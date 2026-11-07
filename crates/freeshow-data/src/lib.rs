@@ -10,7 +10,9 @@ mod import;
 mod scripture;
 mod stage_layout;
 
-pub use stage_layout::{StageItemKind, StageItemSpec, StageLayout, default_stage};
+pub use stage_layout::{
+    StageClockOptions, StageItemKind, StageItemSpec, StageLayout, default_stage,
+};
 
 /// FreeShow `settings.json` text transition. `kind` is the stored type
 /// (`fade`, `none`, `slide`, and the rest). `direction` is the slide axis.
@@ -3502,7 +3504,9 @@ impl Library {
             .to_string()
     }
 
-    /// Named values from `settings_synced.json`. The name is lower case with spaces as underscores.
+    /// Named values from `settings_synced.json`. Each value is returned under
+    /// its raw store id and under its lower-case name with spaces as
+    /// underscores, so both FreeShow tokens and stage items can find it.
     pub fn variables(&self) -> Vec<(String, String)> {
         let Ok(text) = fs::read_to_string(self.synced_settings_path()) else {
             return Vec::new();
@@ -3514,7 +3518,7 @@ impl Library {
             return Vec::new();
         };
         let mut pairs = Vec::new();
-        for variable in map.values() {
+        for (raw_id, variable) in map {
             let Some(name) = variable.get("name").and_then(Value::as_str) else {
                 continue;
             };
@@ -3522,7 +3526,11 @@ impl Library {
             if id.is_empty() {
                 continue;
             }
-            pairs.push((id, variable_text(variable)));
+            let value = variable_text(variable);
+            pairs.push((raw_id.clone(), value.clone()));
+            if id != *raw_id {
+                pairs.push((id, value));
+            }
         }
         pairs
     }
