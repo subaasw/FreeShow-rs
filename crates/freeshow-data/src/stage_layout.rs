@@ -14,14 +14,56 @@ pub enum StageItemKind {
     Notes,
     Clock,
     Timer,
+    /// A custom text box stored with the layout.
+    Text,
+    /// The value of a variable from `settings_synced.json`.
+    Variable,
+    /// The current slide number out of the total.
+    SlideTracker,
+    /// A still image from the library.
+    Media,
+    /// A FreeShow item this app does not draw yet, shown as its label.
+    Custom,
+}
+
+/// Clock options stored on a FreeShow stage item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageClockOptions {
+    /// FreeShow defaults to showing seconds.
+    pub seconds: bool,
+    /// For example `DD/MM/YYYY`; `none` hides the date.
+    pub date_format: String,
+}
+
+impl Default for StageClockOptions {
+    fn default() -> Self {
+        Self {
+            seconds: true,
+            date_format: "none".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageItemSpec {
     pub kind: StageItemKind,
+    /// The key this item has in `stage.json`.
+    pub id: String,
     pub style: String,
+    pub align: String,
     pub offset: i64,
     pub line_count: Option<usize>,
+    /// Explicit display name for a box; empty when the layout has none.
+    pub label: String,
+    /// Static lines for a `text` item.
+    pub lines: Vec<String>,
+    /// Variable id for a `variable` item.
+    pub variable_id: Option<String>,
+    /// Timer id for a `timer` item. Empty uses the running timer.
+    pub timer_id: Option<String>,
+    /// Media path for a `media` item.
+    pub src: Option<String>,
+    pub clock: StageClockOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,13 +167,34 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
         if item_value.get("enabled").and_then(Value::as_bool) == Some(false) {
             continue;
         }
-        let Some(kind) = kind_of(&id, item_value.get("type").and_then(Value::as_str)) else {
-            continue;
-        };
+        let kind = kind_of(&id, item_value);
+        let label = item_value
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
+        let legacy_id = id.split('#').nth(1);
+        let timer_id = item_value
+            .pointer("/timer/id")
+            .and_then(Value::as_str)
+            .or(legacy_id.filter(|_| kind == StageItemKind::Timer))
+            .map(str::to_string);
+        let variable_id = item_value
+            .pointer("/variable/id")
+            .and_then(Value::as_str)
+            .or(legacy_id.filter(|_| kind == StageItemKind::Variable))
+            .map(str::to_string);
         items.push(StageItemSpec {
             kind,
+            id: id.clone(),
             style: item_value
                 .get("style")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            align: item_value
+                .get("align")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
@@ -143,6 +206,30 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .get("lineCount")
                 .and_then(Value::as_u64)
                 .map(|count| count as usize),
+            label,
+            lines: if kind == StageItemKind::Text {
+                text_lines(item_value)
+            } else {
+                Vec::new()
+            },
+            variable_id,
+            timer_id,
+            src: item_value
+                .get("src")
+                .and_then(Value::as_str)
+                .filter(|src| !src.is_empty())
+                .map(str::to_string),
+            clock: StageClockOptions {
+                seconds: item_value
+                    .pointer("/clock/seconds")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                date_format: item_value
+                    .pointer("/clock/dateFormat")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none")
+                    .to_string(),
+            },
         });
     }
     if items.is_empty() {
@@ -158,24 +245,82 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
 fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>) -> StageItemSpec {
     StageItemSpec {
         kind,
+        id: String::new(),
         style: style.to_string(),
+        align: String::new(),
         offset,
         line_count,
+        label: String::new(),
+        lines: Vec::new(),
+        variable_id: None,
+        timer_id: None,
+        src: None,
+        clock: StageClockOptions::default(),
     }
 }
 
-fn kind_of(id: &str, type_name: Option<&str>) -> Option<StageItemKind> {
+/// Flattens a stage text box's runs into one string per line.
+fn text_lines(item: &Value) -> Vec<String> {
+    item.get("lines")
+        .and_then(Value::as_array)
+        .map(|lines| {
+            lines
+                .iter()
+                .filter_map(|line| {
+                    if let Some(runs) = line.get("text").and_then(Value::as_array) {
+                        return Some(
+                            runs.iter()
+                                .filter_map(|run| run.get("value").and_then(Value::as_str))
+                                .collect::<String>(),
+                        );
+                    }
+                    line.get("value")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn kind_of(id: &str, item: &Value) -> StageItemKind {
     let id = id.to_ascii_lowercase();
-    match type_name.unwrap_or("").to_ascii_lowercase().as_str() {
-        "slide_text" => Some(StageItemKind::Slide),
-        "slide_notes" => Some(StageItemKind::Notes),
-        "clock" => Some(StageItemKind::Clock),
-        "timer" => Some(StageItemKind::Timer),
-        _ if id.contains("notes") => Some(StageItemKind::Notes),
-        _ if id.contains("clock") => Some(StageItemKind::Clock),
-        _ if id.contains("timer") => Some(StageItemKind::Timer),
-        _ if id.contains("slide") || id.contains("text") => Some(StageItemKind::Slide),
-        _ => None,
+    match item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "slide_text" => StageItemKind::Slide,
+        "slide_notes" => StageItemKind::Notes,
+        "clock" => StageItemKind::Clock,
+        "timer" => StageItemKind::Timer,
+        "text" => StageItemKind::Text,
+        "variable" => StageItemKind::Variable,
+        "slide_tracker" => StageItemKind::SlideTracker,
+        "media" => StageItemKind::Media,
+        "" => legacy_kind(&id),
+        _ => StageItemKind::Custom,
+    }
+}
+
+/// Layouts older than FreeShow 1.4 stored the item type in the id.
+fn legacy_kind(id: &str) -> StageItemKind {
+    if id.contains("tracker") {
+        StageItemKind::SlideTracker
+    } else if id.contains("notes") {
+        StageItemKind::Notes
+    } else if id.contains("clock") {
+        StageItemKind::Clock
+    } else if id.contains("timer") {
+        StageItemKind::Timer
+    } else if id.contains("variable") {
+        StageItemKind::Variable
+    } else if id.contains("slide") || id.contains("text") {
+        StageItemKind::Slide
+    } else {
+        StageItemKind::Custom
     }
 }
 
@@ -186,7 +331,7 @@ mod tests {
     #[test]
     fn parses_freeshow_stage_layout_and_falls_back() {
         let layout = parse_stage(
-            r##"{"default":{"name":"Main","disabled":false,"settings":{"color":"#101010"},"itemOrder":["textNext","textCurrent","notes"],"items":{"textCurrent":{"type":"slide_text","style":"left:1px;"},"textNext":{"type":"slide_text","slideOffset":1,"lineCount":2,"style":"left:2px;"},"notes":{"type":"slide_notes","style":"left:3px;"},"hidden":{"type":"clock","enabled":false,"style":""}}}}"##,
+            r##"{"default":{"name":"Main","disabled":false,"settings":{"color":"#101010"},"itemOrder":["textNext","textCurrent","notes","caption","var","timer","media","web"],"items":{"textCurrent":{"type":"slide_text","style":"left:1px;"},"textNext":{"type":"slide_text","slideOffset":1,"lineCount":2,"style":"left:2px;"},"notes":{"type":"slide_notes","style":"left:3px;"},"caption":{"type":"text","label":"Welcome","style":"left:4px;","lines":[{"align":"","text":[{"value":"Hello "},{"value":"world"}]}]},"var":{"type":"variable","variable":{"id":"v1"},"style":"left:5px;"},"timer":{"type":"timer","timer":{"id":"sermon"},"style":"left:6px;"},"media":{"type":"media","src":"Media/bg.png","style":"left:7px;"},"web":{"type":"web","style":"left:8px;"},"hidden":{"type":"clock","enabled":false,"style":""}}}}"##,
         )
         .unwrap();
         assert_eq!(layout.name, "Main");
@@ -195,11 +340,48 @@ mod tests {
         assert_eq!(layout.items[0].offset, 1);
         assert_eq!(layout.items[0].line_count, Some(2));
         assert_eq!(layout.items[2].kind, StageItemKind::Notes);
+        assert_eq!(layout.items[3].kind, StageItemKind::Text);
+        assert_eq!(layout.items[3].label, "Welcome");
+        assert_eq!(layout.items[3].lines, vec!["Hello world".to_string()]);
+        assert_eq!(layout.items[4].kind, StageItemKind::Variable);
+        assert_eq!(layout.items[4].variable_id.as_deref(), Some("v1"));
+        assert_eq!(layout.items[5].kind, StageItemKind::Timer);
+        assert_eq!(layout.items[5].timer_id.as_deref(), Some("sermon"));
+        assert_eq!(layout.items[6].kind, StageItemKind::Media);
+        assert_eq!(layout.items[6].src.as_deref(), Some("Media/bg.png"));
+        assert_eq!(layout.items[7].kind, StageItemKind::Custom);
+        assert_eq!(layout.items[7].id, "web");
+        assert_eq!(layout.items[7].label, "");
         assert!(
             load_stage_file(Path::new("/no/such/stage.json"))
                 .items
                 .len()
                 >= 4
         );
+    }
+
+    #[test]
+    fn legacy_item_ids_keep_their_type() {
+        let layout = parse_stage(
+            r##"{"old":{"name":"Old","itemOrder":["slide_text","slide_notes","first_active_timer","variables#v1","slide_tracker","clock"],"items":{"slide_text":{"style":""},"slide_notes":{"style":""},"first_active_timer":{"style":""},"variables#v1":{"style":""},"slide_tracker":{"style":""},"clock":{"style":""}}}}"##,
+        )
+        .unwrap();
+        assert_eq!(layout.items[0].kind, StageItemKind::Slide);
+        assert_eq!(layout.items[1].kind, StageItemKind::Notes);
+        assert_eq!(layout.items[2].kind, StageItemKind::Timer);
+        assert_eq!(layout.items[3].kind, StageItemKind::Variable);
+        assert_eq!(layout.items[3].variable_id.as_deref(), Some("v1"));
+        assert_eq!(layout.items[4].kind, StageItemKind::SlideTracker);
+        assert_eq!(layout.items[5].kind, StageItemKind::Clock);
+    }
+
+    #[test]
+    fn clock_options_default_to_seconds_and_no_date() {
+        let layout = parse_stage(
+            r##"{"clock":{"name":"Clock","items":{"c":{"type":"clock","clock":{"seconds":false,"dateFormat":"DD/MM/YYYY"},"style":""}}}}"##,
+        )
+        .unwrap();
+        assert!(!layout.items[0].clock.seconds);
+        assert_eq!(layout.items[0].clock.date_format, "DD/MM/YYYY");
     }
 }

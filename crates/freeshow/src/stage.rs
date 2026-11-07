@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use freeshow_data::{StageItemKind, StageLayout};
+use std::path::Path;
+
+use freeshow_data::{
+    StageClockOptions, StageItemKind, StageItemSpec, StageLayout, fill_variables,
+};
 use freeshow_output::{
     Blend, Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
     StyledLine, StyledSlide, TextRun, parse_color, render_styled,
@@ -11,12 +15,24 @@ pub struct StageSlide {
     pub notes: String,
 }
 
+/// Values the stage boxes need that are not part of the layout.
+#[derive(Default)]
+pub struct StageContext<'a> {
+    /// `(timer id, label)` for stage boxes that name a timer.
+    pub timers: &'a [(String, String)],
+    /// Variable values, keyed by raw id and by name.
+    pub variables: &'a [(String, String)],
+    /// Library root, used to load media boxes.
+    pub root: Option<&'a Path>,
+}
+
 pub fn paint_stage(
     slides: &[StageSlide],
     index: Option<usize>,
     layout: &StageLayout,
     clock: &str,
     timer: &str,
+    context: &StageContext,
 ) -> freeshow_output::Frame {
     let background = parse_color(&layout.background).unwrap_or(Rgba {
         r: 0x12,
@@ -28,27 +44,25 @@ pub fn paint_stage(
         .items
         .iter()
         .filter_map(|item| {
-            let lines = match item.kind {
-                StageItemKind::Slide => slide_lines(slides, index, item.offset, item.line_count),
-                StageItemKind::Notes => {
-                    let notes = slide_at(slides, index, item.offset)
-                        .map(|slide| slide.notes.clone())
-                        .unwrap_or_default();
-                    if notes.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        notes.lines().map(str::to_string).collect()
-                    }
-                }
-                StageItemKind::Clock => vec![clock.to_string()],
-                StageItemKind::Timer => vec![timer.to_string()],
+            let mut lines = lines_for(item, slides, index, clock, timer, context);
+            let image = if item.kind == StageItemKind::Media {
+                item.src
+                    .as_deref()
+                    .and_then(|src| crate::live::load_image(context.root, src))
+            } else {
+                None
             };
-            if lines.iter().all(|line| line.is_empty()) {
+            if image.is_some() {
+                lines.clear();
+            } else if item.kind == StageItemKind::Media {
+                lines = vec![media_label(item)];
+            }
+            if lines.iter().all(|line| line.is_empty()) && image.is_none() {
                 return None;
             }
             Some(StyledItem {
                 style: item.style.clone(),
-                align: String::new(),
+                align: item.align.clone(),
                 lines: lines
                     .into_iter()
                     .map(|line| StyledLine {
@@ -64,7 +78,7 @@ pub fn paint_stage(
                         }],
                     })
                     .collect(),
-                image: None,
+                image,
                 fit: Fit::Fill,
                 line_bg: None,
                 line_gap: 0.0,
@@ -95,6 +109,49 @@ pub fn paint_stage(
     })
 }
 
+fn lines_for(
+    item: &StageItemSpec,
+    slides: &[StageSlide],
+    index: Option<usize>,
+    clock: &str,
+    timer: &str,
+    context: &StageContext,
+) -> Vec<String> {
+    match item.kind {
+        StageItemKind::Slide => slide_lines(slides, index, item.offset, item.line_count),
+        StageItemKind::Notes => {
+            let notes = slide_at(slides, index, item.offset)
+                .map(|slide| slide.notes.clone())
+                .unwrap_or_default();
+            if notes.trim().is_empty() {
+                Vec::new()
+            } else {
+                notes.lines().map(str::to_string).collect()
+            }
+        }
+        StageItemKind::Clock => vec![clock_text(clock, &item.clock)],
+        StageItemKind::Timer => vec![timer_text(item, timer, context)],
+        StageItemKind::Text => item
+            .lines
+            .iter()
+            .map(|line| fill_variables(line, context.variables))
+            .collect(),
+        StageItemKind::Variable => item
+            .variable_id
+            .as_deref()
+            .and_then(|id| variable_value(id, context.variables))
+            .map(|value| vec![value])
+            .unwrap_or_default(),
+        StageItemKind::SlideTracker => tracker_text(slides, index),
+        StageItemKind::Media => Vec::new(),
+        StageItemKind::Custom => vec![if item.label.is_empty() {
+            item.id.clone()
+        } else {
+            item.label.clone()
+        }],
+    }
+}
+
 fn slide_lines(
     slides: &[StageSlide],
     index: Option<usize>,
@@ -120,11 +177,124 @@ fn slide_at(slides: &[StageSlide], index: Option<usize>, offset: i64) -> Option<
     slides.get(position as usize)
 }
 
+fn tracker_text(slides: &[StageSlide], index: Option<usize>) -> Vec<String> {
+    let Some(index) = index.filter(|_| !slides.is_empty()) else {
+        return Vec::new();
+    };
+    vec![format!("{} / {}", index + 1, slides.len())]
+}
+
+fn timer_text(item: &StageItemSpec, timer: &str, context: &StageContext) -> String {
+    item.timer_id
+        .as_deref()
+        .and_then(|id| {
+            context
+                .timers
+                .iter()
+                .find(|(timer_id, _)| timer_id == id)
+                .map(|(_, label)| label.clone())
+        })
+        .unwrap_or_else(|| timer.to_string())
+}
+
+fn variable_value(id: &str, variables: &[(String, String)]) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let direct = variables
+        .iter()
+        .find(|(key, _)| key == id)
+        .map(|(_, value)| value.clone());
+    direct.or_else(|| {
+        let name = id
+            .strip_prefix("variable_")
+            .or_else(|| id.strip_prefix('$'))
+            .unwrap_or(id)
+            .to_lowercase()
+            .replace(' ', "_");
+        variables
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.clone())
+    })
+}
+
+fn media_label(item: &StageItemSpec) -> String {
+    if !item.label.is_empty() {
+        return item.label.clone();
+    }
+    item.src
+        .as_deref()
+        .and_then(|src| Path::new(src).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("Media")
+        .to_string()
+}
+
+fn clock_text(clock: &str, options: &StageClockOptions) -> String {
+    let mut text = if options.seconds {
+        clock.to_string()
+    } else {
+        clock.get(..5).unwrap_or(clock).to_string()
+    };
+    let date = format_date(&options.date_format, &chrono::Local::now());
+    if !date.is_empty() {
+        text.push(' ');
+        text.push_str(&date);
+    }
+    text
+}
+
+fn format_date(format: &str, now: &chrono::DateTime<chrono::Local>) -> String {
+    if format.is_empty() || format.eq_ignore_ascii_case("none") {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut rest = format;
+    while let Some(index) = rest.find(|character: char| character.is_ascii_alphabetic()) {
+        out.push_str(&rest[..index]);
+        rest = &rest[index..];
+        let (token, value) = [
+            ("YYYY", now.format("%Y").to_string()),
+            ("DD", now.format("%d").to_string()),
+            ("MM", now.format("%m").to_string()),
+            ("HH", now.format("%H").to_string()),
+            ("mm", now.format("%M").to_string()),
+            ("ss", now.format("%S").to_string()),
+        ]
+        .into_iter()
+        .find(|(token, _)| rest.starts_with(token))
+        .unwrap_or_else(|| (&rest[..1], rest[..1].to_string()));
+        out.push_str(&value);
+        rest = &rest[token.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use freeshow_data::default_stage;
+    use freeshow_data::{StageClockOptions, default_stage};
     use freeshow_output::fingerprint;
+
+    fn spec(kind: StageItemKind) -> StageItemSpec {
+        StageItemSpec {
+            kind,
+            id: "custom".into(),
+            style: "left:0px;top:0px;width:600px;height:120px;font-size:48px;".into(),
+            align: String::new(),
+            offset: 0,
+            line_count: None,
+            label: "Web".into(),
+            lines: Vec::new(),
+            variable_id: None,
+            timer_id: None,
+            src: None,
+            clock: StageClockOptions::default(),
+        }
+    }
 
     #[test]
     fn next_slide_notes_clock_and_timer_are_on_the_stage() {
@@ -139,8 +309,9 @@ mod tests {
             },
         ];
         let layout = default_stage();
-        let first = paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00");
-        let later = paint_stage(&slides, Some(0), &layout, "12:00:01", "04:59");
+        let context = StageContext::default();
+        let first = paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00", &context);
+        let later = paint_stage(&slides, Some(0), &layout, "12:00:01", "04:59", &context);
         assert_ne!(fingerprint(&first.pixels), fingerprint(&later.pixels));
         assert_eq!(
             slide_lines(&slides, Some(0), 1, Some(2)),
@@ -148,5 +319,115 @@ mod tests {
         );
         assert_eq!(slide_at(&slides, Some(0), 0).unwrap().notes, "Stand");
         assert!(first.pixels.iter().any(|byte| *byte != 0x12));
+    }
+
+    #[test]
+    fn every_freeshow_item_kind_produces_lines() {
+        let slides = vec![
+            StageSlide {
+                lines: vec!["current".into()],
+                notes: "note".into(),
+            },
+            StageSlide {
+                lines: vec!["next".into()],
+                notes: String::new(),
+            },
+        ];
+        let timers = vec![("sermon".to_string(), "03:00".to_string())];
+        let variables = vec![
+            ("v1".to_string(), "Ada".to_string()),
+            ("speaker".to_string(), "Ada".to_string()),
+        ];
+        let context = StageContext {
+            timers: &timers,
+            variables: &variables,
+            root: None,
+        };
+
+        let mut text = spec(StageItemKind::Text);
+        text.lines = vec!["Hello {variable_speaker}".into()];
+        let mut variable = spec(StageItemKind::Variable);
+        variable.variable_id = Some("v1".into());
+        let mut timer = spec(StageItemKind::Timer);
+        timer.timer_id = Some("sermon".into());
+        let mut clock = spec(StageItemKind::Clock);
+        clock.clock = StageClockOptions {
+            seconds: false,
+            date_format: "none".into(),
+        };
+        let mut unlabeled = spec(StageItemKind::Custom);
+        unlabeled.id = "web".into();
+        unlabeled.label = String::new();
+
+        let cases = [
+            (spec(StageItemKind::Slide), vec!["current".to_string()]),
+            (spec(StageItemKind::Notes), vec!["note".to_string()]),
+            (clock, vec!["12:00".to_string()]),
+            (timer, vec!["03:00".to_string()]),
+            (text, vec!["Hello Ada".to_string()]),
+            (variable, vec!["Ada".to_string()]),
+            (spec(StageItemKind::SlideTracker), vec!["1 / 2".to_string()]),
+            (spec(StageItemKind::Media), Vec::new()),
+            (spec(StageItemKind::Custom), vec!["Web".to_string()]),
+            (unlabeled, vec!["web".to_string()]),
+        ];
+        for (item, expected) in cases {
+            assert_eq!(
+                lines_for(&item, &slides, Some(0), "12:00:00", "05:00", &context),
+                expected,
+                "{:?}",
+                item.kind
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_box_and_a_missing_media_file_are_still_painted() {
+        let slides = vec![StageSlide {
+            lines: vec!["line".into()],
+            notes: String::new(),
+        }];
+        let mut custom = spec(StageItemKind::Custom);
+        custom.label = "Web".into();
+        let mut media = spec(StageItemKind::Media);
+        media.label = String::new();
+        media.src = Some("Media/missing.png".into());
+        media.style = "left:0px;top:200px;width:600px;height:120px;".into();
+        let layout = StageLayout {
+            name: "Custom".into(),
+            background: "#000000".into(),
+            items: vec![custom, media],
+        };
+        let context = StageContext::default();
+        let frame = paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00", &context);
+        assert!(frame.pixels.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn clock_dates_follow_the_stored_format() {
+        let now = chrono::Local::now();
+        assert_eq!(format_date("none", &now), "");
+        assert_eq!(
+            format_date("YYYY-MM-DD", &now),
+            now.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(
+            format_date("DD/MM/YYYY HH:mm", &now),
+            format!("{} {}", now.format("%d/%m/%Y"), now.format("%H:%M"))
+        );
+    }
+
+    #[test]
+    fn variables_fall_back_from_raw_id_to_name() {
+        let values = vec![("speaker".to_string(), "Ada".to_string())];
+        assert_eq!(
+            variable_value("$Speaker", &values).as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(
+            variable_value("variable_speaker", &values).as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(variable_value("missing", &values), None);
     }
 }

@@ -406,6 +406,25 @@ impl Session {
         format!("{:02}:{:02}", seconds / 60, seconds % 60)
     }
 
+    /// The label of every named timer, for stage boxes that point at one id.
+    pub fn timer_labels(&self) -> Vec<(String, String)> {
+        self.timers
+            .iter()
+            .map(|timer| {
+                let seconds = self
+                    .running
+                    .as_ref()
+                    .filter(|running| running.id == timer.id)
+                    .map(RunningTimer::shown)
+                    .unwrap_or(timer.start);
+                (
+                    timer.id.clone(),
+                    format!("{:02}:{:02}", seconds / 60, seconds % 60),
+                )
+            })
+            .collect()
+    }
+
     pub fn start_named_timer(&mut self, id: &str) -> bool {
         let Some(timer) = self.timers.iter().find(|timer| timer.id == id) else {
             return false;

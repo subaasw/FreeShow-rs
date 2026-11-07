@@ -72,13 +72,14 @@ main fader still controls the main channel.
 
 ### M4. Stage layout custom items
 
-- [ ] Every stage item type FreeShow writes (text, clock, timer, counter,
+- [x] Every stage item type FreeShow writes (text, clock, timer, counter,
       variables, media, notes, next slide, and custom boxes).
-- [ ] Per-item style values already used by the compositor.
-- [ ] Layout switching from the stage window and from a slide action.
+- [x] Per-item style values already used by the compositor.
+- [x] Layout switching from the stage window and from a slide action.
 
 Acceptance: a `stage.json` made by FreeShow renders all of its boxes without
-falling back to the four built-in types.
+falling back to the four built-in types. Live video, camera, web, chart, and QR
+boxes render a labeled placeholder until the compositor grows those sources.
 
 ### M5. Installers and packaging
 

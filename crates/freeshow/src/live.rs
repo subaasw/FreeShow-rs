@@ -122,6 +122,8 @@ fn paint_overlays(mut frame: Frame, session: &Session, under_slide: bool) -> Fra
 }
 
 pub fn stage_frame(session: &Session) -> Frame {
+    let variables = session_variables(session);
+    let timers = session.timer_labels();
     let (slides, index) = if session.tab == "scripture" {
         let lines = session.output_lines();
         let index = if lines.is_empty() { None } else { Some(0) };
@@ -137,7 +139,6 @@ pub fn stage_frame(session: &Session) -> Frame {
         let reveal = session.reveal_count;
         let clicks = session.click_revealed;
         let current_index = session.slide_index;
-        let variables = session_variables(session);
         let slides = session
             .show_index
             .and_then(|slot| session.shows.get(slot))
@@ -169,6 +170,11 @@ pub fn stage_frame(session: &Session) -> Frame {
         &session.stage,
         &clock_label(),
         &session.timer_label(),
+        &crate::stage::StageContext {
+            timers: &timers,
+            variables: &variables,
+            root: session.root.as_deref(),
+        },
     )
 }
 
@@ -497,7 +503,7 @@ fn font_size_px(style: &str) -> Option<u32> {
     })
 }
 
-fn load_image(root: Option<&Path>, src: &str) -> Option<Raster> {
+pub(crate) fn load_image(root: Option<&Path>, src: &str) -> Option<Raster> {
     let path = resolve_media(root, src)?;
     let bytes = std::fs::read(path).ok()?;
     decode_image(&bytes)
