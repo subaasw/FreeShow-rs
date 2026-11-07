@@ -33,6 +33,17 @@ impl Default for TextTransition {
     }
 }
 
+/// The parts of FreeShow's library `settings.json` this app understands.
+///
+/// Missing or malformed values stay `None`; callers keep their own defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FreeShowPreferences {
+    /// Theme key, for example `default`, `dark`, or `blue`.
+    pub theme: Option<String>,
+    /// `serverData.remote.password`. An empty value means no password.
+    pub remote_password: Option<String>,
+}
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -3366,6 +3377,37 @@ impl Library {
         self.root.join("settings.json")
     }
 
+    /// Reads the FreeShow preferences this app honors from the library settings.
+    ///
+    /// A missing file, malformed JSON, or an unexpected value is ignored.
+    pub fn preferences(&self) -> FreeShowPreferences {
+        let Ok(text) = fs::read_to_string(self.settings_path()) else {
+            return FreeShowPreferences::default();
+        };
+        let Ok(json) = serde_json::from_str::<Value>(&text) else {
+            return FreeShowPreferences::default();
+        };
+        let theme = json
+            .get("theme")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|theme| !theme.is_empty())
+            .map(str::to_string);
+        let remote_password = json
+            .pointer("/serverData/remote/password")
+            .and_then(|value| match value {
+                Value::String(password) => Some(password.clone()),
+                Value::Number(password) => Some(password.to_string()),
+                _ => None,
+            })
+            .map(|password| password.trim().to_string())
+            .filter(|password| !password.is_empty());
+        FreeShowPreferences {
+            theme,
+            remote_password,
+        }
+    }
+
     /// FreeShow's general toggle. Missing settings keep the default, which advances.
     pub fn next_item_on_last_slide(&self) -> bool {
         let Ok(text) = fs::read_to_string(self.settings_path()) else {
@@ -5128,6 +5170,39 @@ mod tests {
         )
         .unwrap();
         assert!(!library.next_item_on_last_slide());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn library_preferences_read_theme_and_remote_password() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-preferences-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let library = Library::open(&root);
+        assert_eq!(
+            library.preferences(),
+            FreeShowPreferences::default(),
+            "a missing settings file has no preferences"
+        );
+        fs::write(
+            library.settings_path(),
+            r#"{"theme":"sea","serverData":{"remote":{"password":" 1234 "}}}"#,
+        )
+        .unwrap();
+        let preferences = library.preferences();
+        assert_eq!(preferences.theme.as_deref(), Some("sea"));
+        assert_eq!(preferences.remote_password.as_deref(), Some("1234"));
+        fs::write(
+            library.settings_path(),
+            r#"{"theme":"","serverData":{"remote":{"password":""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(library.preferences(), FreeShowPreferences::default());
+        fs::write(library.settings_path(), "not json").unwrap();
+        assert_eq!(library.preferences(), FreeShowPreferences::default());
         let _ = fs::remove_dir_all(&root);
     }
 }

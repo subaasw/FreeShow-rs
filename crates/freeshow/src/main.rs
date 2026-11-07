@@ -1098,7 +1098,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = settings.save(&settings_path) {
         tracing::error!("could not create settings file: {err}");
     }
-    let theme = freeshow_core::theme_by_name(&settings.theme);
 
     slint::BackendSelector::new()
         .backend_name("winit".into())
@@ -1137,6 +1136,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
+    let theme_name = settings
+        .theme
+        .as_deref()
+        .or(session.preferences.theme.as_deref())
+        .unwrap_or("default");
+    let theme = freeshow_core::theme_by_name(theme_name);
     if let Some(path) = &launch.show
         && let Some(show) = session::load_show_file(path)
     {

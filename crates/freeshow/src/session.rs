@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeshow_data::{
-    AUDIO_DIR, BibleFile, Catalog, Library, MEDIA_DIR, OutlinedBook, ProjectsFile,     MixStep, ShowFile, SlideBackdrop, SlideJump, TimerStep,
+    AUDIO_DIR, BibleFile, Catalog, FreeShowPreferences, Library, MEDIA_DIR, OutlinedBook, ProjectsFile,     MixStep, ShowFile, SlideBackdrop, SlideJump, TimerStep,
     StageLayout, VerseHit, default_stage, new_id,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
@@ -82,6 +82,8 @@ pub enum DrawerAction {
 
 pub struct Session {
     pub root: Option<PathBuf>,
+    /// Settings read from the FreeShow library, not this app's own settings file.
+    pub preferences: FreeShowPreferences,
     pub shows: Vec<ShowFile>,
     pub projects: ProjectsFile,
     pub project_id: Option<String>,
@@ -183,6 +185,7 @@ impl Session {
     pub fn empty() -> Self {
         Self {
             root: None,
+            preferences: FreeShowPreferences::default(),
             shows: Vec::new(),
             projects: ProjectsFile::empty(),
             project_id: None,
@@ -266,6 +269,7 @@ impl Session {
 
     pub fn open(root: PathBuf) -> Self {
         let library = Library::open(&root);
+        let preferences = library.preferences();
         let mut warnings = Vec::new();
         let shows = take(library.list_shows(), &mut warnings).unwrap_or_default();
         let projects =
@@ -311,6 +315,7 @@ impl Session {
         let (volume, audio_muted) = library.main_audio();
         Self {
             root: Some(root),
+            preferences,
             shows,
             projects,
             project_id,

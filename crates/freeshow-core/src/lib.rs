@@ -36,7 +36,28 @@ mod tests {
         assert_eq!(theme_by_name("dark").secondary, Rgb::from_hex(0xe64934));
         assert_eq!(theme_by_name("light").primary, Rgb::from_hex(0xDADDE2));
         assert_eq!(theme_by_name("light").text, Rgb::from_hex(0x333748));
+        assert_eq!(theme_by_name("blue").primary, Rgb::from_hex(0x323743));
+        assert_eq!(theme_by_name("sea").secondary, Rgb::from_hex(0x007db3));
+        assert_eq!(theme_by_name("aqua").secondary, Rgb::from_hex(0x00ffbe));
+        assert_eq!(theme_by_name("charcoal").text, Rgb::from_hex(0xd0d0d0));
+        assert_eq!(theme_by_name("papyrus").primary, Rgb::from_hex(0xeac6a4));
+        assert_eq!(theme_by_name("terminal").secondary, Rgb::from_hex(0x00ff00));
+        assert_eq!(theme_by_name("white").secondary, Rgb::from_hex(0xfbe1fe));
+        assert_eq!(theme_by_name("black").primary, Rgb::from_hex(0x000000));
         assert_eq!(theme_by_name("no-such-theme").name, "default");
+    }
+
+    #[test]
+    fn every_built_in_theme_is_reachable_by_key_and_display_name() {
+        use crate::theme::BUILT_IN_THEMES;
+
+        assert_eq!(BUILT_IN_THEMES.len(), 11);
+        for theme in BUILT_IN_THEMES {
+            let by_display = theme_by_name(theme.name);
+            assert_eq!(by_display, theme, "{} by display name", theme.name);
+            let by_lower = theme_by_name(&theme.name.to_lowercase());
+            assert_eq!(by_lower, theme, "{} by lower-case key", theme.name);
+        }
     }
 
     #[test]
@@ -46,7 +67,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let loaded = AppSettings::load(&dir.join("settings.json")).unwrap();
-        assert_eq!(loaded.theme, "default");
+        assert_eq!(loaded.theme, None);
         assert_eq!(loaded.data_path, None);
         assert!(loaded.show_output);
         assert!(loaded.show_stage);
@@ -62,7 +83,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         let settings = AppSettings {
-            theme: "dark".to_string(),
+            theme: Some("dark".to_string()),
             data_path: Some(std::path::PathBuf::from("/tmp/FreeShow")),
             show_output: true,
             show_stage: false,

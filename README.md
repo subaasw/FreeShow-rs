@@ -72,7 +72,7 @@ Settings and the log are stored in the app config directory:
 - Windows: `%APPDATA%\freeshow-rust\`
 - Linux: `$XDG_CONFIG_HOME/freeshow-rust` or `~/.config/freeshow-rust`
 
-`FREESHOW_CONFIG_DIR` overrides that path. `settings.json` holds the theme name, the FreeShow library path, and whether the output and stage windows open on launch. `RUST_LOG` controls stderr tracing (default `info`).
+`FREESHOW_CONFIG_DIR` overrides that path. `settings.json` holds the theme name (when set), the FreeShow library path, and whether the output and stage windows open on launch. When no theme is set here, the library's own FreeShow theme is used. `RUST_LOG` controls stderr tracing (default `info`).
 
 ## Layout
 

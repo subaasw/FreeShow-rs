@@ -5,18 +5,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-fn default_theme_name() -> String {
-    "default".to_string()
-}
-
 fn default_true() -> bool {
     true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
-    #[serde(default = "default_theme_name")]
-    pub theme: String,
+    /// An explicit theme choice for this app. `None` uses the FreeShow library
+    /// theme, then the default theme.
+    #[serde(default)]
+    pub theme: Option<String>,
     #[serde(default)]
     pub data_path: Option<PathBuf>,
     #[serde(default = "default_true")]
@@ -31,7 +29,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            theme: default_theme_name(),
+            theme: None,
             data_path: None,
             show_output: true,
             show_stage: true,
