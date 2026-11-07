@@ -1,0 +1,13 @@
+[package]
+name = "freeshow-timecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "MIDI and linear timecode for freeshow-rust"
+
+[dependencies]
+cpal = "0.15"
+midir = "0.10"
+tracing = "0.1"

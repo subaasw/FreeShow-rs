@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeShow remote</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #12121c;
+      --panel: #242832;
+      --accent: #f0008c;
+      --text: #f0f0ff;
+      --muted: #aaaaaa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 18px/1.4 system-ui, sans-serif;
+    }
+    header, main { padding: 16px; }
+    h1 { margin: 0; font-size: 1.1rem; }
+    h2 { margin: 0 0 8px; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+    #show-name { margin: 6px 0 0; color: var(--muted); }
+    .lines {
+      min-height: 4.5rem;
+      margin: 0;
+      white-space: pre-wrap;
+      font-size: 1.6rem;
+    }
+    .controls, .columns { display: flex; gap: 12px; }
+    .columns { align-items: flex-start; }
+    .columns section { flex: 1; min-width: 0; }
+    button {
+      flex: 1;
+      min-height: 56px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      padding: 12px;
+    }
+    .controls button { text-align: center; font-weight: 650; }
+    #next { background: var(--accent); }
+    button.active { outline: 2px solid var(--accent); }
+    ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    @media (max-width: 700px) {
+      .columns { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FreeShow</h1>
+    <p id="show-name">Connecting</p>
+  </header>
+  <main>
+    <p id="lines" class="lines"></p>
+    <div class="controls">
+      <button id="prev" type="button">Previous</button>
+      <button id="next" type="button">Next</button>
+      <button id="clear" type="button">Clear</button>
+    </div>
+    <div class="columns" style="margin-top: 16px">
+      <section>
+        <h2>Shows</h2>
+        <ul id="shows"></ul>
+      </section>
+      <section>
+        <h2>Slides</h2>
+        <ul id="slides"></ul>
+      </section>
+      <section>
+        <h2>Media</h2>
+        <ul id="media"></ul>
+        <label for="volume">Volume</label>
+        <input id="volume" type="range" min="0" max="100" value="100">
+      </section>
+    </div>
+  </main>
+  <script>
+    let busy = false;
+
+    async function act(channel, data) {
+      await fetch("/action", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ channel: channel, data: data == null ? null : data })
+      });
+      await refresh();
+    }
+
+    function item(label, active, onClick) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      if (active) button.className = "active";
+      button.addEventListener("click", onClick);
+      const li = document.createElement("li");
+      li.appendChild(button);
+      return li;
+    }
+
+    async function refresh() {
+      if (busy) return;
+      busy = true;
+      try {
+        const state = await fetch("/state").then((response) => response.json());
+        document.getElementById("show-name").textContent = state.cleared
+          ? "Cleared"
+          : (state.show_name || "No show");
+        document.getElementById("lines").textContent = state.cleared
+          ? ""
+          : (state.lines || []).join("\n");
+        const shows = document.getElementById("shows");
+        shows.replaceChildren();
+        (state.shows || []).forEach((show, index) => {
+          shows.appendChild(item(show.name, index === state.show_index, () => act("SHOW", show.id)));
+        });
+        const media = document.getElementById("media");
+        media.replaceChildren();
+        (state.media || []).concat(state.audio || []).forEach((file) => {
+          media.appendChild(item(file.name, false, () => act("API:play_media", { path: file.name })));
+        });
+        const volume = document.getElementById("volume");
+        if (document.activeElement !== volume && typeof state.volume === "number") {
+          volume.value = String(Math.round(state.volume * 100));
+        }
+        const slides = document.getElementById("slides");
+        slides.replaceChildren();
+        const current = state.shows && state.show_index != null ? state.shows[state.show_index] : null;
+        (current ? current.slides : []).forEach((slide, index) => {
+          const label = slide.label || (slide.lines || []).join(" ");
+          const active = !state.cleared && index === state.slide_index;
+          slides.appendChild(item(label, active, () => act("API:index_select_slide", {
+            index: index,
+            showId: current.id
+          })));
+        });
+      } finally {
+        busy = false;
+      }
+    }
+
+    document.getElementById("next").addEventListener("click", () => act("API:next_slide"));
+    document.getElementById("prev").addEventListener("click", () => act("API:previous_slide"));
+    document.getElementById("clear").addEventListener("click", () => act("API:clear_all"));
+    document.getElementById("volume").addEventListener("change", (event) => {
+      act("API:change_volume", { volume: Number(event.target.value) / 100 });
+    });
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>

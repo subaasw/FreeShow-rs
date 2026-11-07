@@ -1,0 +1,15 @@
+[package]
+name = "freeshow-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Read and write a FreeShow data folder"
+
+[dependencies]
+quick-xml = "0.37"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+thiserror = "2"
+zip = "2"

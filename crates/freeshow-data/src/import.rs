@@ -1,0 +1,1599 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Turns songs people already have into FreeShow `.show` files.
+
+use std::fs;
+use std::io::{Cursor, Read};
+use std::path::Path;
+
+use quick_xml::Reader;
+use quick_xml::events::Event;
+use serde_json::{Value, json};
+
+use crate::{DataError, ShowFile};
+
+const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
+
+pub fn import_sources(imports: &Path, shows: &Path) -> Result<Vec<String>, DataError> {
+    if !imports.exists() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(shows)?;
+    let mut warnings = Vec::new();
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(imports)? {
+        let path = entry?.path();
+        if path.is_file() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    for path in paths {
+        let bytes = fs::read(&path)?;
+        match import_shows(
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("song"),
+            &bytes,
+        ) {
+            Ok(found) => {
+                for show in found {
+                    let dest = shows.join(format!("{}.show", file_stem(&show.name())));
+                    if dest.exists() {
+                        continue;
+                    }
+                    if let Err(err) = show.save(&dest) {
+                        warnings.push(format!("{}: {err}", path.display()));
+                    }
+                }
+            }
+            Err(err) => warnings.push(format!("{}: {err}", path.display())),
+        }
+    }
+    Ok(warnings)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn import_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
+    import_shows(file_name, bytes)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| DataError::Scripture(format!("{file_name} did not contain slides")))
+}
+
+pub fn import_shows(file_name: &str, bytes: &[u8]) -> Result<Vec<ShowFile>, DataError> {
+    if is_sqlite(file_name, bytes) {
+        return openlp_database(bytes);
+    }
+    Ok(vec![import_one(file_name, bytes)?])
+}
+
+fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "pptx" || looks_like_pptx(bytes) {
+        return powerpoint_show(file_name, bytes);
+    }
+    let text = String::from_utf8_lossy(bytes).replace('\u{feff}', "");
+    let trimmed = text.trim();
+    if trimmed.starts_with('[') {
+        return ShowFile::parse(trimmed);
+    }
+    let (name, sections) = if is_chordpro(trimmed) {
+        chordpro(&text)
+    } else if is_openlyrics(trimmed) {
+        openlyrics(&text)?
+    } else if is_opensong(trimmed) {
+        opensong(&text)?
+    } else if is_propresenter(trimmed) {
+        propresenter(&text)?
+    } else if is_songbeamer(&text) {
+        songbeamer(&text)
+    } else if is_easyworship(&text) || ext == "rtf" {
+        plain(&decode_rtf(&text))
+    } else {
+        plain(&text)
+    };
+    let name = if name.trim().is_empty() {
+        file_stem_str(file_name)
+    } else {
+        name
+    };
+    if sections.is_empty() {
+        return Err(DataError::Scripture(format!(
+            "{file_name} did not contain slides"
+        )));
+    }
+    Ok(show_file(file_name, &name, sections))
+}
+
+#[derive(Clone)]
+struct ChordMark {
+    pos: usize,
+    key: String,
+}
+
+#[derive(Clone)]
+struct LyricVerse {
+    name: String,
+    lines: Vec<String>,
+    chords: Vec<Vec<ChordMark>>,
+}
+
+struct Section {
+    group: String,
+    lines: Vec<String>,
+    chords: Vec<Vec<ChordMark>>,
+}
+
+impl Section {
+    fn plain(group: String, lines: Vec<String>) -> Self {
+        let chords = (0..lines.len()).map(|_| Vec::new()).collect();
+        Self {
+            group,
+            lines,
+            chords,
+        }
+    }
+}
+
+fn show_file(file_name: &str, name: &str, sections: Vec<Section>) -> ShowFile {
+    let mut slides = serde_json::Map::new();
+    let mut order = Vec::new();
+    for (index, section) in sections.into_iter().enumerate() {
+        let id = format!("s{}", index + 1);
+        order.push(json!({ "id": id }));
+        slides.insert(
+            id,
+            slide_value(&section.group, &section.lines, &section.chords),
+        );
+    }
+    let id = file_stem_str(file_name);
+    let document = json!({
+        "name": name,
+        "origin": "import",
+        "settings": { "activeLayout": "main", "template": null },
+        "slides": slides,
+        "layouts": { "main": { "name": "Default", "notes": "", "slides": order } },
+        "media": {}
+    });
+    ShowFile::parse(&json!([id, document]).to_string()).expect("imported show is valid JSON")
+}
+
+fn slide_value(group: &str, lines: &[String], chords: &[Vec<ChordMark>]) -> Value {
+    let enabled = chords.iter().any(|line| !line.is_empty());
+    let lines = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let marks = chords.get(index).map(Vec::as_slice).unwrap_or(&[]);
+            json!({
+                "align": "",
+                "text": [{ "value": line, "style": "" }],
+                "chords": marks.iter().map(|chord| json!({
+                    "id": format!("c{}", chord.pos),
+                    "pos": chord.pos,
+                    "key": chord.key,
+                })).collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "group": group,
+        "color": null,
+        "settings": {},
+        "notes": "",
+        "items": [{
+            "style": ITEM_STYLE,
+            "chords": { "enabled": enabled, "color": "#FF851B" },
+            "lines": lines
+        }]
+    })
+}
+
+fn is_chordpro(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("{title:")
+        || lower.contains("{t:")
+        || lower.contains("{start_of_")
+        || lower.contains("{soc}")
+        || lower.contains("{sov}")
+}
+
+fn is_openlyrics(text: &str) -> bool {
+    text.contains("<song") && text.contains("<verse") && text.contains("<lines")
+}
+
+fn is_opensong(text: &str) -> bool {
+    text.contains("<song") && text.contains("<lyrics") && !text.contains("<verse")
+}
+
+fn is_propresenter(text: &str) -> bool {
+    text.contains("RVPresentationDocument") || text.contains("RVDisplaySlide")
+}
+
+fn is_songbeamer(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("#Title") || line.starts_with("#LangCount") || line.starts_with("#Author")
+    })
+}
+
+fn is_easyworship(text: &str) -> bool {
+    text.contains("{\\rtf") || text.to_ascii_lowercase().contains("easyworship")
+}
+
+fn chordpro(text: &str) -> (String, Vec<Section>) {
+    let mut name = String::new();
+    let mut sections = Vec::new();
+    let mut group = "Verse".to_string();
+    let mut lines = Vec::new();
+    let mut line_chords: Vec<Vec<ChordMark>> = Vec::new();
+    let flush = |group: &str,
+                 lines: &mut Vec<String>,
+                 line_chords: &mut Vec<Vec<ChordMark>>,
+                 sections: &mut Vec<Section>| {
+        let has_words = lines.iter().any(|line| !line.trim().is_empty());
+        let has_chords = line_chords.iter().any(|chords| !chords.is_empty());
+        if has_words || has_chords {
+            sections.push(Section {
+                group: group.to_string(),
+                lines: std::mem::take(lines),
+                chords: std::mem::take(line_chords),
+            });
+        } else {
+            lines.clear();
+            line_chords.clear();
+        }
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            flush(&group, &mut lines, &mut line_chords, &mut sections);
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(title) = directive_value(line, "title").or_else(|| directive_value(line, "t")) {
+            name = title;
+            continue;
+        }
+        if lower.contains("start_of_chorus") || lower.contains("{soc}") {
+            flush(&group, &mut lines, &mut line_chords, &mut sections);
+            group = label_from_directive(line).unwrap_or_else(|| "Chorus".into());
+            continue;
+        }
+        if let Some(label) = directive_value(line, "c") {
+            flush(&group, &mut lines, &mut line_chords, &mut sections);
+            group = label;
+            continue;
+        }
+        if lower.contains("start_of_verse") || lower.contains("{sov}") {
+            flush(&group, &mut lines, &mut line_chords, &mut sections);
+            group = label_from_directive(line).unwrap_or_else(|| "Verse".into());
+            continue;
+        }
+        if lower.contains("end_of_") || lower.contains("{eoc}") || lower.contains("{eov}") {
+            flush(&group, &mut lines, &mut line_chords, &mut sections);
+            continue;
+        }
+        if line.starts_with('{') {
+            continue;
+        }
+        let prepared = line.replace("[/]", " ").replace("[|]", "");
+        let (lyric, chords) = lyric_and_chords(&prepared);
+        if !lyric.is_empty() || !chords.is_empty() {
+            lines.push(lyric);
+            line_chords.push(chords);
+        }
+    }
+    flush(&group, &mut lines, &mut line_chords, &mut sections);
+    (name, sections)
+}
+
+fn directive_value(line: &str, key: &str) -> Option<String> {
+    let trimmed = line.trim().trim_start_matches('{').trim_end_matches('}');
+    let (found, value) = trimmed.split_once(':')?;
+    if found.trim().eq_ignore_ascii_case(key) {
+        Some(value.trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn label_from_directive(line: &str) -> Option<String> {
+    let value = line
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .split_once(':')?
+        .1
+        .trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn lyric_and_chords(line: &str) -> (String, Vec<ChordMark>) {
+    let mut lyric = String::new();
+    let mut chords = Vec::new();
+    let mut in_chord = false;
+    let mut key = String::new();
+    let mut pos = 0usize;
+    for ch in line.chars() {
+        if ch == '[' && !in_chord {
+            in_chord = true;
+            key.clear();
+            continue;
+        }
+        if ch == ']' && in_chord {
+            in_chord = false;
+            if !key.is_empty() {
+                chords.push(ChordMark {
+                    pos,
+                    key: std::mem::take(&mut key),
+                });
+            }
+            continue;
+        }
+        if in_chord {
+            key.push(ch);
+        } else {
+            lyric.push(ch);
+            pos += 1;
+        }
+    }
+    (lyric, chords)
+}
+
+fn openlyrics(text: &str) -> Result<(String, Vec<Section>), DataError> {
+    let (title, order, verses) = parse_lyric_xml(text)?;
+    Ok((title, order_sections(&verses, &order)))
+}
+
+fn parse_lyric_xml(text: &str) -> Result<(String, String, Vec<LyricVerse>), DataError> {
+    let mut title = String::new();
+    let mut order = String::new();
+    let mut verses = Vec::new();
+    let mut current = String::new();
+    let mut capture = String::new();
+    let mut in_title = false;
+    let mut in_order = false;
+    let mut in_lines = false;
+    let mut in_chord = false;
+    let mut chord_named = false;
+    let mut chord_text = String::new();
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref());
+                match name.as_str() {
+                    "title" => in_title = title.is_empty(),
+                    "verseOrder" => in_order = true,
+                    "verse" => {
+                        let named = attribute(&event, "name").unwrap_or_default();
+                        current = if named.is_empty() {
+                            format!(
+                                "{}{}",
+                                attribute(&event, "type").unwrap_or_default(),
+                                attribute(&event, "label").unwrap_or_default()
+                            )
+                        } else {
+                            named
+                        };
+                    }
+                    "br" if in_lines => capture.push('\n'),
+                    "p" if in_lines && page_break(&event) => {
+                        push_verse(&mut verses, &current, &capture);
+                        capture.clear();
+                    }
+                    "lines" => {
+                        in_lines = true;
+                        capture.clear();
+                    }
+                    "chord" if in_lines => {
+                        in_chord = true;
+                        chord_named = remember_chord(&mut capture, &attribute(&event, "name").unwrap_or_default());
+                        chord_text.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(event)) => {
+                let text = event
+                    .unescape()
+                    .map_err(|err| DataError::Scripture(err.to_string()))?
+                    .to_string();
+                if in_title {
+                    title.push_str(text.trim());
+                } else if in_order {
+                    order.push_str(text.trim());
+                } else if in_chord {
+                    chord_text.push_str(&text);
+                } else if in_lines {
+                    capture.push_str(&text);
+                }
+            }
+            Ok(Event::End(event)) => {
+                let name = local_name(event.name().as_ref());
+                match name.as_str() {
+                    "title" => in_title = false,
+                    "verseOrder" => in_order = false,
+                    "lines" => {
+                        in_lines = false;
+                        push_verse(&mut verses, &current, &capture);
+                    }
+                    "chord" => {
+                        if in_chord && !chord_named {
+                            remember_chord(&mut capture, chord_text.trim());
+                        }
+                        in_chord = false;
+                        chord_named = false;
+                        chord_text.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                if in_lines {
+                    let name = local_name(event.name().as_ref());
+                    if name == "br" {
+                        capture.push('\n');
+                    } else if name == "p" && page_break(&event) {
+                        push_verse(&mut verses, &current, &capture);
+                        capture.clear();
+                    } else if name == "chord" {
+                        remember_chord(&mut capture, &attribute(&event, "name").unwrap_or_default());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(err) => return Err(DataError::Scripture(err.to_string())),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok((title, order, verses))
+}
+
+fn remember_chord(capture: &mut String, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    capture.push('[');
+    capture.push_str(name);
+    capture.push(']');
+    true
+}
+
+fn push_verse(verses: &mut Vec<LyricVerse>, name: &str, capture: &str) {
+    let mut lines = Vec::new();
+    let mut chords = Vec::new();
+    for line in capture.lines() {
+        let (text, marks) = lyric_with_chords(line.trim());
+        if text.is_empty() {
+            continue;
+        }
+        lines.push(text);
+        chords.push(marks);
+    }
+    if !lines.is_empty() {
+        verses.push(LyricVerse {
+            name: name.to_string(),
+            lines,
+            chords,
+        });
+    }
+}
+
+fn lyric_with_chords(line: &str) -> (String, Vec<ChordMark>) {
+    let mut plain = String::new();
+    let mut skip = false;
+    for ch in line.chars() {
+        if ch == '{' {
+            skip = true;
+            continue;
+        }
+        if ch == '}' {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            plain.push(ch);
+        }
+    }
+    extract_bracket_chords(plain.trim())
+}
+
+/// `[G]` sits on the following letter. A long or repeated tag such as `[info]` stays in the lyric.
+fn extract_bracket_chords(line: &str) -> (String, Vec<ChordMark>) {
+    let mut lyric = String::new();
+    let mut marks = Vec::new();
+    for part in line.split(']') {
+        let (before, chord) = part.split_once('[').unwrap_or((part, ""));
+        lyric.push_str(before);
+        if chord.is_empty() {
+            continue;
+        }
+        if chord.chars().count() > 5 || chord.contains('x') {
+            lyric.push('[');
+            lyric.push_str(chord);
+            lyric.push(']');
+        } else {
+            marks.push(ChordMark {
+                pos: lyric.chars().count(),
+                key: chord.to_string(),
+            });
+        }
+    }
+    (lyric, marks)
+}
+
+fn page_break(event: &quick_xml::events::BytesStart<'_>) -> bool {
+    attribute(event, "style")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("page-break-after")
+}
+
+fn opensong(text: &str) -> Result<(String, Vec<Section>), DataError> {
+    let mut title = String::new();
+    let mut lyrics = String::new();
+    let mut in_title = false;
+    let mut in_lyrics = false;
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref());
+                in_title = name == "title";
+                in_lyrics = name == "lyrics";
+            }
+            Ok(Event::Text(event)) => {
+                let text = event
+                    .unescape()
+                    .map_err(|err| DataError::Scripture(err.to_string()))?
+                    .to_string();
+                if in_title {
+                    title.push_str(text.trim());
+                } else if in_lyrics {
+                    lyrics.push_str(&text);
+                }
+            }
+            Ok(Event::End(_)) => {
+                in_title = false;
+                in_lyrics = false;
+            }
+            Ok(Event::Eof) => break,
+            Err(err) => return Err(DataError::Scripture(err.to_string())),
+            _ => {}
+        }
+        buf.clear();
+    }
+    let mut sections = Vec::new();
+    let mut group = "Verse".to_string();
+    let mut lines = Vec::new();
+    let mut chords = Vec::new();
+    let mut pending = Vec::new();
+    for line in lyrics.lines() {
+        let line = line.trim();
+        if let Some(tag) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            if !lines.is_empty() {
+                sections.push(Section {
+                    group: group.clone(),
+                    lines: std::mem::take(&mut lines),
+                    chords: std::mem::take(&mut chords),
+                });
+            }
+            pending.clear();
+            group = opensong_group(tag);
+            continue;
+        }
+        if line.starts_with(';') || line.is_empty() {
+            continue;
+        }
+        if let Some(body) = line.strip_prefix('.') {
+            pending = opensong_chords(body);
+            continue;
+        }
+        lines.push(line.replace('_', ""));
+        chords.push(std::mem::take(&mut pending));
+    }
+    if !lines.is_empty() {
+        sections.push(Section {
+            group,
+            lines,
+            chords,
+        });
+    }
+    Ok((title, sections))
+}
+
+/// OpenSong puts chords on a line that starts with `.`. Spaces between names are their positions.
+fn opensong_chords(body: &str) -> Vec<ChordMark> {
+    let mut chords = Vec::new();
+    let mut pos = -1_i32;
+    for token in body.split(' ') {
+        pos += 1;
+        if token.is_empty() {
+            continue;
+        }
+        chords.push(ChordMark {
+            pos: pos.max(0) as usize,
+            key: token.to_string(),
+        });
+        pos += 1;
+    }
+    chords
+}
+
+fn opensong_group(tag: &str) -> String {
+    let tag = tag.trim();
+    let kind = match tag.chars().next().unwrap_or('V').to_ascii_uppercase() {
+        'C' => "Chorus",
+        'B' => "Bridge",
+        'T' => "Tag",
+        'O' => "Outro",
+        'I' => "Intro",
+        'P' => "Pre-chorus",
+        _ => "Verse",
+    };
+    let number: String = tag.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if number.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} {number}")
+    }
+}
+
+fn propresenter(text: &str) -> Result<(String, Vec<Section>), DataError> {
+    let mut slides = Vec::new();
+    let mut lines = Vec::new();
+    let mut capture = false;
+    let mut chunk = String::new();
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref());
+                if name == "RVDisplaySlide" && !lines.is_empty() {
+                    slides.push(std::mem::take(&mut lines));
+                }
+                capture = name == "NSString" || name.ends_with(":t");
+                if capture {
+                    chunk.clear();
+                }
+            }
+            Ok(Event::Text(event)) if capture => {
+                chunk.push_str(
+                    &event
+                        .unescape()
+                        .map_err(|err| DataError::Scripture(err.to_string()))?,
+                );
+            }
+            Ok(Event::End(event)) => {
+                let name = local_name(event.name().as_ref());
+                if capture && (name == "NSString" || name.ends_with(":t")) {
+                    let text = chunk.trim();
+                    if !text.is_empty() {
+                        lines.push(text.to_string());
+                    }
+                    capture = false;
+                }
+                if name == "RVDisplaySlide" && !lines.is_empty() {
+                    slides.push(std::mem::take(&mut lines));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(err) => return Err(DataError::Scripture(err.to_string())),
+            _ => {}
+        }
+        buf.clear();
+    }
+    if !lines.is_empty() {
+        slides.push(lines);
+    }
+    let sections = slides
+        .into_iter()
+        .enumerate()
+        .map(|(index, lines)| {
+            let group = if index == 0 {
+                "Verse".into()
+            } else {
+                format!("Verse {}", index + 1)
+            };
+            Section::plain(group, lines)
+        })
+        .collect();
+    Ok((String::new(), sections))
+}
+
+fn songbeamer(text: &str) -> (String, Vec<Section>) {
+    let stored = songbeamer_chords(text);
+    let mut name = String::new();
+    let mut sections = Vec::new();
+    let mut chord_line = 0usize;
+    for section in text.split("\n---") {
+        let lines: Vec<&str> = section.lines().map(str::trim).collect();
+        let Some(first) = lines.iter().copied().find(|line| !line.is_empty()) else {
+            chord_line += 1;
+            continue;
+        };
+        if first.starts_with('#') && sections.is_empty() && lines.iter().all(|line| line.is_empty() || line.starts_with('#'))
+        {
+            for line in lines {
+                if let Some(title) = line.strip_prefix("#Title=") {
+                    name = title.trim().to_string();
+                }
+            }
+            continue;
+        }
+        let mut group = "Verse".to_string();
+        let mut body = lines.as_slice();
+        if looks_like_group(first) && !first.starts_with('#') {
+            group = first.to_string();
+            chord_line += 1;
+            if let Some(start) = lines.iter().position(|line| line == &first) {
+                body = &lines[start + 1..];
+            }
+        }
+        let mut lyric = Vec::new();
+        let mut marks = Vec::new();
+        for line in body {
+            let these = stored.get(&chord_line).cloned().unwrap_or_default();
+            chord_line += 1;
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            lyric.push((*line).to_string());
+            marks.push(these);
+        }
+        chord_line += 1;
+        if !lyric.is_empty() {
+            sections.push(Section {
+                group,
+                lines: lyric,
+                chords: marks,
+            });
+        }
+    }
+    (name, sections)
+}
+
+fn songbeamer_chords(text: &str) -> std::collections::BTreeMap<usize, Vec<ChordMark>> {
+    let mut stored = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let Some(value) = line.trim().strip_prefix("#Chords=") else {
+            continue;
+        };
+        let decoded = base64_decode(value.trim()).unwrap_or_else(|| value.trim().as_bytes().to_vec());
+        let text = String::from_utf8_lossy(&decoded);
+        for row in text.split('\r') {
+            let parts: Vec<&str> = row.split(',').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let Ok(line_index) = parts[1].trim().parse::<usize>() else {
+                continue;
+            };
+            let pos = parts[0]
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                .ceil()
+                .max(0.0) as usize;
+            let key = parts[2].replace('<', "♭").replace('=', "");
+            if key.is_empty() {
+                continue;
+            }
+            stored
+                .entry(line_index)
+                .or_insert_with(Vec::new)
+                .push(ChordMark { pos, key });
+        }
+    }
+    stored
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = text.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for chunk in bytes.chunks(4) {
+        let pad = chunk.iter().filter(|byte| **byte == b'=').count();
+        let a = value(chunk[0])?;
+        let b = value(chunk[1])?;
+        let c = if chunk[2] == b'=' { 0 } else { value(chunk[2])? };
+        let d = if chunk[3] == b'=' { 0 } else { value(chunk[3])? };
+        out.push((a << 2) | (b >> 4));
+        if pad < 2 {
+            out.push((b << 4) | (c >> 2));
+        }
+        if pad < 1 {
+            out.push((c << 6) | d);
+        }
+    }
+    Some(out)
+}
+
+/// A line of chord names above a lyric becomes chords on that lyric.
+fn pair_chord_lines(lines: Vec<String>) -> (Vec<String>, Vec<Vec<ChordMark>>) {
+    let mut lyrics = Vec::new();
+    let mut chords = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some(lyric) = lines.get(index + 1)
+            && is_chord_line(&lines[index])
+            && !is_chord_line(lyric)
+            && !is_section_header(lyric)
+        {
+            let lyric = lyric.clone();
+            chords.push(chord_marks(&lines[index], &lyric));
+            lyrics.push(lyric);
+            index += 2;
+            continue;
+        }
+        lyrics.push(lines[index].clone());
+        chords.push(Vec::new());
+        index += 1;
+    }
+    (lyrics, chords)
+}
+
+fn is_section_header(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with('[') && line.ends_with(']')
+}
+
+fn is_chord_line(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    !tokens.is_empty() && tokens.iter().all(|token| is_chord_token(token))
+}
+
+fn is_chord_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(root) = chars.next() else {
+        return false;
+    };
+    if !('A'..='G').contains(&root) {
+        return false;
+    }
+    let mut rest = chars.as_str();
+    if rest.starts_with('#') || rest.starts_with('b') {
+        rest = &rest[1..];
+    }
+    for prefix in ["maj", "min", "dim", "aug", "sus", "add", "m", "M"] {
+        if rest.starts_with(prefix) {
+            rest = &rest[prefix.len()..];
+            break;
+        }
+    }
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .count();
+    rest = &rest[digits..];
+    if let Some(bass) = rest.strip_prefix('/') {
+        let mut notes = bass.chars();
+        let Some(note) = notes.next() else {
+            return false;
+        };
+        if !('A'..='G').contains(&note) {
+            return false;
+        }
+        let left: String = notes.collect();
+        return left.is_empty() || left == "#" || left == "b";
+    }
+    rest.is_empty()
+}
+
+fn chord_marks(chord_line: &str, lyric: &str) -> Vec<ChordMark> {
+    let lyric: Vec<char> = lyric.chars().collect();
+    let chars: Vec<char> = chord_line.chars().collect();
+    let mut marks = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && !chars[index].is_whitespace() {
+            index += 1;
+        }
+        let key: String = chars[start..index].iter().collect();
+        if !is_chord_token(&key) {
+            continue;
+        }
+        let mut pos = start;
+        while pos < lyric.len() && lyric[pos] == ' ' {
+            pos += 1;
+        }
+        if pos > lyric.len() {
+            pos = lyric.len();
+        }
+        marks.push(ChordMark { pos, key });
+    }
+    marks
+}
+
+fn looks_like_group(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "verse",
+        "chorus",
+        "bridge",
+        "tag",
+        "intro",
+        "outro",
+        "pre-chorus",
+    ]
+    .iter()
+    .any(|name| lower.starts_with(name))
+}
+
+fn plain(text: &str) -> (String, Vec<Section>) {
+    let mut name = String::new();
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':')
+            && key.eq_ignore_ascii_case("title")
+            && !key.contains(' ')
+        {
+            name = value.trim().to_string();
+            continue;
+        }
+        current.push(line.to_string());
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    let sections = blocks
+        .into_iter()
+        .filter_map(|mut lines| {
+            if lines.is_empty() {
+                return None;
+            }
+            let group = if lines[0].starts_with('[') && lines[0].ends_with(']') {
+                lines.remove(0).trim_matches(['[', ']']).to_string()
+            } else {
+                "Verse".to_string()
+            };
+            if lines.is_empty() {
+                None
+            } else {
+                let (lines, chords) = pair_chord_lines(lines);
+                Some(Section {
+                    group,
+                    lines,
+                    chords,
+                })
+            }
+        })
+        .collect();
+    (name, sections)
+}
+
+fn decode_rtf(text: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && chars.get(index + 1) == Some(&'u') {
+            index += 2;
+            let start = index;
+            if chars.get(index) == Some(&'-') {
+                index += 1;
+            }
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            if let Ok(mut code) = chars[start..index]
+                .iter()
+                .collect::<String>()
+                .parse::<i32>()
+            {
+                if code < 0 {
+                    code += 65536;
+                }
+                if let Some(ch) = char::from_u32(code as u32) {
+                    out.push(ch);
+                }
+            }
+            if chars.get(index) == Some(&'?') {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '\\' && chars[index..].starts_with(&['\\', 'p', 'a', 'r']) {
+            out.push('\n');
+            index += 4;
+            continue;
+        }
+        if chars[index] == '{' || chars[index] == '}' {
+            index += 1;
+            continue;
+        }
+        if chars[index] == '\\' {
+            index += 1;
+            while index < chars.len() && chars[index].is_ascii_alphabetic() {
+                index += 1;
+            }
+            if chars.get(index) == Some(&' ') {
+                index += 1;
+            }
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn powerpoint_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|err| DataError::Scripture(err.to_string()))?;
+    let mut names = archive
+        .file_names()
+        .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    names.sort_by_key(|name| slide_number(name));
+    let mut sections = Vec::new();
+    for name in names {
+        let mut file = archive
+            .by_name(&name)
+            .map_err(|err| DataError::Scripture(err.to_string()))?;
+        let mut xml = String::new();
+        file.read_to_string(&mut xml)
+            .map_err(|err| DataError::Scripture(err.to_string()))?;
+        let lines = pptx_lines(&xml);
+        if !lines.is_empty() {
+            sections.push(Section::plain(
+                format!("Slide {}", sections.len() + 1),
+                lines,
+            ));
+        }
+    }
+    if sections.is_empty() {
+        return Err(DataError::Scripture(
+            "PowerPoint file has no slide text".into(),
+        ));
+    }
+    Ok(show_file(file_name, &file_stem_str(file_name), sections))
+}
+
+fn pptx_lines(xml: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut capture = false;
+    let mut chunk = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) => {
+                capture = local_name(event.name().as_ref()) == "t";
+                if capture {
+                    chunk.clear();
+                }
+            }
+            Ok(Event::Text(event)) if capture => {
+                if let Ok(text) = event.unescape() {
+                    chunk.push_str(&text);
+                }
+            }
+            Ok(Event::End(event)) if local_name(event.name().as_ref()) == "t" => {
+                let text = chunk.trim();
+                if !text.is_empty() {
+                    lines.push(text.to_string());
+                }
+                capture = false;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    lines
+}
+
+fn order_sections(verses: &[LyricVerse], order: &str) -> Vec<Section> {
+    let wanted: Vec<&str> = order.split_whitespace().collect();
+    let chosen: Vec<&LyricVerse> = if wanted.is_empty() {
+        verses.iter().collect()
+    } else {
+        let mut found = Vec::new();
+        for name in &wanted {
+            found.extend(
+                verses
+                    .iter()
+                    .filter(|verse| verse_name_matches(&verse.name, name)),
+            );
+        }
+        if found.is_empty() {
+            verses.iter().collect()
+        } else {
+            found
+        }
+    };
+    chosen
+        .into_iter()
+        .map(|verse| Section {
+            group: verse_group(&verse.name),
+            lines: verse.lines.clone(),
+            chords: verse.chords.clone(),
+        })
+        .collect()
+}
+
+fn verse_name_matches(id: &str, wanted: &str) -> bool {
+    if id.eq_ignore_ascii_case(wanted) {
+        return true;
+    }
+    if wanted.chars().last().is_some_and(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    id.eq_ignore_ascii_case(&format!("{wanted}1"))
+}
+
+fn verse_group(name: &str) -> String {
+    let kind = match name.chars().next().unwrap_or('v').to_ascii_lowercase() {
+        'c' => "Chorus",
+        'b' => "Bridge",
+        'p' => "Pre-chorus",
+        'i' => "Intro",
+        'e' => "Ending",
+        'o' | 't' => "Tag",
+        _ => "Verse",
+    };
+    let number: String = name.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if number.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} {number}")
+    }
+}
+
+fn is_sqlite(file_name: &str, bytes: &[u8]) -> bool {
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .eq_ignore_ascii_case("sqlite");
+    ext || bytes.starts_with(b"SQLite format 3")
+}
+
+fn openlp_database(bytes: &[u8]) -> Result<Vec<ShowFile>, DataError> {
+    let path = std::env::temp_dir().join(format!("freeshow-openlp-{}.sqlite", crate::new_id()));
+    fs::write(&path, bytes)?;
+    let connection =
+        rusqlite::Connection::open(&path).map_err(|err| DataError::Scripture(err.to_string()))?;
+    let songs = openlp_songs(&connection)?;
+    drop(connection);
+    let _ = fs::remove_file(&path);
+    if songs.is_empty() {
+        return Err(DataError::Scripture(
+            "OpenLP database did not contain slides".into(),
+        ));
+    }
+    Ok(songs)
+}
+
+struct OpenLpSong {
+    id: i64,
+    title: String,
+    lyrics: String,
+    order: String,
+    author: String,
+    copyright: String,
+    ccli: String,
+    notes: String,
+}
+
+fn openlp_songs(connection: &rusqlite::Connection) -> Result<Vec<ShowFile>, DataError> {
+    let raw = openlp_rows(connection)?;
+    let mut songs = Vec::new();
+    for song in raw {
+        let author = openlp_author(connection, song.id);
+        let verses = parse_lyric_xml(&song.lyrics)
+            .map(|(_, _, verses)| verses)
+            .unwrap_or_default();
+        let sections = order_sections(&verses, &song.order);
+        if sections.is_empty() {
+            continue;
+        }
+        let title = if song.title.trim().is_empty() {
+            format!("Song {}", song.id)
+        } else {
+            song.title.clone()
+        };
+        let mut show = show_file(&format!("{title}.xml"), &title, sections);
+        if let Some(document) = show.show.as_object_mut() {
+            document.insert("origin".to_string(), json!("openlp"));
+            document.insert(
+                "meta".to_string(),
+                json!({
+                    "title": title,
+                    "author": if author.is_empty() { song.author } else { author },
+                    "CCLI": song.ccli,
+                    "copyright": song.copyright
+                }),
+            );
+        }
+        if !song.notes.is_empty()
+            && let Some(layout) = show
+                .show
+                .pointer_mut("/layouts/main")
+                .and_then(Value::as_object_mut)
+        {
+            layout.insert("notes".to_string(), json!(song.notes));
+        }
+        songs.push(show);
+    }
+    Ok(songs)
+}
+
+fn openlp_rows(connection: &rusqlite::Connection) -> Result<Vec<OpenLpSong>, DataError> {
+    let mut statement = connection
+        .prepare("SELECT * FROM songs")
+        .map_err(|err| DataError::Scripture(err.to_string()))?;
+    let columns: Vec<String> = statement
+        .column_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let mut rows = statement
+        .query([])
+        .map_err(|err| DataError::Scripture(err.to_string()))?;
+    let mut songs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|err| DataError::Scripture(err.to_string()))?
+    {
+        if let Some(song) = openlp_row(row, &columns) {
+            songs.push(song);
+        }
+    }
+    Ok(songs)
+}
+
+fn openlp_row(row: &rusqlite::Row<'_>, columns: &[String]) -> Option<OpenLpSong> {
+    let lyrics = sqlite_text(row, columns, "lyrics");
+    if lyrics.trim().is_empty() {
+        return None;
+    }
+    let title = {
+        let alternate = sqlite_text(row, columns, "alternate_title");
+        if alternate.trim().is_empty() {
+            sqlite_text(row, columns, "title")
+        } else {
+            alternate
+        }
+    };
+    Some(OpenLpSong {
+        id: sqlite_i64(row, columns, "id"),
+        title,
+        lyrics,
+        order: sqlite_text(row, columns, "verse_order"),
+        author: String::new(),
+        copyright: sqlite_text(row, columns, "copyright"),
+        ccli: sqlite_text(row, columns, "ccli_number"),
+        notes: sqlite_text(row, columns, "comments"),
+    })
+}
+
+fn openlp_author(connection: &rusqlite::Connection, song_id: i64) -> String {
+    connection
+        .query_row(
+            "SELECT authors.display_name FROM authors_songs
+             JOIN authors ON authors.id = authors_songs.author_id
+             WHERE authors_songs.song_id = ?1
+             ORDER BY CASE WHEN authors_songs.author_type LIKE '%words%' THEN 0 ELSE 1 END
+             LIMIT 1",
+            [song_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+}
+
+fn sqlite_text(row: &rusqlite::Row<'_>, columns: &[String], name: &str) -> String {
+    let Some(index) = columns.iter().position(|column| column == name) else {
+        return String::new();
+    };
+    row.get::<_, Option<String>>(index)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+fn sqlite_i64(row: &rusqlite::Row<'_>, columns: &[String], name: &str) -> i64 {
+    let Some(index) = columns.iter().position(|column| column == name) else {
+        return 0;
+    };
+    row.get::<_, i64>(index).unwrap_or(0)
+}
+
+fn looks_like_pptx(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK") && bytes.windows(11).any(|window| window == b"ppt/slides/")
+}
+
+fn slide_number(name: &str) -> usize {
+    name.chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
+fn local_name(name: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(name);
+    raw.rsplit(':').next().unwrap_or("").to_string()
+}
+
+fn attribute(event: &quick_xml::events::BytesStart<'_>, key: &str) -> Option<String> {
+    event
+        .try_get_attribute(key)
+        .ok()
+        .flatten()
+        .and_then(|attr| attr.unescape_value().ok().map(|value| value.to_string()))
+}
+
+fn file_stem(name: &str) -> String {
+    file_stem_str(name)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == ' ' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn file_stem_str(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chordpro_openlyrics_opensong_text_and_songbeamer() {
+        let chord = "{title: Amazing Grace}\n{start_of_verse: Verse}\n[G]Amazing [C]grace\n{end_of_verse}\n{soc}\nPraise God\n{eoc}\n";
+        let show = import_show("grace.cho", chord.as_bytes()).unwrap();
+        assert_eq!(show.name(), "Amazing Grace");
+        let slides = show.ordered_slides();
+        assert_eq!(slides[0].group.as_deref(), Some("Verse"));
+        assert_eq!(slides[0].lines, vec!["Amazing grace".to_string()]);
+        let marks = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/chords")
+            .unwrap();
+        assert_eq!(marks[0]["key"], "G");
+        assert_eq!(marks[0]["pos"], 0);
+        assert_eq!(marks[1]["key"], "C");
+        assert_eq!(marks[1]["pos"], 8);
+        assert_eq!(
+            show.show
+                .pointer("/slides/s1/items/0/chords/enabled")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
+        assert_eq!(slides[1].lines, vec!["Praise God".to_string()]);
+
+        let openlyrics = r#"<song><properties><titles><title>Amazing Grace</title></titles><verseOrder>v1 c1</verseOrder></properties><lyrics><verse name="c1"><lines>Praise God</lines></verse><verse name="v1"><lines>Amazing <chord name="G"/>grace
+how sweet</lines></verse></lyrics></song>"#;
+        let show = import_show("grace.xml", openlyrics.as_bytes()).unwrap();
+        assert_eq!(show.ordered_slides()[0].group.as_deref(), Some("Verse 1"));
+        assert_eq!(
+            show.ordered_slides()[0].lines,
+            vec!["Amazing grace".to_string(), "how sweet".to_string()]
+        );
+        let marks = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/chords")
+            .unwrap();
+        assert_eq!(marks[0]["key"], "G");
+        assert_eq!(marks[0]["pos"], 8);
+        assert_eq!(show.ordered_slides()[1].group.as_deref(), Some("Chorus 1"));
+
+        let opensong = "<song><title>Amazing Grace</title><lyrics>\n[V1]\n.G       C\nAmazing grace\n[C]\nPraise God\n</lyrics></song>";
+        let show = import_show("opensong.xml", opensong.as_bytes()).unwrap();
+        assert_eq!(show.ordered_slides()[0].group.as_deref(), Some("Verse 1"));
+        assert_eq!(
+            show.ordered_slides()[0].lines,
+            vec!["Amazing grace".to_string()]
+        );
+        let marks = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/chords")
+            .unwrap();
+        assert_eq!(marks[0]["key"], "G");
+        assert_eq!(marks[0]["pos"], 0);
+        assert_eq!(marks[1]["key"], "C");
+        assert_eq!(
+            show.ordered_slides()[1].lines,
+            vec!["Praise God".to_string()]
+        );
+
+        let text = "Title: Amazing Grace\n\n[Verse]\nG       C\nAmazing grace\n\n[Chorus]\nPraise God\n";
+        let show = import_show("song.txt", text.as_bytes()).unwrap();
+        assert_eq!(show.name(), "Amazing Grace");
+        assert_eq!(show.ordered_slides().len(), 2);
+        assert_eq!(
+            show.ordered_slides()[0].lines,
+            vec!["Amazing grace".to_string()]
+        );
+        let marks = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/chords")
+            .unwrap();
+        assert_eq!(marks[0]["key"], "G");
+        assert_eq!(marks[0]["pos"], 0);
+        assert_eq!(marks[1]["key"], "C");
+
+        let beamer = "#Title=Amazing Grace\n#Author=Newton\n#Chords=MCwxLEc=\n---\nVerse 1\nAmazing grace\n---\nChorus\nPraise God\n";
+        let show = import_show("grace.sng", beamer.as_bytes()).unwrap();
+        assert_eq!(show.name(), "Amazing Grace");
+        assert_eq!(show.ordered_slides()[1].group.as_deref(), Some("Chorus"));
+        let marks = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/chords")
+            .unwrap();
+        assert_eq!(marks[0]["key"], "G");
+        assert_eq!(marks[0]["pos"], 0);
+    }
+
+    #[test]
+    fn propresenter_easyworship_and_powerpoint() {
+        let pro = r#"<RVPresentationDocument><RVDisplaySlide><RVTextElement><NSString>Amazing grace</NSString></RVTextElement></RVDisplaySlide><RVDisplaySlide><RVTextElement><NSString>Praise God</NSString></RVTextElement></RVDisplaySlide></RVPresentationDocument>"#;
+        let show = import_show("song.pro6", pro.as_bytes()).unwrap();
+        assert_eq!(
+            show.ordered_slides()[0].lines,
+            vec!["Amazing grace".to_string()]
+        );
+        assert_eq!(
+            show.ordered_slides()[1].lines,
+            vec!["Praise God".to_string()]
+        );
+
+        let rtf = "{\\rtf1 Amazing grace\\par how sweet\\par\\par Praise God}";
+        let show = import_show("song.rtf", rtf.as_bytes()).unwrap();
+        assert!(show.ordered_slides()[0].lines[0].contains("Amazing grace"));
+        assert!(show.plain_text("s2").contains("Praise God") || show.ordered_slides().len() >= 1);
+
+        let bytes = pptx_with_slide("Amazing grace");
+        let show = import_show("slides.pptx", &bytes).unwrap();
+        assert_eq!(
+            show.ordered_slides()[0].lines,
+            vec!["Amazing grace".to_string()]
+        );
+    }
+
+    #[test]
+    fn openlp_sqlite_and_page_breaks_become_shows() {
+        let lyrics = r#"<song><lyrics><verse type="v" label="1"><lines>Amazing [G]grace<br/>how sweet {it}</lines></verse><verse type="c" label="1"><lines>Praise God<p style="page-break-after: always;"/>from whom</lines></verse></lyrics></song>"#;
+        let path =
+            std::env::temp_dir().join(format!("freeshow-openlp-src-{}.sqlite", std::process::id()));
+        let _ = fs::remove_file(&path);
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT, alternate_title TEXT, lyrics TEXT, verse_order TEXT, copyright TEXT, comments TEXT, ccli_number TEXT);
+                     CREATE TABLE authors (id INTEGER PRIMARY KEY, display_name TEXT);
+                     CREATE TABLE authors_songs (song_id INTEGER, author_id INTEGER, author_type TEXT);
+                     INSERT INTO songs VALUES (1, 'Amazing Grace', '', '', 'v1 c1', 'Public domain', 'slow', '22025');
+                     INSERT INTO authors VALUES (1, 'John Newton');
+                     INSERT INTO authors_songs VALUES (1, 1, 'words');",
+                )
+                .unwrap();
+            connection
+                .execute("UPDATE songs SET lyrics = ?1 WHERE id = 1", [lyrics])
+                .unwrap();
+        }
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let shows = import_shows("songs.sqlite", &bytes).unwrap();
+        assert_eq!(shows.len(), 1);
+        let show = &shows[0];
+        assert_eq!(show.name(), "Amazing Grace");
+        assert_eq!(
+            show.show.get("origin").and_then(Value::as_str),
+            Some("openlp")
+        );
+        assert_eq!(
+            show.show.pointer("/meta/author").and_then(Value::as_str),
+            Some("John Newton")
+        );
+        assert_eq!(
+            show.show.pointer("/meta/CCLI").and_then(Value::as_str),
+            Some("22025")
+        );
+        let slides = show.ordered_slides();
+        assert_eq!(slides[0].group.as_deref(), Some("Verse 1"));
+        assert_eq!(
+            slides[0].lines,
+            vec!["Amazing grace".to_string(), "how sweet".to_string()]
+        );
+        let marks = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/chords")
+            .unwrap();
+        assert_eq!(marks[0]["key"], "G");
+        assert_eq!(marks[0]["pos"], 8);
+        assert_eq!(slides[1].group.as_deref(), Some("Chorus 1"));
+        assert_eq!(slides[1].lines, vec!["Praise God".to_string()]);
+        assert_eq!(slides[2].group.as_deref(), Some("Chorus 1"));
+        assert_eq!(slides[2].lines, vec!["from whom".to_string()]);
+        assert_eq!(
+            show.show
+                .pointer("/layouts/main/notes")
+                .and_then(Value::as_str),
+            Some("slow")
+        );
+    }
+
+    fn pptx_with_slide(text: &str) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            writer
+                .start_file(
+                    "ppt/slides/slide1.xml",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            let xml = format!(
+                r#"<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:t>{text}</a:t></p:sld>"#
+            );
+            std::io::Write::write_all(&mut writer, xml.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+}

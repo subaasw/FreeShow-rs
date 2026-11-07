@@ -1,0 +1,2189 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+mod live;
+mod present;
+mod session;
+mod stage;
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, mpsc};
+
+use freeshow_ai::SlideAssist;
+use freeshow_churchapps::ContentSource;
+use freeshow_cloud::CloudBackup;
+use freeshow_core::{AppSettings, Rgb, ThemePalette};
+use freeshow_media::{AudioOutput, VideoPlayer};
+use freeshow_ndi::VideoSend;
+use freeshow_obs::ObsControl;
+use freeshow_output::{Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, clear_frame};
+use freeshow_pco::PlanSource;
+use freeshow_record::OutputCapture;
+use freeshow_remote::Integration;
+use freeshow_timecode::TimecodeSource;
+use live::{OpeningFade, audience_frame, motion_frame, stage_frame};
+use present::{FrameSlot, attach_frame};
+use session::{DrawerAction, PendingPlay, Session};
+use slint::winit_030::WinitWindowAccessor;
+
+slint::slint! {
+    import { LineEdit, Slider, TextEdit } from "std-widgets.slint";
+
+    struct DrawerTab { id: string, label: string }
+
+    component RailButton inherits Rectangle {
+        in property <string> label;
+        in property <bool> active;
+        in property <color> primary;
+        in property <color> accent;
+        in property <color> text-color;
+        callback clicked();
+        height: 58px;
+        background: root.active ? root.accent : root.primary;
+        Text {
+            text: root.label;
+            color: root.text-color;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            width: parent.width - 8px;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.clicked(); }
+        }
+    }
+
+    component BoxButton inherits Rectangle {
+        in property <string> label;
+        in property <color> accent;
+        in property <color> text-color;
+        callback clicked();
+        horizontal-stretch: 1;
+        height: 28px;
+        border-radius: 4px;
+        background: root.accent;
+        Text {
+            text: root.label;
+            color: root.text-color;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.clicked(); }
+        }
+    }
+
+    component HeaderButton inherits Rectangle {
+        in property <string> label;
+        in property <color> accent;
+        in property <color> text-color;
+        callback clicked();
+        width: 88px;
+        height: 32px;
+        border-radius: 4px;
+        background: root.accent;
+        Text {
+            text: root.label;
+            color: root.text-color;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.clicked(); }
+        }
+    }
+
+    component ListRow inherits Rectangle {
+        in property <string> label;
+        in property <bool> active;
+        in property <color> accent;
+        in property <color> text-color;
+        callback clicked();
+        height: 36px;
+        background: root.active ? root.accent : transparent;
+        Text {
+            text: root.label;
+            color: root.text-color;
+            font-size: 13px;
+            vertical-alignment: center;
+            x: 8px;
+            width: parent.width - 12px;
+            overflow: elide;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.clicked(); }
+        }
+    }
+
+    export component ControlWindow inherits Window {
+        title: "FreeShow";
+        in property <color> primary: #242832;
+        in property <color> primary-lighter: #2f3542;
+        in property <color> primary-darker: #191923;
+        in property <color> primary-darkest: #12121c;
+        in property <color> text-color: #f0f0ff;
+        in property <color> accent: #F0008C;
+        in-out property <string> active-tab: "shows";
+        in-out property <string> panel-title: "Shows";
+        in property <string> data-path: "Data folder not set";
+        in-out property <[string]> drawer-names;
+        in-out property <[string]> slide-labels;
+        in-out property <[string]> project-names;
+        in-out property <string> project-title: "Project";
+        in-out property <string> lyrics: "";
+        in-out property <string> group: "";
+        in-out property <float> volume: 100;
+        in-out property <int> selected-drawer: -1;
+        in-out property <int> selected-slide: -1;
+        in-out property <int> selected-project: -1;
+        in-out property <image> preview;
+        callback open-output();
+        callback open-stage();
+        callback choose-screen();
+        in-out property <string> screen-label: "Screen";
+        callback select-tab(string);
+        callback choose-drawer(int);
+        callback choose-slide(int);
+        callback save-lyrics(string);
+        callback save-group(string);
+        callback nudge-box(int, int, int, int);
+        callback go-slide(string);
+        callback move-project(int);
+        callback choose-project(int);
+        callback add-to-project();
+        callback create-show();
+        callback add-slide();
+        callback create-project();
+        callback search(string);
+        callback set-volume(float);
+
+        preferred-width: 1280px;
+        preferred-height: 800px;
+        background: root.primary-darkest;
+
+        property <[DrawerTab]> tabs: [
+            { id: "shows", label: "Shows" },
+            { id: "media", label: "Media" },
+            { id: "audio", label: "Audio" },
+            { id: "overlays", label: "Overlays" },
+            { id: "templates", label: "Templates" },
+            { id: "scripture", label: "Scripture" },
+            { id: "calendar", label: "Calendar" },
+            { id: "functions", label: "Functions" },
+        ];
+
+        VerticalLayout {
+            spacing: 0;
+            Rectangle {
+                height: 48px;
+                background: root.primary-darker;
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    alignment: center;
+                    Text {
+                        text: "FreeShow";
+                        color: root.text-color;
+                        font-size: 18px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; background: root.primary-darker; }
+                    HeaderButton {
+                        label: root.screen-label;
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        clicked => { root.choose-screen(); }
+                    }
+                    HeaderButton {
+                        label: "Output";
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        clicked => { root.open-output(); }
+                    }
+                    HeaderButton {
+                        label: "Stage";
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        clicked => { root.open-stage(); }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 0;
+                Rectangle {
+                    width: 96px;
+                    background: root.primary-darker;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 0;
+                        for tab in root.tabs: RailButton {
+                            label: tab.label;
+                            active: root.active-tab == tab.id;
+                            primary: root.primary;
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            clicked => {
+                                root.active-tab = tab.id;
+                                root.panel-title = tab.label;
+                                root.select-tab(tab.id);
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 240px;
+                    background: root.primary;
+                    Flickable {
+                        VerticalLayout {
+                            spacing: 0;
+                            alignment: start;
+                            for item[index] in root.drawer-names: ListRow {
+                                label: item;
+                                active: root.selected-drawer == index;
+                                accent: root.accent;
+                                text-color: root.text-color;
+                                clicked => { root.choose-drawer(index); }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 0;
+                    Rectangle {
+                        height: 40px;
+                        background: root.primary;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            alignment: center;
+                            Text {
+                                text: root.panel-title;
+                                color: root.text-color;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; background: root.primary; }
+                            HeaderButton {
+                                label: "Show";
+                                accent: root.primary-lighter;
+                                text-color: root.text-color;
+                                clicked => { root.create-show(); }
+                            }
+                            HeaderButton {
+                                label: "Slide";
+                                accent: root.primary-lighter;
+                                text-color: root.text-color;
+                                clicked => { root.add-slide(); }
+                            }
+                            HeaderButton {
+                                label: "Save";
+                                accent: root.primary-lighter;
+                                text-color: root.text-color;
+                                clicked => { root.save-lyrics(root.lyrics); }
+                            }
+                            Slider {
+                                width: 120px;
+                                maximum: 100;
+                                value <=> root.volume;
+                                changed(value) => { root.set-volume(value); }
+                            }
+                            HeaderButton {
+                                label: "Go";
+                                accent: root.accent;
+                                text-color: root.text-color;
+                                clicked => { root.go-slide(root.lyrics); }
+                            }
+                        }
+                    }
+                    if root.active-tab == "scripture": Rectangle {
+                        height: 40px;
+                        background: root.primary-darker;
+                        LineEdit {
+                            width: parent.width - 16px;
+                            x: 8px;
+                            y: 6px;
+                            placeholder-text: "Search scripture";
+                            edited(value) => { root.search(value); }
+                        }
+                    }
+                    HorizontalLayout {
+                        vertical-stretch: 1;
+                        spacing: 0;
+                        Flickable {
+                            width: 280px;
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 0;
+                                for slide[index] in root.slide-labels: ListRow {
+                                    label: slide;
+                                    active: root.selected-slide == index;
+                                    accent: root.accent;
+                                    text-color: root.text-color;
+                                    clicked => { root.choose-slide(index); }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            padding: 12px;
+                            spacing: 8px;
+                            alignment: start;
+                            Rectangle {
+                                height: 180px;
+                                background: black;
+                                Image {
+                                    source: root.preview;
+                                    width: 100%;
+                                    height: 100%;
+                                    image-fit: contain;
+                                }
+                            }
+                            LineEdit {
+                                text <=> root.group;
+                                placeholder-text: "Group";
+                                edited(value) => { root.save-group(value); }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                BoxButton { label: "Left"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(-40, 0, 0, 0); } }
+                                BoxButton { label: "Right"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(40, 0, 0, 0); } }
+                                BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, -40, 0, 0); } }
+                                BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 40, 0, 0); } }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                BoxButton { label: "Wider"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, 40, 0); } }
+                                BoxButton { label: "Narrow"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, -40, 0); } }
+                                BoxButton { label: "Taller"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, 0, 40); } }
+                                BoxButton { label: "Shorter"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, 0, -40); } }
+                            }
+                            TextEdit {
+                                text <=> root.lyrics;
+                                vertical-stretch: 1;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 260px;
+                    background: root.primary;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: root.project-title;
+                            color: root.text-color;
+                            font-size: 16px;
+                            font-weight: 700;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.move-project(-1); } }
+                            BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.move-project(1); } }
+                            BoxButton { label: "Add"; accent: root.accent; text-color: root.text-color; clicked => { root.add-to-project(); } }
+                            BoxButton { label: "New"; accent: root.accent; text-color: root.text-color; clicked => { root.create-project(); } }
+                        }
+                        if root.project-names.length == 0: Text {
+                            text: "No project open";
+                            color: root.text-color;
+                            font-size: 14px;
+                        }
+                        if root.project-names.length > 0: VerticalLayout {
+                            spacing: 0;
+                            alignment: start;
+                            for item[index] in root.project-names: ListRow {
+                                label: item;
+                                active: root.selected-project == index;
+                                accent: root.accent;
+                                text-color: root.text-color;
+                                clicked => {
+                                    root.selected-project = index;
+                                    root.choose-project(index);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                height: 28px;
+                background: root.primary-darker;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    alignment: center;
+                    Text {
+                        text: root.data-path;
+                        color: root.text-color;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    export component OutputWindow inherits Window {
+        in-out property <image> frame;
+        title: "FreeShow Output";
+        background: #000;
+        preferred-width: 960px;
+        preferred-height: 540px;
+        Image {
+            source: root.frame;
+            width: 100%;
+            height: 100%;
+            image-fit: contain;
+        }
+    }
+
+    export component StageWindow inherits Window {
+        in-out property <image> frame;
+        title: "FreeShow Stage";
+        background: #000;
+        preferred-width: 960px;
+        preferred-height: 540px;
+        Image {
+            source: root.frame;
+            width: 100%;
+            height: 100%;
+            image-fit: contain;
+        }
+    }
+}
+
+fn color(rgb: Rgb) -> slint::Color {
+    slint::Color::from_rgb_u8(rgb.r, rgb.g, rgb.b)
+}
+
+fn apply_theme(ui: &ControlWindow, theme: &ThemePalette) {
+    ui.set_primary(color(theme.primary));
+    ui.set_primary_lighter(color(theme.primary_lighter));
+    ui.set_primary_darker(color(theme.primary_darker));
+    ui.set_primary_darkest(color(theme.primary_darkest));
+    ui.set_text_color(color(theme.text));
+    ui.set_accent(color(theme.secondary));
+}
+
+fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
+    let values: Vec<slint::SharedString> = items.iter().map(|item| item.as_str().into()).collect();
+    slint::ModelRc::new(slint::VecModel::from(values))
+}
+
+fn selected(index: Option<usize>) -> i32 {
+    index.map(|value| value as i32).unwrap_or(-1)
+}
+
+fn refresh(ui: &ControlWindow, session: &Session) {
+    ui.set_drawer_names(strings(&session.drawer()));
+    ui.set_slide_labels(strings(&session.slide_labels()));
+    ui.set_project_names(strings(&session.project_labels()));
+    ui.set_project_title(session.project_title().into());
+    ui.set_lyrics(session.lyrics().into());
+    ui.set_group(session.group().into());
+    ui.set_selected_drawer(match session.tab.as_str() {
+        "shows" => selected(session.show_index),
+        "scripture" => selected(session.bible_index),
+        "media" => selected(session.media_index),
+        "audio" => selected(session.audio_index),
+        _ => -1,
+    });
+    ui.set_volume(session.volume * 100.0);
+    ui.set_selected_slide(if session.tab == "scripture" {
+        selected(session.verse_index)
+    } else {
+        selected(session.slide_index)
+    });
+    ui.set_selected_project(session.project_item as i32);
+}
+
+fn publish(slot: &FrameSlot, frame: Frame) {
+    slot.publish(frame);
+}
+
+fn publish_audience(slot: &FrameSlot, frame: Frame) {
+    ndi().submit(&frame.pixels, frame.width, frame.height);
+    freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+    slot.publish(frame);
+}
+
+fn ndi() -> &'static freeshow_ndi::NdiSender {
+    use std::sync::OnceLock;
+    static NDI: OnceLock<freeshow_ndi::NdiSender> = OnceLock::new();
+    NDI.get_or_init(|| freeshow_ndi::NdiOutput::default().open(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+}
+
+fn fade_into(
+    timer: Rc<slint::Timer>,
+    slots: Vec<Rc<FrameSlot>>,
+    from: Frame,
+    to: Frame,
+    send_ndi: bool,
+    motion: freeshow_data::TextTransition,
+) {
+    if motion.kind == "none" {
+        let frame = to;
+        if send_ndi {
+            ndi().submit(&frame.pixels, frame.width, frame.height);
+            freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+        }
+        for slot in &slots {
+            slot.publish(frame.clone());
+        }
+        return;
+    }
+    let steps = (motion.duration_ms / 40).clamp(1, 250) as u16;
+    let step = Rc::new(std::cell::Cell::new(0u16));
+    let timer_cb = Rc::clone(&timer);
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(40),
+        move || {
+            let next = step.get().saturating_add(1);
+            step.set(next);
+            let frame = motion_frame(
+                &from,
+                &to,
+                &motion,
+                f32::from(next) / f32::from(steps),
+            );
+            if send_ndi {
+                ndi().submit(&frame.pixels, frame.width, frame.height);
+                freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+            }
+            for slot in &slots {
+                slot.publish(frame.clone());
+            }
+            if next >= steps {
+                timer_cb.stop();
+            }
+        },
+    );
+}
+
+fn sample_audio(session: &RefCell<Session>, audio: &RefCell<Option<AudioOutput>>) {
+    let mut session = session.borrow_mut();
+    if let Some(output) = audio.borrow().as_ref() {
+        session.audio_time = output.position_seconds();
+        session.audio_duration = output.duration_seconds();
+        session.audio_paused = output.is_paused();
+        if output.is_finished() {
+            if let Some(path) = session.playing_audio.clone() {
+                let _ = session.finish_media(&path.to_string_lossy(), true);
+            }
+        }
+    } else {
+        session.audio_time = 0.0;
+        session.audio_duration = 0.0;
+    }
+}
+
+fn stop_video(timer: &slint::Timer, video: &RefCell<Option<VideoPlayer>>) {
+    timer.stop();
+    *video.borrow_mut() = None;
+}
+
+#[derive(Clone)]
+struct LivePlayback {
+    audio: Rc<RefCell<Option<AudioOutput>>>,
+    video: Rc<RefCell<Option<VideoPlayer>>>,
+    timer: Rc<slint::Timer>,
+}
+
+fn start_pending(
+    pending: Option<PendingPlay>,
+    session: &Rc<RefCell<Session>>,
+    playback: &LivePlayback,
+    output_slot: &Rc<FrameSlot>,
+    preview_slot: &Rc<FrameSlot>,
+    stage_slot: &Rc<FrameSlot>,
+    last_output: &Rc<RefCell<Frame>>,
+    last_stage: &Rc<RefCell<Frame>>,
+) {
+    match pending {
+        Some(PendingPlay::Audio(path)) => {
+            let (volume, looping, from, to, tempo) = {
+                let current = session.borrow();
+                let (from, to) = current.audio_span();
+                (
+                    current.playback_gain(),
+                    current.audio_should_loop(),
+                    from,
+                    to,
+                    current.audio_tempo(),
+                )
+            };
+            match AudioOutput::play_file(&path, volume) {
+                Ok(output) => {
+                    output.set_looping(looping);
+                    output.set_span(from, to);
+                    output.set_rate(tempo);
+                    *playback.audio.borrow_mut() = Some(output);
+                }
+                Err(err) => tracing::error!("could not play audio: {err}"),
+            }
+        }
+        Some(PendingPlay::Video(path)) => {
+            stop_video(&playback.timer, &playback.video);
+            let ended = path.clone();
+            match VideoPlayer::open(&path) {
+                Ok(player) => {
+                    player.set_looping(session.borrow().media_loop);
+                    player.set_muted(session.borrow().media_muted);
+                    player.set_volume(session.borrow().video_volume);
+                    player.set_rate(session.borrow().video_rate);
+                    let (from, to) = {
+                        let current = session.borrow();
+                        (current.video_from, current.video_to)
+                    };
+                    player.set_span(from, to);
+                    follow_video(
+                        Rc::clone(&playback.timer),
+                        Rc::clone(&playback.video),
+                        player,
+                        Some(ended),
+                        Rc::clone(session),
+                        Rc::clone(output_slot),
+                        Rc::clone(preview_slot),
+                        Rc::clone(stage_slot),
+                        Rc::clone(last_output),
+                        Rc::clone(last_stage),
+                    );
+                }
+                Err(err) => tracing::error!("could not play video: {err}"),
+            }
+        }
+        Some(PendingPlay::Camera(name)) => {
+            stop_video(&playback.timer, &playback.video);
+            match VideoPlayer::open_camera(&name) {
+                Ok(player) => follow_video(
+                    Rc::clone(&playback.timer),
+                    Rc::clone(&playback.video),
+                    player,
+                    None,
+                    Rc::clone(session),
+                    Rc::clone(output_slot),
+                    Rc::clone(preview_slot),
+                    Rc::clone(stage_slot),
+                    Rc::clone(last_output),
+                    Rc::clone(last_stage),
+                ),
+                Err(err) => tracing::error!("could not open camera: {err}"),
+            }
+        }
+        Some(PendingPlay::StopAudio) => {
+            *playback.audio.borrow_mut() = None;
+        }
+        Some(PendingPlay::PauseAudio) => {
+            if let Some(output) = playback.audio.borrow().as_ref() {
+                output.set_paused(true);
+            }
+        }
+        Some(PendingPlay::ResumeAudio) => {
+            if let Some(output) = playback.audio.borrow().as_ref() {
+                output.set_paused(false);
+            }
+        }
+        Some(PendingPlay::SeekAudio(millis)) => {
+            if let Some(output) = playback.audio.borrow().as_ref() {
+                output.seek_seconds(millis as f64 / 1000.0);
+            }
+        }
+        Some(PendingPlay::SeekVideo(millis)) => {
+            if let Some(player) = playback.video.borrow().as_ref() {
+                let _ = player.seek_seconds(millis as f64 / 1000.0);
+            }
+        }
+        Some(PendingPlay::SetMute) => {
+            if let Some(player) = playback.video.borrow().as_ref() {
+                player.set_muted(session.borrow().media_muted);
+            }
+        }
+        Some(PendingPlay::SetLoop) => {
+            if let Some(player) = playback.video.borrow().as_ref() {
+                player.set_looping(session.borrow().media_loop);
+            }
+        }
+        Some(PendingPlay::ToggleMedia) => {
+            let paused = !session.borrow().media_paused;
+            if let Some(player) = playback.video.borrow().as_ref() {
+                player.set_paused(paused);
+                session.borrow_mut().media_paused = paused;
+            }
+        }
+        None => {}
+    }
+}
+
+fn start_plays(
+    plays: [Option<PendingPlay>; 2],
+    session: &Rc<RefCell<Session>>,
+    playback: &LivePlayback,
+    output_slot: &Rc<FrameSlot>,
+    preview_slot: &Rc<FrameSlot>,
+    stage_slot: &Rc<FrameSlot>,
+    last_output: &Rc<RefCell<Frame>>,
+    last_stage: &Rc<RefCell<Frame>>,
+) {
+    for play in plays {
+        start_pending(
+            play,
+            session,
+            playback,
+            output_slot,
+            preview_slot,
+            stage_slot,
+            last_output,
+            last_stage,
+        );
+    }
+}
+
+fn picture_fades_in(pending: &Option<PendingPlay>, session: &Session) -> bool {
+    session.background_transition
+        && matches!(
+            pending,
+            Some(PendingPlay::Video(_)) | Some(PendingPlay::Camera(_))
+        )
+}
+
+fn follow_video(
+    timer: Rc<slint::Timer>,
+    player: Rc<RefCell<Option<VideoPlayer>>>,
+    opened: VideoPlayer,
+    ended: Option<PathBuf>,
+    session: Rc<RefCell<Session>>,
+    output_slot: Rc<FrameSlot>,
+    preview_slot: Rc<FrameSlot>,
+    stage_slot: Rc<FrameSlot>,
+    last_output: Rc<RefCell<Frame>>,
+    last_stage: Rc<RefCell<Frame>>,
+) {
+    *player.borrow_mut() = Some(opened);
+    let opening = {
+        let mut current = session.borrow_mut();
+        if current.background_transition {
+            let (motion, _) = current.output_motion();
+            Some(OpeningFade::new(last_output.borrow().clone(), motion))
+        } else {
+            None
+        }
+    };
+    let opening = Rc::new(RefCell::new(opening));
+    let started = std::time::Instant::now();
+    let player_tick = Rc::clone(&player);
+    let opening_tick = Rc::clone(&opening);
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(33),
+        move || {
+            let timing = player_tick.borrow().as_ref().map(|player| {
+                (player.position_seconds(), player.duration_seconds())
+            });
+            let raster = player_tick
+                .borrow_mut()
+                .as_mut()
+                .and_then(|player| player.next_frame());
+            let Some(raster) = raster else {
+                let mut session = session.borrow_mut();
+                if let Some((time, duration)) = timing {
+                    session.video_time = time;
+                    session.video_duration = duration;
+                }
+                let finished = player_tick
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|player| player.is_finished());
+                if finished {
+                    if let Some(path) = ended.as_deref() {
+                        let _ = session.finish_media(&path.to_string_lossy(), false);
+                    }
+                }
+                return;
+            };
+            let (audience, stage) = {
+                let mut session = session.borrow_mut();
+                if let Some((time, duration)) = timing {
+                    session.video_time = time;
+                    session.video_duration = duration;
+                }
+                session.underlay = Some(raster);
+                (audience_frame(&session), stage_frame(&session))
+            };
+            let shown = {
+                let mut fade = opening_tick.borrow_mut();
+                if let Some(current) = fade.as_ref() {
+                    match current.frame(&audience, started.elapsed().as_millis()) {
+                        Some(blended) => blended,
+                        None => {
+                            *fade = None;
+                            audience.clone()
+                        }
+                    }
+                } else {
+                    audience.clone()
+                }
+            };
+            *last_output.borrow_mut() = audience;
+            *last_stage.borrow_mut() = stage.clone();
+            publish_audience(&output_slot, shown.clone());
+            publish(&preview_slot, shown);
+            publish(&stage_slot, stage);
+        },
+    );
+}
+
+fn send_frames(
+    output_fade: &Rc<slint::Timer>,
+    stage_fade: &Rc<slint::Timer>,
+    output_slot: &Rc<FrameSlot>,
+    preview_slot: &Rc<FrameSlot>,
+    stage_slot: &Rc<FrameSlot>,
+    last_output: &Rc<RefCell<Frame>>,
+    last_stage: &Rc<RefCell<Frame>>,
+    audience: Frame,
+    stage: Frame,
+    motion: freeshow_data::TextTransition,
+    background: bool,
+    next_timer: &Rc<slint::Timer>,
+    session: &Rc<RefCell<Session>>,
+    ui: slint::Weak<ControlWindow>,
+    seconds: Option<f64>,
+    playback: &LivePlayback,
+) {
+    let from_output = last_output.borrow().clone();
+    *last_output.borrow_mut() = audience.clone();
+    fade_into(
+        Rc::clone(output_fade),
+        vec![Rc::clone(output_slot), Rc::clone(preview_slot)],
+        from_output,
+        audience,
+        true,
+        motion.clone(),
+    );
+    let from_stage = last_stage.borrow().clone();
+    *last_stage.borrow_mut() = stage.clone();
+    let stage_motion = if background {
+        freeshow_data::TextTransition {
+            kind: "none".into(),
+            duration_ms: 0,
+            ..freeshow_data::TextTransition::default()
+        }
+    } else {
+        motion
+    };
+    fade_into(
+        Rc::clone(stage_fade),
+        vec![Rc::clone(stage_slot)],
+        from_stage,
+        stage,
+        false,
+        stage_motion,
+    );
+    if !background {
+        schedule_next_slide(
+            next_timer,
+            session,
+            output_fade,
+            stage_fade,
+            output_slot,
+            preview_slot,
+            stage_slot,
+            last_output,
+            last_stage,
+            ui,
+            seconds,
+            playback,
+        );
+    }
+}
+
+fn schedule_next_slide(
+    timer: &Rc<slint::Timer>,
+    session: &Rc<RefCell<Session>>,
+    output_fade: &Rc<slint::Timer>,
+    stage_fade: &Rc<slint::Timer>,
+    output_slot: &Rc<FrameSlot>,
+    preview_slot: &Rc<FrameSlot>,
+    stage_slot: &Rc<FrameSlot>,
+    last_output: &Rc<RefCell<Frame>>,
+    last_stage: &Rc<RefCell<Frame>>,
+    ui: slint::Weak<ControlWindow>,
+    seconds: Option<f64>,
+    playback: &LivePlayback,
+) {
+    timer.stop();
+    let Some(seconds) = seconds else {
+        return;
+    };
+    let delay = (seconds * 1000.0).round().clamp(1.0, 3_600_000.0) as u64;
+    let timer_cb = Rc::clone(timer);
+    let session = Rc::clone(session);
+    let output_fade = Rc::clone(output_fade);
+    let stage_fade = Rc::clone(stage_fade);
+    let output_slot = Rc::clone(output_slot);
+    let preview_slot = Rc::clone(preview_slot);
+    let stage_slot = Rc::clone(stage_slot);
+    let last_output = Rc::clone(last_output);
+    let last_stage = Rc::clone(last_stage);
+    let playback = playback.clone();
+    timer.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(delay),
+        move || {
+            let mut current = session.borrow_mut();
+            if !current.advance_show() {
+                return;
+            }
+            let plays = current.take_plays();
+            if picture_fades_in(&plays[0], &current) {
+                drop(current);
+                start_plays(
+                    plays,
+                    &session,
+                    &playback,
+                    &output_slot,
+                    &preview_slot,
+                    &stage_slot,
+                    &last_output,
+                    &last_stage,
+                );
+                if let Some(ui) = ui.upgrade() {
+                    refresh(&ui, &session.borrow());
+                }
+                return;
+            }
+            if current.background_transition {
+                stop_video(&playback.timer, &playback.video);
+            }
+            let audience = audience_frame(&current);
+            let stage = stage_frame(&current);
+            let (motion, background) = current.output_motion();
+            drop(current);
+            send_frames(
+                &output_fade,
+                &stage_fade,
+                &output_slot,
+                &preview_slot,
+                &stage_slot,
+                &last_output,
+                &last_stage,
+                audience,
+                stage,
+                motion,
+                background,
+                &timer_cb,
+                &session,
+                ui.clone(),
+                session.borrow().next_timer_seconds(),
+                &playback,
+            );
+            start_plays(
+                plays,
+                &session,
+                &playback,
+                &output_slot,
+                &preview_slot,
+                &stage_slot,
+                &last_output,
+                &last_stage,
+            );
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        },
+    );
+}
+
+fn place_output(window: &slint::Window, saved: Option<usize>) {
+    let placed = window.with_winit_window(|winit_window| {
+        let monitors: Vec<_> = winit_window.available_monitors().collect();
+        let Some(index) = freeshow_core::output_monitor_index(saved, monitors.len()) else {
+            return false;
+        };
+        let Some(monitor) = monitors.get(index) else {
+            return false;
+        };
+        let pos = monitor.position();
+        let _ = winit_window.set_outer_position(
+            slint::winit_030::winit::dpi::PhysicalPosition::new(pos.x, pos.y),
+        );
+        true
+    });
+    if placed != Some(true) {
+        place(window, 80, 80);
+    }
+}
+
+fn monitor_count(window: &slint::Window) -> usize {
+    window
+        .with_winit_window(|winit_window| winit_window.available_monitors().count())
+        .unwrap_or(0)
+}
+
+fn screen_label(index: Option<usize>) -> String {
+    match index {
+        Some(index) => format!("Screen {}", index + 1),
+        None => "Screen".to_string(),
+    }
+}
+
+fn place(window: &slint::Window, x: i32, y: i32) {
+    let moved = window.with_winit_window(|winit_window| {
+        winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
+    });
+    if moved.is_none() {
+        tracing::debug!("window was not ready to move");
+    }
+}
+
+struct Launch {
+    data: Option<PathBuf>,
+    show: Option<PathBuf>,
+}
+
+fn launch_args() -> Launch {
+    let mut launch = Launch {
+        data: None,
+        show: None,
+    };
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--data" => launch.data = args.next().map(PathBuf::from),
+            "--show" => launch.show = args.next().map(PathBuf::from),
+            _ => {}
+        }
+    }
+    launch
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let launch = launch_args();
+    let config_dir = freeshow_core::config_dir();
+    let log_path = freeshow_core::init_logging(&config_dir)?;
+    tracing::info!("log {}", log_path.display());
+
+    let settings_path = config_dir.join("settings.json");
+    let mut settings = match AppSettings::load(&settings_path) {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::error!("settings unreadable ({err}); using defaults");
+            AppSettings::default()
+        }
+    };
+    if settings.data_path.is_none() {
+        settings.data_path = freeshow_data::default_library_dir();
+    }
+    if let Some(path) = &launch.data {
+        settings.data_path = Some(path.clone());
+    }
+    if let Err(err) = settings.save(&settings_path) {
+        tracing::error!("could not create settings file: {err}");
+    }
+    let theme = freeshow_core::theme_by_name(&settings.theme);
+
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("femtovg-wgpu".into())
+        .require_wgpu_30(slint::wgpu_30::WGPUConfiguration::default())
+        .select()?;
+
+    let mut session = if let Some(root) = settings.data_path.clone() {
+        let planned = freeshow_pco::PlanningCenter.sync(&root);
+        let church = freeshow_churchapps::ChurchApps.sync(&root);
+        if let Some(obs) = freeshow_obs::ObsOutput::configured()
+            && let Ok(scene) = std::env::var("FREESHOW_OBS_SCENE")
+            && !scene.trim().is_empty()
+        {
+            let scene = scene.trim().to_string();
+            std::thread::spawn(move || obs.set_scene(&scene));
+        }
+        if std::env::var("FREESHOW_CLOUD_DIR")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+            || std::env::var("FREESHOW_CLOUD_URL")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            let _ = freeshow_cloud::LibraryCloud.backup(&root);
+        }
+        let mut session = Session::open(root);
+        if let Some(id) = church.project_id.or(planned.project_id) {
+            session.project_id = Some(id);
+            session.project_item = 0;
+        }
+        session
+    } else {
+        Session::empty()
+    };
+    for warning in &session.warnings {
+        tracing::warn!("{warning}");
+    }
+    if let Some(path) = &launch.show
+        && let Some(show) = session::load_show_file(path)
+    {
+        let id = show.id.clone();
+        if let Some(index) = session.shows.iter().position(|existing| existing.id == id) {
+            session.show_index = Some(index);
+        } else {
+            session.shows.insert(0, show);
+            session.show_index = Some(0);
+        }
+        session.slide_index = Some(0);
+        session.tab = "shows".to_string();
+    }
+
+    let control = ControlWindow::new()?;
+    apply_theme(&control, &theme);
+    let data_label = settings
+        .data_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "Data folder not set".to_string());
+    control.set_data_path(data_label.into());
+    control.set_active_tab(session.tab.clone().into());
+    control.set_panel_title("Shows".into());
+    refresh(&control, &session);
+
+    let output = OutputWindow::new()?;
+    let stage = StageWindow::new()?;
+    let chosen =
+        freeshow_core::output_monitor_index(settings.output_screen, monitor_count(output.window()));
+    control.set_screen_label(screen_label(chosen).into());
+    let output_weak = output.as_weak();
+    let output_redraw = output.as_weak();
+    let output_slot = attach_frame(
+        output.window(),
+        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        move |image| {
+            if let Some(output) = output_weak.upgrade() {
+                output.set_frame(image);
+            }
+        },
+        move || {
+            if let Some(output) = output_redraw.upgrade() {
+                output.window().request_redraw();
+            }
+        },
+    )?;
+    let stage_weak = stage.as_weak();
+    let stage_redraw = stage.as_weak();
+    let stage_slot = attach_frame(
+        stage.window(),
+        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        move |image| {
+            if let Some(stage) = stage_weak.upgrade() {
+                stage.set_frame(image);
+            }
+        },
+        move || {
+            if let Some(stage) = stage_redraw.upgrade() {
+                stage.window().request_redraw();
+            }
+        },
+    )?;
+    let preview_weak = control.as_weak();
+    let preview_redraw = control.as_weak();
+    let preview_slot = attach_frame(
+        control.window(),
+        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        move |image| {
+            if let Some(control) = preview_weak.upgrade() {
+                control.set_preview(image);
+            }
+        },
+        move || {
+            if let Some(control) = preview_redraw.upgrade() {
+                control.window().request_redraw();
+            }
+        },
+    )?;
+
+    let output_slot = Rc::new(output_slot);
+    let stage_slot = Rc::new(stage_slot);
+    let preview_slot = Rc::new(preview_slot);
+    let output_fade = Rc::new(slint::Timer::default());
+    let stage_fade = Rc::new(slint::Timer::default());
+    let next_slide = Rc::new(slint::Timer::default());
+    let last_output = Rc::new(RefCell::new(clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)));
+    let last_stage = Rc::new(RefCell::new(clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)));
+    if session.slide_index.is_some() {
+        let audience = audience_frame(&session);
+        let stage = stage_frame(&session);
+        *last_output.borrow_mut() = audience.clone();
+        *last_stage.borrow_mut() = stage.clone();
+        publish_audience(&output_slot, audience.clone());
+        publish(&preview_slot, audience);
+        publish(&stage_slot, stage);
+    }
+    let _ = ndi();
+
+    if settings.show_output {
+        output.show()?;
+        place_output(output.window(), settings.output_screen);
+    }
+    if settings.show_stage {
+        stage.show()?;
+        place(stage.window(), 120, 140);
+    }
+
+    let session = Rc::new(RefCell::new(session));
+    let settings = Rc::new(RefCell::new(settings));
+    let audio_out: Rc<RefCell<Option<AudioOutput>>> = Rc::new(RefCell::new(None));
+    let video_player: Rc<RefCell<Option<VideoPlayer>>> = Rc::new(RefCell::new(None));
+    let video_timer = Rc::new(slint::Timer::default());
+
+    let output_toggle = output.as_weak();
+    let settings_for_output = Rc::clone(&settings);
+    let settings_path_for_output = settings_path.clone();
+    control.on_open_output(move || {
+        let Some(output) = output_toggle.upgrade() else {
+            return;
+        };
+        let visible = output.window().is_visible();
+        if visible {
+            let _ = output.hide();
+        } else if output.show().is_ok() {
+            place_output(output.window(), settings_for_output.borrow().output_screen);
+        }
+        settings_for_output.borrow_mut().show_output = !visible;
+        if let Err(err) = settings_for_output.borrow().save(&settings_path_for_output) {
+            tracing::error!("could not save settings: {err}");
+        }
+    });
+
+    {
+        let output_for_screen = output.as_weak();
+        let settings_for_screen = Rc::clone(&settings);
+        let settings_path_for_screen = settings_path.clone();
+        let ui = control.as_weak();
+        control.on_choose_screen(move || {
+            let Some(output) = output_for_screen.upgrade() else {
+                return;
+            };
+            let count = monitor_count(output.window());
+            let next = freeshow_core::next_output_monitor(
+                settings_for_screen.borrow().output_screen,
+                count,
+            );
+            settings_for_screen.borrow_mut().output_screen = next;
+            if output.window().is_visible() {
+                place_output(output.window(), next);
+            }
+            if let Some(ui) = ui.upgrade() {
+                ui.set_screen_label(screen_label(next).into());
+            }
+            if let Err(err) = settings_for_screen.borrow().save(&settings_path_for_screen) {
+                tracing::error!("could not save settings: {err}");
+            }
+        });
+    }
+
+    let stage_toggle = stage.as_weak();
+    let settings_for_stage = Rc::clone(&settings);
+    control.on_open_stage(move || {
+        let Some(stage) = stage_toggle.upgrade() else {
+            return;
+        };
+        let visible = stage.window().is_visible();
+        if visible {
+            let _ = stage.hide();
+        } else if stage.show().is_ok() {
+            place(stage.window(), 120, 140);
+        }
+        settings_for_stage.borrow_mut().show_stage = !visible;
+        if let Err(err) = settings_for_stage.borrow().save(&settings_path) {
+            tracing::error!("could not save settings: {err}");
+        }
+    });
+
+    let ui = control.as_weak();
+    let session_for_tab = Rc::clone(&session);
+    control.on_select_tab(move |tab| {
+        session_for_tab.borrow_mut().tab = tab.to_string();
+        if let Some(ui) = ui.upgrade() {
+            refresh(&ui, &session_for_tab.borrow());
+        }
+    });
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let output_slot = Rc::clone(&output_slot);
+        let stage_slot = Rc::clone(&stage_slot);
+        let preview_slot = Rc::clone(&preview_slot);
+        let output_fade = Rc::clone(&output_fade);
+        let stage_fade = Rc::clone(&stage_fade);
+        let last_output = Rc::clone(&last_output);
+        let last_stage = Rc::clone(&last_stage);
+        let next_slide = Rc::clone(&next_slide);
+        let audio_out = Rc::clone(&audio_out);
+        let video_player = Rc::clone(&video_player);
+        let video_timer = Rc::clone(&video_timer);
+        control.on_choose_drawer(move |index| {
+            let playback = LivePlayback {
+                audio: Rc::clone(&audio_out),
+                video: Rc::clone(&video_player),
+                timer: Rc::clone(&video_timer),
+            };
+            let index = index.max(0) as usize;
+            if session.borrow().tab == "functions" {
+                let mut current = session.borrow_mut();
+                match index {
+                    0 => {
+                        current.blanked = true;
+                        current.clear_output();
+                        stop_video(&video_timer, &video_player);
+                        *audio_out.borrow_mut() = None;
+                        let blank = clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+                        next_slide.stop();
+                        *last_output.borrow_mut() = blank.clone();
+                        publish_audience(&output_slot, blank.clone());
+                        publish(&preview_slot, blank);
+                        let stage = stage_frame(&current);
+                        *last_stage.borrow_mut() = stage.clone();
+                        publish(&stage_slot, stage);
+                    }
+                    1 => {
+                        if !current.advance_show() {
+                            return;
+                        }
+                        let plays = current.take_plays();
+                        if picture_fades_in(&plays[0], &current) {
+                            next_slide.stop();
+                            drop(current);
+                            start_plays(
+                                plays,
+                                &session,
+                                &playback,
+                                &output_slot,
+                                &preview_slot,
+                                &stage_slot,
+                                &last_output,
+                                &last_stage,
+                            );
+                            if let Some(ui) = ui.upgrade() {
+                                refresh(&ui, &session.borrow());
+                            }
+                            return;
+                        }
+                        if current.background_transition {
+                            stop_video(&video_timer, &video_player);
+                        }
+                        let audience = audience_frame(&current);
+                        let stage = stage_frame(&current);
+                        let (motion, background) = current.output_motion();
+                        let seconds = if background {
+                            None
+                        } else {
+                            current.next_timer_seconds()
+                        };
+                        drop(current);
+                        send_frames(
+                            &output_fade,
+                            &stage_fade,
+                            &output_slot,
+                            &preview_slot,
+                            &stage_slot,
+                            &last_output,
+                            &last_stage,
+                            audience,
+                            stage,
+                            motion,
+                            background,
+                            &next_slide,
+                            &session,
+                            ui.clone(),
+                            seconds,
+                            &playback,
+                        );
+                        start_plays(
+                            plays,
+                            &session,
+                            &playback,
+                            &output_slot,
+                            &preview_slot,
+                            &stage_slot,
+                            &last_output,
+                            &last_stage,
+                        );
+                        if let Some(ui) = ui.upgrade() {
+                            refresh(&ui, &session.borrow());
+                        }
+                        return;
+                    }
+                    2 => {
+                        if !current.retreat_show() {
+                            return;
+                        }
+                        let plays = current.take_plays();
+                        if picture_fades_in(&plays[0], &current) {
+                            next_slide.stop();
+                            drop(current);
+                            start_plays(
+                                plays,
+                                &session,
+                                &playback,
+                                &output_slot,
+                                &preview_slot,
+                                &stage_slot,
+                                &last_output,
+                                &last_stage,
+                            );
+                            if let Some(ui) = ui.upgrade() {
+                                refresh(&ui, &session.borrow());
+                            }
+                            return;
+                        }
+                        if current.background_transition {
+                            stop_video(&video_timer, &video_player);
+                        }
+                        let audience = audience_frame(&current);
+                        let stage = stage_frame(&current);
+                        let (motion, background) = current.output_motion();
+                        let seconds = if background {
+                            None
+                        } else {
+                            current.next_timer_seconds()
+                        };
+                        drop(current);
+                        send_frames(
+                            &output_fade,
+                            &stage_fade,
+                            &output_slot,
+                            &preview_slot,
+                            &stage_slot,
+                            &last_output,
+                            &last_stage,
+                            audience,
+                            stage,
+                            motion,
+                            background,
+                            &next_slide,
+                            &session,
+                            ui.clone(),
+                            seconds,
+                            &playback,
+                        );
+                        start_plays(
+                            plays,
+                            &session,
+                            &playback,
+                            &output_slot,
+                            &preview_slot,
+                            &stage_slot,
+                            &last_output,
+                            &last_stage,
+                        );
+                        if let Some(ui) = ui.upgrade() {
+                            refresh(&ui, &session.borrow());
+                        }
+                        return;
+                    }
+                    3 => {
+                        current.toggle_timer();
+                        let stage = stage_frame(&current);
+                        *last_stage.borrow_mut() = stage.clone();
+                        publish(&stage_slot, stage);
+                    }
+                    4 => {
+                        let Some(root) = current.root.clone() else {
+                            tracing::error!("could not record without a library");
+                            return;
+                        };
+                        let dir = root.join("Recordings");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                        let path = dir.join(format!("freeshow-{stamp}.mp4"));
+                        current.recording = freeshow_record::ServiceCapture.toggle_file(
+                            &path,
+                            OUTPUT_WIDTH,
+                            OUTPUT_HEIGHT,
+                        );
+                    }
+                    5 => {
+                        let Some(root) = current.root.clone() else {
+                            tracing::error!("could not load planning center without a library");
+                            return;
+                        };
+                        let report = freeshow_pco::PlanningCenter.sync(&root);
+                        let fresh = Session::open(root);
+                        current.shows = fresh.shows;
+                        current.projects = fresh.projects;
+                        current.warnings = fresh.warnings;
+                        if let Some(id) = report.project_id {
+                            current.project_id = Some(id);
+                            current.project_item = 0;
+                        }
+                    }
+                    6 => {
+                        let Some(root) = current.root.clone() else {
+                            tracing::error!("could not load churchapps without a library");
+                            return;
+                        };
+                        let report = freeshow_churchapps::ChurchApps.sync(&root);
+                        let fresh = Session::open(root);
+                        current.shows = fresh.shows;
+                        current.projects = fresh.projects;
+                        current.warnings = fresh.warnings;
+                        if let Some(id) = report.project_id {
+                            current.project_id = Some(id);
+                            current.project_item = 0;
+                        }
+                    }
+                    7 => {
+                        let Some(root) = current.root.clone() else {
+                            tracing::error!("could not back up without a library");
+                            return;
+                        };
+                        let _ = freeshow_cloud::LibraryCloud.backup(&root);
+                    }
+                    8 => {
+                        let Some(root) = current.root.clone() else {
+                            tracing::error!("could not restore without a library");
+                            return;
+                        };
+                        let report = freeshow_cloud::LibraryCloud.restore_latest(&root);
+                        if report.path.is_none() {
+                            return;
+                        }
+                        let fresh = Session::open(root);
+                        current.shows = fresh.shows;
+                        current.projects = fresh.projects;
+                        current.bibles = fresh.bibles;
+                        current.warnings = fresh.warnings;
+                    }
+                    9 => {
+                        let Ok(scene) = std::env::var("FREESHOW_OBS_SCENE") else {
+                            tracing::error!("obs scene name is missing");
+                            return;
+                        };
+                        freeshow_obs::ObsOutput::from_env().set_scene(scene.trim());
+                    }
+                    10 => freeshow_obs::ObsOutput::from_env().toggle_stream(),
+                    11 => freeshow_obs::ObsOutput::from_env().toggle_record(),
+                    12 => {
+                        let Some(assist) = freeshow_ai::OllamaAssist::configured() else {
+                            tracing::error!("ai is not configured");
+                            return;
+                        };
+                        let Some(slide) = current.current_slide_text() else {
+                            tracing::error!("ai needs a selected slide");
+                            return;
+                        };
+                        let prompt = std::env::var("FREESHOW_AI_PROMPT").unwrap_or_else(|_| {
+                            "Rewrite this slide as short lyric lines.".to_string()
+                        });
+                        let Some(reply) = assist.rewrite(&prompt, &slide) else {
+                            return;
+                        };
+                        if let Some(lines) = reply.lines {
+                            if !current.replace_slide_text(&lines.join("\n")) {
+                                tracing::error!("ai could not update the slide");
+                                return;
+                            }
+                            publish(&preview_slot, audience_frame(&current));
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(ui) = ui.upgrade() {
+                    refresh(&ui, &current);
+                }
+                return;
+            }
+            let action = session.borrow_mut().select_drawer(index);
+            match action {
+                DrawerAction::PlayAudio(path) => {
+                    session.borrow_mut().playing_audio = Some(path.clone());
+                    session.borrow_mut().audio_paused = false;
+                    let (volume, looping, from, to, tempo) = {
+                        let current = session.borrow();
+                        let (from, to) = current.audio_span();
+                        (
+                            current.playback_gain(),
+                            current.audio_should_loop(),
+                            from,
+                            to,
+                            current.audio_tempo(),
+                        )
+                    };
+                    match AudioOutput::play_file(&path, volume) {
+                        Ok(output) => {
+                            output.set_looping(looping);
+                            output.set_span(from, to);
+                            output.set_rate(tempo);
+                            *audio_out.borrow_mut() = Some(output);
+                        }
+                        Err(err) => tracing::error!("could not play audio: {err}"),
+                    }
+                }
+                DrawerAction::PlayVideo(path) => {
+                    stop_video(&video_timer, &video_player);
+                    match VideoPlayer::open(&path) {
+                        Ok(player) => {
+                            player.set_looping(session.borrow().media_loop);
+                            player.set_muted(session.borrow().media_muted);
+                            player.set_volume(session.borrow().video_volume);
+                            player.set_rate(session.borrow().video_rate);
+                            let (from, to) = {
+                                let current = session.borrow();
+                                (current.video_from, current.video_to)
+                            };
+                            player.set_span(from, to);
+                            follow_video(
+                            Rc::clone(&video_timer),
+                            Rc::clone(&video_player),
+                            player,
+                            Some(path.clone()),
+                            Rc::clone(&session),
+                            Rc::clone(&output_slot),
+                            Rc::clone(&preview_slot),
+                            Rc::clone(&stage_slot),
+                            Rc::clone(&last_output),
+                            Rc::clone(&last_stage),
+                        );
+                        }
+                        Err(err) => tracing::error!("could not play video: {err}"),
+                    }
+                }
+                DrawerAction::PlayCamera(name) => {
+                    stop_video(&video_timer, &video_player);
+                    match VideoPlayer::open_camera(&name) {
+                        Ok(player) => follow_video(
+                            Rc::clone(&video_timer),
+                            Rc::clone(&video_player),
+                            player,
+                            None,
+                            Rc::clone(&session),
+                            Rc::clone(&output_slot),
+                            Rc::clone(&preview_slot),
+                            Rc::clone(&stage_slot),
+                            Rc::clone(&last_output),
+                            Rc::clone(&last_stage),
+                        ),
+                        Err(err) => tracing::error!("could not open camera: {err}"),
+                    }
+                }
+                DrawerAction::Present => {
+                    session.borrow_mut().blanked = false;
+                    stop_video(&video_timer, &video_player);
+                    let audience = audience_frame(&session.borrow());
+                    let stage = stage_frame(&session.borrow());
+                    let (motion, background) = session.borrow_mut().output_motion();
+                    let seconds = if background {
+                        None
+                    } else {
+                        session.borrow().next_timer_seconds()
+                    };
+                    send_frames(
+                        &output_fade,
+                        &stage_fade,
+                        &output_slot,
+                        &preview_slot,
+                        &stage_slot,
+                        &last_output,
+                        &last_stage,
+                        audience,
+                        stage,
+                        motion,
+                        background,
+                        &next_slide,
+                        &session,
+                        ui.clone(),
+                        seconds,
+                        &playback,
+                    );
+                }
+                DrawerAction::None => {}
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_choose_slide(move |index| {
+            session.borrow_mut().select_slide(index.max(0) as usize);
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_save_lyrics(move |text| {
+            if !session.borrow_mut().save_lyrics(text.as_str()) {
+                tracing::error!("could not save lyrics");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let session = Rc::clone(&session);
+        let audio_out = Rc::clone(&audio_out);
+        control.on_set_volume(move |value| {
+            let volume = (value as f32 / 100.0).clamp(0.0, 1.0);
+            session.borrow_mut().volume = volume;
+            let gain = session.borrow().playback_gain();
+            if let Some(output) = audio_out.borrow().as_ref() {
+                output.set_volume(gain);
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_save_group(move |text| {
+            if session.borrow().group() == text.as_str() {
+                return;
+            }
+            if !session.borrow_mut().save_group(text.as_str()) {
+                tracing::error!("could not save group");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_nudge_box(move |dx, dy, dw, dh| {
+            if !session.borrow_mut().nudge_box(dx, dy, dw, dh) {
+                tracing::error!("could not move the text box");
+                return;
+            }
+            publish(&preview_slot, audience_frame(&session.borrow()));
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let output_slot = Rc::clone(&output_slot);
+        let stage_slot = Rc::clone(&stage_slot);
+        let preview_slot = Rc::clone(&preview_slot);
+        let output_fade = Rc::clone(&output_fade);
+        let stage_fade = Rc::clone(&stage_fade);
+        let last_output = Rc::clone(&last_output);
+        let last_stage = Rc::clone(&last_stage);
+        let next_slide = Rc::clone(&next_slide);
+        let audio_out = Rc::clone(&audio_out);
+        let video_player = Rc::clone(&video_player);
+        let video_timer = Rc::clone(&video_timer);
+        control.on_go_slide(move |text| {
+            let playback = LivePlayback {
+                audio: Rc::clone(&audio_out),
+                video: Rc::clone(&video_player),
+                timer: Rc::clone(&video_timer),
+            };
+            let session_rc = Rc::clone(&session);
+            let mut session = session.borrow_mut();
+            if session.tab == "shows" {
+                session.save_lyrics(text.as_str());
+            }
+            session.blanked = false;
+            let audience = audience_frame(&session);
+            let stage = stage_frame(&session);
+            let (motion, background) = session.output_motion();
+            let seconds = if background {
+                None
+            } else {
+                session.next_timer_seconds()
+            };
+            send_frames(
+                &output_fade,
+                &stage_fade,
+                &output_slot,
+                &preview_slot,
+                &stage_slot,
+                &last_output,
+                &last_stage,
+                audience,
+                stage,
+                motion,
+                background,
+                &next_slide,
+                &session_rc,
+                ui.clone(),
+                seconds,
+                &playback,
+            );
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session);
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_choose_project(move |index| {
+            session.borrow_mut().project_item = index.max(0) as usize;
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_move_project(move |delta| {
+            if !session.borrow_mut().move_project(delta as isize) {
+                tracing::debug!("project item stayed in place");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_add_to_project(move || {
+            if !session.borrow_mut().add_current_show() {
+                tracing::error!("could not add the show to the project");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_create_show(move || {
+            if !session.borrow_mut().create_show() {
+                tracing::error!("could not create a show");
+                return;
+            }
+            publish(&preview_slot, audience_frame(&session.borrow()));
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_add_slide(move || {
+            if !session.borrow_mut().add_slide() {
+                tracing::error!("could not add a slide");
+                return;
+            }
+            publish(&preview_slot, audience_frame(&session.borrow()));
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_create_project(move || {
+            if !session.borrow_mut().create_project() {
+                tracing::error!("could not create a project");
+                return;
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_search(move |query| {
+            session.borrow_mut().search(query.as_str());
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    let (command_tx, command_rx) = mpsc::channel();
+    let snapshot = Arc::new(Mutex::new(session.borrow().to_snapshot()));
+    freeshow_remote::spawn(Arc::clone(&snapshot), command_tx.clone());
+    freeshow_osc::OscInput::default().start(freeshow_remote::ShowBus {
+        snapshot: Arc::clone(&snapshot),
+        commands: command_tx.clone(),
+    });
+    freeshow_midi::MidiInput::default().start(freeshow_remote::ShowBus {
+        snapshot: Arc::clone(&snapshot),
+        commands: command_tx,
+    });
+    freeshow_timecode::MtcInput::default().start();
+    freeshow_timecode::LtcInput.start();
+    if let Ok(url) = std::env::var("FREESHOW_RTMP")
+        && !url.trim().is_empty()
+    {
+        let _ = freeshow_record::ServiceCapture.start_rtmp(&url, OUTPUT_WIDTH, OUTPUT_HEIGHT);
+    }
+    let remote_session = Rc::clone(&session);
+    let remote_ui = control.as_weak();
+    let remote_output = Rc::clone(&output_slot);
+    let remote_preview = Rc::clone(&preview_slot);
+    let remote_stage = Rc::clone(&stage_slot);
+    let remote_output_fade = Rc::clone(&output_fade);
+    let remote_stage_fade = Rc::clone(&stage_fade);
+    let remote_last_output = Rc::clone(&last_output);
+    let remote_last_stage = Rc::clone(&last_stage);
+    let remote_next_slide = Rc::clone(&next_slide);
+    let remote_audio = Rc::clone(&audio_out);
+    let remote_video = Rc::clone(&video_player);
+    let remote_video_timer = Rc::clone(&video_timer);
+    let remote_playback = LivePlayback {
+        audio: Rc::clone(&remote_audio),
+        video: Rc::clone(&remote_video),
+        timer: Rc::clone(&remote_video_timer),
+    };
+    let remote_timer = slint::Timer::default();
+    remote_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(100),
+        move || {
+            let mut batch = Vec::new();
+            while let Ok(command) = command_rx.try_recv() {
+                batch.push(command);
+            }
+            if batch.is_empty() {
+                let started = remote_session
+                    .borrow_mut()
+                    .start_due_events(chrono::Utc::now());
+                sample_audio(&remote_session, &remote_audio);
+                let moved = remote_session.borrow().refresh_output;
+                if started || moved {
+                    remote_session.borrow_mut().refresh_output = false;
+                    if moved {
+                        let plays = remote_session.borrow_mut().take_plays();
+                        let fades = picture_fades_in(&plays[0], &remote_session.borrow());
+                        start_plays(
+                            plays,
+                            &remote_session,
+                            &remote_playback,
+                            &remote_output,
+                            &remote_preview,
+                            &remote_stage,
+                            &remote_last_output,
+                            &remote_last_stage,
+                        );
+                        if fades {
+                            if let Some(ui) = remote_ui.upgrade() {
+                                refresh(&ui, &remote_session.borrow());
+                            }
+                            if let Ok(mut stored) = snapshot.lock() {
+                                *stored = remote_session.borrow().to_snapshot();
+                            }
+                            return;
+                        }
+                    }
+                    let (audience, stage) = {
+                        let session = remote_session.borrow();
+                        (audience_frame(&session), stage_frame(&session))
+                    };
+                    if let Some(ui) = remote_ui.upgrade() {
+                        refresh(&ui, &remote_session.borrow());
+                    }
+                    let (motion, background) = remote_session.borrow_mut().output_motion();
+                    let seconds = if background {
+                        None
+                    } else {
+                        remote_session.borrow().next_timer_seconds()
+                    };
+                    send_frames(
+                        &remote_output_fade,
+                        &remote_stage_fade,
+                        &remote_output,
+                        &remote_preview,
+                        &remote_stage,
+                        &remote_last_output,
+                        &remote_last_stage,
+                        audience,
+                        stage,
+                        motion,
+                        background,
+                        &remote_next_slide,
+                        &remote_session,
+                        remote_ui.clone(),
+                        seconds,
+                        &remote_playback,
+                    );
+                }
+                if let Ok(mut stored) = snapshot.lock() {
+                    *stored = remote_session.borrow().to_snapshot();
+                }
+                return;
+            }
+            let clear = matches!(batch.last(), Some(freeshow_remote::Command::Clear));
+            sample_audio(&remote_session, &remote_audio);
+            remote_session.borrow_mut().refresh_output = false;
+            let (audience, stage) = {
+                let mut session = remote_session.borrow_mut();
+                for command in batch {
+                    session.apply_remote(command);
+                }
+                let audience = audience_frame(&session);
+                let stage = stage_frame(&session);
+                if let Ok(mut stored) = snapshot.lock() {
+                    *stored = session.to_snapshot();
+                }
+                (audience, stage)
+            };
+            let plays = remote_session.borrow_mut().take_plays();
+            let fades = picture_fades_in(&plays[0], &remote_session.borrow());
+            start_plays(
+                plays,
+                &remote_session,
+                &remote_playback,
+                &remote_output,
+                &remote_preview,
+                &remote_stage,
+                &remote_last_output,
+                &remote_last_stage,
+            );
+            if let Some(output) = remote_audio.borrow().as_ref() {
+                output.set_volume(remote_session.borrow().playback_gain());
+            }
+            if fades {
+                remote_next_slide.stop();
+            }
+            if clear {
+                stop_video(&remote_video_timer, &remote_video);
+                *remote_audio.borrow_mut() = None;
+                remote_next_slide.stop();
+                *remote_last_output.borrow_mut() = audience.clone();
+                publish(&remote_output, audience.clone());
+                publish(&remote_preview, audience);
+                *remote_last_stage.borrow_mut() = stage.clone();
+                publish(&remote_stage, stage);
+            } else if !fades {
+                let (motion, background) = remote_session.borrow_mut().output_motion();
+                let seconds = if background {
+                    None
+                } else {
+                    remote_session.borrow().next_timer_seconds()
+                };
+                send_frames(
+                    &remote_output_fade,
+                    &remote_stage_fade,
+                    &remote_output,
+                    &remote_preview,
+                    &remote_stage,
+                    &remote_last_output,
+                    &remote_last_stage,
+                    audience,
+                    stage,
+                    motion,
+                    background,
+                    &remote_next_slide,
+                    &remote_session,
+                    remote_ui.clone(),
+                    seconds,
+                    &remote_playback,
+                );
+            }
+            if let Some(ui) = remote_ui.upgrade() {
+                refresh(&ui, &remote_session.borrow());
+            }
+        },
+    );
+
+    let clock_session = Rc::clone(&session);
+    let clock_stage = Rc::clone(&stage_slot);
+    let clock_last = Rc::clone(&last_stage);
+    let clock_output = Rc::clone(&output_slot);
+    let clock_preview = Rc::clone(&preview_slot);
+    let clock_last_output = Rc::clone(&last_output);
+    let clock_audio = Rc::clone(&audio_out);
+    let clock_video = Rc::clone(&video_player);
+    let clock_video_timer = Rc::clone(&video_timer);
+    let clock_timer = slint::Timer::default();
+    let autosave_session = Rc::clone(&session);
+    let autosave_timer = slint::Timer::default();
+    autosave_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(15 * 60),
+        move || {
+            let wrote = autosave_session.borrow().autosave();
+            if wrote > 0 {
+                tracing::info!("autosave wrote {wrote} files");
+            }
+        },
+    );
+    clock_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(100),
+        move || {
+            let ran = clock_session.borrow_mut().run_due_actions();
+            if ran {
+                let plays = clock_session.borrow_mut().take_plays();
+                let playback = LivePlayback {
+                    audio: Rc::clone(&clock_audio),
+                    video: Rc::clone(&clock_video),
+                    timer: Rc::clone(&clock_video_timer),
+                };
+                let fades = picture_fades_in(&plays[0], &clock_session.borrow());
+                start_plays(
+                    plays,
+                    &clock_session,
+                    &playback,
+                    &clock_output,
+                    &clock_preview,
+                    &clock_stage,
+                    &clock_last_output,
+                    &clock_last,
+                );
+                if !fades {
+                    let audience = audience_frame(&clock_session.borrow());
+                    *clock_last_output.borrow_mut() = audience.clone();
+                    publish_audience(&clock_output, audience.clone());
+                    publish(&clock_preview, audience);
+                }
+            }
+            let frame = stage_frame(&clock_session.borrow());
+            *clock_last.borrow_mut() = frame.clone();
+            publish(&clock_stage, frame);
+        },
+    );
+    place(control.window(), 40, 40);
+    tracing::info!("control window ready");
+    control.run()?;
+    Ok(())
+}

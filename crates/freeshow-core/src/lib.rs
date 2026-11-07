@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Shared settings, FreeShow theme colors, and logging.
+
+mod log;
+mod settings;
+mod theme;
+
+pub use log::{init_logging, log_file_path};
+pub use settings::{
+    AppSettings, SettingsError, config_dir, next_output_monitor, output_monitor_index,
+};
+pub use theme::{Rgb, ThemePalette, theme_by_name};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn default_theme_matches_freeshow() {
+        let theme = theme_by_name("default");
+        assert_eq!(theme.name, "default");
+        assert_eq!(theme.primary, Rgb::from_hex(0x242832));
+        assert_eq!(theme.primary_lighter, Rgb::from_hex(0x2f3542));
+        assert_eq!(theme.primary_darker, Rgb::from_hex(0x191923));
+        assert_eq!(theme.primary_darkest, Rgb::from_hex(0x12121c));
+        assert_eq!(theme.text, Rgb::from_hex(0xf0f0ff));
+        assert_eq!(theme.text_invert, Rgb::from_hex(0x131313));
+        assert_eq!(theme.secondary_text, Rgb::from_hex(0xf0f0ff));
+        assert_eq!(theme.secondary, Rgb::from_hex(0xf0008c));
+    }
+
+    #[test]
+    fn named_themes_match_freeshow_defaults() {
+        assert_eq!(theme_by_name("dark").secondary, Rgb::from_hex(0xe64934));
+        assert_eq!(theme_by_name("light").primary, Rgb::from_hex(0xDADDE2));
+        assert_eq!(theme_by_name("light").text, Rgb::from_hex(0x333748));
+        assert_eq!(theme_by_name("no-such-theme").name, "default");
+    }
+
+    #[test]
+    fn missing_settings_file_uses_defaults() {
+        let dir =
+            std::env::temp_dir().join(format!("freeshow-rust-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let loaded = AppSettings::load(&dir.join("settings.json")).unwrap();
+        assert_eq!(loaded.theme, "default");
+        assert_eq!(loaded.data_path, None);
+        assert!(loaded.show_output);
+        assert!(loaded.show_stage);
+        assert_eq!(loaded.output_screen, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let dir =
+            std::env::temp_dir().join(format!("freeshow-rust-settings-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let settings = AppSettings {
+            theme: "dark".to_string(),
+            data_path: Some(std::path::PathBuf::from("/tmp/FreeShow")),
+            show_output: true,
+            show_stage: false,
+            output_screen: Some(1),
+        };
+        settings.save(&path).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded, settings);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn output_screen_uses_the_saved_monitor_or_the_second_one() {
+        assert_eq!(output_monitor_index(None, 0), None);
+        assert_eq!(output_monitor_index(None, 1), None);
+        assert_eq!(output_monitor_index(None, 2), Some(1));
+        assert_eq!(output_monitor_index(Some(0), 2), Some(0));
+        assert_eq!(output_monitor_index(Some(4), 2), Some(1));
+        assert_eq!(next_output_monitor(None, 2), Some(0));
+        assert_eq!(next_output_monitor(Some(0), 2), Some(1));
+        assert_eq!(next_output_monitor(Some(1), 3), Some(2));
+        assert_eq!(next_output_monitor(Some(2), 3), Some(0));
+    }
+
+    #[test]
+    fn corrupt_settings_are_an_error() {
+        let dir = std::env::temp_dir().join(format!("freeshow-rust-bad-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, "not json").unwrap();
+        assert!(AppSettings::load(&path).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_dir_honors_override_and_log_name() {
+        let override_dir = std::env::temp_dir().join("freeshow-rust-config-override");
+        // SAFETY: this test is the only one that reads or writes the variable.
+        unsafe { std::env::set_var("FREESHOW_CONFIG_DIR", &override_dir) };
+        assert_eq!(config_dir(), override_dir);
+        assert_eq!(
+            log_file_path(&override_dir),
+            override_dir.join("freeshow-rust.log")
+        );
+        unsafe { std::env::remove_var("FREESHOW_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn init_logging_creates_a_log_file() {
+        let dir = std::env::temp_dir().join(format!("freeshow-rust-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = init_logging(&dir).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("freeshow-rust"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

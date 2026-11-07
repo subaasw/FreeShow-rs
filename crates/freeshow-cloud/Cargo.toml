@@ -1,0 +1,15 @@
+[package]
+name = "freeshow-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Library backup and cloud copy for freeshow-rust"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+freeshow-data = { path = "../freeshow-data" }
+tracing = "0.1"
+ureq = "2.12"
+zip = "2"

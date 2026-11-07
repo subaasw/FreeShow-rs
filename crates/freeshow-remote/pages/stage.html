@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeShow stage</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #12121c;
+      color: #f0f0ff;
+      font: 20px/1.3 system-ui, sans-serif;
+      display: grid;
+      grid-template-rows: auto 1fr auto auto;
+      padding: 28px 36px;
+    }
+    #clock { margin: 0; color: #f0008c; font-variant-numeric: tabular-nums; }
+    #lines {
+      margin: 0;
+      align-self: center;
+      white-space: pre-wrap;
+      font-size: clamp(2rem, 6vw, 5rem);
+    }
+    #next, #notes { margin: 8px 0 0; color: #aaaaaa; white-space: pre-wrap; }
+    #next { font-size: clamp(1.2rem, 3vw, 2.2rem); }
+  </style>
+</head>
+<body>
+  <p id="clock"></p>
+  <p id="lines"></p>
+  <p id="next"></p>
+  <p id="notes"></p>
+  <script>
+    function paintClock() {
+      document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+    }
+
+    async function refresh() {
+      const state = await fetch("/state").then((response) => response.json());
+      document.getElementById("lines").textContent = (state.lines || []).join("\n");
+      const next = state.next_lines || [];
+      document.getElementById("next").textContent = next.length ? next.join("\n") : "";
+      document.getElementById("notes").textContent = state.notes || "";
+    }
+
+    paintClock();
+    setInterval(paintClock, 1000);
+    refresh();
+    setInterval(refresh, 500);
+  </script>
+</body>
+</html>
