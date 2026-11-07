@@ -84,9 +84,28 @@
   </main>
   <script>
     let busy = false;
+    let passwordAttempts = 0;
+
+    function password() {
+      return localStorage.getItem("freeshow-password") || "";
+    }
+
+    async function authorizedFetch(url, options = {}) {
+      options.headers = Object.assign({}, options.headers, {
+        "x-freeshow-password": password()
+      });
+      let response = await fetch(url, options);
+      if (response.status !== 401 || passwordAttempts >= 2) return response;
+      passwordAttempts += 1;
+      const value = prompt("Remote password");
+      if (value == null) return response;
+      localStorage.setItem("freeshow-password", value);
+      options.headers["x-freeshow-password"] = value;
+      return fetch(url, options);
+    }
 
     async function act(channel, data) {
-      await fetch("/action", {
+      await authorizedFetch("/action", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ channel: channel, data: data == null ? null : data })
@@ -109,7 +128,12 @@
       if (busy) return;
       busy = true;
       try {
-        const state = await fetch("/state").then((response) => response.json());
+        const response = await authorizedFetch("/state");
+        if (response.status === 401) {
+          document.getElementById("show-name").textContent = "Password required";
+          return;
+        }
+        const state = await response.json();
         document.getElementById("show-name").textContent = state.cleared
           ? "Cleared"
           : (state.show_name || "No show");

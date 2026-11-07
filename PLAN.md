@@ -40,7 +40,7 @@ Read FreeShow's library `settings.json` instead of keeping a parallel world.
       `terminal`).
 - [x] Use the library's stored theme when this app has no explicit choice.
 - [x] Read `serverData.remote.password` into the library preferences.
-- [ ] Read the remote/stage ports from the library settings.
+- [x] Read the remote/stage ports from the library settings.
 - [ ] Honor a custom FreeShow theme (colors and font) from `settings.json`.
 
 Acceptance: opening a FreeShow library shows its theme and keeps its remote
@@ -50,12 +50,12 @@ password without editing this app's config by hand.
 
 FreeShow's `PASSWORD` / `ACCESS` handshake, enforced per connection.
 
-- [ ] `PASSWORD` reports whether a password is required.
-- [ ] `ACCESS` with the right password unlocks; a wrong password returns
+- [x] `PASSWORD` reports whether a password is required.
+- [x] `ACCESS` with the right password unlocks; a wrong password returns
       `ERROR { key: "wrongPass" }`.
-- [ ] Socket.IO, raw WebSocket, and the HTTP page share the same rule.
-- [ ] The built-in phone page prompts for the password and remembers it.
-- [ ] Stage page stays read-only and follows the same gate.
+- [x] Socket.IO, raw WebSocket, and the HTTP page share the same rule.
+- [x] The built-in phone page prompts for the password and remembers it.
+- [x] Stage page stays read-only and follows the same gate.
 
 Acceptance: with a password set, no channel other than the handshake changes
 the show or reveals lyrics until the password is accepted.

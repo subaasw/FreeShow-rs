@@ -341,43 +341,75 @@ impl ShowSnapshot {
     }
 }
 
+/// Replies sent when a remote connection is accepted.
+fn access_granted(snapshot: &ShowSnapshot) -> Vec<Value> {
+    vec![
+        json!({ "channel": "ACCESS", "data": null }),
+        shows_message(snapshot),
+        out_message(snapshot),
+        scripture_catalog(snapshot),
+        projects_message(snapshot),
+        folders_message(snapshot),
+        project_message(snapshot),
+        out_data_message(snapshot),
+        media_message(snapshot),
+    ]
+}
+
 /// Handle one FreeShow remote or stage message.
 ///
 /// The body is `{ "channel", "data" }`, the same shape the Electron app
 /// receives on the `REMOTE` and `STAGE` socket.io events.
 pub fn handle_message(snapshot: &mut ShowSnapshot, message: &Value) -> (Vec<Value>, Vec<Command>) {
+    let mut authenticated = true;
+    handle_message_authenticated(snapshot, message, None, &mut authenticated)
+}
+
+/// Handle one message with the connection's password policy and state.
+///
+/// `password` is the configured remote password, if any. `authenticated` is
+/// this connection's state and is updated by the `PASSWORD` and `ACCESS`
+/// handshake. A connection that has not been accepted receives no replies and
+/// cannot change the show.
+pub fn handle_message_authenticated(
+    snapshot: &mut ShowSnapshot,
+    message: &Value,
+    password: Option<&str>,
+    authenticated: &mut bool,
+) -> (Vec<Value>, Vec<Command>) {
     let Some(channel) = message.get("channel").and_then(Value::as_str) else {
         return (vec![unknown()], Vec::new());
     };
+    let password = password.map(str::trim).filter(|value| !value.is_empty());
     let data = message.get("data").cloned().unwrap_or(Value::Null);
     let mut commands = Vec::new();
     let replies = match channel {
-        "PASSWORD" => vec![
-            json!({
-                "channel": "PASSWORD",
-                "data": { "password": false, "dictionary": {} }
-            }),
-            json!({ "channel": "ACCESS", "data": null }),
-            shows_message(snapshot),
-            out_message(snapshot),
-            scripture_catalog(snapshot),
-            projects_message(snapshot),
-            folders_message(snapshot),
-            project_message(snapshot),
-            out_data_message(snapshot),
-            media_message(snapshot),
-        ],
-        "ACCESS" => vec![
-            json!({ "channel": "ACCESS", "data": null }),
-            shows_message(snapshot),
-            out_message(snapshot),
-            scripture_catalog(snapshot),
-            projects_message(snapshot),
-            folders_message(snapshot),
-            project_message(snapshot),
-            out_data_message(snapshot),
-            media_message(snapshot),
-        ],
+        "PASSWORD" => {
+            if password.is_some() {
+                vec![json!({
+                    "channel": "PASSWORD",
+                    "data": { "password": true, "dictionary": {} }
+                })]
+            } else {
+                *authenticated = true;
+                let mut replies = vec![json!({
+                    "channel": "PASSWORD",
+                    "data": { "password": false, "dictionary": {} }
+                })];
+                replies.extend(access_granted(snapshot));
+                replies
+            }
+        }
+        "ACCESS" => {
+            if password.is_none() || data.as_str() == password {
+                *authenticated = true;
+                access_granted(snapshot)
+            } else {
+                *authenticated = false;
+                vec![json!({ "channel": "ERROR", "data": { "key": "wrongPass" } })]
+            }
+        }
+        _ if password.is_some() && !*authenticated => return (Vec::new(), Vec::new()),
         "API:get_output" => vec![out_message(snapshot)],
         "API:next_slide" => {
             if let Some(command) = step(snapshot, 1) {
@@ -2601,6 +2633,79 @@ mod tests {
         assert_eq!(replies[2]["channel"], "SHOWS");
         assert_eq!(replies[2]["data"]["grace"]["name"], "Amazing Grace");
         assert_eq!(replies[3]["data"]["lines"][0], "Amazing grace");
+    }
+
+    #[test]
+    fn a_password_blocks_the_show_until_access_is_accepted() {
+        let mut snapshot = sample();
+        let mut authenticated = false;
+
+        let (replies, commands) = handle_message_authenticated(
+            &mut snapshot,
+            &json!({ "channel": "PASSWORD" }),
+            Some("1234"),
+            &mut authenticated,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["data"]["password"], true);
+        assert!(!authenticated);
+
+        let (replies, commands) = handle_message_authenticated(
+            &mut snapshot,
+            &json!({ "channel": "API:next_slide" }),
+            Some("1234"),
+            &mut authenticated,
+        );
+        assert!(replies.is_empty(), "an unauthenticated channel is ignored");
+        assert!(commands.is_empty());
+        assert_eq!(snapshot.slide_index, Some(0));
+
+        let (replies, commands) = handle_message_authenticated(
+            &mut snapshot,
+            &json!({ "channel": "ACCESS", "data": "0000" }),
+            Some("1234"),
+            &mut authenticated,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(replies[0]["channel"], "ERROR");
+        assert_eq!(replies[0]["data"]["key"], "wrongPass");
+        assert!(!authenticated);
+
+        let (replies, commands) = handle_message_authenticated(
+            &mut snapshot,
+            &json!({ "channel": "ACCESS", "data": "1234" }),
+            Some("1234"),
+            &mut authenticated,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(replies[0]["channel"], "ACCESS");
+        assert_eq!(replies[1]["channel"], "SHOWS");
+        assert!(authenticated);
+
+        let (replies, commands) = handle_message_authenticated(
+            &mut snapshot,
+            &json!({ "channel": "API:next_slide" }),
+            Some("1234"),
+            &mut authenticated,
+        );
+        assert_eq!(commands, vec![Command::SetSlide(1)]);
+        assert_eq!(replies[0]["data"]["lines"][0], "how sweet");
+    }
+
+    #[test]
+    fn an_empty_password_does_not_gate_the_remote() {
+        let mut snapshot = sample();
+        let mut authenticated = false;
+        let (replies, commands) = handle_message_authenticated(
+            &mut snapshot,
+            &json!({ "channel": "PASSWORD" }),
+            Some("  "),
+            &mut authenticated,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(replies[0]["data"]["password"], false);
+        assert!(authenticated);
     }
 
     #[test]
