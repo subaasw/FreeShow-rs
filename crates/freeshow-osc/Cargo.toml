@@ -1,0 +1,14 @@
+[package]
+name = "freeshow-osc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "OSC show control for freeshow-rust"
+
+[dependencies]
+freeshow-remote = { path = "../freeshow-remote" }
+rosc = "0.11"
+serde_json = "1"
+tracing = "0.1"

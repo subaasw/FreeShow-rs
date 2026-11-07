@@ -1,0 +1,13 @@
+[package]
+name = "freeshow-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Slide assist through a local Ollama model"
+
+[dependencies]
+serde_json = "1"
+tracing = "0.1"
+ureq = "2.12"

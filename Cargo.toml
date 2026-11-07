@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/freeshow-core", "crates/freeshow-output", "crates/freeshow-data", "crates/freeshow-media", "crates/freeshow-remote", "crates/freeshow-osc", "crates/freeshow-midi", "crates/freeshow-ndi", "crates/freeshow-timecode", "crates/freeshow-record", "crates/freeshow-pco", "crates/freeshow-churchapps", "crates/freeshow-cloud", "crates/freeshow-obs", "crates/freeshow-ai", "crates/freeshow"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.92"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+incremental = false

@@ -1,0 +1,13 @@
+[package]
+name = "freeshow-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Audience recording and RTMP for freeshow-rust"
+
+[dependencies]
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+tracing = "0.1"

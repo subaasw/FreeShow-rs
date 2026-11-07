@@ -1,0 +1,13 @@
+[package]
+name = "freeshow-output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "CPU frame compositor for audience and stage output"
+
+[dependencies]
+ab_glyph = "0.2"
+font8x8 = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

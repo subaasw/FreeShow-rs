@@ -1,0 +1,23 @@
+[package]
+name = "freeshow-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Remote and stage companion servers"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socketioxide = "0.18"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+futures-util = "0.3"
+http-body-util = "0.1"
+rust_socketio = "0.6"
+tokio-tungstenite = "0.26"
+tower = { version = "0.5", features = ["util"] }
