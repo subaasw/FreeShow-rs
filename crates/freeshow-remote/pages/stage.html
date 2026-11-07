@@ -34,12 +34,39 @@
   <p id="next"></p>
   <p id="notes"></p>
   <script>
+    let passwordAttempts = 0;
+
+    function password() {
+      return localStorage.getItem("freeshow-password") || "";
+    }
+
+    async function authorizedFetch(url, options = {}) {
+      options.headers = Object.assign({}, options.headers, {
+        "x-freeshow-password": password()
+      });
+      let response = await fetch(url, options);
+      if (response.status !== 401 || passwordAttempts >= 2) return response;
+      passwordAttempts += 1;
+      const value = prompt("Stage password");
+      if (value == null) return response;
+      localStorage.setItem("freeshow-password", value);
+      options.headers["x-freeshow-password"] = value;
+      return fetch(url, options);
+    }
+
     function paintClock() {
       document.getElementById("clock").textContent = new Date().toLocaleTimeString();
     }
 
     async function refresh() {
-      const state = await fetch("/state").then((response) => response.json());
+      const response = await authorizedFetch("/state");
+      if (response.status === 401) {
+        document.getElementById("lines").textContent = "Password required";
+        document.getElementById("next").textContent = "";
+        document.getElementById("notes").textContent = "";
+        return;
+      }
+      const state = await response.json();
       document.getElementById("lines").textContent = (state.lines || []).join("\n");
       const next = state.next_lines || [];
       document.getElementById("next").textContent = next.length ? next.join("\n") : "";

@@ -42,6 +42,10 @@ pub struct FreeShowPreferences {
     pub theme: Option<String>,
     /// `serverData.remote.password`. An empty value means no password.
     pub remote_password: Option<String>,
+    /// `ports.remote`, the phone remote port.
+    pub remote_port: Option<u16>,
+    /// `ports.stage`, the stage page port.
+    pub stage_port: Option<u16>,
 }
 
 use std::fs::{self, File};
@@ -3402,9 +3406,17 @@ impl Library {
             })
             .map(|password| password.trim().to_string())
             .filter(|password| !password.is_empty());
+        let port = |name: &str| {
+            json.pointer(&format!("/ports/{name}"))
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port != 0)
+        };
         FreeShowPreferences {
             theme,
             remote_password,
+            remote_port: port("remote"),
+            stage_port: port("stage"),
         }
     }
 
@@ -5189,15 +5201,17 @@ mod tests {
         );
         fs::write(
             library.settings_path(),
-            r#"{"theme":"sea","serverData":{"remote":{"password":" 1234 "}}}"#,
+            r#"{"theme":"sea","serverData":{"remote":{"password":" 1234 "}},"ports":{"remote":5600,"stage":5601}}"#,
         )
         .unwrap();
         let preferences = library.preferences();
         assert_eq!(preferences.theme.as_deref(), Some("sea"));
         assert_eq!(preferences.remote_password.as_deref(), Some("1234"));
+        assert_eq!(preferences.remote_port, Some(5600));
+        assert_eq!(preferences.stage_port, Some(5601));
         fs::write(
             library.settings_path(),
-            r#"{"theme":"","serverData":{"remote":{"password":""}}}"#,
+            r#"{"theme":"","serverData":{"remote":{"password":""}},"ports":{"remote":0,"stage":"x"}}"#,
         )
         .unwrap();
         assert_eq!(library.preferences(), FreeShowPreferences::default());

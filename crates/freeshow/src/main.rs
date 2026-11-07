@@ -1945,7 +1945,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (command_tx, command_rx) = mpsc::channel();
     let snapshot = Arc::new(Mutex::new(session.borrow().to_snapshot()));
-    freeshow_remote::spawn(Arc::clone(&snapshot), command_tx.clone());
+    let (remote_password, remote_ports) = {
+        let session = session.borrow();
+        (
+            session.preferences.remote_password.clone(),
+            freeshow_remote::RemotePorts {
+                remote: session
+                    .preferences
+                    .remote_port
+                    .unwrap_or(freeshow_remote::REMOTE_PORT),
+                stage: session
+                    .preferences
+                    .stage_port
+                    .unwrap_or(freeshow_remote::STAGE_PORT),
+            },
+        )
+    };
+    freeshow_remote::spawn(
+        Arc::clone(&snapshot),
+        command_tx.clone(),
+        remote_password,
+        remote_ports,
+    );
     freeshow_osc::OscInput::default().start(freeshow_remote::ShowBus {
         snapshot: Arc::clone(&snapshot),
         commands: command_tx.clone(),
