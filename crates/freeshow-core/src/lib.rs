@@ -88,6 +88,7 @@ mod tests {
             show_output: true,
             show_stage: false,
             output_screen: Some(1),
+            audio_devices: [("speaker_sub_id".into(), "Stage Speakers".into())].into(),
         };
         settings.save(&path).unwrap();
         let loaded = AppSettings::load(&path).unwrap();

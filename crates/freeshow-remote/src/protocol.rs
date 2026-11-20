@@ -25,7 +25,17 @@ pub enum Command {
     ClearOverlays,
     Play { name: String },
     /// Output gain in thousandths, so 1000 is full volume.
-    SetVolume { thousandths: u16 },
+    SetVolume {
+        thousandths: u16,
+    },
+    SetChannelVolume {
+        id: String,
+        thousandths: u16,
+    },
+    MuteChannel {
+        id: String,
+        muted: bool,
+    },
     StopAudio,
     ToggleMedia,
     PauseAudio { name: String },
@@ -112,6 +122,8 @@ pub struct ShowSnapshot {
     /// Linear output gain, 1 is full volume.
     #[serde(default = "full_volume")]
     pub volume: f32,
+    #[serde(default)]
+    pub audio_mixer: Value,
     /// Row in the current project that the audience is playing.
     #[serde(default)]
     pub project_item: usize,
@@ -171,6 +183,7 @@ impl Default for ShowSnapshot {
             audio_duration: 0.0,
             audio_paused: false,
             volume: 1.0,
+            audio_mixer: Value::Null,
             project_item: 0,
             next_item_on_last_slide: true,
         }
@@ -352,6 +365,7 @@ fn access_granted(snapshot: &ShowSnapshot) -> Vec<Value> {
         folders_message(snapshot),
         project_message(snapshot),
         out_data_message(snapshot),
+        mixer_message(snapshot),
         media_message(snapshot),
     ]
 }
@@ -502,6 +516,12 @@ pub fn handle_message_authenticated(
         "API:change_volume" => change_volume(snapshot, &data, &mut commands),
         "API:mute" => mute_output(snapshot, &data, &mut commands),
         "GET_AUDIO_MIXER" => vec![mixer_message(snapshot)],
+        "AUDIO_ROUTING" => {
+            vec![json!({"channel":"AUDIO_ROUTING", "data":mixer_data(snapshot)["audioRouting"]})]
+        }
+        "AUDIO_CHANNELS_DATA" => vec![
+            json!({"channel":"AUDIO_CHANNELS_DATA", "data":mixer_data(snapshot)["audioChannelsData"]}),
+        ],
         "API:get_groups" => vec![groups_message(snapshot, &data)],
         "API:rearrange_groups" => rearrange_groups(snapshot, &data, &mut commands),
         "API:add_group" => add_group(snapshot, &data, &mut commands),
@@ -933,16 +953,47 @@ fn media_message(snapshot: &ShowSnapshot) -> Value {
     json!({ "channel": "MEDIA", "data": Value::Object(data) })
 }
 
+fn mixer_data(snapshot: &ShowSnapshot) -> Value {
+    let mut mixer = snapshot
+        .audio_mixer
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if !mixer.get("audioRouting").is_some_and(Value::is_object) {
+        mixer.insert(
+            "audioRouting".into(),
+            json!({"channels":[{"id":"main", "name":"Main"}]}),
+        );
+    }
+    if !mixer.get("audioChannelsData").is_some_and(Value::is_object) {
+        mixer.insert("audioChannelsData".into(), json!({}));
+    }
+    let data = mixer
+        .get_mut("audioChannelsData")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    let main = data.entry("main").or_insert_with(|| json!({}));
+    if !main.is_object() {
+        *main = json!({});
+    }
+    main["volume"] = json!(snapshot.volume);
+    Value::Object(mixer)
+}
+
 fn mixer_message(snapshot: &ShowSnapshot) -> Value {
-    json!({
-        "channel": "GET_AUDIO_MIXER",
-        "data": {
-            "audioRouting": { "channels": [{ "id": "main", "name": "Main" }] },
-            "audioChannelsData": {
-                "main": { "volume": snapshot.volume, "muted": snapshot.volume == 0.0 }
-            }
-        }
-    })
+    json!({"channel":"GET_AUDIO_MIXER", "data":mixer_data(snapshot)})
+}
+
+fn known_channel(mixer: &Value, id: &str) -> bool {
+    id == "main"
+        || mixer["audioRouting"]["channels"]
+            .as_array()
+            .is_some_and(|channels| {
+                channels
+                    .iter()
+                    .any(|channel| channel["id"].as_str() == Some(id))
+            })
 }
 
 fn seek_to(audio: bool, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
@@ -1045,18 +1096,87 @@ fn video_state_message(snapshot: &ShowSnapshot) -> Value {
     })
 }
 
-fn change_volume(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
-    let thousandths = gain_thousandths(data.get("volume").and_then(Value::as_f64).unwrap_or(1.0));
-    snapshot.volume = f32::from(thousandths) / 1000.0;
-    commands.push(Command::SetVolume { thousandths });
+fn change_volume(
+    snapshot: &mut ShowSnapshot,
+    data: &Value,
+    commands: &mut Vec<Command>,
+) -> Vec<Value> {
+    let id = data["channelId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap_or("main");
+    let mut mixer = mixer_data(snapshot);
+    if !known_channel(&mixer, id) {
+        return Vec::new();
+    }
+    let current = mixer["audioChannelsData"][id]["volume"]
+        .as_f64()
+        .unwrap_or(1.0);
+    let volume = data["volume"]
+        .as_f64()
+        .unwrap_or(if current > 0.0 { 0.0 } else { 1.0 });
+    let volume = if data["useDB"].as_bool() == Some(true) {
+        10f64.powf(volume / 20.0).min(1.0)
+    } else {
+        volume
+    };
+    let thousandths = gain_thousandths(volume);
+    let channel = mixer["audioChannelsData"]
+        .as_object_mut()
+        .unwrap()
+        .entry(id)
+        .or_insert_with(|| json!({}));
+    if !channel.is_object() {
+        *channel = json!({});
+    }
+    channel["volume"] = json!(f32::from(thousandths) / 1000.0);
+    if id == "main" {
+        snapshot.volume = f32::from(thousandths) / 1000.0;
+        commands.push(Command::SetVolume { thousandths });
+    } else {
+        commands.push(Command::SetChannelVolume {
+            id: id.into(),
+            thousandths,
+        });
+    }
+    snapshot.audio_mixer = mixer;
     vec![mixer_message(snapshot)]
 }
 
-fn mute_output(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
-    let muted = data.get("value").and_then(Value::as_bool).unwrap_or(true);
-    let thousandths = if muted { 0 } else { 1000 };
-    snapshot.volume = f32::from(thousandths) / 1000.0;
-    commands.push(Command::SetVolume { thousandths });
+fn mute_output(
+    snapshot: &mut ShowSnapshot,
+    data: &Value,
+    commands: &mut Vec<Command>,
+) -> Vec<Value> {
+    let id = data["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap_or("main");
+    let mut mixer = mixer_data(snapshot);
+    if !known_channel(&mixer, id) {
+        return Vec::new();
+    }
+    let current = mixer["audioChannelsData"][id]["isMuted"]
+        .as_bool()
+        .unwrap_or(false);
+    let muted = data["value"]
+        .as_bool()
+        .or_else(|| data["value"].as_str().and_then(|v| v.parse().ok()))
+        .unwrap_or(!current);
+    let channel = mixer["audioChannelsData"]
+        .as_object_mut()
+        .unwrap()
+        .entry(id)
+        .or_insert_with(|| json!({}));
+    if !channel.is_object() {
+        *channel = json!({});
+    }
+    channel["isMuted"] = json!(muted);
+    snapshot.audio_mixer = mixer;
+    commands.push(Command::MuteChannel {
+        id: id.into(),
+        muted,
+    });
     vec![mixer_message(snapshot)]
 }
 
@@ -1987,6 +2107,7 @@ mod tests {
             audio_duration: 0.0,
             audio_paused: false,
             volume: 1.0,
+            audio_mixer: Value::Null,
             project_item: 0,
             next_item_on_last_slide: true,
         }
@@ -2221,6 +2342,79 @@ mod tests {
     }
 
     #[test]
+    fn channel_volume_and_mute_are_independent_and_validate_channel_ids() {
+        let mut snapshot = sample();
+        snapshot.audio_mixer = json!({
+            "audioRouting":{"channels":[{"id":"main", "name":"Main"},{"id":"cue", "name":"Stage"}]},
+            "audioChannelsData":{"main":{"volume":0.7}, "cue":{"volume":0.4}}
+        });
+        snapshot.volume = 0.7;
+        let (replies, commands) = handle_message(
+            &mut snapshot,
+            &json!({
+                "channel":"API:change_volume", "data":{"channelId":"cue", "volume":25}
+            }),
+        );
+        assert_eq!(
+            commands,
+            vec![Command::SetChannelVolume {
+                id: "cue".into(),
+                thousandths: 250
+            }]
+        );
+        assert_eq!(
+            replies[0]["data"]["audioChannelsData"]["cue"]["volume"],
+            0.25
+        );
+        assert_eq!(snapshot.volume, 0.7);
+        for muted in [true, false] {
+            let (_, commands) = handle_message(
+                &mut snapshot,
+                &json!({"channel":"API:mute", "data":{"id":"cue"}}),
+            );
+            assert_eq!(
+                commands,
+                vec![Command::MuteChannel {
+                    id: "cue".into(),
+                    muted
+                }]
+            );
+            assert_eq!(
+                snapshot.audio_mixer["audioChannelsData"]["cue"]["volume"],
+                0.25
+            );
+        }
+        let (_, commands) = handle_message(
+            &mut snapshot,
+            &json!({"channel":"API:mute", "data":{"id":"main", "value":true}}),
+        );
+        assert_eq!(
+            commands,
+            vec![Command::MuteChannel {
+                id: "main".into(),
+                muted: true
+            }]
+        );
+        assert_eq!(snapshot.volume, 0.7);
+        let (replies, commands) = handle_message(
+            &mut snapshot,
+            &json!({"channel":"API:change_volume", "data":{"channelId":"unknown", "volume":1}}),
+        );
+        assert!(commands.is_empty() && replies.is_empty());
+        let (_, commands) = handle_message(
+            &mut snapshot,
+            &json!({"channel":"API:change_volume", "data":{"channelId":"cue", "volume":-6, "useDB":true}}),
+        );
+        assert_eq!(
+            commands,
+            vec![Command::SetChannelVolume {
+                id: "cue".into(),
+                thousandths: 501
+            }]
+        );
+    }
+
+    #[test]
     fn the_remote_can_play_a_file_and_set_the_volume() {
         let mut snapshot = sample();
         snapshot.media = vec![RemoteFile {
@@ -2232,8 +2426,16 @@ mod tests {
             kind: "audio".into(),
         }];
         let (replies, _) = handle_message(&mut snapshot, &json!({ "channel": "ACCESS" }));
-        assert_eq!(replies.last().unwrap()["channel"], "MEDIA");
-        assert_eq!(replies.last().unwrap()["data"]["clip.mp4"]["type"], "video");
+        let media = replies
+            .iter()
+            .find(|reply| reply["channel"] == "MEDIA")
+            .unwrap();
+        assert_eq!(media["data"]["clip.mp4"]["type"], "video");
+        assert!(
+            replies
+                .iter()
+                .any(|reply| reply["channel"] == "GET_AUDIO_MIXER")
+        );
 
         let (_, commands) = handle_message(
             &mut snapshot,

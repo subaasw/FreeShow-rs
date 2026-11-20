@@ -644,18 +644,19 @@ fn start_pending(
 ) {
     match pending {
         Some(PendingPlay::Audio(path)) => {
-            let (volume, looping, from, to, tempo) = {
+            *playback.audio.borrow_mut() = None;
+            let (routes, looping, from, to, tempo) = {
                 let current = session.borrow();
                 let (from, to) = current.audio_span();
                 (
-                    current.playback_gain(),
+                    current.audio_routes(),
                     current.audio_should_loop(),
                     from,
                     to,
                     current.audio_tempo(),
                 )
             };
-            match AudioOutput::play_file(&path, volume) {
+            match AudioOutput::play_file_routed(&path, &routes) {
                 Ok(output) => {
                     output.set_looping(looping);
                     output.set_span(from, to);
@@ -778,6 +779,9 @@ fn start_plays(
             last_output,
             last_stage,
         );
+    }
+    if let Some(output) = playback.audio.borrow().as_ref() {
+        output.set_route_gains(&session.borrow().audio_routes());
     }
 }
 
@@ -1082,18 +1086,21 @@ fn place(window: &slint::Window, x: i32, y: i32) {
 struct Launch {
     data: Option<PathBuf>,
     show: Option<PathBuf>,
+    list_audio_devices: bool,
 }
 
 fn launch_args() -> Launch {
     let mut launch = Launch {
         data: None,
         show: None,
+        list_audio_devices: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--data" => launch.data = args.next().map(PathBuf::from),
             "--show" => launch.show = args.next().map(PathBuf::from),
+            "--list-audio-devices" => launch.list_audio_devices = true,
             _ => {}
         }
     }
@@ -1102,6 +1109,12 @@ fn launch_args() -> Launch {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launch = launch_args();
+    if launch.list_audio_devices {
+        for device in freeshow_media::output_devices() {
+            println!("{device}");
+        }
+        return Ok(());
+    }
     let config_dir = freeshow_core::config_dir();
     let log_path = freeshow_core::init_logging(&config_dir)?;
     tracing::info!("log {}", log_path.display());
@@ -1161,6 +1174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
+    session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show
         && let Some(show) = session::load_show_file(path)
@@ -1642,20 +1656,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let action = session.borrow_mut().select_drawer(index);
             match action {
                 DrawerAction::PlayAudio(path) => {
+                    *audio_out.borrow_mut() = None;
                     session.borrow_mut().playing_audio = Some(path.clone());
                     session.borrow_mut().audio_paused = false;
-                    let (volume, looping, from, to, tempo) = {
+                    let (routes, looping, from, to, tempo) = {
                         let current = session.borrow();
                         let (from, to) = current.audio_span();
                         (
-                            current.playback_gain(),
+                            current.audio_routes(),
                             current.audio_should_loop(),
                             from,
                             to,
                             current.audio_tempo(),
                         )
                     };
-                    match AudioOutput::play_file(&path, volume) {
+                    match AudioOutput::play_file_routed(&path, &routes) {
                         Ok(output) => {
                             output.set_looping(looping);
                             output.set_span(from, to);
@@ -1779,10 +1794,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio_out = Rc::clone(&audio_out);
         control.on_set_volume(move |value| {
             let volume = (value as f32 / 100.0).clamp(0.0, 1.0);
-            session.borrow_mut().volume = volume;
-            let gain = session.borrow().playback_gain();
+            session.borrow_mut().set_channel_volume("main", volume);
+            let routes = session.borrow().audio_routes();
             if let Some(output) = audio_out.borrow().as_ref() {
-                output.set_volume(gain);
+                output.set_route_gains(&routes);
             }
         });
     }
@@ -2128,9 +2143,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &remote_last_output,
                 &remote_last_stage,
             );
-            if let Some(output) = remote_audio.borrow().as_ref() {
-                output.set_volume(remote_session.borrow().playback_gain());
-            }
             if fades {
                 remote_next_slide.stop();
             }

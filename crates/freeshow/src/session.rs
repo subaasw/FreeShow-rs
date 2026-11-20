@@ -84,6 +84,7 @@ pub struct Session {
     pub root: Option<PathBuf>,
     /// Settings read from the FreeShow library, not this app's own settings file.
     pub preferences: FreeShowPreferences,
+    pub audio_device_map: std::collections::BTreeMap<String, String>,
     pub shows: Vec<ShowFile>,
     pub projects: ProjectsFile,
     pub project_id: Option<String>,
@@ -126,7 +127,7 @@ pub struct Session {
     /// The main channel is muted. Playback stays silent until a slide unmutes it.
     pub audio_muted: bool,
     /// Volume restored when a slide toggles the main channel back on.
-    unmuted_volume: f32,
+    unmuted_volumes: std::collections::BTreeMap<String, f32>,
     pub pending_play: Option<PendingPlay>,
     /// A second playback for the same slide, so a video and an audio file can both start.
     pub pending_also: Option<PendingPlay>,
@@ -186,6 +187,7 @@ impl Session {
         Self {
             root: None,
             preferences: FreeShowPreferences::default(),
+            audio_device_map: Default::default(),
             shows: Vec::new(),
             projects: ProjectsFile::empty(),
             project_id: None,
@@ -224,7 +226,7 @@ impl Session {
             background_path: None,
             volume: 1.0,
             audio_muted: false,
-            unmuted_volume: 1.0,
+            unmuted_volumes: Default::default(),
             pending_play: None,
             pending_also: None,
             playing_audio: None,
@@ -316,6 +318,7 @@ impl Session {
         Self {
             root: Some(root),
             preferences,
+            audio_device_map: Default::default(),
             shows,
             projects,
             project_id,
@@ -354,7 +357,7 @@ impl Session {
             background_path: None,
             volume,
             audio_muted,
-            unmuted_volume: if volume > 0.0 { volume } else { 1.0 },
+            unmuted_volumes: Default::default(),
             pending_play: None,
             pending_also: None,
             playing_audio: None,
@@ -1535,7 +1538,13 @@ impl Session {
                     volume,
                     use_db,
                 } => {
-                    let gain = mix_gain(volume, use_db, self.volume, &mut self.unmuted_volume);
+                    let current = if channel == "main" {
+                        self.volume
+                    } else {
+                        library.channel_audio(&channel).0
+                    };
+                    let remembered = self.unmuted_volumes.entry(channel.clone()).or_insert(1.0);
+                    let gain = mix_gain(volume, use_db, current, remembered);
                     if channel == "main" {
                         self.volume = gain.clamp(0.0, 1.0);
                     }
@@ -1919,8 +1928,61 @@ impl Session {
         advanced
     }
 
-    /// Main output gain times the volume stored for the file that is playing.
-    pub fn playback_gain(&self) -> f32 {
+    pub fn set_channel_volume(&mut self, id: &str, gain: f32) {
+        if id == "main" {
+            self.volume = gain.clamp(0.0, 1.0);
+        }
+        if let Some(root) = &self.root {
+            Library::open(root).set_channel_volume(id, gain);
+        }
+    }
+
+    fn audio_mixer(&self) -> serde_json::Value {
+        let mut mixer = self.root.as_ref().map(|root| Library::open(root).audio_mixer())
+            .unwrap_or_else(|| serde_json::json!({"audioRouting":{"channels":[{"id":"main", "name":"Main"}]}, "audioChannelsData":{}}));
+        let main = mixer["audioChannelsData"]
+            .as_object_mut()
+            .unwrap()
+            .entry("main")
+            .or_insert_with(|| serde_json::json!({}));
+        if !main.is_object() {
+            *main = serde_json::json!({});
+        }
+        main["volume"] = serde_json::json!(self.volume);
+        main["isMuted"] = serde_json::json!(self.audio_muted);
+        mixer
+    }
+
+    /// Physical destinations for drawer/slide audio, or the active playlist.
+    pub fn audio_routes(&self) -> Vec<(Option<String>, f32)> {
+        let main = if self.audio_muted { 0.0 } else { self.volume };
+        let file_gain = self.audio_file_gain();
+        let Some(root) = &self.root else {
+            return vec![(None, main * file_gain)];
+        };
+        let playlist_source = self
+            .playlist_id
+            .as_ref()
+            .filter(|_| self.effect_playing.is_none())
+            .map(|id| format!("playlist_sub_{id}"));
+        let sources = match playlist_source.as_deref() {
+            Some(id) => vec![id, "playlists_default"],
+            None => vec!["drawer_audio"],
+        };
+        let mut destinations = std::collections::BTreeMap::<Option<String>, f32>::new();
+        for route in Library::open(root).audio_routes(&sources, main) {
+            let device = route
+                .device
+                .map(|id| self.audio_device_map.get(&id).cloned().unwrap_or(id));
+            *destinations.entry(device).or_default() += route.gain * file_gain;
+        }
+        destinations
+            .into_iter()
+            .map(|(device, gain)| (device, gain.clamp(0.0, 1.0)))
+            .collect()
+    }
+
+    fn audio_file_gain(&self) -> f32 {
         let file = self
             .playing_audio
             .as_ref()
@@ -1930,15 +1992,12 @@ impl Session {
                     .map(|root| Library::open(root).media_volume(path))
             })
             .unwrap_or(1.0);
-        if self.audio_muted {
-            return 0.0;
-        }
-        let playlist = if self.playlist_id.is_some() {
+        let playlist = if self.playlist_id.is_some() && self.effect_playing.is_none() {
             self.playlist_volume
         } else {
             1.0
         };
-        (self.volume * file * playlist).clamp(0.0, 1.0)
+        (file * playlist).clamp(0.0, 1.0)
     }
 
     /// The file that is playing repeats when `media.json` says so.
@@ -2277,6 +2336,7 @@ impl Session {
                 })
                 .collect(),
             volume: self.volume,
+            audio_mixer: self.audio_mixer(),
             project_item: self.project_item,
             next_item_on_last_slide: self
                 .root
@@ -2322,7 +2382,18 @@ impl Session {
                 let _ = self.play_named(&name);
             }
             freeshow_remote::Command::SetVolume { thousandths } => {
-                self.volume = f32::from(thousandths) / 1000.0;
+                self.set_channel_volume("main", f32::from(thousandths) / 1000.0);
+            }
+            freeshow_remote::Command::SetChannelVolume { id, thousandths } => {
+                self.set_channel_volume(&id, f32::from(thousandths) / 1000.0);
+            }
+            freeshow_remote::Command::MuteChannel { id, muted } => {
+                if id == "main" {
+                    self.audio_muted = muted;
+                }
+                if let Some(root) = &self.root {
+                    Library::open(root).set_channel_muted(&id, muted);
+                }
             }
             freeshow_remote::Command::StopAudio => {
                 self.playing_audio = None;
@@ -3391,6 +3462,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn routed_audio_obeys_remote_channel_gain_without_leaking_to_main() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-routing-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            serde_json::json!({
+                "keep":"unchanged",
+                "audioRouting":{"channels":[{"id":"main"},{"id":"cue"}], "connections":[
+                    {"from":"drawer_audio", "to":"cue"}, {"from":"cue", "to":"speaker_sub_hash"}
+                ]},
+                "audioChannelsData":{"main":{"volume":0.2}, "cue":{"volume":0.5}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        session
+            .audio_device_map
+            .insert("speaker_sub_hash".into(), "Stage Speakers".into());
+        assert_eq!(
+            session.audio_routes(),
+            vec![(Some("Stage Speakers".into()), 0.5)]
+        );
+        session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 0 });
+        assert_eq!(session.audio_routes()[0].1, 0.5);
+        session.apply_remote(freeshow_remote::Command::SetChannelVolume {
+            id: "cue".into(),
+            thousandths: 250,
+        });
+        assert_eq!(session.audio_routes()[0].1, 0.25);
+        session.apply_remote(freeshow_remote::Command::MuteChannel {
+            id: "cue".into(),
+            muted: true,
+        });
+        assert_eq!(session.audio_routes()[0].1, 0.0);
+        session.apply_remote(freeshow_remote::Command::MuteChannel {
+            id: "cue".into(),
+            muted: false,
+        });
+        assert_eq!(session.audio_routes()[0].1, 0.25);
+        let mixer = session.to_snapshot().audio_mixer;
+        assert_eq!(mixer["audioChannelsData"]["cue"]["volume"], 0.25);
+        assert_eq!(mixer["audioRouting"]["channels"][1]["id"], "cue");
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored["keep"], "unchanged");
+        assert_eq!(
+            Session::open(root.clone()).to_snapshot().audio_mixer["audioChannelsData"]["cue"]["isMuted"],
+            false
+        );
+        std::fs::write(root.join("settings.json"), "broken json").unwrap();
+        assert!(!Library::open(&root).set_channel_volume("cue", 1.0));
+        assert_eq!(
+            std::fs::read_to_string(root.join("settings.json")).unwrap(),
+            "broken json"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn create_show_and_project_land_in_the_library() {
         let root =
             std::env::temp_dir().join(format!("freeshow-rust-session-{}", std::process::id()));
@@ -4442,7 +4576,7 @@ mod tests {
         assert!(session.present_show_id(&show_id));
         let plays = session.take_plays();
         assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3")));
-        assert!((session.playback_gain() - 0.5).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 0.5).abs() < 0.001);
         assert!(!session.finish_media("other.mp3", true));
         assert!(session.take_plays()[0].is_none());
         assert!(session.finish_media("one.mp3", true) == false);
@@ -4798,10 +4932,10 @@ mod tests {
         assert!(session.present_show_id(&show_id));
         assert!((session.volume - 0.25).abs() < 0.001);
         assert!(!session.audio_muted);
-        assert!((session.playback_gain() - 0.25).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 0.25).abs() < 0.001);
         session.select_slide(1);
         assert!(session.audio_muted);
-        assert_eq!(session.playback_gain(), 0.0);
+        assert_eq!(session.audio_routes()[0].1, 0.0);
         assert!((session.volume - 0.25).abs() < 0.001);
         session.select_slide(2);
         assert!((session.volume - 0.4).abs() < 0.001);
@@ -4809,7 +4943,7 @@ mod tests {
         session.select_slide(3);
         assert!(!session.audio_muted);
         assert!((session.volume - 0.501).abs() < 0.001);
-        assert!((session.playback_gain() - 0.501).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 0.501).abs() < 0.001);
         session.select_slide(4);
         assert_eq!(session.volume, 0.0);
         session.select_slide(4);
@@ -5500,13 +5634,13 @@ mod tests {
         let song = root.join("song.mp3");
         std::fs::write(&song, b"not a real song").unwrap();
         assert!(session.play_named(&song.to_string_lossy()));
-        assert!((session.playback_gain() - 1.0).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 1.0).abs() < 0.001);
         let store = serde_json::json!({
             song.to_string_lossy().as_ref(): { "volume": 0.4 }
         });
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         session.volume = 0.5;
-        assert!((session.playback_gain() - 0.2).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 0.2).abs() < 0.001);
         assert!(!session.audio_should_loop());
         let store = serde_json::json!({
             song.to_string_lossy().as_ref(): { "volume": 0.4, "loop": true }
@@ -5514,7 +5648,7 @@ mod tests {
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         assert!(session.audio_should_loop());
         assert_eq!(session.audio_span(), (0.0, 0.0));
-        assert!((session.playback_gain() - 0.2).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 0.2).abs() < 0.001);
         let store = serde_json::json!({
             song.to_string_lossy().as_ref(): { "volume": 0.4, "loop": true, "fromTime": 2, "toTime": 9 }
         });
@@ -5526,7 +5660,7 @@ mod tests {
         });
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         assert!((session.audio_tempo() - 1.5).abs() < 0.001);
-        assert!((session.playback_gain() - 0.2).abs() < 0.001);
+        assert!((session.audio_routes()[0].1 - 0.2).abs() < 0.001);
         let _ = std::fs::remove_dir_all(&root);
     }
 

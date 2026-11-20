@@ -75,7 +75,9 @@ mod gst_player {
                 pipeline,
                 sink,
                 looping: std::cell::Cell::new(true),
-                rewound: std::cell::Cell::new(false),
+                // Appsink can report EOS before asynchronous startup finishes.
+                // Wait for an initial frame before trying to loop the source.
+                rewound: std::cell::Cell::new(true),
                 rate: std::cell::Cell::new(1.0),
                 muted: std::cell::Cell::new(false),
                 gain: std::cell::Cell::new(1.0),
@@ -422,9 +424,16 @@ mod tests {
         let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         let mut player = VideoPlayer::open(&path).expect("open clip");
         let mut frames = 0;
-        for _ in 0..40 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             if player.next_frame().is_some() {
                 frames += 1;
+                if frames >= 4 && player.duration_seconds() > 0.0 {
+                    break;
+                }
+            } else {
+                // A pending seek or decoder startup can return immediately.
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
         let duration = player.duration_seconds();
