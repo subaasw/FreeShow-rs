@@ -16,8 +16,8 @@ GPL-3.0-only.
   stage layouts, media, output/stage windows, and the phone remote.
 - `PARITY.md` is the detailed, feature-by-feature status. It is the source of
   truth for what is done, partial, or not-yet.
-- The largest remaining gaps are security (remote password), deeper output
-  control (per-channel audio routing), stage customization, and packaging.
+- The largest remaining gaps are video/network audio routing, deeper output
+  and stage customization, importer media, and packaging.
 
 ## Priorities
 
@@ -63,10 +63,11 @@ the show or reveals lyrics until the password is accepted.
 
 ### M3. Per-output audio routing
 
-- [ ] Read `audioChannelsData`, outputs, and routing from `settings.json`.
-- [ ] Route each audio/video source to its stored channel.
-- [ ] Keep the main volume and mute controls working across channels.
-- [ ] Remote channel list and per-channel volume.
+- [x] Read `audioChannelsData`, outputs, and routing from `settings.json`.
+- [x] Route drawer, slide audio, and playlists through their stored channels to speakers.
+- [ ] Route video audio, network sinks, and individual hardware channels.
+- [x] Keep the main volume and mute controls working for paths through Main.
+- [x] Remote channel list, per-channel volume, and independent mute.
 
 Acceptance: a clip assigned to a secondary output plays only there, while the
 main fader still controls the main channel.

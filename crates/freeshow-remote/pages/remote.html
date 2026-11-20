@@ -45,6 +45,7 @@
       padding: 12px;
     }
     .controls button { text-align: center; font-weight: 650; }
+    select { font: inherit; max-width: 100%; }
     #next { background: var(--accent); }
     button.active { outline: 2px solid var(--accent); }
     ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
@@ -77,6 +78,9 @@
       <section>
         <h2>Media</h2>
         <ul id="media"></ul>
+        <label for="audio-channel">Audio channel</label>
+        <select id="audio-channel"><option value="main">Main</option></select>
+        <button id="channel-mute" type="button" aria-pressed="false">Mute</button>
         <label for="volume">Volume</label>
         <input id="volume" type="range" min="0" max="100" value="100">
       </section>
@@ -84,6 +88,7 @@
   </main>
   <script>
     let busy = false;
+    let channelState = {};
     let passwordAttempts = 0;
 
     function password() {
@@ -150,10 +155,19 @@
         (state.media || []).concat(state.audio || []).forEach((file) => {
           media.appendChild(item(file.name, false, () => act("API:play_media", { path: file.name })));
         });
-        const volume = document.getElementById("volume");
-        if (document.activeElement !== volume && typeof state.volume === "number") {
-          volume.value = String(Math.round(state.volume * 100));
-        }
+        const channelSelect = document.getElementById("audio-channel");
+        const selected = channelSelect.value;
+        const mixer = state.audio_mixer || {};
+        channelState = mixer.audioChannelsData || {main: {volume: state.volume}};
+        const channels = (mixer.audioRouting || {}).channels || [{id: "main", name: "Main"}];
+        channelSelect.replaceChildren(...channels.map((channel) => {
+          const option = document.createElement("option");
+          option.value = channel.id;
+          option.textContent = channel.name || channel.id;
+          return option;
+        }));
+        if (channels.some((channel) => channel.id === selected)) channelSelect.value = selected;
+        updateChannel();
         const slides = document.getElementById("slides");
         slides.replaceChildren();
         const current = state.shows && state.show_index != null ? state.shows[state.show_index] : null;
@@ -173,8 +187,22 @@
     document.getElementById("next").addEventListener("click", () => act("API:next_slide"));
     document.getElementById("prev").addEventListener("click", () => act("API:previous_slide"));
     document.getElementById("clear").addEventListener("click", () => act("API:clear_all"));
+    function updateChannel() {
+      const id = document.getElementById("audio-channel").value;
+      const channel = channelState[id] || {};
+      const volume = document.getElementById("volume");
+      if (document.activeElement !== volume) volume.value = String(Math.round((channel.volume ?? 1) * 100));
+      const mute = document.getElementById("channel-mute");
+      mute.textContent = channel.isMuted ? "Unmute" : "Mute";
+      mute.setAttribute("aria-pressed", String(!!channel.isMuted));
+    }
+    document.getElementById("audio-channel").addEventListener("change", updateChannel);
+    document.getElementById("channel-mute").addEventListener("click", () => {
+      const id = document.getElementById("audio-channel").value;
+      act("API:mute", {id, value: !channelState[id]?.isMuted});
+    });
     document.getElementById("volume").addEventListener("change", (event) => {
-      act("API:change_volume", { volume: Number(event.target.value) / 100 });
+      act("API:change_volume", { channelId: document.getElementById("audio-channel").value, volume: Number(event.target.value) / 100 });
     });
     refresh();
     setInterval(refresh, 1000);

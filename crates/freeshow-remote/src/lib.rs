@@ -357,6 +357,7 @@ mod tests {
             audio_duration: 0.0,
             audio_paused: false,
             volume: 1.0,
+            audio_mixer: Value::Null,
             project_item: 0,
             next_item_on_last_slide: true,
         };
@@ -538,7 +539,7 @@ mod tests {
         let message = socket.next().await.unwrap().unwrap();
         let reply: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
         assert_eq!(reply["channel"], "ACCESS");
-        for _ in 0..8 {
+        for _ in 0..9 {
             let message = socket.next().await.unwrap().unwrap();
             let reply: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
             assert_ne!(reply["channel"], "ERROR");

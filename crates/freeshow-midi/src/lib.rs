@@ -202,6 +202,7 @@ mod tests {
             audio_duration: 0.0,
             audio_paused: false,
             volume: 1.0,
+            audio_mixer: serde_json::Value::Null,
             project_item: 0,
             next_item_on_last_slide: true,
         };

@@ -87,7 +87,7 @@ pub fn apply_volume(samples: &[f32], volume: f32) -> Vec<f32> {
 
 #[derive(Debug)]
 pub struct Playback {
-    pcm: Pcm,
+    pcm: Arc<Pcm>,
     position: f64,
     volume: f32,
     paused: bool,
@@ -99,6 +99,10 @@ pub struct Playback {
 
 impl Playback {
     pub fn new(pcm: Pcm, volume: f32) -> Self {
+        Self::shared(Arc::new(pcm), volume)
+    }
+
+    fn shared(pcm: Arc<Pcm>, volume: f32) -> Self {
         Self {
             pcm,
             position: 0.0,
@@ -229,23 +233,13 @@ impl Playback {
     }
 }
 
-pub struct AudioOutput {
+struct DeviceAudioOutput {
     stream: cpal::Stream,
     playback: Arc<Mutex<Playback>>,
 }
 
-impl AudioOutput {
-    pub fn play_file(path: &Path, volume: f32) -> Result<Self, MediaError> {
-        let bytes = std::fs::read(path).map_err(|err| MediaError::Audio(err.to_string()))?;
-        let extension = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("wav");
-        let pcm = decode_with_hint(&bytes, extension)?;
-        Self::start(pcm, volume, None)
-    }
-
-    pub fn start(pcm: Pcm, volume: f32, device_name: Option<&str>) -> Result<Self, MediaError> {
+impl DeviceAudioOutput {
+    fn start(pcm: Arc<Pcm>, volume: f32, device_name: Option<&str>) -> Result<Self, MediaError> {
         let host = cpal::default_host();
         let device = match device_name {
             Some(name) => host
@@ -262,7 +256,7 @@ impl AudioOutput {
             .map_err(|err| MediaError::Audio(err.to_string()))?;
         let rate = supported.sample_rate().0;
         let channels = supported.channels();
-        let playback = Arc::new(Mutex::new(Playback::new(pcm, volume)));
+        let playback = Arc::new(Mutex::new(Playback::shared(pcm, volume)));
         let state = Arc::clone(&playback);
         let config: cpal::StreamConfig = supported.clone().into();
         let stream = match supported.sample_format() {
@@ -378,6 +372,116 @@ impl AudioOutput {
     pub fn set_volume(&self, volume: f32) {
         if let Ok(mut playback) = self.playback.lock() {
             playback.set_volume(volume);
+        }
+    }
+}
+
+/// One decoded track sent to the physical destinations in the library routing graph.
+pub struct AudioOutput {
+    // ponytail: each device has its own clock; add clock-drift resampling if
+    // long-running outputs must remain sample synchronized.
+    outputs: Vec<(Option<String>, DeviceAudioOutput)>,
+}
+
+impl AudioOutput {
+    pub fn play_file(path: &Path, volume: f32) -> Result<Self, MediaError> {
+        Self::play_file_routed(path, &[(None, volume)])
+    }
+
+    pub fn play_file_routed(
+        path: &Path,
+        routes: &[(Option<String>, f32)],
+    ) -> Result<Self, MediaError> {
+        let bytes = std::fs::read(path).map_err(|err| MediaError::Audio(err.to_string()))?;
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("wav");
+        let pcm = Arc::new(decode_with_hint(&bytes, extension)?);
+        // Keep a silent clock for an intentionally disconnected source, so end
+        // actions and playlist advancement still run without leaking to Main.
+        let silent = [(None, 0.0)];
+        let routes = if routes.is_empty() {
+            &silent[..]
+        } else {
+            routes
+        };
+        let mut outputs = Vec::new();
+        for (device, gain) in routes {
+            // A missing named destination fails closed: never play its cue in
+            // the default speakers as a fallback.
+            let output = DeviceAudioOutput::start(pcm.clone(), *gain, device.as_deref())?;
+            outputs.push((device.clone(), output));
+        }
+        Ok(Self { outputs })
+    }
+
+    pub fn start(pcm: Pcm, volume: f32, device_name: Option<&str>) -> Result<Self, MediaError> {
+        Ok(Self {
+            outputs: vec![(
+                device_name.map(str::to_string),
+                DeviceAudioOutput::start(Arc::new(pcm), volume, device_name)?,
+            )],
+        })
+    }
+
+    pub fn set_route_gains(&self, routes: &[(Option<String>, f32)]) {
+        for (device, output) in &self.outputs {
+            let gain = routes
+                .iter()
+                .find(|(name, _)| name == device)
+                .map(|(_, gain)| *gain)
+                .unwrap_or(0.0);
+            output.set_volume(gain);
+        }
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        for (_, output) in &self.outputs {
+            output.set_volume(volume);
+        }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        for (_, output) in &self.outputs {
+            output.set_paused(paused);
+        }
+    }
+
+    pub fn seek_seconds(&self, seconds: f64) {
+        for (_, output) in &self.outputs {
+            output.seek_seconds(seconds);
+        }
+    }
+
+    pub fn position_seconds(&self) -> f64 {
+        self.outputs[0].1.position_seconds()
+    }
+    pub fn duration_seconds(&self) -> f64 {
+        self.outputs[0].1.duration_seconds()
+    }
+    pub fn is_paused(&self) -> bool {
+        self.outputs[0].1.is_paused()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.outputs.iter().all(|(_, output)| output.is_finished())
+    }
+
+    pub fn set_looping(&self, looping: bool) {
+        for (_, output) in &self.outputs {
+            output.set_looping(looping);
+        }
+    }
+
+    pub fn set_span(&self, from: f64, to: f64) {
+        for (_, output) in &self.outputs {
+            output.set_span(from, to);
+        }
+    }
+
+    pub fn set_rate(&self, rate: f64) {
+        for (_, output) in &self.outputs {
+            output.set_rate(rate);
         }
     }
 }

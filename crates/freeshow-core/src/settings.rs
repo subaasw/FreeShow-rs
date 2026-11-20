@@ -24,6 +24,9 @@ pub struct AppSettings {
     /// Monitor index for the audience window. Empty means the second monitor when one is connected.
     #[serde(default)]
     pub output_screen: Option<usize>,
+    /// FreeShow speaker node IDs mapped to native output device names.
+    #[serde(default)]
+    pub audio_devices: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -34,6 +37,7 @@ impl Default for AppSettings {
             show_output: true,
             show_stage: true,
             output_screen: None,
+            audio_devices: Default::default(),
         }
     }
 }

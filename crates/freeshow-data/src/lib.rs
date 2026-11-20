@@ -6,7 +6,9 @@
 //! Unknown fields stay in the JSON value so a save does not drop data this
 //! crate does not understand yet.
 
+mod audio_routing;
 mod import;
+pub use audio_routing::{AudioRoute, audio_routes};
 mod scripture;
 mod stage_layout;
 
@@ -3662,13 +3664,17 @@ impl Library {
 
     /// Volume and mute of the main audio channel. Missing settings are full volume, unmuted.
     pub fn main_audio(&self) -> (f32, bool) {
+        self.channel_audio("main")
+    }
+
+    pub fn channel_audio(&self, id: &str) -> (f32, bool) {
         let Ok(text) = fs::read_to_string(self.settings_path()) else {
             return (1.0, false);
         };
         let Ok(json) = serde_json::from_str::<Value>(&text) else {
             return (1.0, false);
         };
-        let channel = json.pointer("/audioChannelsData/main");
+        let channel = json.get("audioChannelsData").and_then(|data| data.get(id));
         let volume = channel
             .and_then(|channel| channel.get("volume"))
             .and_then(json_f64)
@@ -3678,6 +3684,41 @@ impl Library {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         (volume, muted)
+    }
+
+    pub fn audio_routes(&self, sources: &[&str], main_gain: f32) -> Vec<AudioRoute> {
+        let settings = fs::read_to_string(self.settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null);
+        audio_routes(&settings, sources, main_gain)
+    }
+
+    pub fn audio_mixer(&self) -> Value {
+        let settings: Value = fs::read_to_string(self.settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null);
+        let mut routing = settings["audioRouting"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let mut channels = routing
+            .get("channels")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !channels
+            .iter()
+            .any(|channel| channel["id"].as_str() == Some("main"))
+        {
+            channels.insert(0, serde_json::json!({"id":"main", "name":"Main"}));
+        }
+        routing.insert("channels".into(), Value::Array(channels));
+        serde_json::json!({
+            "audioRouting": routing,
+            "audioChannelsData": settings["audioChannelsData"].as_object().cloned().unwrap_or_default()
+        })
     }
 
     pub fn channel_muted(&self, channel: &str) -> bool {
@@ -3717,11 +3758,14 @@ impl Library {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut json = fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| Value::Object(Map::new()));
+        let mut json = match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(json) if json.is_object() => json,
+                _ => return false,
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
+            Err(_) => return false,
+        };
         let root = json.as_object_mut().expect("settings object");
         let channels = root
             .entry("audioChannelsData")
@@ -3738,7 +3782,7 @@ impl Library {
             *channel_value = Value::Object(Map::new());
         }
         edit(channel_value.as_object_mut().expect("channel"));
-        fs::write(path, json.to_string()).is_ok()
+        atomic_write(&path, json.to_string().as_bytes()).is_ok()
     }
 
     /// Replaces the text or media transition in `settings.json`.
@@ -4206,7 +4250,12 @@ fn keep_previous(path: &Path) -> Result<(), DataError> {
     if !path.is_file() {
         return Ok(());
     }
-    let Some(root) = path.parent().and_then(Path::parent) else {
+    let root = if path.file_name().is_some_and(|name| name == "settings.json") {
+        path.parent()
+    } else {
+        path.parent().and_then(Path::parent)
+    };
+    let Some(root) = root else {
         return Ok(());
     };
     if root.as_os_str().is_empty() {
