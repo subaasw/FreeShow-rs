@@ -31,7 +31,7 @@ FreeShow's named speaker IDs come from Chromium and need a native device mapping
 {"audio_devices": {"speaker_sub_<FreeShow-device-id>": "Stage Speakers"}}
 ```
 
-Keep the other app settings when adding that field. An unavailable mapped device logs an error and does not fall back to the room speakers. Audio-file speaker devices use independent playback clocks. Video sound uses GStreamer speaker sinks on its playback clock. Network audio, effects, delays, and connections that select individual hardware channels are not implemented; those destinations do not play on the default speakers.
+Keep the other app settings when adding that field. An unavailable mapped device logs an error and does not fall back to the room speakers. Audio-file speaker devices use independent playback clocks. Video sound uses GStreamer speaker sinks on its playback clock. Hardware speaker connections honor `channelIndex`/`toChannelIndex` and an explicit `fromChannelIndex`. A single selected speaker port receives a mono mix; multiple selected ports preserve the corresponding source channels. Named speaker connections without an index use port 0, as FreeShow does. Audio and video share the same channel matrix, and unmapped ports stay silent. Indices are zero-based and must be below 64; unavailable device channels fail without falling back to the room speakers. Network audio, effects, and delays are not implemented.
 
 OSC input listens on UDP port 5505, the same port FreeShow uses. `/freeshow/slide/next`, `/freeshow/slide/previous`, `/freeshow/slide/1`, `/freeshow/clear/all`, and `/freeshow/show/<id>/start` drive the open show.
 

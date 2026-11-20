@@ -8,6 +8,7 @@ publish.workspace = true
 description = "Read and write a FreeShow data folder"
 
 [dependencies]
+freeshow-core = { path = "../freeshow-core" }
 quick-xml = "0.37"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"

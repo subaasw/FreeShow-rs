@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::path::{Path, PathBuf};
+use freeshow_core::SpeakerRoute;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1954,7 +1955,7 @@ impl Session {
     }
 
     /// Physical destinations for drawer/slide audio, or the active playlist.
-    pub fn audio_routes(&self) -> Vec<(Option<String>, f32)> {
+    pub fn audio_routes(&self) -> Vec<SpeakerRoute> {
         let playlist_source = self
             .playlist_id
             .as_ref()
@@ -1969,30 +1970,42 @@ impl Session {
 
     /// Video sound belongs to the active audience output, not drawer_audio.
     /// Includes the file volume; the player's master gain stays at unity.
-    pub fn video_audio_routes(&self) -> Vec<(Option<String>, f32)> {
+    pub fn video_audio_routes(&self) -> Vec<SpeakerRoute> {
         let (output, _) = self.audience();
         let source = format!("output_win_sub_{output}");
         self.routes_for_sources(&["output_window", &source], self.video_volume as f32)
     }
 
-    fn routes_for_sources(&self, sources: &[&str], file_gain: f32) -> Vec<(Option<String>, f32)> {
+    fn routes_for_sources(&self, sources: &[&str], file_gain: f32) -> Vec<SpeakerRoute> {
         let main = if self.audio_muted { 0.0 } else { self.volume };
         let Some(root) = &self.root else {
-            return vec![(None, (main * file_gain).clamp(0.0, 1.0))];
+            return vec![SpeakerRoute::stereo(
+                None,
+                (main * file_gain).clamp(0.0, 1.0),
+            )];
         };
-        let mut destinations = std::collections::BTreeMap::<Option<String>, f32>::new();
+        let mut destinations =
+            std::collections::BTreeMap::<(Option<String>, Option<u16>, Option<u16>), f32>::new();
         for route in Library::open(root).audio_routes(sources, main) {
             let device = route
                 .device
                 .map(|id| self.audio_device_map.get(&id).cloned().unwrap_or(id));
-            *destinations.entry(device).or_default() += route.gain * file_gain;
+            *destinations
+                .entry((device, route.input_channel, route.output_channel))
+                .or_default() += route.gain * file_gain;
         }
         destinations
             .into_iter()
-            .map(|(device, gain)| (device, gain.clamp(0.0, 1.0)))
+            .map(
+                |((device, input_channel, output_channel), gain)| SpeakerRoute {
+                    device,
+                    gain: gain.clamp(0.0, 1.0),
+                    input_channel,
+                    output_channel,
+                },
+            )
             .collect()
     }
-
     fn audio_file_gain(&self) -> f32 {
         let file = self
             .playing_audio
@@ -3496,31 +3509,31 @@ mod tests {
             .audio_device_map
             .insert("speaker_sub_stage".into(), "Stage Speakers".into());
         session.video_volume = 0.4;
-        assert_eq!(session.audio_routes(), vec![(None, 0.8)]);
+        assert_eq!(session.audio_routes(), vec![SpeakerRoute::stereo(None, 0.8)]);
         assert_eq!(
             session.video_audio_routes(),
-            vec![(Some("Stage Speakers".into()), 0.2)]
+            vec![SpeakerRoute { output_channel:Some(0), ..SpeakerRoute::stereo(Some("Stage Speakers".into()), 0.2) }]
         );
         session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 0 });
-        assert_eq!(session.video_audio_routes()[0].1, 0.2);
+        assert_eq!(session.video_audio_routes()[0].gain, 0.2);
         session.apply_remote(freeshow_remote::Command::MuteChannel {
             id: "cue".into(),
             muted: true,
         });
-        assert_eq!(session.video_audio_routes()[0].1, 0.0);
+        assert_eq!(session.video_audio_routes()[0].gain, 0.0);
         session.apply_remote(freeshow_remote::Command::MuteChannel {
             id: "cue".into(),
             muted: false,
         });
-        assert_eq!(session.video_audio_routes()[0].1, 0.2);
+        assert_eq!(session.video_audio_routes()[0].gain, 0.2);
         let mut settings = settings;
         settings["outputs"]["screen"]["enabled"] = serde_json::json!(false);
         std::fs::write(root.join("settings.json"), settings.to_string()).unwrap();
-        assert_eq!(session.video_audio_routes()[0].1, 0.0);
+        assert_eq!(session.video_audio_routes()[0].gain, 0.0);
         let mut no_library = Session::empty();
         no_library.volume = 0.5;
         no_library.video_volume = 0.4;
-        assert_eq!(no_library.video_audio_routes(), vec![(None, 0.2)]);
+        assert_eq!(no_library.video_audio_routes(), vec![SpeakerRoute::stereo(None, 0.2)]);
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]
@@ -3547,25 +3560,25 @@ mod tests {
             .insert("speaker_sub_hash".into(), "Stage Speakers".into());
         assert_eq!(
             session.audio_routes(),
-            vec![(Some("Stage Speakers".into()), 0.5)]
+            vec![SpeakerRoute { output_channel:Some(0), ..SpeakerRoute::stereo(Some("Stage Speakers".into()), 0.5) }]
         );
         session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 0 });
-        assert_eq!(session.audio_routes()[0].1, 0.5);
+        assert_eq!(session.audio_routes()[0].gain, 0.5);
         session.apply_remote(freeshow_remote::Command::SetChannelVolume {
             id: "cue".into(),
             thousandths: 250,
         });
-        assert_eq!(session.audio_routes()[0].1, 0.25);
+        assert_eq!(session.audio_routes()[0].gain, 0.25);
         session.apply_remote(freeshow_remote::Command::MuteChannel {
             id: "cue".into(),
             muted: true,
         });
-        assert_eq!(session.audio_routes()[0].1, 0.0);
+        assert_eq!(session.audio_routes()[0].gain, 0.0);
         session.apply_remote(freeshow_remote::Command::MuteChannel {
             id: "cue".into(),
             muted: false,
         });
-        assert_eq!(session.audio_routes()[0].1, 0.25);
+        assert_eq!(session.audio_routes()[0].gain, 0.25);
         let mixer = session.to_snapshot().audio_mixer;
         assert_eq!(mixer["audioChannelsData"]["cue"]["volume"], 0.25);
         assert_eq!(mixer["audioRouting"]["channels"][1]["id"], "cue");
@@ -4638,7 +4651,7 @@ mod tests {
         assert!(session.present_show_id(&show_id));
         let plays = session.take_plays();
         assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3")));
-        assert!((session.audio_routes()[0].1 - 0.5).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 0.5).abs() < 0.001);
         assert!(!session.finish_media("other.mp3", true));
         assert!(session.take_plays()[0].is_none());
         assert!(session.finish_media("one.mp3", true) == false);
@@ -4994,10 +5007,10 @@ mod tests {
         assert!(session.present_show_id(&show_id));
         assert!((session.volume - 0.25).abs() < 0.001);
         assert!(!session.audio_muted);
-        assert!((session.audio_routes()[0].1 - 0.25).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 0.25).abs() < 0.001);
         session.select_slide(1);
         assert!(session.audio_muted);
-        assert_eq!(session.audio_routes()[0].1, 0.0);
+        assert_eq!(session.audio_routes()[0].gain, 0.0);
         assert!((session.volume - 0.25).abs() < 0.001);
         session.select_slide(2);
         assert!((session.volume - 0.4).abs() < 0.001);
@@ -5005,7 +5018,7 @@ mod tests {
         session.select_slide(3);
         assert!(!session.audio_muted);
         assert!((session.volume - 0.501).abs() < 0.001);
-        assert!((session.audio_routes()[0].1 - 0.501).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 0.501).abs() < 0.001);
         session.select_slide(4);
         assert_eq!(session.volume, 0.0);
         session.select_slide(4);
@@ -5696,13 +5709,13 @@ mod tests {
         let song = root.join("song.mp3");
         std::fs::write(&song, b"not a real song").unwrap();
         assert!(session.play_named(&song.to_string_lossy()));
-        assert!((session.audio_routes()[0].1 - 1.0).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 1.0).abs() < 0.001);
         let store = serde_json::json!({
             song.to_string_lossy().as_ref(): { "volume": 0.4 }
         });
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         session.volume = 0.5;
-        assert!((session.audio_routes()[0].1 - 0.2).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 0.2).abs() < 0.001);
         assert!(!session.audio_should_loop());
         let store = serde_json::json!({
             song.to_string_lossy().as_ref(): { "volume": 0.4, "loop": true }
@@ -5710,7 +5723,7 @@ mod tests {
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         assert!(session.audio_should_loop());
         assert_eq!(session.audio_span(), (0.0, 0.0));
-        assert!((session.audio_routes()[0].1 - 0.2).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 0.2).abs() < 0.001);
         let store = serde_json::json!({
             song.to_string_lossy().as_ref(): { "volume": 0.4, "loop": true, "fromTime": 2, "toTime": 9 }
         });
@@ -5722,7 +5735,7 @@ mod tests {
         });
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         assert!((session.audio_tempo() - 1.5).abs() < 0.001);
-        assert!((session.audio_routes()[0].1 - 0.2).abs() < 0.001);
+        assert!((session.audio_routes()[0].gain - 0.2).abs() < 0.001);
         let _ = std::fs::remove_dir_all(&root);
     }
 
