@@ -669,11 +669,12 @@ fn start_pending(
         Some(PendingPlay::Video(path)) => {
             stop_video(&playback.timer, &playback.video);
             let ended = path.clone();
-            match VideoPlayer::open(&path) {
+            let routes = session.borrow().video_audio_routes();
+            match VideoPlayer::open_routed(&path, &routes) {
                 Ok(player) => {
                     player.set_looping(session.borrow().media_loop);
                     player.set_muted(session.borrow().media_muted);
-                    player.set_volume(session.borrow().video_volume);
+                    player.set_volume(1.0);
                     player.set_rate(session.borrow().video_rate);
                     let (from, to) = {
                         let current = session.borrow();
@@ -782,6 +783,9 @@ fn start_plays(
     }
     if let Some(output) = playback.audio.borrow().as_ref() {
         output.set_route_gains(&session.borrow().audio_routes());
+    }
+    if let Some(player) = playback.video.borrow().as_ref() {
+        player.set_audio_routes(&session.borrow().video_audio_routes());
     }
 }
 
@@ -1087,6 +1091,7 @@ struct Launch {
     data: Option<PathBuf>,
     show: Option<PathBuf>,
     list_audio_devices: bool,
+    list_video_audio_devices: bool,
 }
 
 fn launch_args() -> Launch {
@@ -1094,6 +1099,7 @@ fn launch_args() -> Launch {
         data: None,
         show: None,
         list_audio_devices: false,
+        list_video_audio_devices: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -1101,6 +1107,7 @@ fn launch_args() -> Launch {
             "--data" => launch.data = args.next().map(PathBuf::from),
             "--show" => launch.show = args.next().map(PathBuf::from),
             "--list-audio-devices" => launch.list_audio_devices = true,
+            "--list-video-audio-devices" => launch.list_video_audio_devices = true,
             _ => {}
         }
     }
@@ -1109,6 +1116,12 @@ fn launch_args() -> Launch {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launch = launch_args();
+    if launch.list_video_audio_devices {
+        for device in freeshow_media::video_output_devices() {
+            println!("{device}");
+        }
+        return Ok(());
+    }
     if launch.list_audio_devices {
         for device in freeshow_media::output_devices() {
             println!("{device}");
@@ -1682,11 +1695,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 DrawerAction::PlayVideo(path) => {
                     stop_video(&video_timer, &video_player);
-                    match VideoPlayer::open(&path) {
+                    let routes = session.borrow().video_audio_routes();
+                    match VideoPlayer::open_routed(&path, &routes) {
                         Ok(player) => {
                             player.set_looping(session.borrow().media_loop);
                             player.set_muted(session.borrow().media_muted);
-                            player.set_volume(session.borrow().video_volume);
+                            player.set_volume(1.0);
                             player.set_rate(session.borrow().video_rate);
                             let (from, to) = {
                                 let current = session.borrow();
@@ -1792,12 +1806,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let session = Rc::clone(&session);
         let audio_out = Rc::clone(&audio_out);
+        let video_player = Rc::clone(&video_player);
         control.on_set_volume(move |value| {
             let volume = (value as f32 / 100.0).clamp(0.0, 1.0);
             session.borrow_mut().set_channel_volume("main", volume);
             let routes = session.borrow().audio_routes();
             if let Some(output) = audio_out.borrow().as_ref() {
                 output.set_route_gains(&routes);
+            }
+            if let Some(player) = video_player.borrow().as_ref() {
+                player.set_audio_routes(&session.borrow().video_audio_routes());
             }
         });
     }

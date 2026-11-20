@@ -1955,11 +1955,6 @@ impl Session {
 
     /// Physical destinations for drawer/slide audio, or the active playlist.
     pub fn audio_routes(&self) -> Vec<(Option<String>, f32)> {
-        let main = if self.audio_muted { 0.0 } else { self.volume };
-        let file_gain = self.audio_file_gain();
-        let Some(root) = &self.root else {
-            return vec![(None, main * file_gain)];
-        };
         let playlist_source = self
             .playlist_id
             .as_ref()
@@ -1969,8 +1964,24 @@ impl Session {
             Some(id) => vec![id, "playlists_default"],
             None => vec!["drawer_audio"],
         };
+        self.routes_for_sources(&sources, self.audio_file_gain())
+    }
+
+    /// Video sound belongs to the active audience output, not drawer_audio.
+    /// Includes the file volume; the player's master gain stays at unity.
+    pub fn video_audio_routes(&self) -> Vec<(Option<String>, f32)> {
+        let (output, _) = self.audience();
+        let source = format!("output_win_sub_{output}");
+        self.routes_for_sources(&["output_window", &source], self.video_volume as f32)
+    }
+
+    fn routes_for_sources(&self, sources: &[&str], file_gain: f32) -> Vec<(Option<String>, f32)> {
+        let main = if self.audio_muted { 0.0 } else { self.volume };
+        let Some(root) = &self.root else {
+            return vec![(None, (main * file_gain).clamp(0.0, 1.0))];
+        };
         let mut destinations = std::collections::BTreeMap::<Option<String>, f32>::new();
-        for route in Library::open(root).audio_routes(&sources, main) {
+        for route in Library::open(root).audio_routes(sources, main) {
             let device = route
                 .device
                 .map(|id| self.audio_device_map.get(&id).cloned().unwrap_or(id));
@@ -3461,6 +3472,57 @@ fn remote_book(book: OutlinedBook) -> freeshow_remote::RemoteBook {
 mod tests {
     use super::*;
 
+    #[test]
+    fn video_routes_use_the_audience_output_and_keep_file_gain_when_main_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-video-routing-session-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = serde_json::json!({
+            "outputs":{"screen":{"name":"Audience", "active":true, "enabled":true}},
+            "audioRouting":{"channels":[{"id":"main"},{"id":"cue"}], "connections":[
+                {"from":"drawer_audio", "to":"main"},
+                {"from":"main", "to":"speaker_default"},
+                {"from":"output_win_sub_screen", "to":"cue"},
+                {"from":"cue", "to":"speaker_sub_stage"}
+            ]},
+            "audioChannelsData":{"main":{"volume":0.8}, "cue":{"volume":0.5}}
+        });
+        std::fs::write(root.join("settings.json"), settings.to_string()).unwrap();
+        let mut session = Session::open(root.clone());
+        session
+            .audio_device_map
+            .insert("speaker_sub_stage".into(), "Stage Speakers".into());
+        session.video_volume = 0.4;
+        assert_eq!(session.audio_routes(), vec![(None, 0.8)]);
+        assert_eq!(
+            session.video_audio_routes(),
+            vec![(Some("Stage Speakers".into()), 0.2)]
+        );
+        session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 0 });
+        assert_eq!(session.video_audio_routes()[0].1, 0.2);
+        session.apply_remote(freeshow_remote::Command::MuteChannel {
+            id: "cue".into(),
+            muted: true,
+        });
+        assert_eq!(session.video_audio_routes()[0].1, 0.0);
+        session.apply_remote(freeshow_remote::Command::MuteChannel {
+            id: "cue".into(),
+            muted: false,
+        });
+        assert_eq!(session.video_audio_routes()[0].1, 0.2);
+        let mut settings = settings;
+        settings["outputs"]["screen"]["enabled"] = serde_json::json!(false);
+        std::fs::write(root.join("settings.json"), settings.to_string()).unwrap();
+        assert_eq!(session.video_audio_routes()[0].1, 0.0);
+        let mut no_library = Session::empty();
+        no_library.volume = 0.5;
+        no_library.video_volume = 0.4;
+        assert_eq!(no_library.video_audio_routes(), vec![(None, 0.2)]);
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn routed_audio_obeys_remote_channel_gain_without_leaking_to_main() {
         let root =

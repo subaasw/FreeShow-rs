@@ -18,6 +18,7 @@ mod gst_player {
     pub struct VideoPlayer {
         pipeline: gst::Pipeline,
         sink: AppSink,
+        audio: AudioBranch,
         looping: std::cell::Cell<bool>,
         rewound: std::cell::Cell<bool>,
         rate: std::cell::Cell<f64>,
@@ -29,11 +30,21 @@ mod gst_player {
 
     impl VideoPlayer {
         pub fn open(path: &Path) -> Result<Self, MediaError> {
+            Self::open_routed(path, &[(None, 1.0)])
+        }
+
+        pub fn open_routed(
+            path: &Path,
+            routes: &[(Option<String>, f32)],
+        ) -> Result<Self, MediaError> {
             let location = path.to_string_lossy().replace('"', "\\\"");
-            Self::from_launch(&format!(
-                "filesrc location=\"{location}\" ! decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
-                rgba_caps()
-            ))
+            Self::from_launch_routed(
+                &format!(
+                    "filesrc location=\"{location}\" ! decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
+                    rgba_caps()
+                ),
+                routes,
+            )
         }
 
         pub fn open_camera(name: &str) -> Result<Self, MediaError> {
@@ -55,7 +66,25 @@ mod gst_player {
         }
 
         pub fn from_launch(description: &str) -> Result<Self, MediaError> {
-            gst::init().map_err(|err| MediaError::Video(err.to_string()))?;
+            Self::from_launch_routed(description, &[(None, 1.0)])
+        }
+
+        fn from_launch_routed(
+            description: &str,
+            routes: &[(Option<String>, f32)],
+        ) -> Result<Self, MediaError> {
+            gst::init().map_err(video_error)?;
+            let mut sinks = Vec::new();
+            for (device, gain) in routes {
+                sinks.push((device.clone(), *gain, speaker_sink(device.as_deref())?));
+            }
+            Self::from_launch_with_audio(description, AudioBranch::new(sinks)?)
+        }
+
+        fn from_launch_with_audio(
+            description: &str,
+            audio: AudioBranch,
+        ) -> Result<Self, MediaError> {
             let element = gst::parse::launch(description)
                 .map_err(|err| MediaError::Video(err.to_string()))?;
             let pipeline = element
@@ -67,13 +96,14 @@ mod gst_player {
             let sink = appsink
                 .dynamic_cast::<AppSink>()
                 .map_err(|_| MediaError::Video("sink is not an appsink".into()))?;
-            attach_audio(&pipeline);
+            attach_audio(&pipeline, &audio.bin);
             pipeline
                 .set_state(gst::State::Playing)
                 .map_err(|err| MediaError::Video(err.to_string()))?;
             Ok(Self {
                 pipeline,
                 sink,
+                audio,
                 looping: std::cell::Cell::new(true),
                 // Appsink can report EOS before asynchronous startup finishes.
                 // Wait for an initial frame before trying to loop the source.
@@ -101,15 +131,31 @@ mod gst_player {
         }
 
         fn apply_gain(&self) {
-            let Some(volume) = self.pipeline.by_name("vol") else {
-                return;
+            let level = if self.muted.get() {
+                0.0
+            } else {
+                self.gain.get()
             };
-            let level = if self.muted.get() { 0.0 } else { self.gain.get() };
-            volume.set_property("volume", level);
+            // This element exists before decodebin discovers the audio pad, so
+            // controls set during startup are retained when audio is linked.
+            self.audio.volume.set_property("volume", level);
+        }
+
+        pub fn set_audio_routes(&self, routes: &[(Option<String>, f32)]) {
+            for (device, volume) in &self.audio.routes {
+                let gain = routes
+                    .iter()
+                    .find(|(name, _)| name == device)
+                    .map(|(_, gain)| *gain)
+                    .unwrap_or(0.0);
+                volume.set_property("volume", f64::from(gain.clamp(0.0, 1.0)));
+            }
         }
 
         pub fn output_volume(&self) -> Option<f64> {
-            self.pipeline.by_name("vol").map(|volume| volume.property("volume"))
+            self.pipeline
+                .by_name("vol")
+                .map(|volume| volume.property("volume"))
         }
 
         pub fn set_paused(&self, paused: bool) {
@@ -138,7 +184,8 @@ mod gst_player {
         pub fn set_span(&self, from_seconds: f64, to_seconds: f64) {
             let from = from_seconds.max(0.0);
             self.start.set(from);
-            self.end.set(if to_seconds > from { to_seconds } else { 0.0 });
+            self.end
+                .set(if to_seconds > from { to_seconds } else { 0.0 });
             let _ = self.seek_seconds(from);
         }
 
@@ -238,52 +285,292 @@ mod gst_player {
         names
     }
 
-    fn attach_audio(pipeline: &gst::Pipeline) {
-        let Some(decode) = pipeline.by_name("dec") else {
-            return;
+    fn video_error(error: impl std::fmt::Display) -> MediaError {
+        MediaError::Video(error.to_string())
+    }
+
+    fn speaker_sink(device: Option<&str>) -> Result<gst::Element, MediaError> {
+        let Some(name) = device else {
+            return gst::ElementFactory::make("autoaudiosink")
+                .build()
+                .map_err(video_error);
         };
-        let pipeline = pipeline.clone();
-        decode.connect_pad_added(move |_decode, pad| {
-            let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-            let Some(structure) = caps.structure(0) else {
-                return;
-            };
-            if !structure.name().starts_with("audio/") || pipeline.by_name("vol").is_some() {
-                return;
+        #[cfg(target_os = "macos")]
+        {
+            let (id, _) = macos_speaker_devices()?
+                .into_iter()
+                .find(|(_, label)| label == name)
+                .ok_or_else(|| video_error(format!("no video audio output device named {name}")))?;
+            gst::ElementFactory::make("osxaudiosink")
+                .property("device", i32::try_from(id).map_err(video_error)?)
+                .build()
+                .map_err(video_error)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            speaker_devices()?
+                .into_iter()
+                .find(|device| device.display_name() == name)
+                .ok_or_else(|| video_error(format!("no video audio output device named {name}")))?
+                .create_element(None)
+                .map_err(video_error)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_speaker_devices() -> Result<Vec<(u32, String)>, MediaError> {
+        use coreaudio::audio_unit::{Scope, macos_helpers};
+        // GStreamer's macOS provider can block discovery in a headless process.
+        // Query output metadata through the CoreAudio bindings CPAL already
+        // uses, then pass the native device ID to osxaudiosink.
+        let mut devices = Vec::new();
+        for id in macos_helpers::get_audio_device_ids().map_err(video_error)? {
+            if macos_helpers::get_audio_device_supports_scope(id, Scope::Output).unwrap_or(false) {
+                if let Ok(name) = macos_helpers::get_device_name(id) {
+                    devices.push((id, name));
+                }
             }
-            let Ok(queue) = gst::ElementFactory::make("queue").build() else {
-                return;
-            };
-            let Ok(convert) = gst::ElementFactory::make("audioconvert").build() else {
-                return;
-            };
-            let Ok(resample) = gst::ElementFactory::make("audioresample").build() else {
-                return;
-            };
-            let Ok(volume) = gst::ElementFactory::make("volume")
+        }
+        Ok(devices)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn speaker_devices() -> Result<Vec<gst::Device>, MediaError> {
+        let monitor = gst::DeviceMonitor::new();
+        monitor
+            .add_filter(Some("Audio/Sink"), None)
+            .ok_or_else(|| video_error("could not enumerate audio sinks"))?;
+        monitor.start().map_err(video_error)?;
+        let devices = monitor.devices();
+        monitor.stop();
+        Ok(devices)
+    }
+
+    pub fn video_output_devices() -> Vec<String> {
+        if gst::init().is_err() {
+            return Vec::new();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos_speaker_devices()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            speaker_devices()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|device| device.display_name().to_string())
+                .collect()
+        }
+    }
+
+    struct AudioBranch {
+        bin: gst::Bin,
+        volume: gst::Element,
+        routes: Vec<(Option<String>, gst::Element)>,
+    }
+
+    impl AudioBranch {
+        fn new(mut sinks: Vec<(Option<String>, f32, gst::Element)>) -> Result<Self, MediaError> {
+            let bin = gst::Bin::new();
+            let queue = gst::ElementFactory::make("queue")
+                .build()
+                .map_err(video_error)?;
+            let convert = gst::ElementFactory::make("audioconvert")
+                .build()
+                .map_err(video_error)?;
+            let volume = gst::ElementFactory::make("volume")
                 .name("vol")
                 .property("volume", 0.0_f64)
                 .build()
-            else {
-                return;
-            };
-            let Ok(sink) = gst::ElementFactory::make("autoaudiosink").build() else {
-                return;
-            };
-            if pipeline
-                .add_many([&queue, &convert, &resample, &volume, &sink])
-                .is_err()
+                .map_err(video_error)?;
+            let tee = gst::ElementFactory::make("tee")
+                .build()
+                .map_err(video_error)?;
+            bin.add_many([&queue, &convert, &volume, &tee])
+                .map_err(video_error)?;
+            gst::Element::link_many([&queue, &convert, &volume, &tee]).map_err(video_error)?;
+            let sinkpad = queue
+                .static_pad("sink")
+                .ok_or_else(|| video_error("audio queue has no sink"))?;
+            let ghost = gst::GhostPad::with_target(&sinkpad).map_err(video_error)?;
+            bin.add_pad(&ghost).map_err(video_error)?;
+            if sinks.is_empty() {
+                // Consume disconnected audio so video, seek, and end actions keep
+                // running. Never substitute the default room speakers.
+                sinks.push((
+                    None,
+                    0.0,
+                    gst::ElementFactory::make("fakesink")
+                        .property("sync", true)
+                        .build()
+                        .map_err(video_error)?,
+                ));
+            }
+            let mut routes = Vec::new();
+            for (device, gain, sink) in sinks {
+                let queue = gst::ElementFactory::make("queue")
+                    .build()
+                    .map_err(video_error)?;
+                let convert = gst::ElementFactory::make("audioconvert")
+                    .build()
+                    .map_err(video_error)?;
+                let resample = gst::ElementFactory::make("audioresample")
+                    .build()
+                    .map_err(video_error)?;
+                let gain_element = gst::ElementFactory::make("volume")
+                    .property("volume", f64::from(gain.clamp(0.0, 1.0)))
+                    .build()
+                    .map_err(video_error)?;
+                bin.add_many([&queue, &convert, &resample, &gain_element, &sink])
+                    .map_err(video_error)?;
+                gst::Element::link_many([&tee, &queue, &convert, &resample, &gain_element, &sink])
+                    .map_err(video_error)?;
+                routes.push((device, gain_element));
+            }
+            Ok(Self {
+                bin,
+                volume,
+                routes,
+            })
+        }
+    }
+
+    fn attach_audio(pipeline: &gst::Pipeline, bin: &gst::Bin) {
+        let Some(decode) = pipeline.by_name("dec") else {
+            return;
+        };
+        let pipeline = pipeline.downgrade();
+        let bin = bin.clone();
+        decode.connect_pad_added(move |_decode, pad| {
+            let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+            if !caps
+                .structure(0)
+                .is_some_and(|structure| structure.name().starts_with("audio/"))
+                || bin.parent().is_some()
             {
                 return;
             }
-            let _ = gst::Element::link_many([&queue, &convert, &resample, &volume, &sink]);
-            for element in [&queue, &convert, &resample, &volume, &sink] {
-                let _ = element.sync_state_with_parent();
-            }
-            if let Some(sinkpad) = queue.static_pad("sink") {
-                let _ = pad.link(&sinkpad);
+            let Some(pipeline) = pipeline.upgrade() else {
+                return;
+            };
+            let linked = (|| {
+                pipeline.add(&bin).map_err(video_error)?;
+                let sinkpad = bin
+                    .static_pad("sink")
+                    .ok_or_else(|| video_error("audio bin has no sink"))?;
+                pad.link(&sinkpad).map_err(video_error)?;
+                bin.sync_state_with_parent().map_err(video_error)
+            })();
+            if let Err(error) = linked {
+                eprintln!("video audio routing: {error}");
             }
         });
+    }
+
+    #[cfg(test)]
+    mod audio_tests {
+        use super::*;
+
+        fn capture_sink() -> AppSink {
+            let sink = AppSink::builder().build();
+            sink.set_caps(Some(
+                &gst::Caps::builder("audio/x-raw")
+                    .field("format", "F32LE")
+                    .field("channels", 1_i32)
+                    .field("rate", 8000_i32)
+                    .field("layout", "interleaved")
+                    .build(),
+            ));
+            sink.set_property("sync", false);
+            sink.set_property("async", false);
+            sink.set_property("max-buffers", 4_u32);
+            sink.set_property("drop", true);
+            sink
+        }
+
+        fn expect_amplitude(sink: &AppSink, expected: f32) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut last = None;
+            while std::time::Instant::now() < deadline {
+                if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
+                    let map = sample.buffer().unwrap().map_readable().unwrap();
+                    let amplitude = map
+                        .as_slice()
+                        .chunks_exact(4)
+                        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).abs())
+                        .fold(0.0_f32, f32::max);
+                    last = Some(amplitude);
+                    if (amplitude - expected).abs() < 0.005 {
+                        return;
+                    }
+                }
+            }
+            panic!("expected audio amplitude {expected}, received {last:?}");
+        }
+
+        #[test]
+        fn decoded_audio_only_reaches_its_routed_sinks_and_controls_keep_their_gain() {
+            gst::init().unwrap();
+            let room = capture_sink();
+            let stage = capture_sink();
+            let audio = AudioBranch::new(vec![
+                (None, 0.0, room.clone().upcast()),
+                (Some("Stage".into()), 0.25, stage.clone().upcast()),
+            ])
+            .unwrap();
+            let player = VideoPlayer::from_launch_with_audio(
+                "videotestsrc is-live=true ! video/x-raw,width=2,height=2,framerate=5/1 ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink max-buffers=1 drop=true sync=false audiotestsrc is-live=true wave=square volume=1 samplesperbuffer=64 ! audio/x-raw,format=F32LE,channels=1,rate=8000 ! decodebin name=dec", audio
+            ).unwrap();
+            // Set controls immediately, before decodebin necessarily has a pad.
+            player.set_muted(false);
+            player.set_volume(1.0);
+            expect_amplitude(&stage, 0.25);
+            expect_amplitude(&room, 0.0);
+            player.set_audio_routes(&[(None, 0.5), (Some("Stage".into()), 0.1)]);
+            player.set_volume(0.4);
+            expect_amplitude(&room, 0.2);
+            expect_amplitude(&stage, 0.04);
+            player.set_muted(true);
+            expect_amplitude(&room, 0.0);
+            expect_amplitude(&stage, 0.0);
+            player.set_muted(false);
+            expect_amplitude(&stage, 0.04);
+            player.set_audio_routes(&[]);
+            expect_amplitude(&room, 0.0);
+            expect_amplitude(&stage, 0.0);
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn named_coreaudio_sinks_keep_the_requested_device_and_reject_unknown_names() {
+            gst::init().unwrap();
+            if let Some((id, name)) = macos_speaker_devices().unwrap().first() {
+                let sink = speaker_sink(Some(name)).unwrap();
+                assert_eq!(sink.factory().unwrap().name(), "osxaudiosink");
+                assert_eq!(sink.property::<i32>("device"), i32::try_from(*id).unwrap());
+            }
+            assert!(speaker_sink(Some("freeshow-nonexistent-speaker-46f7c81d")).is_err());
+        }
+
+        #[test]
+        fn a_disconnected_source_consumes_audio_without_opening_speakers() {
+            gst::init().unwrap();
+            let audio = AudioBranch::new(Vec::new()).unwrap();
+            let factories: Vec<_> = audio
+                .bin
+                .children()
+                .iter()
+                .filter_map(|element| element.factory().map(|factory| factory.name().to_string()))
+                .collect();
+            assert!(factories.iter().any(|name| name == "fakesink"));
+            assert!(!factories.iter().any(|name| name == "autoaudiosink"));
+            assert_eq!(audio.routes[0].1.property::<f64>("volume"), 0.0);
+        }
     }
 
     fn clock_seconds(time: Option<gst::ClockTime>) -> f64 {
@@ -299,7 +586,7 @@ mod gst_player {
 }
 
 #[cfg(feature = "gst")]
-pub use gst_player::{VideoPlayer, cameras};
+pub use gst_player::{VideoPlayer, cameras, video_output_devices};
 
 #[cfg(not(feature = "gst"))]
 pub struct VideoPlayer;
@@ -311,6 +598,12 @@ impl VideoPlayer {
             "video decode needs GStreamer; rebuild with the gst feature".into(),
         ))
     }
+
+    pub fn open_routed(path: &Path, _routes: &[(Option<String>, f32)]) -> Result<Self, MediaError> {
+        Self::open(path)
+    }
+
+    pub fn set_audio_routes(&self, _routes: &[(Option<String>, f32)]) {}
 
     pub fn open_camera(_name: &str) -> Result<Self, MediaError> {
         Err(MediaError::Video(
@@ -360,6 +653,11 @@ pub fn cameras() -> Vec<String> {
     Vec::new()
 }
 
+#[cfg(not(feature = "gst"))]
+pub fn video_output_devices() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(all(test, feature = "gst"))]
 mod tests {
     use gstreamer as gst;
@@ -405,7 +703,8 @@ mod tests {
     #[test]
     fn a_finished_clip_plays_again_when_looping() {
         gst::init().expect("gstreamer");
-        let path = std::env::temp_dir().join(format!("freeshow-rust-loop-{}.mkv", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("freeshow-rust-loop-{}.mkv", std::process::id()));
         let location = path.to_string_lossy().replace('"', "");
         let writer = gst::parse::launch(&format!(
             "videotestsrc num-buffers=3 pattern=red ! videoconvert ! avenc_mjpeg ! matroskamux ! filesink location=\"{location}\""
@@ -456,7 +755,8 @@ mod tests {
     #[test]
     fn a_clip_with_sound_starts_silent() {
         gst::init().expect("gstreamer");
-        let path = std::env::temp_dir().join(format!("freeshow-rust-mute-{}.wav", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("freeshow-rust-mute-{}.wav", std::process::id()));
         let location = path.to_string_lossy().replace('"', "");
         let writer = gst::parse::launch(&format!(
             "audiotestsrc num-buffers=8 ! audioconvert ! wavenc ! filesink location=\"{location}\""

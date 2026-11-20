@@ -35,7 +35,8 @@ pub fn audio_routes(settings: &Value, sources: &[&str], main_gain: f32) -> Vec<A
                     .find(|channel| channel["id"].as_str() == Some(id))
             })
             .and_then(|channel| channel["outputLink"].as_str())
-            .or_else(|| id.strip_prefix("channel_"));
+            .or_else(|| id.strip_prefix("channel_"))
+            .or_else(|| id.strip_prefix("output_win_sub_"));
         if linked
             .is_some_and(|output| settings["outputs"][output]["enabled"].as_bool() == Some(false))
         {

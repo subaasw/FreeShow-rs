@@ -1880,6 +1880,7 @@ dependencies = [
 name = "freeshow-media"
 version = "0.1.0"
 dependencies = [
+ "coreaudio-rs",
  "cpal",
  "freeshow-output",
  "gstreamer",

@@ -16,7 +16,7 @@ GPL-3.0-only.
   stage layouts, media, output/stage windows, and the phone remote.
 - `PARITY.md` is the detailed, feature-by-feature status. It is the source of
   truth for what is done, partial, or not-yet.
-- The largest remaining gaps are video/network audio routing, deeper output
+- The largest remaining gaps are network/hardware-channel audio routing, deeper output
   and stage customization, importer media, and packaging.
 
 ## Priorities
@@ -65,7 +65,8 @@ the show or reveals lyrics until the password is accepted.
 
 - [x] Read `audioChannelsData`, outputs, and routing from `settings.json`.
 - [x] Route drawer, slide audio, and playlists through their stored channels to speakers.
-- [ ] Route video audio, network sinks, and individual hardware channels.
+- [x] Route video sound through the active audience output's mixer channels.
+- [ ] Route network sinks and individual hardware channels.
 - [x] Keep the main volume and mute controls working for paths through Main.
 - [x] Remote channel list, per-channel volume, and independent mute.
 
