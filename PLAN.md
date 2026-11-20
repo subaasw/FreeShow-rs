@@ -67,7 +67,9 @@ the show or reveals lyrics until the password is accepted.
 - [x] Route drawer, slide audio, and playlists through their stored channels to speakers.
 - [x] Route video sound through the active audience output's mixer channels.
 - [x] Route individual hardware channels for audio files and video.
-- [ ] Route network sinks.
+- [x] Feed the existing NDI and RTMP senders from saved stereo network routes.
+- [ ] Remaining network transports (OMT, WebRTC, Icecast), NDI groups, and
+      multiple independent network pictures.
 - [x] Keep the main volume and mute controls working for paths through Main.
 - [x] Remote channel list, per-channel volume, and independent mute.
 

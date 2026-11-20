@@ -15,8 +15,7 @@ use freeshow_ai::SlideAssist;
 use freeshow_churchapps::ContentSource;
 use freeshow_cloud::CloudBackup;
 use freeshow_core::{AppSettings, Rgb, ThemePalette};
-use freeshow_media::{AudioOutput, VideoPlayer};
-use freeshow_ndi::VideoSend;
+use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
 use freeshow_obs::ObsControl;
 use freeshow_output::{Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, clear_frame};
 use freeshow_pco::PlanSource;
@@ -549,10 +548,10 @@ fn publish_audience(slot: &FrameSlot, frame: Frame) {
     slot.publish(frame);
 }
 
+static NDI: std::sync::OnceLock<freeshow_ndi::NdiSender> = std::sync::OnceLock::new();
+
 fn ndi() -> &'static freeshow_ndi::NdiSender {
-    use std::sync::OnceLock;
-    static NDI: OnceLock<freeshow_ndi::NdiSender> = OnceLock::new();
-    NDI.get_or_init(|| freeshow_ndi::NdiOutput::default().open(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+    NDI.get_or_init(|| freeshow_ndi::NdiSender::disabled(OUTPUT_WIDTH, OUTPUT_HEIGHT))
 }
 
 fn fade_into(
@@ -656,11 +655,19 @@ fn start_pending(
                     current.audio_tempo(),
                 )
             };
-            match AudioOutput::play_file_routed(&path, &routes) {
+            let network_routes = session.borrow().audio_network_routes();
+            match AudioOutput::play_file_configured(
+                &path,
+                &routes,
+                &network_routes,
+                &AudioPlaybackOptions {
+                    looping,
+                    from_seconds: from,
+                    to_seconds: to,
+                    rate: tempo,
+                },
+            ) {
                 Ok(output) => {
-                    output.set_looping(looping);
-                    output.set_span(from, to);
-                    output.set_rate(tempo);
                     *playback.audio.borrow_mut() = Some(output);
                 }
                 Err(err) => tracing::error!("could not play audio: {err}"),
@@ -670,7 +677,8 @@ fn start_pending(
             stop_video(&playback.timer, &playback.video);
             let ended = path.clone();
             let routes = session.borrow().video_audio_routes();
-            match VideoPlayer::open_routed(&path, &routes) {
+            let network_routes = session.borrow().video_network_routes();
+            match VideoPlayer::open_with_network(&path, &routes, &network_routes) {
                 Ok(player) => {
                     player.set_looping(session.borrow().media_loop);
                     player.set_muted(session.borrow().media_muted);
@@ -783,9 +791,11 @@ fn start_plays(
     }
     if let Some(output) = playback.audio.borrow().as_ref() {
         output.set_route_gains(&session.borrow().audio_routes());
+        output.set_network_routes(&session.borrow().audio_network_routes());
     }
     if let Some(player) = playback.video.borrow().as_ref() {
         player.set_audio_routes(&session.borrow().video_audio_routes());
+        player.set_network_routes(&session.borrow().video_network_routes());
     }
 }
 
@@ -1187,6 +1197,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
+    let ndi_sender = session
+        .ndi_output()
+        .map(|(id, name)| {
+            freeshow_ndi::NdiSender::open_routed(&name, OUTPUT_WIDTH, OUTPUT_HEIGHT, &id)
+        })
+        .unwrap_or_else(|| freeshow_ndi::NdiSender::disabled(OUTPUT_WIDTH, OUTPUT_HEIGHT));
+    let _ = NDI.set(ndi_sender);
     session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show
@@ -1574,6 +1591,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             OUTPUT_WIDTH,
                             OUTPUT_HEIGHT,
                         );
+                        if current.recording {
+                            let frame = last_output.borrow();
+                            freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+                        }
                     }
                     5 => {
                         let Some(root) = current.root.clone() else {
@@ -1683,11 +1704,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             current.audio_tempo(),
                         )
                     };
-                    match AudioOutput::play_file_routed(&path, &routes) {
+                    let network_routes = session.borrow().audio_network_routes();
+                    match AudioOutput::play_file_configured(
+                        &path,
+                        &routes,
+                        &network_routes,
+                        &AudioPlaybackOptions {
+                            looping,
+                            from_seconds: from,
+                            to_seconds: to,
+                            rate: tempo,
+                        },
+                    ) {
                         Ok(output) => {
-                            output.set_looping(looping);
-                            output.set_span(from, to);
-                            output.set_rate(tempo);
                             *audio_out.borrow_mut() = Some(output);
                         }
                         Err(err) => tracing::error!("could not play audio: {err}"),
@@ -1696,7 +1725,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DrawerAction::PlayVideo(path) => {
                     stop_video(&video_timer, &video_player);
                     let routes = session.borrow().video_audio_routes();
-                    match VideoPlayer::open_routed(&path, &routes) {
+                    let network_routes = session.borrow().video_network_routes();
+                    match VideoPlayer::open_with_network(&path, &routes, &network_routes) {
                         Ok(player) => {
                             player.set_looping(session.borrow().media_loop);
                             player.set_muted(session.borrow().media_muted);
@@ -1813,9 +1843,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let routes = session.borrow().audio_routes();
             if let Some(output) = audio_out.borrow().as_ref() {
                 output.set_route_gains(&routes);
+                output.set_network_routes(&session.borrow().audio_network_routes());
             }
             if let Some(player) = video_player.borrow().as_ref() {
                 player.set_audio_routes(&session.borrow().video_audio_routes());
+                player.set_network_routes(&session.borrow().video_network_routes());
             }
         });
     }
@@ -2037,7 +2069,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(url) = std::env::var("FREESHOW_RTMP")
         && !url.trim().is_empty()
     {
-        let _ = freeshow_record::ServiceCapture.start_rtmp(&url, OUTPUT_WIDTH, OUTPUT_HEIGHT);
+        let output_id = session
+            .borrow()
+            .network_output("rtmp")
+            .unwrap_or_else(|| "default".into());
+        let _ = freeshow_record::ServiceCapture.start_rtmp_routed(
+            &url, OUTPUT_WIDTH, OUTPUT_HEIGHT, &output_id,
+        );
+        let frame = last_output.borrow();
+        freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
     }
     let remote_session = Rc::clone(&session);
     let remote_ui = control.as_weak();
@@ -2264,6 +2304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     place(control.window(), 40, 40);
     tracing::info!("control window ready");
-    control.run()?;
+    let result = control.run();
+    freeshow_record::ServiceCapture.stop_all();
+    result?;
     Ok(())
 }

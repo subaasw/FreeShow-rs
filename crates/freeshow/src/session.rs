@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::path::{Path, PathBuf};
-use freeshow_core::SpeakerRoute;
+use freeshow_core::{NetworkRoute, SpeakerRoute};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1956,26 +1956,100 @@ impl Session {
 
     /// Physical destinations for drawer/slide audio, or the active playlist.
     pub fn audio_routes(&self) -> Vec<SpeakerRoute> {
-        let playlist_source = self
+        let sources = self.audio_sources();
+        self.routes_for_sources(
+            &sources.iter().map(String::as_str).collect::<Vec<_>>(),
+            self.audio_file_gain(),
+        )
+    }
+
+    fn audio_sources(&self) -> Vec<String> {
+        if let Some(id) = self
             .playlist_id
             .as_ref()
             .filter(|_| self.effect_playing.is_none())
-            .map(|id| format!("playlist_sub_{id}"));
-        let sources = match playlist_source.as_deref() {
-            Some(id) => vec![id, "playlists_default"],
-            None => vec!["drawer_audio"],
-        };
-        self.routes_for_sources(&sources, self.audio_file_gain())
+        {
+            vec![format!("playlist_sub_{id}"), "playlists_default".into()]
+        } else {
+            vec!["drawer_audio".into()]
+        }
     }
 
-    /// Video sound belongs to the active audience output, not drawer_audio.
-    /// Includes the file volume; the player's master gain stays at unity.
     pub fn video_audio_routes(&self) -> Vec<SpeakerRoute> {
         let (output, _) = self.audience();
-        let source = format!("output_win_sub_{output}");
-        self.routes_for_sources(&["output_window", &source], self.video_volume as f32)
+        self.routes_for_sources(
+            &["output_window", &format!("output_win_sub_{output}")],
+            self.video_volume as f32,
+        )
     }
 
+    pub fn audio_network_routes(&self) -> Vec<NetworkRoute> {
+        let sources = self.audio_sources();
+        self.network_routes(
+            &sources.iter().map(String::as_str).collect::<Vec<_>>(),
+            self.audio_file_gain(),
+        )
+    }
+
+    pub fn video_network_routes(&self) -> Vec<NetworkRoute> {
+        let (output, _) = self.audience();
+        self.network_routes(
+            &["output_window", &format!("output_win_sub_{output}")],
+            self.video_volume as f32,
+        )
+    }
+
+    fn network_routes(&self, sources: &[&str], file_gain: f32) -> Vec<NetworkRoute> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        let main = if self.audio_muted { 0.0 } else { self.volume };
+        Library::open(root)
+            .network_audio_routes(sources, main)
+            .into_iter()
+            .map(|mut route| {
+                let gain = route.gain * file_gain;
+                route.gain = if gain.is_finite() {
+                    gain.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                route
+            })
+            .collect()
+    }
+
+    pub fn network_output(&self, kind: &str) -> Option<String> {
+        self.root
+            .as_ref()
+            .and_then(|root| Library::open(root).network_output(kind))
+    }
+
+    pub fn ndi_output(&self) -> Option<(String, String)> {
+        let (id, output) = self
+            .root
+            .as_ref()
+            .and_then(|root| Library::open(root).network_output_settings("ndi"))?;
+        let groups = &output["ndiData"]["groups"];
+        if !groups.is_null() && groups.as_str() != Some("") {
+            // The installed ndisink exposes no groups property. Do not publish
+            // a grouped source to the default discovery group instead.
+            tracing::warn!("grouped NDI output is not supported; sender disabled");
+            return None;
+        }
+        let valid = |value: &serde_json::Value| {
+            value
+                .as_str()
+                .filter(|name| !name.is_empty() && !name.contains('\0'))
+                .map(str::to_string)
+        };
+        let name = valid(&output["ndiData"]["name"]).unwrap_or_else(|| {
+            valid(&output["name"])
+                .map(|name| format!("FreeShow NDI - {name}"))
+                .unwrap_or_else(|| "FreeShow NDI".into())
+        });
+        Some((id, name))
+    }
     fn routes_for_sources(&self, sources: &[&str], file_gain: f32) -> Vec<SpeakerRoute> {
         let main = if self.audio_muted { 0.0 } else { self.volume };
         let Some(root) = &self.root else {
@@ -3485,6 +3559,72 @@ fn remote_book(book: OutlinedBook) -> freeshow_remote::RemoteBook {
 mod tests {
     use super::*;
 
+    #[test]
+    fn network_routes_keep_channel_gain_file_volume_and_output_identity() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-session-network-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"),serde_json::json!({
+            "outputs":{"screen":{"active":true,"enabled":true},"ndi":{"ndi":true,"enabled":true},"stream":{"rtmp":true,"enabled":true}},
+            "audioChannelsData":{"streaming":{"volume":0.5}},
+            "audioRouting":{"connections":[
+                {"from":"drawer_audio","to":"main"},{"from":"main","to":"speaker_default"},
+                {"from":"drawer_audio","to":"streaming"},{"from":"output_win_sub_screen","to":"streaming"},
+                {"from":"streaming","to":"network_sub_stream"},{"from":"streaming","to":"network_sub_ndi"}
+            ]}}).to_string()).unwrap();
+        let mut session = Session::open(root.clone());
+        assert_eq!(session.network_output("ndi").as_deref(), Some("ndi"));
+        assert_eq!(
+            session.ndi_output(),
+            Some(("ndi".into(), "FreeShow NDI".into()))
+        );
+        assert_eq!(session.network_output("rtmp").as_deref(), Some("stream"));
+        session.volume = 0.0;
+        session.video_volume = 0.4;
+        assert!(
+            session
+                .audio_network_routes()
+                .iter()
+                .all(|route| route.gain == 0.5)
+        );
+        assert!(
+            session
+                .video_network_routes()
+                .iter()
+                .all(|route| route.gain == 0.2)
+        );
+        session.apply_remote(freeshow_remote::Command::MuteChannel {
+            id: "streaming".into(),
+            muted: true,
+        });
+        assert!(
+            session
+                .audio_network_routes()
+                .iter()
+                .all(|route| route.gain == 0.0)
+        );
+        assert!(
+            session
+                .video_network_routes()
+                .iter()
+                .all(|route| route.gain == 0.0)
+        );
+        assert_eq!(session.audio_routes()[0].gain, 0.0);
+        let path = root.join("settings.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        settings["outputs"]["ndi"]["ndiData"] = serde_json::json!({"name":"My NDI","groups":"Private"});
+        std::fs::write(&path, settings.to_string()).unwrap();
+        assert!(session.ndi_output().is_none());
+        settings["outputs"]["ndi"]["ndiData"]["groups"]=serde_json::json!(["Private"]);
+        std::fs::write(&path,settings.to_string()).unwrap();
+        assert!(session.ndi_output().is_none());
+        settings["outputs"]["ndi"]["ndiData"]["groups"] = serde_json::json!("");
+        std::fs::write(&path, settings.to_string()).unwrap();
+        assert_eq!(session.ndi_output(), Some(("ndi".into(), "My NDI".into())));
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn video_routes_use_the_audience_output_and_keep_file_gain_when_main_changes() {
         let root = std::env::temp_dir().join(format!(

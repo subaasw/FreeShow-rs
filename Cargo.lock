@@ -1904,6 +1904,7 @@ dependencies = [
 name = "freeshow-ndi"
 version = "0.1.0"
 dependencies = [
+ "freeshow-media",
  "gstreamer",
  "gstreamer-app",
  "tracing",
@@ -1953,6 +1954,7 @@ dependencies = [
 name = "freeshow-record"
 version = "0.1.0"
 dependencies = [
+ "freeshow-media",
  "gstreamer",
  "gstreamer-app",
  "tracing",
