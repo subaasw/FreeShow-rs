@@ -6,8 +6,11 @@
 
 mod audio;
 mod video;
+mod network;
+pub use network::{network_channel,network_audio_mix};
+pub use freeshow_core::NetworkRoute;
 
-pub use audio::{AudioOutput, Pcm, Playback, apply_volume, decode_audio, output_devices};
+pub use audio::{AudioOutput, AudioPlaybackOptions, Pcm, Playback, apply_volume, decode_audio, output_devices};
 pub use video::{VideoPlayer, cameras, video_output_devices};
 
 use std::path::Path;

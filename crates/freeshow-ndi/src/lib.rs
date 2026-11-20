@@ -42,11 +42,27 @@ pub struct NdiSender {
 
 impl NdiSender {
     pub fn open(name: &str, width: u32, height: u32) -> Self {
+        Self::open_audio(name, width, height, None)
+    }
+
+    pub fn open_routed(name: &str, width: u32, height: u32, output: &str) -> Self {
+        Self::open_audio(name, width, height, Some(output.to_string()))
+    }
+
+    pub fn disabled(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            frames: None,
+        }
+    }
+
+    fn open_audio(name: &str, width: u32, height: u32, output: Option<String>) -> Self {
         let (tx, rx) = mpsc::sync_channel(1);
         let name = name.to_string();
         let started = std::thread::Builder::new()
             .name("freeshow-ndi".into())
-            .spawn(move || serve(name, width, height, rx));
+            .spawn(move || serve(name, width, height, rx, output));
         if started.is_err() {
             tracing::error!("could not start the ndi sender");
             return Self {
@@ -96,15 +112,34 @@ fn explain_failure(pipeline: &gstreamer::Pipeline, name: &str, err: impl std::fm
     }
 }
 
-fn serve(name: String, width: u32, height: u32, frames: mpsc::Receiver<Vec<u8>>) {
+fn pipeline_description(name: &str, width: u32, height: u32, output: Option<&str>) -> String {
+    let safe_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let destination = if let Some(output) = output {
+        format!(
+            "ndi_combine.video ndisinkcombiner name=ndi_combine ! ndisink ndi-name=\"{safe_name}\" {} ! queue ! ndi_combine.audio",
+            freeshow_media::network_audio_mix(output)
+        )
+    } else {
+        format!("ndisink ndi-name=\"{safe_name}\"")
+    };
+    format!(
+        "appsrc name=src is-live=true format=time block=false caps=video/x-raw,format=UYVY,width={width},height={height},framerate=30/1 ! {destination}"
+    )
+}
+
+fn serve(
+    name: String,
+    width: u32,
+    height: u32,
+    frames: mpsc::Receiver<Vec<u8>>,
+    output: Option<String>,
+) {
     if let Err(err) = gstreamer::init() {
         tracing::error!("ndi sender did not start: {err}");
         return;
     }
     let safe_name = name.replace('"', "'");
-    let description = format!(
-        "appsrc name=src is-live=true format=time block=false caps=video/x-raw,format=UYVY,width={width},height={height},framerate=30/1 ! ndisink ndi-name=\"{safe_name}\""
-    );
+    let description = pipeline_description(&name, width, height, output.as_deref());
     let Ok(element) = gstreamer::parse::launch(&description) else {
         tracing::error!("ndi sender {safe_name} is not available");
         return;
@@ -132,21 +167,43 @@ fn serve(name: String, width: u32, height: u32, frames: mpsc::Receiver<Vec<u8>>)
         return;
     }
     tracing::info!("ndi sender {safe_name}");
-    let mut index = 0u64;
-    while let Ok(rgba) = frames.recv() {
-        let Some(uyvy) = rgba_to_uyvy(&rgba, width, height) else {
+    let period = std::time::Duration::from_nanos(1_000_000_000 / 30);
+    let mut next = std::time::Instant::now();
+    let mut last = vec![0u8; width as usize * height as usize * 4];
+    let mut cached = rgba_to_uyvy(&last, width, height).unwrap_or_default();
+    let mut changed = false;
+    loop {
+        match frames.recv_timeout(next.saturating_duration_since(std::time::Instant::now())) {
+            Ok(frame) => {
+                last = frame;
+                changed = true;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if std::time::Instant::now() < next {
             continue;
-        };
-        let mut buffer = gstreamer::Buffer::from_slice(uyvy);
+        }
+        next = std::time::Instant::now() + period;
+        if changed {
+            if let Some(frame) = rgba_to_uyvy(&last, width, height) {
+                cached = frame;
+            }
+            changed = false;
+        }
+        if appsrc.current_level_bytes() >= (cached.len() as u64).saturating_mul(2) {
+            continue;
+        }
+        let mut buffer = gstreamer::Buffer::from_slice(cached.clone());
         if let Some(buffer) = buffer.get_mut() {
-            buffer.set_pts(gstreamer::ClockTime::from_nseconds(
-                index * 1_000_000_000 / 30,
-            ));
+            buffer.set_pts(
+                pipeline
+                    .current_running_time()
+                    .unwrap_or(gstreamer::ClockTime::ZERO),
+            );
             buffer.set_duration(gstreamer::ClockTime::from_nseconds(1_000_000_000 / 30));
         }
-        index += 1;
         if appsrc.push_buffer(buffer).is_err() {
-            tracing::error!("ndi sender stopped accepting frames");
             break;
         }
     }
@@ -193,6 +250,68 @@ fn clamp_u8(value: i32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the GStreamer NDI combiner plugin, but not the SDK"]
+    fn the_combiner_attaches_audio_to_video_buffers() {
+        gstreamer::init().unwrap();
+        let id = format!("ndi-meta-test-{}", std::process::id());
+        let description = pipeline_description("FreeShow Test", 32, 32, Some(&id)).replace(
+            "ndisink ndi-name=\"FreeShow Test\"",
+            "appsink name=capture sync=false",
+        );
+        let pipeline = gstreamer::parse::launch(&description)
+            .unwrap()
+            .downcast::<gstreamer::Pipeline>()
+            .unwrap();
+        let src = pipeline
+            .by_name("src")
+            .unwrap()
+            .dynamic_cast::<AppSrc>()
+            .unwrap();
+        let sink = pipeline
+            .by_name("capture")
+            .unwrap()
+            .dynamic_cast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let mut attached = false;
+        let mut names = Vec::new();
+        for index in 0..20_u64 {
+            let mut buffer =
+                gstreamer::Buffer::from_slice(vec![128_u8, 200, 128, 200].repeat(32 * 32 / 2));
+            buffer
+                .get_mut()
+                .unwrap()
+                .set_pts(gstreamer::ClockTime::from_nseconds(
+                    index * 1_000_000_000 / 30,
+                ));
+            buffer
+                .get_mut()
+                .unwrap()
+                .set_duration(gstreamer::ClockTime::from_nseconds(1_000_000_000 / 30));
+            src.push_buffer(buffer).unwrap();
+            if let Some(sample) = sink.try_pull_sample(gstreamer::ClockTime::from_mseconds(200)) {
+                names = sample
+                    .buffer()
+                    .unwrap()
+                    .iter_meta::<gstreamer::Meta>()
+                    .map(|meta| meta.api().name().to_string())
+                    .collect();
+                attached = names.iter().any(|name| {
+                    name.to_lowercase().contains("ndi") && name.to_lowercase().contains("audio")
+                });
+                if attached {
+                    break;
+                }
+            }
+        }
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        assert!(
+            attached,
+            "NDI video did not carry audio metadata: {names:?}"
+        );
+    }
 
     #[test]
     fn white_and_red_pack_to_uyvy() {

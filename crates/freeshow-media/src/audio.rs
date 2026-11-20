@@ -13,7 +13,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::MediaError;
-use freeshow_core::{SpeakerRoute, speaker_matrix};
+use freeshow_core::{NetworkRoute, SpeakerRoute, speaker_matrix};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pcm {
@@ -105,7 +105,7 @@ impl Playback {
         Self::shared(Arc::new(pcm), volume)
     }
 
-    fn shared(pcm: Arc<Pcm>, volume: f32) -> Self {
+    pub(crate) fn shared(pcm: Arc<Pcm>, volume: f32) -> Self {
         Self {
             pcm,
             position: 0.0,
@@ -122,7 +122,11 @@ impl Playback {
 
     /// Playback speed. A value of 2 plays the file twice as fast. Zero and negative values stay at normal speed.
     pub fn set_rate(&mut self, rate: f64) {
-        self.tempo = if rate > 0.0 { rate } else { 1.0 };
+        self.tempo = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            1.0
+        };
     }
 
     pub fn set_looping(&mut self, looping: bool) {
@@ -269,6 +273,7 @@ impl DeviceAudioOutput {
         pcm: Arc<Pcm>,
         routes: &[SpeakerRoute],
         device_name: Option<&str>,
+        options: &AudioPlaybackOptions,
     ) -> Result<Self, MediaError> {
         let host = cpal::default_host();
         let device = match device_name {
@@ -312,6 +317,7 @@ impl DeviceAudioOutput {
         let channels = supported.channels();
         let mut state = Playback::shared(pcm, 1.0);
         state.set_routes(routes);
+        options.apply(&mut state);
         let playback = Arc::new(Mutex::new(state));
         let state = Arc::clone(&playback);
         let config: cpal::StreamConfig = supported.clone().into();
@@ -379,27 +385,6 @@ impl DeviceAudioOutput {
         }
     }
 
-    pub fn position_seconds(&self) -> f64 {
-        self.playback
-            .lock()
-            .map(|playback| playback.position_seconds())
-            .unwrap_or(0.0)
-    }
-
-    pub fn duration_seconds(&self) -> f64 {
-        self.playback
-            .lock()
-            .map(|playback| playback.duration_seconds())
-            .unwrap_or(0.0)
-    }
-
-    pub fn is_paused(&self) -> bool {
-        self.playback
-            .lock()
-            .map(|playback| playback.is_paused())
-            .unwrap_or(false)
-    }
-
     pub fn is_finished(&self) -> bool {
         self.playback
             .lock()
@@ -442,10 +427,39 @@ impl DeviceAudioOutput {
 }
 
 /// One decoded track sent to the physical destinations in the library routing graph.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioPlaybackOptions {
+    pub looping: bool,
+    pub from_seconds: f64,
+    pub to_seconds: f64,
+    pub rate: f64,
+}
+
+impl Default for AudioPlaybackOptions {
+    fn default() -> Self {
+        Self {
+            looping: false,
+            from_seconds: 0.0,
+            to_seconds: 0.0,
+            rate: 1.0,
+        }
+    }
+}
+
+impl AudioPlaybackOptions {
+    pub(crate) fn apply(&self, playback: &mut Playback) {
+        playback.set_looping(self.looping);
+        playback.set_span(self.from_seconds, self.to_seconds);
+        playback.set_rate(self.rate);
+    }
+}
+
 pub struct AudioOutput {
     // ponytail: each device has its own clock; add clock-drift resampling if
     // long-running outputs must remain sample synchronized.
     outputs: Vec<(Option<String>, DeviceAudioOutput)>,
+    #[cfg(feature = "gst")]
+    network: Option<crate::network::NetworkAudio>,
 }
 
 impl AudioOutput {
@@ -454,6 +468,28 @@ impl AudioOutput {
     }
 
     pub fn play_file_routed(path: &Path, routes: &[SpeakerRoute]) -> Result<Self, MediaError> {
+        Self::play_file_with_network(path, routes, &[])
+    }
+
+    pub fn play_file_with_network(
+        path: &Path,
+        routes: &[SpeakerRoute],
+        network_routes: &[NetworkRoute],
+    ) -> Result<Self, MediaError> {
+        Self::play_file_configured(
+            path,
+            routes,
+            network_routes,
+            &AudioPlaybackOptions::default(),
+        )
+    }
+
+    pub fn play_file_configured(
+        path: &Path,
+        routes: &[SpeakerRoute],
+        network_routes: &[NetworkRoute],
+        options: &AudioPlaybackOptions,
+    ) -> Result<Self, MediaError> {
         let bytes = std::fs::read(path).map_err(|err| MediaError::Audio(err.to_string()))?;
         let extension = path
             .extension()
@@ -462,7 +498,23 @@ impl AudioOutput {
         let pcm = Arc::new(decode_with_hint(&bytes, extension)?);
         // Keep a silent clock for an intentionally disconnected source, so end
         // actions and playlist advancement still run without leaking to Main.
+        #[cfg(feature = "gst")]
+        let network = if !network_routes.is_empty() || routes.is_empty() {
+            Some(crate::network::NetworkAudio::configured(
+                Arc::clone(&pcm),
+                network_routes,
+                options,
+            )?)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "gst"))]
+        if !network_routes.is_empty() {
+            return Err(MediaError::Audio("network audio requires GStreamer".into()));
+        }
+        #[cfg(not(feature = "gst"))]
         let silent = [SpeakerRoute::stereo(None, 0.0)];
+        #[cfg(not(feature = "gst"))]
         let routes = if routes.is_empty() {
             &silent[..]
         } else {
@@ -477,14 +529,21 @@ impl AudioOutput {
                 .push(route.clone());
         }
         for (device, routes) in devices {
-            let output = DeviceAudioOutput::start(pcm.clone(), &routes, device.as_deref())?;
+            let output =
+                DeviceAudioOutput::start(pcm.clone(), &routes, device.as_deref(), options)?;
             outputs.push((device, output));
         }
-        Ok(Self { outputs })
+        Ok(Self {
+            outputs,
+            #[cfg(feature = "gst")]
+            network,
+        })
     }
 
     pub fn start(pcm: Pcm, volume: f32, device_name: Option<&str>) -> Result<Self, MediaError> {
         Ok(Self {
+            #[cfg(feature = "gst")]
+            network: None,
             outputs: vec![(
                 device_name.map(str::to_string),
                 DeviceAudioOutput::start(
@@ -494,9 +553,29 @@ impl AudioOutput {
                         volume,
                     )],
                     device_name,
+                    &AudioPlaybackOptions::default(),
                 )?,
             )],
         })
+    }
+
+    pub fn set_network_routes(&self, routes: &[NetworkRoute]) {
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            network.set_routes(routes);
+        }
+        let _ = routes;
+    }
+
+    fn clock(&self) -> Option<Arc<Mutex<Playback>>> {
+        if let Some((_, output)) = self.outputs.first() {
+            return Some(Arc::clone(&output.playback));
+        }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            return Some(Arc::clone(&network.playback));
+        }
+        None
     }
 
     pub fn set_route_gains(&self, routes: &[SpeakerRoute]) {
@@ -514,11 +593,21 @@ impl AudioOutput {
         for (_, output) in &self.outputs {
             output.set_volume(volume);
         }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            if let Ok(mut playback) = network.playback.lock() {
+                playback.set_volume(volume);
+            }
+        }
     }
 
     pub fn set_paused(&self, paused: bool) {
         for (_, output) in &self.outputs {
             output.set_paused(paused);
+        }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            network.set_paused(paused);
         }
     }
 
@@ -526,24 +615,62 @@ impl AudioOutput {
         for (_, output) in &self.outputs {
             output.seek_seconds(seconds);
         }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            if let Ok(mut playback) = network.playback.lock() {
+                playback.seek_seconds(seconds);
+            }
+        }
     }
 
     pub fn position_seconds(&self) -> f64 {
-        self.outputs[0].1.position_seconds()
+        self.clock()
+            .and_then(|clock| {
+                clock
+                    .lock()
+                    .ok()
+                    .map(|playback| playback.position_seconds())
+            })
+            .unwrap_or(0.0)
     }
     pub fn duration_seconds(&self) -> f64 {
-        self.outputs[0].1.duration_seconds()
+        self.clock()
+            .and_then(|clock| {
+                clock
+                    .lock()
+                    .ok()
+                    .map(|playback| playback.duration_seconds())
+            })
+            .unwrap_or(0.0)
     }
     pub fn is_paused(&self) -> bool {
-        self.outputs[0].1.is_paused()
+        self.clock()
+            .and_then(|clock| clock.lock().ok().map(|playback| playback.is_paused()))
+            .unwrap_or(false)
     }
     pub fn is_finished(&self) -> bool {
-        self.outputs.iter().all(|(_, output)| output.is_finished())
+        let finished = self.outputs.iter().all(|(_, output)| output.is_finished());
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            return finished
+                && network
+                    .playback
+                    .lock()
+                    .map(|playback| playback.is_finished())
+                    .unwrap_or(false);
+        }
+        finished
     }
 
     pub fn set_looping(&self, looping: bool) {
         for (_, output) in &self.outputs {
             output.set_looping(looping);
+        }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            if let Ok(mut playback) = network.playback.lock() {
+                playback.set_looping(looping);
+            }
         }
     }
 
@@ -551,11 +678,23 @@ impl AudioOutput {
         for (_, output) in &self.outputs {
             output.set_span(from, to);
         }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            if let Ok(mut playback) = network.playback.lock() {
+                playback.set_span(from, to);
+            }
+        }
     }
 
     pub fn set_rate(&self, rate: f64) {
         for (_, output) in &self.outputs {
             output.set_rate(rate);
+        }
+        #[cfg(feature = "gst")]
+        if let Some(network) = &self.network {
+            if let Ok(mut playback) = network.playback.lock() {
+                playback.set_rate(rate);
+            }
         }
     }
 }
@@ -600,6 +739,40 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_network_only_file_needs_no_physical_output_device() {
+        let path =
+            std::env::temp_dir().join(format!("freeshow-network-only-{}.wav", std::process::id()));
+        std::fs::write(&path, wav_bytes(&vec![16000; 16000], 8000)).unwrap();
+        let output = AudioOutput::play_file_configured(
+            &path,
+            &[],
+            &[NetworkRoute {
+                output_id: format!("file-test-{}", std::process::id()),
+                gain: 0.5,
+            }],
+            &AudioPlaybackOptions {
+                looping: true,
+                from_seconds: 0.8,
+                to_seconds: 1.2,
+                rate: 1.0,
+            },
+        )
+        .unwrap();
+        assert!(output.outputs.is_empty());
+        assert_eq!(output.duration_seconds(), 2.0);
+        assert!(output.position_seconds() >= 0.8 && output.position_seconds() <= 1.2);
+        output.set_paused(true);
+        output.seek_seconds(0.8);
+        assert_eq!(output.position_seconds(), 0.8);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(output.position_seconds(), 0.8);
+        assert!(output.is_paused());
+        drop(output);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -9,8 +9,58 @@ pub use freeshow_core::SpeakerRoute as AudioRoute;
 /// Resolves FreeShow's source -> mixer -> speaker graph. An explicit graph with
 /// no speaker path stays silent; network destinations never fall back to speakers.
 pub fn audio_routes(settings: &Value, sources: &[&str], main_gain: f32) -> Vec<AudioRoute> {
+    resolve_routes(settings, sources, main_gain, false)
+}
+
+pub fn network_audio_routes(
+    settings: &Value,
+    sources: &[&str],
+    main_gain: f32,
+) -> Vec<freeshow_core::NetworkRoute> {
+    resolve_routes(settings, sources, main_gain, true)
+        .into_iter()
+        .filter_map(|route| {
+            route.device.map(|output_id| freeshow_core::NetworkRoute {
+                output_id,
+                gain: route.gain,
+            })
+        })
+        .collect()
+}
+
+fn resolve_routes(
+    settings: &Value,
+    sources: &[&str],
+    main_gain: f32,
+    network: bool,
+) -> Vec<AudioRoute> {
     let routing = &settings["audioRouting"];
     let Some(connections) = routing["connections"].as_array() else {
+        if network {
+            if !routing.is_null() {
+                return Vec::new();
+            }
+            return settings["outputs"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(_, output)| {
+                    output["enabled"].as_bool() != Some(false)
+                        && ["ndi", "rtmp", "webrtc", "omt"]
+                            .iter()
+                            .any(|kind| output[kind].as_bool() == Some(true))
+                })
+                .map(|(id, _)| {
+                    let channel = &settings["audioChannelsData"][format!("channel_{id}")];
+                    let gain = if channel["isMuted"].as_bool() == Some(true) {
+                        0.0
+                    } else {
+                        channel["volume"].as_f64().unwrap_or(1.0).clamp(0.0, 1.0) as f32
+                    };
+                    AudioRoute::stereo(Some(id.clone()), gain)
+                })
+                .collect();
+        }
         return if routing.is_null() {
             vec![AudioRoute::stereo(None, main_gain.clamp(0.0, 1.0))]
         } else {
@@ -69,7 +119,18 @@ pub fn audio_routes(settings: &Value, sources: &[&str], main_gain: f32) -> Vec<A
         if !visited.insert(id.clone()) {
             continue;
         }
+        if let Some(output) = id.strip_prefix("network_sub_") {
+            if network && settings["outputs"][output]["enabled"].as_bool() != Some(false) {
+                *destinations
+                    .entry((Some(output.to_string()), None, None))
+                    .or_default() += gain;
+            }
+            continue;
+        }
         if id == "speaker_default" {
+            if network {
+                continue;
+            }
             *destinations
                 .entry((None, input, output_channel))
                 .or_default() += gain;
@@ -80,6 +141,9 @@ pub fn audio_routes(settings: &Value, sources: &[&str], main_gain: f32) -> Vec<A
                 .iter()
                 .find(|output| output["id"].as_str() == Some(&id))
         }) {
+            if network {
+                continue;
+            }
             if output["type"].as_str() == Some("speaker")
                 && output["enabled"].as_bool() != Some(false)
             {
@@ -101,6 +165,9 @@ pub fn audio_routes(settings: &Value, sources: &[&str], main_gain: f32) -> Vec<A
             continue;
         }
         if id.starts_with("speaker_sub_") {
+            if network {
+                continue;
+            }
             // Chromium device IDs are opaque. The native app resolves this key
             // using its saved ID -> OS device-name mapping.
             *destinations
@@ -205,6 +272,35 @@ pub fn audio_routes(settings: &Value, sources: &[&str], main_gain: f32) -> Vec<A
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn network_mix_is_independent_from_room_and_disabled_outputs_stay_silent() {
+        let mut settings = json!({"outputs":{"stream":{"enabled":true,"ndi":true}},
+        "audioChannelsData":{"live":{"volume":0.5}},
+        "audioRouting":{"connections":[
+            {"from":"drawer_audio","to":"main"},{"from":"main","to":"speaker_default"},
+            {"from":"drawer_audio","to":"live"},{"from":"live","to":"network_sub_stream"}
+        ]}});
+        assert_eq!(
+            audio_routes(&settings, &["drawer_audio"], 0.0),
+            vec![AudioRoute::stereo(None, 0.0)]
+        );
+        assert_eq!(
+            network_audio_routes(&settings, &["drawer_audio"], 0.0),
+            vec![freeshow_core::NetworkRoute {
+                output_id: "stream".into(),
+                gain: 0.5
+            }]
+        );
+        settings["audioChannelsData"]["live"]["isMuted"] = json!(true);
+        assert_eq!(
+            network_audio_routes(&settings, &["drawer_audio"], 1.0)[0].gain,
+            0.0
+        );
+        settings["outputs"]["stream"]["enabled"] = json!(false);
+        assert!(network_audio_routes(&settings, &["drawer_audio"], 1.0).is_empty());
+        assert!(network_audio_routes(&Value::Null, &["drawer_audio"], 1.0).is_empty());
+    }
 
     #[test]
     fn physical_ports_keep_stereo_and_a_single_port_receives_a_mono_mix() {

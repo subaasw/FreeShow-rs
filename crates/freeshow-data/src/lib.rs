@@ -8,7 +8,7 @@
 
 mod audio_routing;
 mod import;
-pub use audio_routing::{AudioRoute, audio_routes};
+pub use audio_routing::{AudioRoute, audio_routes, network_audio_routes};
 mod scripture;
 mod stage_layout;
 
@@ -3694,6 +3694,36 @@ impl Library {
         audio_routes(&settings, sources, main_gain)
     }
 
+    pub fn network_audio_routes(
+        &self,
+        sources: &[&str],
+        main_gain: f32,
+    ) -> Vec<freeshow_core::NetworkRoute> {
+        let settings = fs::read_to_string(self.settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null);
+        network_audio_routes(&settings, sources, main_gain)
+    }
+
+    /// First enabled output of this transport, used by the current single audience sender.
+    pub fn network_output(&self, kind: &str) -> Option<String> {
+        self.network_output_settings(kind).map(|(id, _)| id)
+    }
+
+    pub fn network_output_settings(&self, kind: &str) -> Option<(String, Value)> {
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(self.settings_path()).ok()?).ok()?;
+        settings["outputs"]
+            .as_object()?
+            .iter()
+            .find(|(_, output)| {
+                output["enabled"].as_bool() != Some(false)
+                    && output[kind].as_bool() == Some(true)
+                    && output["stageOutput"].as_str().is_none_or(str::is_empty)
+            })
+            .map(|(id, body)| (id.clone(), body.clone()))
+    }
     pub fn audio_mixer(&self) -> Value {
         let settings: Value = fs::read_to_string(self.settings_path())
             .ok()

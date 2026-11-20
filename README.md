@@ -31,17 +31,17 @@ FreeShow's named speaker IDs come from Chromium and need a native device mapping
 {"audio_devices": {"speaker_sub_<FreeShow-device-id>": "Stage Speakers"}}
 ```
 
-Keep the other app settings when adding that field. An unavailable mapped device logs an error and does not fall back to the room speakers. Audio-file speaker devices use independent playback clocks. Video sound uses GStreamer speaker sinks on its playback clock. Hardware speaker connections honor `channelIndex`/`toChannelIndex` and an explicit `fromChannelIndex`. A single selected speaker port receives a mono mix; multiple selected ports preserve the corresponding source channels. Named speaker connections without an index use port 0, as FreeShow does. Audio and video share the same channel matrix, and unmapped ports stay silent. Indices are zero-based and must be below 64; unavailable device channels fail without falling back to the room speakers. Network audio, effects, and delays are not implemented.
+Keep the other app settings when adding that field. An unavailable mapped device logs an error and does not fall back to the room speakers. Audio-file speaker devices and network feeds use independent playback clocks. Video sound uses GStreamer speaker sinks on its playback clock. Hardware speaker connections honor `channelIndex`/`toChannelIndex` and an explicit `fromChannelIndex`. A single selected speaker port receives a mono mix; multiple selected ports preserve the corresponding source channels. Named speaker connections without an index use port 0, as FreeShow does. Audio and video share the same channel matrix, and unmapped ports stay silent. Indices are zero-based and must be below 64; unavailable device channels fail without falling back to the room speakers. Stereo network feeds follow `network_sub_<output-id>` routes and keep audio-file and video sources separate until the sender mixes them. A network-only audio file needs no physical output device. OMT, WebRTC, Icecast, effects, and delays are not implemented.
 
 OSC input listens on UDP port 5505, the same port FreeShow uses. `/freeshow/slide/next`, `/freeshow/slide/previous`, `/freeshow/slide/1`, `/freeshow/clear/all`, and `/freeshow/show/<id>/start` drive the open show.
 
 MIDI input opens the first connected input, or the port named by `FREESHOW_MIDI_IN`. FreeShow's default notes are used: channel 1 note 0 is next, note 1 is previous, channel 3 note 0 clears, and channel 5 note 2 selects a slide from the velocity.
 
-The audience picture is also published as an NDI source named `FreeShow NDI` through the GStreamer NDI plugin. That source appears when the NDI runtime is installed.
+The first enabled audience NDI output in the library sends the current audience picture and its routed stereo audio through the GStreamer NDI plugin. Its source name uses `ndiData.name`, or `FreeShow NDI - <output name>`. With no enabled NDI output, nothing is broadcast. The plugin and NDI SDK runtime are required. Grouped outputs stay disabled because the current sink does not expose NDI discovery groups. Multiple independent NDI pictures and stage NDI are not implemented.
 
 MIDI timecode uses the first input, or the port named by `FREESHOW_MTC_IN`. Quarter-frames and full frames replace the stage clock with `HH:MM:SS:FF` while they are arriving. Linear timecode listens only when `FREESHOW_LTC_IN` names an input (`default` uses the system input) and uses 25 fps unless `FREESHOW_LTC_FPS` is set.
 
-Functions → Record writes the audience picture to `Recordings/freeshow-YYYYMMDD-HHMMSS.mp4` in the library. Choosing it again closes the file. `FREESHOW_RTMP` streams that picture to an RTMP URL when it is set.
+Functions → Record writes the audience picture to `Recordings/freeshow-YYYYMMDD-HHMMSS.mp4` in the library. Choosing it again, or closing the app, closes the file. Local MP4 recording is still video only. `FREESHOW_RTMP` streams the current picture with routed stereo AAC audio to that URL. It uses the first enabled RTMP output ID in the library, or `default` when none is configured; route to `network_sub_<id>` to feed it. Saved `rtmpData.destinations` are not started automatically. Static pictures repeat at 30 fps so media audio can continue without slide changes. Network feeds require the GStreamer `inter` plugin; RTMP also requires an AAC encoder (`avenc_aac`).
 
 Planning Center loads when `FREESHOW_PCO_TOKEN` is a Services access token and `FREESHOW_PCO_PLAN` is `serviceTypeId/planId`. `FREESHOW_PCO_FILE` can point at a saved plan document instead. Songs and plan items become shows, headers stay section labels in the project, and Functions → Planning Center loads the plan again. With neither a token nor a file, the app does not contact Planning Center.
 
@@ -73,6 +73,17 @@ Check the workspace:
 cargo test --workspace
 cargo build --workspace
 ```
+
+Optional transport checks:
+
+```sh
+cargo test -p freeshow-ndi the_combiner_attaches_audio -- --ignored
+# In another terminal, start a loopback RTMP listener with ffmpeg:
+ffmpeg -nostdin -y -listen 1 -i rtmp://127.0.0.1:19350/live/freeshow -c copy /tmp/freeshow-rtmp-smoke.flv
+FREESHOW_TEST_RTMP=rtmp://127.0.0.1:19350/live/freeshow cargo test -p freeshow-record publish_to_local_rtmp_listener -- --ignored
+```
+
+The combiner check needs the NDI plugin but not the SDK; NDI receiver playback still needs the SDK. The RTMP smoke test only accepts a loopback listener URL.
 
 The operator window is Slint. Audience and stage windows show frames rendered by the `freeshow-output` crate and uploaded with wgpu. Those frames are not drawn as Slint widgets.
 

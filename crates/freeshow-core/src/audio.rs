@@ -21,6 +21,13 @@ impl SpeakerRoute {
     }
 }
 
+/// A stereo feed for one FreeShow network output ID.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetworkRoute {
+    pub output_id: String,
+    pub gain: f32,
+}
+
 // Web Audio's speaker layouts, matching FreeShow's default interpretation.
 // https://www.w3.org/TR/2021/REC-webaudio-20210617/#down-mix
 fn mono_weight(inputs: u16, input: usize) -> f32 {
