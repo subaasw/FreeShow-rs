@@ -31,7 +31,7 @@ GPL-3.0-only.
 
 ## Milestones
 
-### M1. Library settings compatibility — in progress
+### M1. Library settings compatibility — complete
 
 Read FreeShow's library `settings.json` instead of keeping a parallel world.
 
@@ -41,7 +41,8 @@ Read FreeShow's library `settings.json` instead of keeping a parallel world.
 - [x] Use the library's stored theme when this app has no explicit choice.
 - [x] Read `serverData.remote.password` into the library preferences.
 - [x] Read the remote/stage ports from the library settings.
-- [ ] Honor a custom FreeShow theme (colors and font) from `settings.json`.
+- [x] Honor the theme selected in `settings.json`, including custom colors and
+      font from `Config/themes.json`.
 
 Acceptance: opening a FreeShow library shows its theme and keeps its remote
 password without editing this app's config by hand.
