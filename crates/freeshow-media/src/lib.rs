@@ -8,7 +8,7 @@ mod audio;
 mod video;
 
 pub use audio::{AudioOutput, Pcm, Playback, apply_volume, decode_audio, output_devices};
-pub use video::{VideoPlayer, cameras};
+pub use video::{VideoPlayer, cameras, video_output_devices};
 
 use std::path::Path;
 

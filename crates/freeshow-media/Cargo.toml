@@ -9,7 +9,7 @@ description = "Image, audio, and video playback for freeshow-rust"
 
 [features]
 default = ["gst"]
-gst = ["dep:gstreamer", "dep:gstreamer-app"]
+gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:coreaudio-rs"]
 
 [dependencies]
 cpal = "0.15"
@@ -17,3 +17,6 @@ freeshow-output = { path = "../freeshow-output" }
 gstreamer = { version = "0.23", optional = true }
 gstreamer-app = { version = "0.23", optional = true }
 symphonia = { version = "0.5", default-features = false, features = ["wav", "mp3", "flac", "ogg", "vorbis", "pcm", "isomp4", "aac"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = { version = "0.11", optional = true, default-features = false, features = ["audio_unit", "core_audio"] }
