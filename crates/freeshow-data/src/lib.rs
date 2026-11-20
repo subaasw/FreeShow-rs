@@ -42,6 +42,8 @@ impl Default for TextTransition {
 pub struct FreeShowPreferences {
     /// Theme key, for example `default`, `dark`, or `blue`.
     pub theme: Option<String>,
+    /// Portable `Config/themes.json`, keyed by the theme ID in settings.
+    pub themes: Value,
     /// `serverData.remote.password`. An empty value means no password.
     pub remote_password: Option<String>,
     /// `ports.remote`, the phone remote port.
@@ -3387,12 +3389,10 @@ impl Library {
     ///
     /// A missing file, malformed JSON, or an unexpected value is ignored.
     pub fn preferences(&self) -> FreeShowPreferences {
-        let Ok(text) = fs::read_to_string(self.settings_path()) else {
-            return FreeShowPreferences::default();
-        };
-        let Ok(json) = serde_json::from_str::<Value>(&text) else {
-            return FreeShowPreferences::default();
-        };
+        let json: Value = fs::read_to_string(self.settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
         let theme = json
             .get("theme")
             .and_then(Value::as_str)
@@ -3416,6 +3416,10 @@ impl Library {
         };
         FreeShowPreferences {
             theme,
+            themes: fs::read_to_string(self.root.join(CONFIG_DIR).join("themes.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default(),
             remote_password,
             remote_port: port("remote"),
             stage_port: port("stage"),
@@ -5217,6 +5221,21 @@ mod tests {
         assert_eq!(preferences.remote_password.as_deref(), Some("1234"));
         assert_eq!(preferences.remote_port, Some(5600));
         assert_eq!(preferences.stage_port, Some(5601));
+        fs::create_dir_all(root.join(CONFIG_DIR)).unwrap();
+        let themes_path = root.join(CONFIG_DIR).join("themes.json");
+        let themes = serde_json::json!({"sea": {
+            "colors": {"primary": "#123456"},
+            "font": {"family": "Georgia", "size": "1.2em"}
+        }});
+        fs::write(&themes_path, themes.to_string()).unwrap();
+        assert_eq!(library.preferences().themes, themes);
+        // Reading compatibility settings must not rewrite the Electron files.
+        assert_eq!(fs::read_to_string(&themes_path).unwrap(), themes.to_string());
+        fs::remove_file(library.settings_path()).unwrap();
+        assert_eq!(library.preferences().theme, None);
+        assert_eq!(library.preferences().themes, themes);
+        fs::write(&themes_path, "invalid json").unwrap();
+        assert_eq!(library.preferences().themes, Value::Null);
         fs::write(
             library.settings_path(),
             r#"{"theme":"","serverData":{"remote":{"password":""}},"ports":{"remote":0,"stage":"x"}}"#,

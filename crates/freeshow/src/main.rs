@@ -4,6 +4,7 @@ mod live;
 mod present;
 mod session;
 mod stage;
+mod theme;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -30,6 +31,10 @@ use slint::winit_030::WinitWindowAccessor;
 slint::slint! {
     import { LineEdit, Slider, TextEdit } from "std-widgets.slint";
 
+    export global OperatorStyle {
+        in-out property <float> font-scale: 1;
+    }
+
     struct DrawerTab { id: string, label: string }
 
     component RailButton inherits Rectangle {
@@ -38,13 +43,14 @@ slint::slint! {
         in property <color> primary;
         in property <color> accent;
         in property <color> text-color;
+        in property <color> accent-text;
         callback clicked();
         height: 58px;
         background: root.active ? root.accent : root.primary;
         Text {
             text: root.label;
-            color: root.text-color;
-            font-size: 12px;
+            color: root.active ? root.accent-text : root.text-color;
+            font-size: 12px * OperatorStyle.font-scale;
             horizontal-alignment: center;
             vertical-alignment: center;
             wrap: word-wrap;
@@ -61,6 +67,7 @@ slint::slint! {
         in property <string> label;
         in property <color> accent;
         in property <color> text-color;
+        in property <color> accent-text;
         callback clicked();
         horizontal-stretch: 1;
         height: 28px;
@@ -68,8 +75,8 @@ slint::slint! {
         background: root.accent;
         Text {
             text: root.label;
-            color: root.text-color;
-            font-size: 12px;
+            color: root.accent-text;
+            font-size: 12px * OperatorStyle.font-scale;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -84,6 +91,7 @@ slint::slint! {
         in property <string> label;
         in property <color> accent;
         in property <color> text-color;
+        in property <color> accent-text;
         callback clicked();
         width: 88px;
         height: 32px;
@@ -91,8 +99,8 @@ slint::slint! {
         background: root.accent;
         Text {
             text: root.label;
-            color: root.text-color;
-            font-size: 13px;
+            color: root.accent-text;
+            font-size: 13px * OperatorStyle.font-scale;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -108,13 +116,14 @@ slint::slint! {
         in property <bool> active;
         in property <color> accent;
         in property <color> text-color;
+        in property <color> accent-text;
         callback clicked();
         height: 36px;
         background: root.active ? root.accent : transparent;
         Text {
             text: root.label;
-            color: root.text-color;
-            font-size: 13px;
+            color: root.active ? root.accent-text : root.text-color;
+            font-size: 13px * OperatorStyle.font-scale;
             vertical-alignment: center;
             x: 8px;
             width: parent.width - 12px;
@@ -129,12 +138,16 @@ slint::slint! {
 
     export component ControlWindow inherits Window {
         title: "FreeShow";
+        in property <string> theme-font-family;
+        default-font-family: root.theme-font-family;
+        default-font-size: 14px * OperatorStyle.font-scale;
         in property <color> primary: #242832;
         in property <color> primary-lighter: #2f3542;
         in property <color> primary-darker: #191923;
         in property <color> primary-darkest: #12121c;
         in property <color> text-color: #f0f0ff;
         in property <color> accent: #F0008C;
+        in property <color> accent-text: #f0f0ff;
         in-out property <string> active-tab: "shows";
         in-out property <string> panel-title: "Shows";
         in property <string> data-path: "Data folder not set";
@@ -197,7 +210,7 @@ slint::slint! {
                     Text {
                         text: "FreeShow";
                         color: root.text-color;
-                        font-size: 18px;
+                        font-size: 18px * OperatorStyle.font-scale;
                         font-weight: 700;
                         vertical-alignment: center;
                     }
@@ -206,18 +219,21 @@ slint::slint! {
                         label: root.screen-label;
                         accent: root.accent;
                         text-color: root.text-color;
+                        accent-text: root.accent-text;
                         clicked => { root.choose-screen(); }
                     }
                     HeaderButton {
                         label: "Output";
                         accent: root.accent;
                         text-color: root.text-color;
+                        accent-text: root.accent-text;
                         clicked => { root.open-output(); }
                     }
                     HeaderButton {
                         label: "Stage";
                         accent: root.accent;
                         text-color: root.text-color;
+                        accent-text: root.accent-text;
                         clicked => { root.open-stage(); }
                     }
                 }
@@ -236,6 +252,7 @@ slint::slint! {
                             primary: root.primary;
                             accent: root.accent;
                             text-color: root.text-color;
+                            accent-text: root.accent-text;
                             clicked => {
                                 root.active-tab = tab.id;
                                 root.panel-title = tab.label;
@@ -256,6 +273,7 @@ slint::slint! {
                                 active: root.selected-drawer == index;
                                 accent: root.accent;
                                 text-color: root.text-color;
+                                accent-text: root.accent-text;
                                 clicked => { root.choose-drawer(index); }
                             }
                         }
@@ -275,7 +293,7 @@ slint::slint! {
                             Text {
                                 text: root.panel-title;
                                 color: root.text-color;
-                                font-size: 16px;
+                                font-size: 16px * OperatorStyle.font-scale;
                                 vertical-alignment: center;
                             }
                             Rectangle { horizontal-stretch: 1; background: root.primary; }
@@ -283,18 +301,21 @@ slint::slint! {
                                 label: "Show";
                                 accent: root.primary-lighter;
                                 text-color: root.text-color;
+                                accent-text: root.text-color;
                                 clicked => { root.create-show(); }
                             }
                             HeaderButton {
                                 label: "Slide";
                                 accent: root.primary-lighter;
                                 text-color: root.text-color;
+                                accent-text: root.text-color;
                                 clicked => { root.add-slide(); }
                             }
                             HeaderButton {
                                 label: "Save";
                                 accent: root.primary-lighter;
                                 text-color: root.text-color;
+                                accent-text: root.text-color;
                                 clicked => { root.save-lyrics(root.lyrics); }
                             }
                             Slider {
@@ -307,6 +328,7 @@ slint::slint! {
                                 label: "Go";
                                 accent: root.accent;
                                 text-color: root.text-color;
+                                accent-text: root.accent-text;
                                 clicked => { root.go-slide(root.lyrics); }
                             }
                         }
@@ -335,6 +357,7 @@ slint::slint! {
                                     active: root.selected-slide == index;
                                     accent: root.accent;
                                     text-color: root.text-color;
+                                    accent-text: root.accent-text;
                                     clicked => { root.choose-slide(index); }
                                 }
                             }
@@ -361,17 +384,17 @@ slint::slint! {
                             }
                             HorizontalLayout {
                                 spacing: 6px;
-                                BoxButton { label: "Left"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(-40, 0, 0, 0); } }
-                                BoxButton { label: "Right"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(40, 0, 0, 0); } }
-                                BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, -40, 0, 0); } }
-                                BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 40, 0, 0); } }
+                                BoxButton { label: "Left"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(-40, 0, 0, 0); } }
+                                BoxButton { label: "Right"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(40, 0, 0, 0); } }
+                                BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(0, -40, 0, 0); } }
+                                BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(0, 40, 0, 0); } }
                             }
                             HorizontalLayout {
                                 spacing: 6px;
-                                BoxButton { label: "Wider"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, 40, 0); } }
-                                BoxButton { label: "Narrow"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, -40, 0); } }
-                                BoxButton { label: "Taller"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, 0, 40); } }
-                                BoxButton { label: "Shorter"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.nudge-box(0, 0, 0, -40); } }
+                                BoxButton { label: "Wider"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(0, 0, 40, 0); } }
+                                BoxButton { label: "Narrow"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(0, 0, -40, 0); } }
+                                BoxButton { label: "Taller"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(0, 0, 0, 40); } }
+                                BoxButton { label: "Shorter"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.nudge-box(0, 0, 0, -40); } }
                             }
                             TextEdit {
                                 text <=> root.lyrics;
@@ -391,20 +414,20 @@ slint::slint! {
                         Text {
                             text: root.project-title;
                             color: root.text-color;
-                            font-size: 16px;
+                            font-size: 16px * OperatorStyle.font-scale;
                             font-weight: 700;
                         }
                         HorizontalLayout {
                             spacing: 6px;
-                            BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.move-project(-1); } }
-                            BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; clicked => { root.move-project(1); } }
-                            BoxButton { label: "Add"; accent: root.accent; text-color: root.text-color; clicked => { root.add-to-project(); } }
-                            BoxButton { label: "New"; accent: root.accent; text-color: root.text-color; clicked => { root.create-project(); } }
+                            BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.move-project(-1); } }
+                            BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.move-project(1); } }
+                            BoxButton { label: "Add"; accent: root.accent; text-color: root.text-color; accent-text: root.accent-text; clicked => { root.add-to-project(); } }
+                            BoxButton { label: "New"; accent: root.accent; text-color: root.text-color; accent-text: root.accent-text; clicked => { root.create-project(); } }
                         }
                         if root.project-names.length == 0: Text {
                             text: "No project open";
                             color: root.text-color;
-                            font-size: 14px;
+                            font-size: 14px * OperatorStyle.font-scale;
                         }
                         if root.project-names.length > 0: VerticalLayout {
                             spacing: 0;
@@ -414,6 +437,7 @@ slint::slint! {
                                 active: root.selected-project == index;
                                 accent: root.accent;
                                 text-color: root.text-color;
+                                accent-text: root.accent-text;
                                 clicked => {
                                     root.selected-project = index;
                                     root.choose-project(index);
@@ -432,7 +456,7 @@ slint::slint! {
                     Text {
                         text: root.data-path;
                         color: root.text-color;
-                        font-size: 12px;
+                        font-size: 12px * OperatorStyle.font-scale;
                         vertical-alignment: center;
                     }
                 }
@@ -480,6 +504,7 @@ fn apply_theme(ui: &ControlWindow, theme: &ThemePalette) {
     ui.set_primary_darkest(color(theme.primary_darkest));
     ui.set_text_color(color(theme.text));
     ui.set_accent(color(theme.secondary));
+    ui.set_accent_text(color(theme.secondary_text));
 }
 
 fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
@@ -1136,12 +1161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
-    let theme_name = settings
-        .theme
-        .as_deref()
-        .or(session.preferences.theme.as_deref())
-        .unwrap_or("default");
-    let theme = freeshow_core::theme_by_name(theme_name);
+    let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show
         && let Some(show) = session::load_show_file(path)
     {
@@ -1157,7 +1177,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let control = ControlWindow::new()?;
-    apply_theme(&control, &theme);
+    apply_theme(&control, &theme.palette);
+    control.set_theme_font_family(theme.font_family.into());
+    control
+        .global::<OperatorStyle>()
+        .set_font_scale(theme.font_scale);
     let data_label = settings
         .data_path
         .as_ref()
