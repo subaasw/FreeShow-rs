@@ -12,6 +12,7 @@ default = ["gst"]
 gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:coreaudio-rs"]
 
 [dependencies]
+freeshow-core = { path = "../freeshow-core" }
 cpal = "0.15"
 freeshow-output = { path = "../freeshow-output" }
 gstreamer = { version = "0.23", optional = true }

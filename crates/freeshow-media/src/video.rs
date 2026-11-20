@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use freeshow_core::SpeakerRoute;
 use std::path::Path;
 
 use freeshow_output::Raster;
@@ -30,13 +31,10 @@ mod gst_player {
 
     impl VideoPlayer {
         pub fn open(path: &Path) -> Result<Self, MediaError> {
-            Self::open_routed(path, &[(None, 1.0)])
+            Self::open_routed(path, &[SpeakerRoute::stereo(None, 1.0)])
         }
 
-        pub fn open_routed(
-            path: &Path,
-            routes: &[(Option<String>, f32)],
-        ) -> Result<Self, MediaError> {
+        pub fn open_routed(path: &Path, routes: &[SpeakerRoute]) -> Result<Self, MediaError> {
             let location = path.to_string_lossy().replace('"', "\\\"");
             Self::from_launch_routed(
                 &format!(
@@ -66,19 +64,26 @@ mod gst_player {
         }
 
         pub fn from_launch(description: &str) -> Result<Self, MediaError> {
-            Self::from_launch_routed(description, &[(None, 1.0)])
+            Self::from_launch_routed(description, &[SpeakerRoute::stereo(None, 1.0)])
         }
 
         fn from_launch_routed(
             description: &str,
-            routes: &[(Option<String>, f32)],
+            routes: &[SpeakerRoute],
         ) -> Result<Self, MediaError> {
             gst::init().map_err(video_error)?;
-            let mut sinks = Vec::new();
-            for (device, gain) in routes {
-                sinks.push((device.clone(), *gain, speaker_sink(device.as_deref())?));
+            let mut groups = std::collections::BTreeMap::<Option<String>, Vec<SpeakerRoute>>::new();
+            for route in routes {
+                groups
+                    .entry(route.device.clone())
+                    .or_default()
+                    .push(route.clone());
             }
-            Self::from_launch_with_audio(description, AudioBranch::new(sinks)?)
+            let mut sinks = Vec::new();
+            for (device, routes) in groups {
+                sinks.push((routes, speaker_sink(device.as_deref())?));
+            }
+            Self::from_launch_with_audio(description, AudioBranch::new_routed(sinks)?)
         }
 
         fn from_launch_with_audio(
@@ -96,7 +101,7 @@ mod gst_player {
             let sink = appsink
                 .dynamic_cast::<AppSink>()
                 .map_err(|_| MediaError::Video("sink is not an appsink".into()))?;
-            attach_audio(&pipeline, &audio.bin);
+            attach_audio(&pipeline, &audio);
             pipeline
                 .set_state(gst::State::Playing)
                 .map_err(|err| MediaError::Video(err.to_string()))?;
@@ -141,14 +146,9 @@ mod gst_player {
             self.audio.volume.set_property("volume", level);
         }
 
-        pub fn set_audio_routes(&self, routes: &[(Option<String>, f32)]) {
-            for (device, volume) in &self.audio.routes {
-                let gain = routes
-                    .iter()
-                    .find(|(name, _)| name == device)
-                    .map(|(_, gain)| *gain)
-                    .unwrap_or(0.0);
-                volume.set_property("volume", f64::from(gain.clamp(0.0, 1.0)));
+        pub fn set_audio_routes(&self, routes: &[SpeakerRoute]) {
+            if let Ok(mut mix) = self.audio.mix.lock() {
+                mix.set_routes(routes);
             }
         }
 
@@ -371,11 +371,23 @@ mod gst_player {
     struct AudioBranch {
         bin: gst::Bin,
         volume: gst::Element,
-        routes: Vec<(Option<String>, gst::Element)>,
+        mix: std::sync::Arc<std::sync::Mutex<ChannelMix>>,
     }
 
     impl AudioBranch {
-        fn new(mut sinks: Vec<(Option<String>, f32, gst::Element)>) -> Result<Self, MediaError> {
+        #[cfg(test)]
+        fn new(sinks: Vec<(Option<String>, f32, gst::Element)>) -> Result<Self, MediaError> {
+            Self::new_routed(
+                sinks
+                    .into_iter()
+                    .map(|(device, gain, sink)| (vec![SpeakerRoute::stereo(device, gain)], sink))
+                    .collect(),
+            )
+        }
+
+        fn new_routed(
+            mut sinks: Vec<(Vec<SpeakerRoute>, gst::Element)>,
+        ) -> Result<Self, MediaError> {
             let bin = gst::Bin::new();
             let queue = gst::ElementFactory::make("queue")
                 .build()
@@ -403,16 +415,15 @@ mod gst_player {
                 // Consume disconnected audio so video, seek, and end actions keep
                 // running. Never substitute the default room speakers.
                 sinks.push((
-                    None,
-                    0.0,
+                    vec![SpeakerRoute::stereo(None, 0.0)],
                     gst::ElementFactory::make("fakesink")
                         .property("sync", true)
                         .build()
                         .map_err(video_error)?,
                 ));
             }
-            let mut routes = Vec::new();
-            for (device, gain, sink) in sinks {
+            let mut outputs = Vec::new();
+            for (routes, sink) in sinks {
                 let queue = gst::ElementFactory::make("queue")
                     .build()
                     .map_err(video_error)?;
@@ -422,30 +433,137 @@ mod gst_player {
                 let resample = gst::ElementFactory::make("audioresample")
                     .build()
                     .map_err(video_error)?;
-                let gain_element = gst::ElementFactory::make("volume")
-                    .property("volume", f64::from(gain.clamp(0.0, 1.0)))
+                let filter = gst::ElementFactory::make("capsfilter")
                     .build()
                     .map_err(video_error)?;
-                bin.add_many([&queue, &convert, &resample, &gain_element, &sink])
+                let gain_element = gst::ElementFactory::make("volume")
+                    .property("volume", 0.0_f64)
+                    .build()
                     .map_err(video_error)?;
-                gst::Element::link_many([&tee, &queue, &convert, &resample, &gain_element, &sink])
+                bin.add_many([&queue, &convert, &filter, &resample, &gain_element, &sink])
                     .map_err(video_error)?;
-                routes.push((device, gain_element));
+                gst::Element::link_many([
+                    &tee,
+                    &queue,
+                    &convert,
+                    &filter,
+                    &resample,
+                    &gain_element,
+                    &sink,
+                ])
+                .map_err(video_error)?;
+                outputs.push(ChannelOutput {
+                    device: routes[0].device.clone(),
+                    routes,
+                    convert,
+                    filter,
+                    volume: gain_element,
+                });
             }
+            let mix = ChannelMix {
+                channels: None,
+                outputs,
+            };
+            mix.apply();
             Ok(Self {
                 bin,
                 volume,
-                routes,
+                mix: std::sync::Arc::new(std::sync::Mutex::new(mix)),
             })
         }
     }
 
-    fn attach_audio(pipeline: &gst::Pipeline, bin: &gst::Bin) {
+    struct ChannelOutput {
+        device: Option<String>,
+        routes: Vec<SpeakerRoute>,
+        convert: gst::Element,
+        filter: gst::Element,
+        volume: gst::Element,
+    }
+
+    struct ChannelMix {
+        channels: Option<u16>,
+        outputs: Vec<ChannelOutput>,
+    }
+
+    impl ChannelMix {
+        fn set_routes(&mut self, routes: &[SpeakerRoute]) {
+            let mut changed = false;
+            for output in &mut self.outputs {
+                let selected: Vec<_> = routes
+                    .iter()
+                    .filter(|route| route.device == output.device)
+                    .cloned()
+                    .collect();
+                if output.routes != selected {
+                    output.routes = selected;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.apply();
+            }
+        }
+
+        fn apply(&self) {
+            for output in &self.outputs {
+                // Silence the branch while changing its matrix and caps.
+                output.volume.set_property("volume", 0.0_f64);
+                let explicit = output
+                    .routes
+                    .iter()
+                    .any(|route| route.input_channel.is_some() || route.output_channel.is_some());
+                if !explicit {
+                    output
+                        .convert
+                        .set_property("mix-matrix", gst::Array::new(Vec::<gst::Array>::new()));
+                    output.filter.set_property("caps", gst::Caps::new_any());
+                    let gain: f32 = output.routes.iter().map(|route| route.gain).sum();
+                    output
+                        .volume
+                        .set_property("volume", f64::from(gain.clamp(0.0, 10.0)));
+                    continue;
+                }
+                let Some(inputs) = self.channels else {
+                    output.volume.set_property("volume", 0.0_f64);
+                    continue;
+                };
+                let full_source = output
+                    .routes
+                    .iter()
+                    .any(|route| route.output_channel.is_none());
+                let outputs = output
+                    .routes
+                    .iter()
+                    .filter_map(|route| route.output_channel)
+                    .max()
+                    .map(|index| index + 1)
+                    .unwrap_or(2)
+                    .max(if full_source { inputs.max(2) } else { 2 });
+                let matrix = freeshow_core::speaker_matrix(inputs, outputs, &output.routes);
+                let rows: Vec<_> = matrix.into_iter().map(gst::Array::new).collect();
+                output
+                    .convert
+                    .set_property("mix-matrix", gst::Array::new(rows));
+                output.filter.set_property(
+                    "caps",
+                    gst::Caps::builder("audio/x-raw")
+                        .field("channels", i32::from(outputs))
+                        .field("channel-mask", gst::Bitmask::new(0))
+                        .build(),
+                );
+                output.volume.set_property("volume", 1.0_f64);
+            }
+        }
+    }
+
+    fn attach_audio(pipeline: &gst::Pipeline, audio: &AudioBranch) {
         let Some(decode) = pipeline.by_name("dec") else {
             return;
         };
         let pipeline = pipeline.downgrade();
-        let bin = bin.clone();
+        let bin = audio.bin.clone();
+        let mix = std::sync::Arc::clone(&audio.mix);
         decode.connect_pad_added(move |_decode, pad| {
             let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
             if !caps
@@ -454,6 +572,14 @@ mod gst_player {
                 || bin.parent().is_some()
             {
                 return;
+            }
+            if let Ok(mut mix) = mix.lock() {
+                mix.channels = caps
+                    .structure(0)
+                    .and_then(|caps| caps.get::<i32>("channels").ok())
+                    .filter(|channels| (1..=64).contains(channels))
+                    .map(|channels| channels as u16);
+                mix.apply();
             }
             let Some(pipeline) = pipeline.upgrade() else {
                 return;
@@ -513,6 +639,83 @@ mod gst_player {
             panic!("expected audio amplitude {expected}, received {last:?}");
         }
 
+        fn expect_channels(sink: &AppSink, expected: &[f32]) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut last = vec![0.0_f32; expected.len()];
+            while std::time::Instant::now() < deadline {
+                if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
+                    let channels = sample
+                        .caps()
+                        .and_then(|caps| caps.structure(0))
+                        .and_then(|caps| caps.get::<i32>("channels").ok());
+                    if channels != Some(expected.len() as i32) {
+                        continue;
+                    }
+                    let map = sample.buffer().unwrap().map_readable().unwrap();
+                    last.fill(0.0);
+                    for frame in map.as_slice().chunks_exact(4 * expected.len()) {
+                        for (index, value) in frame.chunks_exact(4).enumerate() {
+                            last[index] = last[index]
+                                .max(f32::from_le_bytes(value.try_into().unwrap()).abs());
+                        }
+                    }
+                    if last
+                        .iter()
+                        .zip(expected)
+                        .all(|(a, b)| (a - b).abs() < 0.005)
+                    {
+                        return;
+                    }
+                }
+            }
+            panic!("expected channels {expected:?}, got {last:?}");
+        }
+
+        #[test]
+        fn video_channel_matrix_preserves_sources_and_never_leaks_to_unmapped_ports() {
+            gst::init().unwrap();
+            let sink = capture_sink();
+            sink.set_caps(Some(
+                &gst::Caps::builder("audio/x-raw")
+                    .field("format", "F32LE")
+                    .field("channels", gst::IntRange::<i32>::new(1, 64))
+                    .field("rate", 8000_i32)
+                    .field("layout", "interleaved")
+                    .field("channel-mask", gst::Bitmask::new(0))
+                    .build(),
+            ));
+            let route = SpeakerRoute {
+                input_channel: Some(1),
+                output_channel: Some(1),
+                ..SpeakerRoute::stereo(None, 0.5)
+            };
+            let audio = AudioBranch::new_routed(vec![(vec![route.clone()], sink.clone().upcast())])
+                .unwrap();
+            let player = VideoPlayer::from_launch_with_audio(
+                "videotestsrc is-live=true ! video/x-raw,width=2,height=2,framerate=5/1 ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink max-buffers=1 drop=true sync=false interleave name=stereo ! audio/x-raw,format=F32LE,channels=2,rate=8000 ! decodebin name=dec audiotestsrc is-live=true wave=square volume=0.8 samplesperbuffer=64 ! audio/x-raw,format=F32LE,channels=1,rate=8000 ! stereo.sink_0 audiotestsrc is-live=true wave=square volume=0.4 samplesperbuffer=64 ! audio/x-raw,format=F32LE,channels=1,rate=8000 ! stereo.sink_1", audio
+            ).unwrap();
+            player.set_volume(1.0);
+            expect_channels(&sink, &[0.0, 0.2]);
+            player.set_audio_routes(&[
+                SpeakerRoute {
+                    input_channel: Some(0),
+                    output_channel: Some(0),
+                    ..SpeakerRoute::stereo(None, 0.25)
+                },
+                route,
+            ]);
+            expect_channels(&sink, &[0.2, 0.2]);
+            player.set_muted(true);
+            expect_channels(&sink, &[0.0, 0.0]);
+            player.set_muted(false);
+            expect_channels(&sink, &[0.2, 0.2]);
+            player.set_audio_routes(&[SpeakerRoute {
+                output_channel: Some(3),
+                ..SpeakerRoute::stereo(None, 0.5)
+            }]);
+            expect_channels(&sink, &[0.0, 0.0, 0.0, 0.3]);
+        }
+
         #[test]
         fn decoded_audio_only_reaches_its_routed_sinks_and_controls_keep_their_gain() {
             gst::init().unwrap();
@@ -531,7 +734,10 @@ mod gst_player {
             player.set_volume(1.0);
             expect_amplitude(&stage, 0.25);
             expect_amplitude(&room, 0.0);
-            player.set_audio_routes(&[(None, 0.5), (Some("Stage".into()), 0.1)]);
+            player.set_audio_routes(&[
+                SpeakerRoute::stereo(None, 0.5),
+                SpeakerRoute::stereo(Some("Stage".into()), 0.1),
+            ]);
             player.set_volume(0.4);
             expect_amplitude(&room, 0.2);
             expect_amplitude(&stage, 0.04);
@@ -569,7 +775,12 @@ mod gst_player {
                 .collect();
             assert!(factories.iter().any(|name| name == "fakesink"));
             assert!(!factories.iter().any(|name| name == "autoaudiosink"));
-            assert_eq!(audio.routes[0].1.property::<f64>("volume"), 0.0);
+            assert_eq!(
+                audio.mix.lock().unwrap().outputs[0]
+                    .volume
+                    .property::<f64>("volume"),
+                0.0
+            );
         }
     }
 
@@ -599,11 +810,11 @@ impl VideoPlayer {
         ))
     }
 
-    pub fn open_routed(path: &Path, _routes: &[(Option<String>, f32)]) -> Result<Self, MediaError> {
+    pub fn open_routed(path: &Path, _routes: &[SpeakerRoute]) -> Result<Self, MediaError> {
         Self::open(path)
     }
 
-    pub fn set_audio_routes(&self, _routes: &[(Option<String>, f32)]) {}
+    pub fn set_audio_routes(&self, _routes: &[SpeakerRoute]) {}
 
     pub fn open_camera(_name: &str) -> Result<Self, MediaError> {
         Err(MediaError::Video(

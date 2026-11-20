@@ -13,6 +13,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::MediaError;
+use freeshow_core::{SpeakerRoute, speaker_matrix};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pcm {
@@ -95,6 +96,8 @@ pub struct Playback {
     start: f64,
     end: f64,
     tempo: f64,
+    routes: Vec<SpeakerRoute>,
+    matrix: Vec<Vec<f32>>,
 }
 
 impl Playback {
@@ -112,6 +115,8 @@ impl Playback {
             start: 0.0,
             end: 0.0,
             tempo: 1.0,
+            routes: vec![SpeakerRoute::stereo(None, 1.0)],
+            matrix: Vec::new(),
         }
     }
 
@@ -165,7 +170,10 @@ impl Playback {
 
     /// The playhead has reached the end and the file is not set to repeat.
     pub fn is_finished(&self) -> bool {
-        !self.paused && !self.looping && self.frame_count() > 0 && self.position >= self.play_limit()
+        !self.paused
+            && !self.looping
+            && self.frame_count() > 0
+            && self.position >= self.play_limit()
     }
 
     fn play_limit(&self) -> f64 {
@@ -184,6 +192,13 @@ impl Playback {
         self.position = target.min(frames as f64);
     }
 
+    pub fn set_routes(&mut self, routes: &[SpeakerRoute]) {
+        if self.routes != routes {
+            self.routes = routes.to_vec();
+            self.matrix.clear();
+        }
+    }
+
     /// Fills interleaved output frames, resampling by stepping through the source.
     pub fn fill(&mut self, output: &mut [f32], output_rate: u32, output_channels: u16) {
         if self.paused {
@@ -195,6 +210,10 @@ impl Playback {
         if dst_channels == 0 || output.is_empty() {
             return;
         }
+        if self.matrix.len() != dst_channels {
+            self.matrix = speaker_matrix(self.pcm.channels, output_channels, &self.routes);
+        }
+        output.fill(0.0);
         let frame_count = self.frame_count();
         if frame_count == 0 {
             output.fill(0.0);
@@ -219,12 +238,19 @@ impl Playback {
             for channel in 0..dst_channels {
                 let sample = if silent || base >= self.pcm.samples.len() {
                     0.0
-                } else if channel < src_channels {
-                    self.pcm.samples[base + channel]
                 } else {
-                    self.pcm.samples[base]
+                    self.matrix
+                        .get(channel)
+                        .map(|weights| {
+                            weights
+                                .iter()
+                                .zip(&self.pcm.samples[base..base + src_channels])
+                                .map(|(weight, sample)| weight * sample)
+                                .sum::<f32>()
+                        })
+                        .unwrap_or(0.0)
                 };
-                output[frame * dst_channels + channel] = sample * self.volume;
+                output[frame * dst_channels + channel] = (sample * self.volume).clamp(-1.0, 1.0);
             }
             if !silent {
                 self.position += step;
@@ -239,7 +265,11 @@ struct DeviceAudioOutput {
 }
 
 impl DeviceAudioOutput {
-    fn start(pcm: Arc<Pcm>, volume: f32, device_name: Option<&str>) -> Result<Self, MediaError> {
+    fn start(
+        pcm: Arc<Pcm>,
+        routes: &[SpeakerRoute],
+        device_name: Option<&str>,
+    ) -> Result<Self, MediaError> {
         let host = cpal::default_host();
         let device = match device_name {
             Some(name) => host
@@ -251,12 +281,38 @@ impl DeviceAudioOutput {
                 .default_output_device()
                 .ok_or_else(|| MediaError::Audio("no default output device".into()))?,
         };
-        let supported = device
+        let mut supported = device
             .default_output_config()
             .map_err(|err| MediaError::Audio(err.to_string()))?;
+        let required = routes
+            .iter()
+            .filter_map(|route| route.output_channel)
+            .max()
+            .map(|index| index + 1)
+            .unwrap_or(1);
+        if supported.channels() < required {
+            let rate = supported.sample_rate();
+            supported = device
+                .supported_output_configs()
+                .map_err(|err| MediaError::Audio(err.to_string()))?
+                .filter(|config| config.channels() >= required)
+                .min_by_key(|config| config.channels())
+                .map(|config| {
+                    let selected_rate = cpal::SampleRate(
+                        rate.0
+                            .clamp(config.min_sample_rate().0, config.max_sample_rate().0),
+                    );
+                    config.with_sample_rate(selected_rate)
+                })
+                .ok_or_else(|| {
+                    MediaError::Audio(format!("output device has no channel {}", required))
+                })?;
+        }
         let rate = supported.sample_rate().0;
         let channels = supported.channels();
-        let playback = Arc::new(Mutex::new(Playback::shared(pcm, volume)));
+        let mut state = Playback::shared(pcm, 1.0);
+        state.set_routes(routes);
+        let playback = Arc::new(Mutex::new(state));
         let state = Arc::clone(&playback);
         let config: cpal::StreamConfig = supported.clone().into();
         let stream = match supported.sample_format() {
@@ -371,7 +427,16 @@ impl DeviceAudioOutput {
 
     pub fn set_volume(&self, volume: f32) {
         if let Ok(mut playback) = self.playback.lock() {
-            playback.set_volume(volume);
+            for route in &mut playback.routes {
+                route.gain = volume.clamp(0.0, 1.0);
+            }
+            playback.matrix.clear();
+        }
+    }
+
+    fn set_routes(&self, routes: &[SpeakerRoute]) {
+        if let Ok(mut playback) = self.playback.lock() {
+            playback.set_routes(routes);
         }
     }
 }
@@ -385,13 +450,10 @@ pub struct AudioOutput {
 
 impl AudioOutput {
     pub fn play_file(path: &Path, volume: f32) -> Result<Self, MediaError> {
-        Self::play_file_routed(path, &[(None, volume)])
+        Self::play_file_routed(path, &[SpeakerRoute::stereo(None, volume)])
     }
 
-    pub fn play_file_routed(
-        path: &Path,
-        routes: &[(Option<String>, f32)],
-    ) -> Result<Self, MediaError> {
+    pub fn play_file_routed(path: &Path, routes: &[SpeakerRoute]) -> Result<Self, MediaError> {
         let bytes = std::fs::read(path).map_err(|err| MediaError::Audio(err.to_string()))?;
         let extension = path
             .extension()
@@ -400,18 +462,23 @@ impl AudioOutput {
         let pcm = Arc::new(decode_with_hint(&bytes, extension)?);
         // Keep a silent clock for an intentionally disconnected source, so end
         // actions and playlist advancement still run without leaking to Main.
-        let silent = [(None, 0.0)];
+        let silent = [SpeakerRoute::stereo(None, 0.0)];
         let routes = if routes.is_empty() {
             &silent[..]
         } else {
             routes
         };
         let mut outputs = Vec::new();
-        for (device, gain) in routes {
-            // A missing named destination fails closed: never play its cue in
-            // the default speakers as a fallback.
-            let output = DeviceAudioOutput::start(pcm.clone(), *gain, device.as_deref())?;
-            outputs.push((device.clone(), output));
+        let mut devices = std::collections::BTreeMap::<Option<String>, Vec<SpeakerRoute>>::new();
+        for route in routes {
+            devices
+                .entry(route.device.clone())
+                .or_default()
+                .push(route.clone());
+        }
+        for (device, routes) in devices {
+            let output = DeviceAudioOutput::start(pcm.clone(), &routes, device.as_deref())?;
+            outputs.push((device, output));
         }
         Ok(Self { outputs })
     }
@@ -420,19 +487,26 @@ impl AudioOutput {
         Ok(Self {
             outputs: vec![(
                 device_name.map(str::to_string),
-                DeviceAudioOutput::start(Arc::new(pcm), volume, device_name)?,
+                DeviceAudioOutput::start(
+                    Arc::new(pcm),
+                    &[SpeakerRoute::stereo(
+                        device_name.map(str::to_string),
+                        volume,
+                    )],
+                    device_name,
+                )?,
             )],
         })
     }
 
-    pub fn set_route_gains(&self, routes: &[(Option<String>, f32)]) {
+    pub fn set_route_gains(&self, routes: &[SpeakerRoute]) {
         for (device, output) in &self.outputs {
-            let gain = routes
+            let selected: Vec<_> = routes
                 .iter()
-                .find(|(name, _)| name == device)
-                .map(|(_, gain)| *gain)
-                .unwrap_or(0.0);
-            output.set_volume(gain);
+                .filter(|route| &route.device == device)
+                .cloned()
+                .collect();
+            output.set_routes(&selected);
         }
     }
 
@@ -526,6 +600,45 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn playback_mixes_only_into_assigned_hardware_channels() {
+        let pcm = Pcm {
+            rate: 8000,
+            channels: 2,
+            samples: vec![0.8, 0.4, 0.6, 0.2],
+        };
+        let mut playback = Playback::new(pcm, 1.0);
+        let cue = SpeakerRoute {
+            output_channel: Some(3),
+            ..SpeakerRoute::stereo(None, 0.5)
+        };
+        playback.set_routes(&[cue]);
+        let mut output = [0.0; 4];
+        playback.fill(&mut output, 8000, 4);
+        assert_eq!(&output[..3], &[0.0, 0.0, 0.0]);
+        assert!((output[3] - 0.3).abs() < 0.001);
+        playback.seek_seconds(0.0);
+        playback.set_routes(&[
+            SpeakerRoute {
+                input_channel: Some(0),
+                output_channel: Some(0),
+                ..SpeakerRoute::stereo(None, 0.5)
+            },
+            SpeakerRoute {
+                input_channel: Some(1),
+                output_channel: Some(1),
+                ..SpeakerRoute::stereo(None, 0.25)
+            },
+        ]);
+        let mut stereo = [0.0; 2];
+        playback.fill(&mut stereo, 8000, 2);
+        assert_eq!(stereo, [0.4, 0.1]);
+        playback.set_routes(&[]);
+        playback.fill(&mut stereo, 8000, 2);
+        assert_eq!(stereo, [0.0, 0.0]);
+        assert!(playback.is_finished());
     }
 
     #[test]
