@@ -475,6 +475,13 @@ mod gst_player {
                 let queue = gst::ElementFactory::make("queue")
                     .build()
                     .map_err(video_error)?;
+                let upstream = queue.static_pad("src").expect("queue has a source pad");
+                let normalize = gst::ElementFactory::make("audioconvert")
+                    .build()
+                    .map_err(video_error)?;
+                let input_format = gst::ElementFactory::make("capsfilter")
+                    .build()
+                    .map_err(video_error)?;
                 let convert = gst::ElementFactory::make("audioconvert")
                     .build()
                     .map_err(video_error)?;
@@ -488,11 +495,16 @@ mod gst_player {
                     .property("volume", 0.0_f64)
                     .build()
                     .map_err(video_error)?;
-                bin.add_many([&queue, &convert, &filter, &resample, &gain_element, &sink])
-                    .map_err(video_error)?;
+                bin.add_many([
+                    &queue, &normalize, &input_format, &convert, &filter, &resample, &gain_element,
+                    &sink,
+                ])
+                .map_err(video_error)?;
                 gst::Element::link_many([
                     &tee,
                     &queue,
+                    &normalize,
+                    &input_format,
                     &convert,
                     &filter,
                     &resample,
@@ -504,6 +516,8 @@ mod gst_player {
                     network,
                     device: routes[0].device.clone(),
                     routes,
+                    upstream,
+                    input_format,
                     convert,
                     filter,
                     volume: gain_element,
@@ -526,9 +540,48 @@ mod gst_player {
         network: bool,
         device: Option<String>,
         routes: Vec<SpeakerRoute>,
+        upstream: gst::Pad,
+        input_format: gst::Element,
         convert: gst::Element,
         filter: gst::Element,
         volume: gst::Element,
+    }
+
+    impl ChannelOutput {
+        fn configure(&self, matrix: Vec<gst::Array>, caps: gst::Caps, gain: f64) {
+            let convert = self.convert.clone();
+            let input_format = self.input_format.clone();
+            let filter = self.filter.clone();
+            let volume = self.volume.clone();
+            let matrix = gst::Array::new(matrix);
+            self.upstream.add_probe(gst::PadProbeType::IDLE, move |_, _| {
+                volume.set_property("volume", 0.0_f64);
+                let was_explicit = !convert
+                    .property::<gst::Array>("mix-matrix")
+                    .as_slice()
+                    .is_empty();
+                convert.set_property("mix-matrix", &matrix);
+                filter.set_property("caps", &caps);
+                if was_explicit || !matrix.as_slice().is_empty() {
+                    // Older audioconvert versions skip rebuilding the matrix when caps are equal.
+                    let current = convert.static_pad("sink").and_then(|pad| pad.current_caps());
+                    let is_f32 = current
+                        .as_ref()
+                        .and_then(|caps| caps.structure(0))
+                        .and_then(|caps| caps.get::<&str>("format").ok())
+                        == Some("F32LE");
+                    let format = if is_f32 { "F64LE" } else { "F32LE" };
+                    input_format.set_property(
+                        "caps",
+                        gst::Caps::builder("audio/x-raw")
+                            .field("format", format)
+                            .build(),
+                    );
+                }
+                volume.set_property("volume", gain);
+                gst::PadProbeReturn::Remove
+            });
+        }
     }
 
     struct ChannelMix {
@@ -575,21 +628,17 @@ mod gst_player {
 
         fn apply(&self) {
             for output in &self.outputs {
-                // Silence the branch while changing its matrix and caps.
-                output.volume.set_property("volume", 0.0_f64);
                 let explicit = output
                     .routes
                     .iter()
                     .any(|route| route.input_channel.is_some() || route.output_channel.is_some());
                 if !explicit {
-                    output
-                        .convert
-                        .set_property("mix-matrix", gst::Array::new(Vec::<gst::Array>::new()));
-                    output.filter.set_property("caps", gst::Caps::new_any());
                     let gain: f32 = output.routes.iter().map(|route| route.gain).sum();
-                    output
-                        .volume
-                        .set_property("volume", f64::from(gain.clamp(0.0, 10.0)));
+                    output.configure(
+                        Vec::new(),
+                        gst::Caps::new_any(),
+                        f64::from(gain.clamp(0.0, 10.0)),
+                    );
                     continue;
                 }
                 let Some(inputs) = self.channels else {
@@ -610,17 +659,13 @@ mod gst_player {
                     .max(if full_source { inputs.max(2) } else { 2 });
                 let matrix = freeshow_core::speaker_matrix(inputs, outputs, &output.routes);
                 let rows: Vec<_> = matrix.into_iter().map(gst::Array::new).collect();
-                output
-                    .convert
-                    .set_property("mix-matrix", gst::Array::new(rows));
-                output.filter.set_property(
-                    "caps",
+                output.configure(
+                    rows,
                     gst::Caps::builder("audio/x-raw")
                         .field("channels", i32::from(outputs))
-                        .field("channel-mask", gst::Bitmask::new(0))
                         .build(),
+                    1.0,
                 );
-                output.volume.set_property("volume", 1.0_f64);
             }
         }
     }
@@ -785,7 +830,6 @@ mod gst_player {
                     .field("channels", gst::IntRange::<i32>::new(1, 64))
                     .field("rate", 8000_i32)
                     .field("layout", "interleaved")
-                    .field("channel-mask", gst::Bitmask::new(0))
                     .build(),
             ));
             let route = SpeakerRoute {
@@ -806,13 +850,15 @@ mod gst_player {
                     output_channel: Some(0),
                     ..SpeakerRoute::stereo(None, 0.25)
                 },
-                route,
+                route.clone(),
             ]);
             expect_channels(&sink, &[0.2, 0.2]);
             player.set_muted(true);
             expect_channels(&sink, &[0.0, 0.0]);
             player.set_muted(false);
             expect_channels(&sink, &[0.2, 0.2]);
+            player.set_audio_routes(&[route]);
+            expect_channels(&sink, &[0.0, 0.2]);
             player.set_audio_routes(&[SpeakerRoute {
                 output_channel: Some(3),
                 ..SpeakerRoute::stereo(None, 0.5)
