@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod live;
+mod runtime;
 mod present;
 mod session;
 mod stage;
@@ -1100,20 +1101,26 @@ fn place(window: &slint::Window, x: i32, y: i32) {
 struct Launch {
     data: Option<PathBuf>,
     show: Option<PathBuf>,
+    check_runtime: bool,
+    check_media: Option<PathBuf>,
     list_audio_devices: bool,
     list_video_audio_devices: bool,
 }
 
-fn launch_args() -> Launch {
+fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
     let mut launch = Launch {
         data: None,
         show: None,
+        check_runtime: false,
+        check_media: None,
         list_audio_devices: false,
         list_video_audio_devices: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--check-runtime" => launch.check_runtime = true,
+            "--check-media" => launch.check_media = Some(PathBuf::from(args.next().ok_or("--check-media needs a video file")?)),
             "--data" => launch.data = args.next().map(PathBuf::from),
             "--show" => launch.show = args.next().map(PathBuf::from),
             "--list-audio-devices" => launch.list_audio_devices = true,
@@ -1121,11 +1128,15 @@ fn launch_args() -> Launch {
             _ => {}
         }
     }
-    launch
+    Ok(launch)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let launch = launch_args();
+    runtime::configure_bundle()?;
+    let launch = launch_args()?;
+    if launch.check_runtime || launch.check_media.is_some() {
+        return runtime::check(launch.check_media.as_deref());
+    }
     if launch.list_video_audio_devices {
         for device in freeshow_media::video_output_devices() {
             println!("{device}");

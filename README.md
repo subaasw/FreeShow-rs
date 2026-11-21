@@ -69,7 +69,24 @@ scripts/package.sh x86_64-pc-windows-msvc
 scripts/package.sh x86_64-unknown-linux-gnu
 ```
 
-The extra arguments need that Rust target installed, plus a GStreamer development package for the platform. The script does not build disk images or installers.
+The extra arguments need that Rust target installed, plus a GStreamer development package for the platform. Windows and Linux currently produce staged folders.
+
+On a native Mac, the script also creates `FreeShow Rust.app` and a compressed `.dmg` with an Applications shortcut and SHA-256 checksum. Building needs Python 3.11+, Xcode command-line tools, and Homebrew GStreamer. The app bundles its linked libraries, selected GStreamer plugins, and plugin scanner, so the installed app needs neither Rust nor Homebrew. The optional NDI SDK remains a separate installation. Each app records its architecture and measured minimum macOS version in `Contents/Resources/BUILD.json`. Build on a host with dependencies compatible with the macOS versions you intend to support.
+
+The bundle includes this project's source archive, GPL license, DejaVu license, and available third-party license files/Homebrew source recipes. Source files must be tracked and the working tree must match the Git index; use a clean checkout for release builds. The imported FreeShow icon is credited in `ICON-SOURCE.txt`.
+
+Packaging relocates the app into a path with spaces, cold-scans its plugins with an empty home/cache, and decodes an H.264 sample without opening windows. Where `sandbox-exec` is available, these checks deny reads from Homebrew and Rust toolchain directories. The DMG is verified, mounted read-only, and checked again. Results go into `macos-verification.json`. The default signature is ad-hoc for development; public-distribution signing and notarization are not performed automatically. To sign with your own identity, use the packaging helper after building:
+
+```sh
+python3 scripts/package-macos.py --binary target/release/freeshow --output dist/macos --identity "Developer ID Application: Your Name (TEAMID)" --dmg
+```
+
+Headless diagnostics also work on a development binary:
+
+```sh
+cargo run -p freeshow -- --check-runtime
+cargo run -p freeshow -- --check-media /path/to/video.mp4
+```
 
 Check the workspace:
 

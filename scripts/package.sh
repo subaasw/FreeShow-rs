@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stage a release folder for this machine, or for a Rust target triple passed as $1.
+# Stage a release folder; native macOS builds also produce an app and DMG.
 # The build is locked to Cargo.lock. SOURCE_DATE_EPOCH and remapped paths keep the
 # binary from embedding this checkout's clock and home directory.
 set -eu
@@ -59,4 +59,13 @@ fi
     echo "cargo_lock_sha256 $LOCK_HASH"
     rustc -vV
 } > "$STAGE/BUILD.txt"
+case $TRIPLE in
+    *apple-darwin*)
+        if [ "$(uname -s)" != Darwin ]; then
+            echo "macOS app packaging needs a native macOS host" >&2
+            exit 1
+        fi
+        python3 scripts/package-macos.py --binary "$STAGE/$NAME" --output "$STAGE" --dmg
+        ;;
+esac
 echo "$STAGE"
