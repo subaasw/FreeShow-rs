@@ -7,6 +7,9 @@ use std::time::Duration;
 use freeshow_data::{Library, ProjectsFile, ShowFile};
 use serde_json::{Map, Value};
 
+mod lessons;
+pub use lessons::import_lesson_document;
+
 /// Loads ChurchApps presenter plans into a FreeShow library.
 /// The show keeps running when no account is connected or a request fails.
 pub trait ContentSource {
@@ -37,11 +40,15 @@ impl ContentSource for ChurchApps {
     }
 
     fn sync(&self, library: &Path) -> SyncReport {
+        let local = lessons::import_sources(library);
         match load_configured(library) {
-            Ok(report) => report,
+            Ok(report) => SyncReport {
+                shows: report.shows + local.shows,
+                project_id: report.project_id.or(local.project_id),
+            },
             Err(err) => {
                 tracing::error!("churchapps: {err}");
-                SyncReport::none()
+                local
             }
         }
     }
@@ -88,6 +95,13 @@ fn load_configured(library: &Path) -> Result<SyncReport, String> {
         if path.trim().is_empty() {
             return Ok(SyncReport::none());
         }
+        if std::fs::metadata(&path)
+            .map_err(|err| err.to_string())?
+            .len()
+            > 16 * 1024 * 1024
+        {
+            return Err("ChurchApps document exceeds 16 MiB".into());
+        }
         std::fs::read_to_string(path).map_err(|err| err.to_string())?
     } else {
         let Some(token) = std::env::var("FREESHOW_CHURCHAPPS_TOKEN")
@@ -98,6 +112,10 @@ fn load_configured(library: &Path) -> Result<SyncReport, String> {
         };
         fetch_plans(token.trim())?
     };
+    let value: Value = serde_json::from_str(&document).map_err(|err| err.to_string())?;
+    if freeshow_data::is_lesson_document(&value) {
+        return import_lesson_document(library, &value);
+    }
     let plans = plans_from_document(&document)?;
     if plans.is_empty() {
         return Err("churchapps returned no plans".to_string());

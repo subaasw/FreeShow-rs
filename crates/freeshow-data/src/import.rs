@@ -45,7 +45,17 @@ pub fn import_sources(
     }
     paths.sort();
     for path in paths {
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if extension.eq_ignore_ascii_case("olp") || extension.eq_ignore_ascii_case("olf") {
+            continue;
+        }
         let bytes = fs::read(&path)?;
+        if serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .is_some_and(|value| crate::is_lesson_document(&value))
+        {
+            continue;
+        }
         let found = if propresenter::is_bundle(&path) {
             propresenter::import_bundle(&bytes, media)
         } else {

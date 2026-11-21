@@ -120,6 +120,14 @@ pub struct ShowFile {
     pub path: Option<PathBuf>,
 }
 
+/// Lessons.church OLP/OLF documents are imported by the ChurchApps integration,
+/// which downloads their media before publishing a show.
+pub fn is_lesson_document(value: &Value) -> bool {
+    value.get("lessonName").and_then(Value::as_str).is_some()
+        && (value.get("messages").is_some_and(Value::is_array)
+            || value.get("sections").is_some_and(Value::is_array))
+}
+
 fn active_output_key(outputs: &serde_json::Map<String, Value>) -> Option<String> {
     outputs
         .iter()
@@ -2979,6 +2987,10 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn save(&self, path: &Path) -> Result<(), DataError> {
+        atomic_write(path, self.to_json()?.as_bytes())
+    }
+
     pub fn empty() -> Self {
         Self {
             document: Value::Object(Map::new()),
