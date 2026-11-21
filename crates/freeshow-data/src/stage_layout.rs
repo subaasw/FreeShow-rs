@@ -168,6 +168,10 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
             continue;
         }
         let kind = kind_of(&id, item_value);
+        let legacy = item_value
+            .get("type")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty);
         let label = item_value
             .get("label")
             .and_then(Value::as_str)
@@ -201,7 +205,7 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
             offset: item_value
                 .get("slideOffset")
                 .and_then(Value::as_i64)
-                .unwrap_or(0),
+                .unwrap_or_else(|| i64::from(legacy && id.contains("next"))),
             line_count: item_value
                 .get("lineCount")
                 .and_then(Value::as_u64)
@@ -227,7 +231,15 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 date_format: item_value
                     .pointer("/clock/dateFormat")
                     .and_then(Value::as_str)
-                    .unwrap_or("none")
+                    .unwrap_or_else(|| {
+                        if legacy
+                            && item_value.pointer("/clock/show_date") == Some(&Value::Bool(true))
+                        {
+                            "DD/MM/YYYY"
+                        } else {
+                            "none"
+                        }
+                    })
                     .to_string(),
             },
         });
@@ -383,5 +395,25 @@ mod tests {
         .unwrap();
         assert!(!layout.items[0].clock.seconds);
         assert_eq!(layout.items[0].clock.date_format, "DD/MM/YYYY");
+    }
+
+    #[test]
+    fn legacy_next_and_clock_options_match_freeshow() {
+        let layout = parse_stage(
+            r#"{"old":{"itemOrder":["next_slide_text","next_slide_notes","next_modern","clock"],"items":{
+                "next_slide_text":{},
+                "next_slide_notes":{},
+                "next_modern":{"type":"slide_text"},
+                "clock":{"clock":{"seconds":false,"show_date":true}}
+            }}}"#,
+        )
+        .unwrap();
+        assert_eq!(layout.items[0].kind, StageItemKind::Slide);
+        assert_eq!(layout.items[0].offset, 1);
+        assert_eq!(layout.items[1].kind, StageItemKind::Notes);
+        assert_eq!(layout.items[1].offset, 1);
+        assert_eq!(layout.items[2].offset, 0);
+        assert!(!layout.items[3].clock.seconds);
+        assert_eq!(layout.items[3].clock.date_format, "DD/MM/YYYY");
     }
 }
