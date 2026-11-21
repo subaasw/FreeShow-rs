@@ -28,11 +28,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config patchelf binutils python3 desktop-file-utils libglib2.0-bin \
-            libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev mesa-vulkan-drivers \
+            libasound2-dev libudev-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev mesa-vulkan-drivers \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa gstreamer1.0-pulseaudio
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Restore native compilation cache
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: linux-ubuntu24-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: linux-ubuntu24-${{ hashFiles('Cargo.lock') }}-
       - name: Test and package the native release
         run: |
           run_checked() {
@@ -80,3 +89,11 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Save native compilation cache
+        if: always() && steps.native-cache.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
