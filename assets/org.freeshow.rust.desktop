@@ -1,0 +1,12 @@
+# Managed by freeshow-rust
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FreeShow Rust
+GenericName=Presentation
+Comment=Present songs, scripture, and media
+Exec=freeshow-rust --show %f
+TryExec=freeshow-rust
+Icon=freeshow-rust
+Terminal=false
+Categories=Office;Presentation;

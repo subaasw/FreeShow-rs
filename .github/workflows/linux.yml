@@ -1,0 +1,80 @@
+name: Linux release package
+
+on:
+  push:
+    branches: [main]
+    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/linux.yml']
+  pull_request:
+    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/linux.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native build and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config patchelf binutils python3 desktop-file-utils libglib2.0-bin \
+            libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev mesa-vulkan-drivers \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa gstreamer1.0-pulseaudio
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Test and package the native release
+        run: |
+          run_checked() {
+            log="$RUNNER_TEMP/$1.log"
+            shift
+            if "$@" > "$log" 2>&1; then
+              cat "$log"
+            else
+              cat "$log"
+              python3 - "$log" <<'PY'
+          import pathlib,sys
+          text=pathlib.Path(sys.argv[1]).read_text(errors='replace')[-12000:]
+          print('::error::'+text.replace('%','%25').replace('\r','%0D').replace('\n','%0A'))
+          PY
+              return 1
+            fi
+          }
+          run_checked tests cargo test --locked --workspace
+          run_checked package scripts/package.sh
+      - name: Verify after removing the system GStreamer runtime
+        run: |
+          sudo apt-get remove -y libgstreamer1.0-0 libgstreamer-plugins-base1.0-0
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess,tempfile
+          root=pathlib.Path.cwd()
+          apps=list((root/'dist').glob('freeshow-*/freeshow-rust-*-linux-x86_64'))
+          assert len(apps)==1, apps
+          with tempfile.TemporaryDirectory(prefix='freeshow-clean-runtime-') as temp:
+              env={'HOME':temp,'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'}
+              subprocess.run([str(apps[0]/'AppRun'),'--check-media',str(root/'crates/freeshow-data/tests/fixtures/lesson-clip.mp4')],env=env,check=True,timeout=60)
+          report={'system_gstreamer_removed':True,'empty_home_and_registry':True,'h264_decoded':True}
+          (apps[0].parent/'linux-clean-runtime.json').write_text(json.dumps(report,indent=2)+'\n')
+          print('::notice::'+json.dumps(report))
+          PY
+      - name: Upload the installable archive and verification reports
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: freeshow-linux-x86_64
+          path: |
+            dist/freeshow-*/*.tar.gz
+            dist/freeshow-*/*.sha256
+            dist/freeshow-*/linux-*.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

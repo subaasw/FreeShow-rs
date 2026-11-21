@@ -92,7 +92,7 @@ boxes render a labeled placeholder until the compositor grows those sources.
 - [x] Native macOS `.app`/`.dmg` with bundled runtime and documented signing.
 - [ ] Verify macOS distribution with Developer ID/notarization and on additional OS/architecture hosts.
 - [ ] Windows installer.
-- [ ] Linux AppImage or tarball with a desktop file.
+- [ ] Linux runtime tarball and desktop installer: implemented, native CI verification pending.
 - [ ] Release workflow that builds all three from the lockfile.
 
 Acceptance: a fresh machine can install the app without a Rust toolchain.

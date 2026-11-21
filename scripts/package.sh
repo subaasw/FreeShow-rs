@@ -67,5 +67,8 @@ case $TRIPLE in
         fi
         python3 scripts/package-macos.py --binary "$STAGE/$NAME" --output "$STAGE" --dmg
         ;;
+    *unknown-linux-gnu*)
+        python3 scripts/package-linux.py --binary "$STAGE/$NAME" --output "$STAGE"
+        ;;
 esac
 echo "$STAGE"
