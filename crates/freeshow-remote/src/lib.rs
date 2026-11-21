@@ -57,6 +57,7 @@ pub struct AppState {
     pub bus: ShowBus,
     /// Password required from network clients. `None` or an empty value is open.
     pub password: Option<String>,
+    stage_only: bool,
 }
 
 impl AppState {
@@ -66,6 +67,7 @@ impl AppState {
             password: password
                 .map(|password| password.trim().to_string())
                 .filter(|password| !password.is_empty()),
+            stage_only: false,
         }
     }
 
@@ -125,7 +127,7 @@ pub fn spawn(
             runtime.block_on(async move {
                 let state = AppState::new(ShowBus { snapshot, commands }, password);
                 let remote = with_socket(remote_router(state.clone()), state.clone(), "REMOTE");
-                let stage = with_socket(stage_router(state.clone()), state, "STAGE");
+                let stage = stage_router(state);
                 tokio::join!(
                     listen(ports.remote, remote, "remote"),
                     listen(ports.stage, stage, "stage"),
@@ -147,13 +149,15 @@ pub fn remote_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub fn stage_router(state: AppState) -> Router {
-    Router::new()
+pub fn stage_router(mut state: AppState) -> Router {
+    state.stage_only = true;
+    let router = Router::new()
         .route("/", get(stage_page))
         .route("/state", get(state_json))
         .route("/action", post(action))
         .route("/ws", get(ws_upgrade))
-        .with_state(state)
+        .with_state(state.clone());
+    with_socket(router, state, "STAGE")
 }
 
 fn with_socket(router: Router, state: AppState, event: &'static str) -> Router {
@@ -265,6 +269,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 }
 
 fn dispatch(state: &AppState, incoming: &Value, authenticated: &mut bool) -> Vec<Value> {
+    if state.stage_only
+        && !matches!(
+            incoming.get("channel").and_then(Value::as_str),
+            Some("PASSWORD" | "ACCESS" | "LAYOUTS" | "LAYOUT" | "API:get_output")
+        )
+    {
+        return Vec::new();
+    }
     dispatch_message(
         &state.bus,
         incoming,
@@ -616,6 +628,78 @@ mod tests {
         assert_eq!(body["lines"][0], "Amazing grace");
         assert_eq!(body["next_lines"][0], "how sweet");
         assert_eq!(body["notes"], "Stand");
+    }
+
+    #[tokio::test]
+    async fn stage_transports_read_the_show_without_advancing_it() {
+        let (state, rx) = harness();
+        let app = stage_router(state.clone());
+        let advance = json!({ "channel": "API:next_slide" });
+        let read = json!({ "channel": "API:get_output" });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/action")
+                    .header("content-type", "application/json")
+                    .body(Body::from(advance.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "[]"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { serve(listener, app).await.unwrap() });
+        let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .unwrap();
+        for message in [&advance, &read] {
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                message.to_string().into(),
+            ))
+            .await
+            .unwrap();
+        }
+        let reply = timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let output: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+        assert_eq!(output["data"]["lines"][0], "Amazing grace");
+
+        let output = tokio::task::spawn_blocking(move || {
+            let (tx, replies) = mpsc::channel();
+            let socket = ClientBuilder::new(format!("http://127.0.0.1:{port}"))
+                .on("STAGE", move |payload, _client: RawClient| {
+                    if let Payload::Text(values) = payload {
+                        for value in values {
+                            let _ = tx.send(value);
+                        }
+                    }
+                })
+                .connect()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            socket.emit("STAGE", advance).unwrap();
+            socket.emit("STAGE", read).unwrap();
+            let reply = replies.recv_timeout(Duration::from_secs(5)).unwrap();
+            socket.disconnect().ok();
+            reply
+        })
+        .await
+        .unwrap();
+        assert_eq!(output["data"]["lines"][0], "Amazing grace");
+        assert_eq!(state.bus.snapshot.lock().unwrap().slide_index, Some(0));
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
     }
 
     #[tokio::test]
