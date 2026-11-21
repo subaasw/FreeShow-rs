@@ -379,8 +379,8 @@ mod gst_player {
             .ok_or_else(|| video_error("could not enumerate audio sinks"))?;
         monitor.start().map_err(video_error)?;
         let devices = monitor.devices();
-        monitor.stop();
-        Ok(devices)
+        let _ = monitor.stop();
+        Ok(devices.into_iter().collect())
     }
 
     pub fn video_output_devices() -> Vec<String> {
