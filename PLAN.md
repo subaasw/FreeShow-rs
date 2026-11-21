@@ -100,7 +100,9 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 
 - [x] ProPresenter 4–6 XML bundles and their slide-background media.
 - [ ] ProPresenter 7 protobuf, arrangements, and original text-box styling.
-- [ ] ChurchApps lesson media downloads.
+- [x] Lessons.church OLP/OLF imports with downloaded, cached media.
+- [ ] ChurchApps service-plan lesson feeds and add-ons.
+- [ ] Background lesson downloads with progress and cancellation.
 - [x] ProPresenter bundle backgrounds land in `Media/` and stay linked.
 - [ ] Background media from the other import formats.
 

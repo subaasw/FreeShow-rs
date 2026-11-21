@@ -47,7 +47,9 @@ Functions → Record writes the audience picture to `Recordings/freeshow-YYYYMMD
 
 Planning Center loads when `FREESHOW_PCO_TOKEN` is a Services access token and `FREESHOW_PCO_PLAN` is `serviceTypeId/planId`. `FREESHOW_PCO_FILE` can point at a saved plan document instead. Songs and plan items become shows, headers stay section labels in the project, and Functions → Planning Center loads the plan again. With neither a token nor a file, the app does not contact Planning Center.
 
-ChurchApps loads the presenter plans for `FREESHOW_CHURCHAPPS_TOKEN`, or a saved plan from `FREESHOW_CHURCHAPPS_FILE`. Arrangement lyrics become shows, with later lyric blocks kept as child slides, and Functions → ChurchApps loads them again. With neither a token nor a file, the app does not contact ChurchApps.
+ChurchApps loads the presenter plans for `FREESHOW_CHURCHAPPS_TOKEN`, or a saved plan from `FREESHOW_CHURCHAPPS_FILE`. Arrangement lyrics become shows, with later lyric blocks kept as child slides, and Functions → ChurchApps loads them again. Without a token, service-plan API requests are disabled.
+
+Lessons.church `.olp`, `.olf`, and lesson `.json` files in `Imports/` are imported at startup or through Functions → ChurchApps, without an account. `FREESHOW_CHURCHAPPS_FILE` can also point at one lesson document. Cover images and media from playlist groups or OLF `play` actions download over HTTP/HTTPS into `Media/Lessons/`. The resulting shows are added to the `Lessons.church` project only after every media download finishes. Grouped slides keep video loop flags, audible video sound, and advancement after a non-looping video except on the final slide. Completed downloads are cached for offline reuse; repeated imports keep operator edits. Failed or truncated transfers do not publish a lesson and can be retried. Limits are 16 MiB per source file, 2,000 media slides, and 2 GiB per media file. Imports currently wait synchronously and log media progress; large new downloads can delay startup or the Functions action. Live service-plan lesson feeds/add-ons and a download progress/cancel interface remain unimplemented.
 
 Functions → Backup writes `Backups/YYYY-MM-DD_HH-MM.zip` with shows, portable config, and bibles in the FreeShow backup names. Functions → Restore puts the newest of those zips back into the library. `FREESHOW_CLOUD_DIR` also receives a copy, and `FREESHOW_CLOUD_URL` receives a PUT of the zip (`FREESHOW_CLOUD_TOKEN` is sent as a bearer token when it is set). A failed copy or upload keeps the local zip and the show continues. When neither destination is set, the app does not upload on startup.
 
@@ -111,7 +113,7 @@ Settings and the log are stored in the app config directory:
 - `crates/freeshow-timecode` — MIDI timecode and linear timecode audio
 - `crates/freeshow-record` — audience recording and RTMP. The show runs when the encoder is missing
 - `crates/freeshow-pco` — Planning Center service plans. The show runs when no account is connected
-- `crates/freeshow-churchapps` — ChurchApps presenter plans. The show runs when no account is connected
+- `crates/freeshow-churchapps` — ChurchApps presenter plans and Lessons.church media imports. The show runs when no account is connected
 - `crates/freeshow-cloud` — library zip backup and an optional cloud copy. The show runs when the destination is missing
 - `crates/freeshow-obs` — OBS WebSocket 5 scene, stream, and record control. The show runs when OBS is closed
 - `crates/freeshow-ai` — slide rewrite through a local Ollama model. The show runs when no model is configured

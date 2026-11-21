@@ -3560,6 +3560,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn downloaded_lesson_media_presents_from_the_local_library() {
+        use std::io::{Read, Write};
+        let root = std::env::temp_dir().join(format!("freeshow-present-lesson-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // Generated green PNG and silent H.264 clip; no external network.
+            for body in [
+                include_bytes!("../../freeshow-data/tests/fixtures/lesson-cover.png").as_slice(),
+                include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4").as_slice(),
+            ] {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(error) => panic!("lesson test listener: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 16384 {
+                    let mut byte = [0];
+                    if stream.read(&mut byte).unwrap() == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let lesson = serde_json::json!({"lessonName":"Sunday Lesson", "lessonImage":format!("http://{address}/cover.png"), "messages":[{"files":[{"name":"Story","url":format!("http://{address}/story.mp4")}]}]});
+        freeshow_churchapps::import_lesson_document(&root, &lesson).unwrap();
+        server.join().unwrap();
+        let mut session = Session::open(root.clone());
+        let id = session.shows[0].id.clone();
+        assert!(session.present_show_id(&id));
+        let raster = session.underlay.as_ref().expect("lesson image must decode");
+        assert_eq!(raster.rgba, [0, 255, 0, 255]);
+        assert_eq!(session.projects.projects()[0].name, "Lessons.church");
+        assert!(
+            session
+                .background_path
+                .as_ref()
+                .unwrap()
+                .starts_with(root.join("Media").canonicalize().unwrap())
+        );
+        session.select_slide(1);
+        assert!(!session.media_loop);
+        assert!(!session.media_muted);
+        let Some(PendingPlay::Video(path)) = session.pending_play.take() else {
+            panic!("lesson must queue the downloaded video");
+        };
+        let mut player = freeshow_media::VideoPlayer::open_with_network(&path, &[], &[]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let frame = loop {
+            if let Some(frame) = player.next_frame() {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "downloaded video did not decode");
+        };
+        let center = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
+        assert!(frame.rgba[center] < 15 && frame.rgba[center + 1] > 240 && frame.rgba[center + 2] < 15);
+        drop(player);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn imported_propresenter_bundle_presents_lyrics_over_its_copied_background() {
         let root =
             std::env::temp_dir().join(format!("freeshow-present-probundle-{}", std::process::id()));
