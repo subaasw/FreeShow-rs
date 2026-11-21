@@ -89,7 +89,8 @@ boxes render a labeled placeholder until the compositor grows those sources.
 
 ### M5. Installers and packaging
 
-- [ ] macOS `.app`/`.dmg` (codesigning optional, documented).
+- [x] Native macOS `.app`/`.dmg` with bundled runtime and documented signing.
+- [ ] Verify macOS distribution with Developer ID/notarization and on additional OS/architecture hosts.
 - [ ] Windows installer.
 - [ ] Linux AppImage or tarball with a desktop file.
 - [ ] Release workflow that builds all three from the lockfile.

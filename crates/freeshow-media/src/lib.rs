@@ -5,6 +5,8 @@
 //! feature is enabled.
 
 mod audio;
+mod runtime;
+pub use runtime::{check_runtime, RuntimeStatus};
 mod video;
 mod network;
 pub use network::{network_channel,network_audio_mix};
