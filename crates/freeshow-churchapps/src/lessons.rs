@@ -448,6 +448,7 @@ pub(super) mod tests {
                         Err(err) => panic!("test listener: {err}"),
                     }
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
