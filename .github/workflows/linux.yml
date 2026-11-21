@@ -44,8 +44,10 @@ jobs:
               cat "$log"
               python3 - "$log" <<'PY'
           import pathlib,sys
-          text=pathlib.Path(sys.argv[1]).read_text(errors='replace')[-12000:]
-          print('::error::'+text.replace('%','%25').replace('\r','%0D').replace('\n','%0A'))
+          text=pathlib.Path(sys.argv[1]).read_text(errors='replace')[-9000:]
+          for start in range(0,len(text),2000):
+              chunk=text[start:start+2000]
+              print('::error::'+chunk.replace('%','%25').replace('\r','%0D').replace('\n','%0A'))
           PY
               return 1
             fi
