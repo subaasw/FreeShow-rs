@@ -274,7 +274,6 @@ impl Session {
         let library = Library::open(&root);
         let preferences = library.preferences();
         let mut warnings = Vec::new();
-        let shows = take(library.list_shows(), &mut warnings).unwrap_or_default();
         let projects =
             take(library.load_projects(), &mut warnings).unwrap_or_else(ProjectsFile::empty);
         let project_id = projects
@@ -287,12 +286,13 @@ impl Session {
         let overlay_catalog =
             take(library.load_overlays(), &mut warnings).unwrap_or_else(Catalog::empty);
         let overlays = overlay_catalog.names();
-        if let Ok(notes) = library.import_scripture_sources() {
+        if let Some(notes) = take(library.import_scripture_sources(), &mut warnings) {
             warnings.extend(notes);
         }
-        if let Ok(notes) = library.import_show_sources() {
+        if let Some(notes) = take(library.import_show_sources(), &mut warnings) {
             warnings.extend(notes);
         }
+        let shows = take(library.list_shows(), &mut warnings).unwrap_or_default();
         let bibles = take(library.list_bibles(), &mut warnings).unwrap_or_default();
         let scripture = scripture_catalog(&bibles);
         let mut media = take(
@@ -3558,6 +3558,50 @@ fn remote_book(book: OutlinedBook) -> freeshow_remote::RemoteBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_propresenter_bundle_presents_lyrics_over_its_copied_background() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-present-probundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Imports")).unwrap();
+        // Hand-authored Pro6 XML and a generated green PNG, zipped together.
+        std::fs::write(
+            root.join("Imports/Sunday.proBundle"),
+            include_bytes!("../../freeshow-data/tests/fixtures/pro6-background.proBundle"),
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
+        assert_eq!(session.shows.len(), 1);
+        let id = session.shows[0].id.clone();
+        assert!(session.present_show_id(&id));
+        assert_eq!(
+            session.current_show().unwrap().ordered_slides()[0].lines,
+            ["Imported words"]
+        );
+        assert!(!session.slide_hidden);
+        let raster = session
+            .underlay
+            .as_ref()
+            .expect("bundled PNG must decode for presentation");
+        assert_eq!((raster.width, raster.height), (1, 1));
+        assert_eq!(raster.rgba, [0, 255, 0, 255]);
+        assert!(
+            session
+                .background_path
+                .as_ref()
+                .unwrap()
+                .starts_with(root.join("Media").canonicalize().unwrap())
+        );
+        session.select_slide(1);
+        assert_eq!(
+            session.current_show().unwrap().ordered_slides()[1].lines,
+            ["Second slide"]
+        );
+        assert!(session.underlay.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn network_routes_keep_channel_gain_file_volume_and_output_identity() {
