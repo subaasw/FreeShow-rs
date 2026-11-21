@@ -226,10 +226,67 @@ fn lesson_groups(lesson: &Value) -> Result<Vec<Vec<Value>>, String> {
     Ok(groups)
 }
 
+pub(super) fn plan_media_show(
+    library: &Library,
+    id: &str,
+    name: &str,
+    notes: &str,
+    files: &[Value],
+) -> Result<ShowFile, String> {
+    let mut files = files.to_vec();
+    for file in &mut files {
+        if !file.is_object() {
+            return Err("service-plan media entry is not an object".into());
+        }
+        if !file["url"].as_str().is_some_and(|url| !url.is_empty()) {
+            let stream = file["streamUrl"].as_str().unwrap_or("");
+            let path = stream
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ![".mp4", ".mov", ".m4v", ".webm"]
+                .iter()
+                .any(|extension| path.ends_with(extension))
+            {
+                return Err("stream-only lesson media needs a downloadable video URL".into());
+            }
+            file["url"] = file["streamUrl"].clone();
+        }
+    }
+    let groups = lesson_groups(&json!({"messages":[{"files":files}]}))?;
+    if groups.first().map(Vec::len) != Some(files.len()) || files.is_empty() {
+        return Err("service-plan media is missing a downloadable URL".into());
+    }
+    let mut cache = MediaCache::open(library)?;
+    let mut show = ShowFile::blank(id, name);
+    show.show["origin"] = json!("churchApps");
+    show.show["category"] = json!("churchapps");
+    show.show["meta"]["title"] = json!(name);
+    show.show["layouts"]["main"]["notes"] = json!(notes);
+    show.show["slides"] = json!({});
+    show.show["media"] = json!({});
+    let mut order = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let slide_id = format!("s{}", index + 1);
+        let media_id = format!("m{}", index + 1);
+        let extension = media_extension(file)?;
+        let path = cache.download(file["url"].as_str().unwrap(), extension)?;
+        show.show["media"][&media_id] = json!({"name":file["name"],"path":path,
+            "type":if is_video(extension) {"video"} else {"image"},
+            "loop":file["loopVideo"].as_bool().unwrap_or(false),"muted":false});
+        show.show["slides"][&slide_id] =
+            json!({"group":name,"color":null,"settings":{},"notes":"","items":[]});
+        order.push(json!({"id":slide_id,"background":media_id}));
+    }
+    show.show["layouts"]["main"]["slides"] = json!(order);
+    Ok(show)
+}
+
 fn media_extension(file: &Value) -> Result<&'static str, String> {
     let mime = file["fileType"].as_str().unwrap_or("");
     let extension = match mime.split(';').next().unwrap_or("") {
-        "video/mp4" => "mp4",
+        "video" | "video/mp4" => "mp4",
         "video/quicktime" => "mov",
         "video/webm" => "webm",
         "image/png" => "png",
@@ -357,17 +414,24 @@ impl MediaCache {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use freeshow_data::SlideBackdrop;
     use std::net::TcpListener;
     use std::thread::{self, JoinHandle};
     use std::time::Instant;
 
-    fn server(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<String>>) {
+    pub(crate) fn server(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<String>>) {
+        server_with(|_| responses)
+    }
+
+    pub(crate) fn server_with(
+        responses: impl FnOnce(&str) -> Vec<Vec<u8>>,
+    ) -> (String, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let responses = responses(&url);
         let thread = thread::spawn(move || {
             let mut requests = Vec::new();
             for response in responses {
@@ -403,7 +467,7 @@ mod tests {
         (url, thread)
     }
 
-    fn response(body: &[u8]) -> Vec<u8> {
+    pub(crate) fn response(body: &[u8]) -> Vec<u8> {
         let mut response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
