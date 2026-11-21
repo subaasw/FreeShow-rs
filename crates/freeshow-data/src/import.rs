@@ -2,6 +2,7 @@
 
 //! Turns songs people already have into FreeShow `.show` files.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -12,13 +13,28 @@ use serde_json::{Value, json};
 
 use crate::{DataError, ShowFile};
 
+mod propresenter;
+
 const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
 
-pub fn import_sources(imports: &Path, shows: &Path) -> Result<Vec<String>, DataError> {
+pub fn import_sources(
+    imports: &Path,
+    shows: &Path,
+    media: &Path,
+) -> Result<Vec<String>, DataError> {
     if !imports.exists() {
         return Ok(Vec::new());
     }
     fs::create_dir_all(shows)?;
+    let mut ids = HashSet::new();
+    for entry in fs::read_dir(shows)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("show")
+            && let Ok(show) = ShowFile::load(&path)
+        {
+            ids.insert(show.id);
+        }
+    }
     let mut warnings = Vec::new();
     let mut paths = Vec::new();
     for entry in fs::read_dir(imports)? {
@@ -30,18 +46,30 @@ pub fn import_sources(imports: &Path, shows: &Path) -> Result<Vec<String>, DataE
     paths.sort();
     for path in paths {
         let bytes = fs::read(&path)?;
-        match import_shows(
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("song"),
-            &bytes,
-        ) {
+        let found = if propresenter::is_bundle(&path) {
+            propresenter::import_bundle(&bytes, media)
+        } else {
+            import_shows(
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("song"),
+                &bytes,
+            )
+        };
+        match found {
             Ok(found) => {
-                for show in found {
+                for mut show in found {
                     let dest = shows.join(format!("{}.show", file_stem(&show.name())));
                     if dest.exists() {
                         continue;
                     }
+                    // Different presentations can share the same source filename.
+                    // An ID collision would make the second show unselectable.
+                    if ids.contains(&show.id) {
+                        show.id = crate::new_id();
+                    }
                     if let Err(err) = show.save(&dest) {
                         warnings.push(format!("{}: {err}", path.display()));
+                    } else {
+                        ids.insert(show.id);
                     }
                 }
             }
@@ -60,6 +88,10 @@ pub fn import_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError>
 }
 
 pub fn import_shows(file_name: &str, bytes: &[u8]) -> Result<Vec<ShowFile>, DataError> {
+    if propresenter::is_bundle(Path::new(file_name)) {
+        return propresenter::bundle_shows(bytes)
+            .map(|(_, shows)| shows.into_iter().map(|(_, show)| show).collect());
+    }
     if is_sqlite(file_name, bytes) {
         return openlp_database(bytes);
     }
@@ -75,10 +107,18 @@ fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
     if ext == "pptx" || looks_like_pptx(bytes) {
         return powerpoint_show(file_name, bytes);
     }
+    if ext == "pro" {
+        return Err(DataError::Scripture(
+            "ProPresenter 7 protobuf is not supported yet".into(),
+        ));
+    }
     let text = String::from_utf8_lossy(bytes).replace('\u{feff}', "");
     let trimmed = text.trim();
     if trimmed.starts_with('[') {
         return ShowFile::parse(trimmed);
+    }
+    if is_propresenter(trimmed) {
+        return propresenter::xml_show(file_name, &text);
     }
     let (name, sections) = if is_chordpro(trimmed) {
         chordpro(&text)
@@ -86,8 +126,6 @@ fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
         openlyrics(&text)?
     } else if is_opensong(trimmed) {
         opensong(&text)?
-    } else if is_propresenter(trimmed) {
-        propresenter(&text)?
     } else if is_songbeamer(&text) {
         songbeamer(&text)
     } else if is_easyworship(&text) || ext == "rtf" {
@@ -398,7 +436,10 @@ fn parse_lyric_xml(text: &str) -> Result<(String, String, Vec<LyricVerse>), Data
                     }
                     "chord" if in_lines => {
                         in_chord = true;
-                        chord_named = remember_chord(&mut capture, &attribute(&event, "name").unwrap_or_default());
+                        chord_named = remember_chord(
+                            &mut capture,
+                            &attribute(&event, "name").unwrap_or_default(),
+                        );
                         chord_text.clear();
                     }
                     _ => {}
@@ -448,7 +489,10 @@ fn parse_lyric_xml(text: &str) -> Result<(String, String, Vec<LyricVerse>), Data
                         push_verse(&mut verses, &current, &capture);
                         capture.clear();
                     } else if name == "chord" {
-                        remember_chord(&mut capture, &attribute(&event, "name").unwrap_or_default());
+                        remember_chord(
+                            &mut capture,
+                            &attribute(&event, "name").unwrap_or_default(),
+                        );
                     }
                 }
             }
@@ -657,70 +701,6 @@ fn opensong_group(tag: &str) -> String {
     }
 }
 
-fn propresenter(text: &str) -> Result<(String, Vec<Section>), DataError> {
-    let mut slides = Vec::new();
-    let mut lines = Vec::new();
-    let mut capture = false;
-    let mut chunk = String::new();
-    let mut reader = Reader::from_str(text);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(event)) => {
-                let name = local_name(event.name().as_ref());
-                if name == "RVDisplaySlide" && !lines.is_empty() {
-                    slides.push(std::mem::take(&mut lines));
-                }
-                capture = name == "NSString" || name.ends_with(":t");
-                if capture {
-                    chunk.clear();
-                }
-            }
-            Ok(Event::Text(event)) if capture => {
-                chunk.push_str(
-                    &event
-                        .unescape()
-                        .map_err(|err| DataError::Scripture(err.to_string()))?,
-                );
-            }
-            Ok(Event::End(event)) => {
-                let name = local_name(event.name().as_ref());
-                if capture && (name == "NSString" || name.ends_with(":t")) {
-                    let text = chunk.trim();
-                    if !text.is_empty() {
-                        lines.push(text.to_string());
-                    }
-                    capture = false;
-                }
-                if name == "RVDisplaySlide" && !lines.is_empty() {
-                    slides.push(std::mem::take(&mut lines));
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(err) => return Err(DataError::Scripture(err.to_string())),
-            _ => {}
-        }
-        buf.clear();
-    }
-    if !lines.is_empty() {
-        slides.push(lines);
-    }
-    let sections = slides
-        .into_iter()
-        .enumerate()
-        .map(|(index, lines)| {
-            let group = if index == 0 {
-                "Verse".into()
-            } else {
-                format!("Verse {}", index + 1)
-            };
-            Section::plain(group, lines)
-        })
-        .collect();
-    Ok((String::new(), sections))
-}
-
 fn songbeamer(text: &str) -> (String, Vec<Section>) {
     let stored = songbeamer_chords(text);
     let mut name = String::new();
@@ -732,7 +712,11 @@ fn songbeamer(text: &str) -> (String, Vec<Section>) {
             chord_line += 1;
             continue;
         };
-        if first.starts_with('#') && sections.is_empty() && lines.iter().all(|line| line.is_empty() || line.starts_with('#'))
+        if first.starts_with('#')
+            && sections.is_empty()
+            && lines
+                .iter()
+                .all(|line| line.is_empty() || line.starts_with('#'))
         {
             for line in lines {
                 if let Some(title) = line.strip_prefix("#Title=") {
@@ -779,7 +763,8 @@ fn songbeamer_chords(text: &str) -> std::collections::BTreeMap<usize, Vec<ChordM
         let Some(value) = line.trim().strip_prefix("#Chords=") else {
             continue;
         };
-        let decoded = base64_decode(value.trim()).unwrap_or_else(|| value.trim().as_bytes().to_vec());
+        let decoded =
+            base64_decode(value.trim()).unwrap_or_else(|| value.trim().as_bytes().to_vec());
         let text = String::from_utf8_lossy(&decoded);
         for row in text.split('\r') {
             let parts: Vec<&str> = row.split(',').collect();
@@ -819,7 +804,10 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     }
-    let bytes: Vec<u8> = text.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect();
+    let bytes: Vec<u8> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
     if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return None;
     }
@@ -828,8 +816,16 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
         let pad = chunk.iter().filter(|byte| **byte == b'=').count();
         let a = value(chunk[0])?;
         let b = value(chunk[1])?;
-        let c = if chunk[2] == b'=' { 0 } else { value(chunk[2])? };
-        let d = if chunk[3] == b'=' { 0 } else { value(chunk[3])? };
+        let c = if chunk[2] == b'=' {
+            0
+        } else {
+            value(chunk[2])?
+        };
+        let d = if chunk[3] == b'=' {
+            0
+        } else {
+            value(chunk[3])?
+        };
         out.push((a << 2) | (b >> 4));
         if pad < 2 {
             out.push((b << 4) | (c >> 2));
@@ -893,10 +889,7 @@ fn is_chord_token(token: &str) -> bool {
             break;
         }
     }
-    let digits = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .count();
+    let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
     rest = &rest[digits..];
     if let Some(bass) = rest.strip_prefix('/') {
         let mut notes = bass.chars();
@@ -1008,59 +1001,116 @@ fn plain(text: &str) -> (String, Vec<Section>) {
 }
 
 fn decode_rtf(text: &str) -> String {
-    let mut out = String::new();
     let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::<u16>::new();
+    let mut stack = Vec::new();
+    let (mut skip, mut unicode_fallback) = (false, 1_usize);
+    let mut fallback = 0_usize;
     let mut index = 0;
     while index < chars.len() {
-        if chars[index] == '\\' && chars.get(index + 1) == Some(&'u') {
-            index += 2;
-            let start = index;
-            if chars.get(index) == Some(&'-') {
-                index += 1;
-            }
-            while index < chars.len() && chars[index].is_ascii_digit() {
-                index += 1;
-            }
-            if let Ok(mut code) = chars[start..index]
-                .iter()
-                .collect::<String>()
-                .parse::<i32>()
-            {
-                if code < 0 {
-                    code += 65536;
-                }
-                if let Some(ch) = char::from_u32(code as u32) {
-                    out.push(ch);
-                }
-            }
-            if chars.get(index) == Some(&'?') {
-                index += 1;
-            }
-            continue;
-        }
-        if chars[index] == '\\' && chars[index..].starts_with(&['\\', 'p', 'a', 'r']) {
-            out.push('\n');
-            index += 4;
-            continue;
-        }
-        if chars[index] == '{' || chars[index] == '}' {
-            index += 1;
-            continue;
-        }
-        if chars[index] == '\\' {
-            index += 1;
-            while index < chars.len() && chars[index].is_ascii_alphabetic() {
-                index += 1;
-            }
-            if chars.get(index) == Some(&' ') {
-                index += 1;
-            }
-            continue;
-        }
-        out.push(chars[index]);
+        let ch = chars[index];
         index += 1;
+        match ch {
+            '{' => stack.push((skip, unicode_fallback)),
+            '}' => {
+                if let Some(state) = stack.pop() {
+                    (skip, unicode_fallback) = state;
+                }
+            }
+            '\\' => {
+                let Some(&next) = chars.get(index) else {
+                    break;
+                };
+                if !next.is_ascii_alphabetic() {
+                    index += 1;
+                    let literal = match next {
+                        '*' => {
+                            skip = true;
+                            None
+                        }
+                        '\\' | '{' | '}' => Some(next),
+                        '~' => Some('\u{a0}'),
+                        '_' => Some('\u{2011}'),
+                        '\'' if index + 2 <= chars.len() => {
+                            let hex: String = chars[index..index + 2].iter().collect();
+                            index += 2;
+                            u8::from_str_radix(&hex, 16).ok().map(|byte| {
+                                // RTF's default ANSI encoding is Windows-1252.
+                                const C1: [char; 32] = [
+                                    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š',
+                                    '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’', '“',
+                                    '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž',
+                                    'Ÿ',
+                                ];
+                                if (0x80..0xa0).contains(&byte) {
+                                    C1[(byte - 0x80) as usize]
+                                } else {
+                                    char::from(byte)
+                                }
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(ch) = literal {
+                        if fallback > 0 {
+                            fallback -= 1;
+                        } else if !skip {
+                            out.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
+                        }
+                    }
+                    continue;
+                }
+                let start = index;
+                while chars.get(index).is_some_and(char::is_ascii_alphabetic) {
+                    index += 1;
+                }
+                let word: String = chars[start..index].iter().collect();
+                let start = index;
+                if chars.get(index) == Some(&'-') {
+                    index += 1;
+                }
+                while chars.get(index).is_some_and(char::is_ascii_digit) {
+                    index += 1;
+                }
+                let number = chars[start..index]
+                    .iter()
+                    .collect::<String>()
+                    .parse::<i32>()
+                    .ok();
+                if chars.get(index) == Some(&' ') {
+                    index += 1;
+                }
+                match word.as_str() {
+                    "fonttbl" | "colortbl" | "stylesheet" | "info" | "pict" | "object"
+                    | "header" | "footer" => skip = true,
+                    "uc" => unicode_fallback = number.unwrap_or(1).clamp(0, 16) as usize,
+                    "u" if !skip => {
+                        if let Some(code) = number {
+                            out.push(code as u16);
+                            fallback = unicode_fallback;
+                        }
+                    }
+                    "par" | "line" if !skip => out.push(b'\n' as u16),
+                    "tab" if !skip => out.push(b'\t' as u16),
+                    "bin" => {
+                        index = index
+                            .saturating_add(number.unwrap_or(0).max(0) as usize)
+                            .min(chars.len())
+                    }
+                    _ => {}
+                }
+            }
+            '\r' | '\n' => {}
+            _ => {
+                if fallback > 0 {
+                    fallback -= 1;
+                } else if !skip {
+                    out.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
+                }
+            }
+        }
     }
-    out
+    String::from_utf16_lossy(&out)
 }
 
 fn powerpoint_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
@@ -1460,7 +1510,8 @@ how sweet</lines></verse></lyrics></song>"#;
             vec!["Praise God".to_string()]
         );
 
-        let text = "Title: Amazing Grace\n\n[Verse]\nG       C\nAmazing grace\n\n[Chorus]\nPraise God\n";
+        let text =
+            "Title: Amazing Grace\n\n[Verse]\nG       C\nAmazing grace\n\n[Chorus]\nPraise God\n";
         let show = import_show("song.txt", text.as_bytes()).unwrap();
         assert_eq!(show.name(), "Amazing Grace");
         assert_eq!(show.ordered_slides().len(), 2);

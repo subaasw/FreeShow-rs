@@ -98,9 +98,11 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 
 ### M6. Importer media
 
-- [ ] ProPresenter bundles and their media.
+- [x] ProPresenter 4–6 XML bundles and their slide-background media.
+- [ ] ProPresenter 7 protobuf, arrangements, and original text-box styling.
 - [ ] ChurchApps lesson media downloads.
-- [ ] Imported background images land in `Media/` and stay linked.
+- [x] ProPresenter bundle backgrounds land in `Media/` and stay linked.
+- [ ] Background media from the other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
 their original backgrounds.

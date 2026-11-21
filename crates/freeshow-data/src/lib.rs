@@ -4199,7 +4199,7 @@ impl Library {
 
     /// Converts song files in `Imports/` into `Shows/*.show`.
     pub fn import_show_sources(&self) -> Result<Vec<String>, DataError> {
-        import::import_sources(&self.imports_dir(), &self.shows_dir())
+        import::import_sources(&self.imports_dir(), &self.shows_dir(), &self.media_dir())
     }
 
     pub fn list_bibles(&self) -> Result<Vec<BibleFile>, DataError> {
