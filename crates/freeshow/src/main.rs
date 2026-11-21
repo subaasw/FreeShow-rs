@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod live;
+mod desktop;
 mod runtime;
 mod present;
 mod session;
@@ -1102,6 +1103,8 @@ struct Launch {
     data: Option<PathBuf>,
     show: Option<PathBuf>,
     check_runtime: bool,
+    install_desktop: bool,
+    uninstall_desktop: bool,
     check_media: Option<PathBuf>,
     list_audio_devices: bool,
     list_video_audio_devices: bool,
@@ -1112,6 +1115,8 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
         data: None,
         show: None,
         check_runtime: false,
+        install_desktop: false,
+        uninstall_desktop: false,
         check_media: None,
         list_audio_devices: false,
         list_video_audio_devices: false,
@@ -1119,6 +1124,8 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--install-desktop" => launch.install_desktop = true,
+            "--uninstall-desktop" => launch.uninstall_desktop = true,
             "--check-runtime" => launch.check_runtime = true,
             "--check-media" => launch.check_media = Some(PathBuf::from(args.next().ok_or("--check-media needs a video file")?)),
             "--data" => launch.data = args.next().map(PathBuf::from),
@@ -1134,6 +1141,9 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime::configure_bundle()?;
     let launch = launch_args()?;
+    if launch.install_desktop || launch.uninstall_desktop {
+        return desktop::install(launch.uninstall_desktop);
+    }
     if launch.check_runtime || launch.check_media.is_some() {
         return runtime::check(launch.check_media.as_deref());
     }

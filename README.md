@@ -69,7 +69,7 @@ scripts/package.sh x86_64-pc-windows-msvc
 scripts/package.sh x86_64-unknown-linux-gnu
 ```
 
-The extra arguments need that Rust target installed, plus a GStreamer development package for the platform. Windows and Linux currently produce staged folders.
+The extra arguments need that Rust target installed, plus a GStreamer development package for the platform. Windows currently produces a staged folder. Linux packaging produces a runtime archive; native CI verification is pending.
 
 On a native Mac, the script also creates `FreeShow Rust.app` and a compressed `.dmg` with an Applications shortcut and SHA-256 checksum. Building needs Python 3.11+, Xcode command-line tools, and Homebrew GStreamer. The app bundles its linked libraries, selected GStreamer plugins, and plugin scanner, so the installed app needs neither Rust nor Homebrew. The optional NDI SDK remains a separate installation. Each app records its architecture and measured minimum macOS version in `Contents/Resources/BUILD.json`. Build on a host with dependencies compatible with the macOS versions you intend to support.
 
@@ -80,6 +80,12 @@ Packaging relocates the app into a path with spaces, cold-scans its plugins with
 ```sh
 python3 scripts/package-macos.py --binary target/release/freeshow --output dist/macos --identity "Developer ID Application: Your Name (TEAMID)" --dmg
 ```
+
+On a native Linux build host, `scripts/package.sh` also prepares a `.tar.gz` containing `AppRun`, the binary, relocated shared libraries, selected GStreamer plugins, the plugin scanner, desktop metadata, an icon, source/provenance, and third-party notices. It needs Python 3.11+, patchelf, binutils, desktop-file-utils, GStreamer development/runtime packages, and the usual X11/Wayland development libraries. The Linux workflow in `.github/workflows/linux.yml` lists the Ubuntu dependencies and is the native verification gate. Base glibc, graphics drivers, and desktop/audio services remain OS requirements; the measured minimum glibc version is recorded in `share/BUILD.json`. The optional NDI SDK remains separate.
+
+Extract the Linux archive into a permanent folder, run `./AppRun` to launch directly, or `./install.sh` to add a per-user application-menu entry and `~/.local/bin/freeshow-rust`. `./install.sh --uninstall` removes that desktop integration and keeps your library. Moving the extracted folder later requires running its installer again.
+
+The Linux verifier checks relocation into a path with spaces, quotes, percent signs and Unicode; plugin discovery and H.264 decoding with an empty home/cache; the actual desktop-entry parser; and desktop removal without deleting a library sentinel. Native CI also removes system GStreamer packages and repeats decoding, then uploads the archive, checksum and reports as a workflow artifact. Windows installers and the complete three-platform workflow are still pending.
 
 Headless diagnostics also work on a development binary:
 

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+APP_ROOT=$(dirname -- "$(readlink -f -- "$0")")
+export LD_LIBRARY_PATH="$APP_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GST_PLUGIN_SYSTEM_PATH="$APP_ROOT/lib/gstreamer-1.0"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$GST_PLUGIN_SYSTEM_PATH"
+export GST_PLUGIN_PATH="$GST_PLUGIN_SYSTEM_PATH"
+export GST_PLUGIN_PATH_1_0="$GST_PLUGIN_SYSTEM_PATH"
+export GST_PLUGIN_SCANNER="$APP_ROOT/libexec/gst-plugin-scanner"
+export GST_PLUGIN_SCANNER_1_0="$GST_PLUGIN_SCANNER"
+export GST_REGISTRY_1_0="${GST_REGISTRY_1_0:-${GST_REGISTRY:-${XDG_CACHE_HOME:-$HOME/.cache}/freeshow-rust/registry-$(uname -m).bin}}"
+mkdir -p -- "$(dirname -- "$GST_REGISTRY_1_0")"
+exec "$APP_ROOT/bin/freeshow" "$@"
