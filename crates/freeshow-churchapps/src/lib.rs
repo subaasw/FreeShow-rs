@@ -7,6 +7,7 @@ use std::time::Duration;
 use freeshow_data::{Library, ProjectsFile, ShowFile};
 use serde_json::{Map, Value};
 
+mod feed;
 mod lessons;
 pub use lessons::import_lesson_document;
 
@@ -57,14 +58,14 @@ impl ContentSource for ChurchApps {
 const API: &str = "https://api.churchapps.org";
 const ITEM_STYLE: &str = "left:50px;top:120px;width:1820px;height:840px;";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ServicePlan {
     id: String,
     name: String,
     entries: Vec<PlanEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum PlanEntry {
     Section {
         id: String,
@@ -72,6 +73,13 @@ enum PlanEntry {
         notes: String,
     },
     Show(PlanShow),
+    Media {
+        id: String,
+        name: String,
+        notes: String,
+        seconds: f64,
+        files: Vec<Value>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +146,7 @@ pub(crate) fn plans_from_document(document: &str) -> Result<Vec<ServicePlan>, St
         .ok_or_else(|| "churchapps document has no plans".to_string())?;
     let mut parsed = Vec::new();
     for plan in plans {
-        if let Some(plan) = parse_plan(plan) {
+        if let Some(plan) = parse_plan(plan)? {
             parsed.push(plan);
         }
     }
@@ -150,19 +158,31 @@ pub(crate) fn write_plans(library_root: &Path, plans: &[ServicePlan]) -> Result<
     std::fs::create_dir_all(library.shows_dir()).map_err(|err| err.to_string())?;
     let mut projects =
         ProjectsFile::load(&library.projects_path()).map_err(|err| err.to_string())?;
-    let mut count = 0;
+    // Finish every download before replacing any show or the project list.
+    let mut prepared = Vec::new();
     for plan in plans {
         for entry in &plan.entries {
-            let PlanEntry::Show(song) = entry else {
-                continue;
+            let show = match entry {
+                PlanEntry::Show(song) => show_file(song),
+                PlanEntry::Media {
+                    id,
+                    name,
+                    notes,
+                    files,
+                    ..
+                } => lessons::plan_media_show(&library, id, name, notes, files)?,
+                PlanEntry::Section { .. } => continue,
             };
-            let show = show_file(song);
-            let path = library
-                .shows_dir()
-                .join(format!("{}.show", file_id(&song.id)));
-            show.save(&path).map_err(|err| err.to_string())?;
-            count += 1;
+            prepared.push(show);
         }
+    }
+    for show in &prepared {
+        let path = library
+            .shows_dir()
+            .join(format!("{}.show", file_id(&show.id)));
+        show.save(&path).map_err(|err| err.to_string())?;
+    }
+    for plan in plans {
         if !projects.add_project(&plan.id, &plan.name) {
             projects.set_project_name(&plan.id, &plan.name);
         }
@@ -175,17 +195,23 @@ pub(crate) fn write_plans(library_root: &Path, plans: &[ServicePlan]) -> Result<
                 PlanEntry::Show(song) => {
                     projects.append_show(&plan.id, &song.id);
                 }
+                PlanEntry::Media { id, seconds, .. } => {
+                    projects.append_scheduled_show(&plan.id, id, *seconds);
+                }
             }
         }
     }
     projects
         .save(&library.projects_path())
         .map_err(|err| err.to_string())?;
-    Ok(count)
+    Ok(prepared.len())
 }
 
-fn parse_plan(plan: &Value) -> Option<ServicePlan> {
-    let id = plan.get("id")?.as_str()?.to_string();
+fn parse_plan(plan: &Value) -> Result<Option<ServicePlan>, String> {
+    let Some(id) = plan.get("id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let id = id.to_string();
     let name = plan
         .get("name")
         .and_then(Value::as_str)
@@ -222,24 +248,50 @@ fn parse_plan(plan: &Value) -> Option<ServicePlan> {
             .into_iter()
             .flatten()
         {
-            if let Some(show) = parse_child(child) {
-                entries.push(PlanEntry::Show(show));
+            if let Some(entry) = parse_child(child)? {
+                entries.push(entry);
             }
         }
     }
     if entries.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(ServicePlan { id, name, entries })
+    Ok(Some(ServicePlan { id, name, entries }))
 }
 
-fn parse_child(child: &Value) -> Option<PlanShow> {
+fn parse_child(child: &Value) -> Result<Option<PlanEntry>, String> {
     let kind = child.get("itemType").and_then(Value::as_str).unwrap_or("");
-    match kind {
-        "arrangementKey" => parse_song(child),
-        "item" | "header" => Some(text_show(child)),
+    Ok(match kind {
+        "arrangementKey" => {
+            Some(PlanEntry::Show(parse_song(child).ok_or_else(|| {
+                "ChurchApps song is missing arrangement data".to_string()
+            })?))
+        }
+        "item" | "header" => Some(PlanEntry::Show(text_show(child))),
+        "lessonSection" | "lessonAction" | "lessonAddOn" => {
+            let id = child["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or("ChurchApps lesson item has no ID")?;
+            let prefix = if kind == "lessonSection" {
+                "chumslesson"
+            } else {
+                "chumsaction"
+            };
+            let files = child["files"]
+                .as_array()
+                .filter(|files| !files.is_empty())
+                .ok_or("ChurchApps lesson item has no resolved media files")?;
+            Some(PlanEntry::Media {
+                id: format!("{prefix}_{id}"),
+                name: child["label"].as_str().unwrap_or("").to_string(),
+                notes: child["description"].as_str().unwrap_or("").to_string(),
+                seconds: child["seconds"].as_f64().unwrap_or(0.0).max(0.0),
+                files: files.clone(),
+            })
+        }
         _ => None,
-    }
+    })
 }
 
 fn parse_song(child: &Value) -> Option<PlanShow> {
@@ -552,12 +604,17 @@ fn file_id(id: &str) -> String {
 }
 
 fn fetch_plans(token: &str) -> Result<String, String> {
+    fetch_plans_from(API, "https://api.lessons.church", token)
+}
+
+fn fetch_plans_from(api: &str, lessons_api: &str, token: &str) -> Result<String, String> {
     let plans: Vec<Value> = serde_json::from_str(&get_json(
-        &format!("{API}/doing/plans/presenter"),
+        &format!("{api}/doing/plans/presenter"),
         Some(token),
     )?)
     .map_err(|err| err.to_string())?;
     let mut assembled = Vec::new();
+    let mut feeds = HashMap::new();
     for mut plan in plans {
         let church = plan
             .get("churchId")
@@ -572,63 +629,56 @@ fn fetch_plans(token: &str) -> Result<String, String> {
         if church.is_empty() || id.is_empty() {
             continue;
         }
-        let mut items: Vec<Value> = match get_json(
-            &format!("{API}/doing/planItems/presenter/{church}/{id}"),
+        let mut items: Vec<Value> = serde_json::from_str(&get_json(
+            &format!("{api}/doing/planItems/presenter/{church}/{id}"),
             Some(token),
-        ) {
-            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
-            Err(err) => {
-                tracing::error!("churchapps plan {id}: {err}");
-                Vec::new()
-            }
-        };
+        )?)
+        .map_err(|err| err.to_string())?;
         for item in &mut items {
             let Some(children) = item.get_mut("children").and_then(Value::as_array_mut) else {
                 continue;
             };
             for child in children.iter_mut() {
-                attach_arrangement(&church, child);
+                attach_arrangement(api, &church, child)?;
             }
         }
         if let Some(plan) = plan.as_object_mut() {
             plan.insert("items".to_string(), Value::Array(items));
         }
+        feed::hydrate_plan(lessons_api, &mut plan, &mut feeds)?;
         assembled.push(plan);
     }
     serde_json::to_string(&serde_json::json!({ "plans": assembled })).map_err(|err| err.to_string())
 }
 
-fn attach_arrangement(church: &str, child: &mut Value) {
+fn attach_arrangement(api: &str, church: &str, child: &mut Value) -> Result<(), String> {
     if child.get("itemType").and_then(Value::as_str) != Some("arrangementKey") {
-        return;
+        return Ok(());
     }
     if child.get("arrangement").is_some() {
-        return;
+        return Ok(());
     }
     let church_id = child
         .get("churchId")
         .and_then(Value::as_str)
         .unwrap_or(church);
     let Some(related) = child.get("relatedId").and_then(Value::as_str) else {
-        return;
+        return Ok(());
     };
-    let Ok(body) = get_json(
-        &format!("{API}/content/arrangementKeys/presenter/{church_id}/{related}"),
+    let body = get_json(
+        &format!("{api}/content/arrangementKeys/presenter/{church_id}/{related}"),
         None,
-    ) else {
-        return;
-    };
-    let Ok(data) = serde_json::from_str::<Value>(&body) else {
-        return;
-    };
+    )?;
+    let data: Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
     let Some(child) = child.as_object_mut() else {
-        return;
+        return Ok(());
     };
     for key in ["arrangementKey", "arrangement", "song", "songDetail"] {
         if let Some(value) = data.get(key) {
             child.insert(key.to_string(), value.clone());
         }
     }
+    Ok(())
 }
 
 fn get_json(url: &str, token: Option<&str>) -> Result<String, String> {

@@ -2839,6 +2839,18 @@ impl ProjectsFile {
         true
     }
 
+    /// Adds a service-plan show with its planned duration in seconds.
+    pub fn append_scheduled_show(&mut self, project_id: &str, show_id: &str, seconds: f64) -> bool {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return false;
+        }
+        let Some(shows) = self.project_shows_mut(project_id) else {
+            return false;
+        };
+        shows.push(serde_json::json!({"id":show_id,"type":"show","scheduleLength":seconds}));
+        true
+    }
+
     pub fn append_item(&mut self, project_id: &str, id: &str, kind: &str) -> bool {
         let Some(shows) = self.project_shows_mut(project_id) else {
             return false;
