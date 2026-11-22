@@ -166,9 +166,9 @@ Acceptance: a volunteer can open their existing library, recognize the theme and
 ### M3. Compositor, fonts, and stage sources
 
 - [x] System fonts beyond DejaVu / optional Arial: use the item's `font-family` through fontconfig (`fc-match`) on Unix, then a scan of the DirectWrite and Core Text font folders, with bundled DejaVu Sans as the last fallback.
-- Remaining typography and effects called out as partial in `PARITY.md` (filters and blends on stills are started; keep going from the highest-impact gaps).
+- [x] Remaining typography and effects called out as partial in `PARITY.md`: item `box-shadow` (including inset), pixel `border-radius`, and `backdrop-filter` on the pixels behind the box, on top of the existing item filters, blends, and typography.
 - [x] Live camera, web, and chart boxes on the native stage. Camera uses the saved `device` name against `freeshow-media` discovery and shows a label when that device is missing. Web boxes show a stored still or a URL preview card (no embedded browser). Chart boxes paint bar, line, and pie/doughnut charts from stored `chart` data.
-- Current Output / local stage video already work; do not regress them.
+- [x] Current Output / local stage video already work; do not regress them.
 
 Acceptance: a `stage.json` from Electron renders every box type the Sunday operator actually uses, including a named camera, without falling back to a label unless the device is missing.
 
