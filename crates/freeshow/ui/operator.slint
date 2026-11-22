@@ -55,6 +55,14 @@ export component ControlWindow inherits Window {
     in-out property <string> group: "";
     in-out property <float> volume: 100;
     in-out property <int> selected-drawer: -1;
+    // Calendar, Player and RSS form under the drawer tabs.
+    in-out property <string> form-a;
+    in-out property <string> form-b;
+    in-out property <string> form-c;
+    in-out property <int> form-show;
+    in property <[string]> form-show-names;
+    in property <bool> form-editing;
+    callback sync-drawer-form();
     in-out property <int> selected-slide: -1;
     in property <int> live-slide: -1;
     in property <string> now-playing;
@@ -809,6 +817,101 @@ export component ControlWindow inherits Window {
                 }
             }
         }
+        if !root.focus-mode && root.active-tab == "calendar": Rectangle {
+            background: root.primary-darker;
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 6px;
+                LineEdit { text <=> root.form-a; placeholder-text: "Event name"; horizontal-stretch: 3; }
+                LineEdit { text <=> root.form-b; placeholder-text: "YYYY-MM-DD"; horizontal-stretch: 0; width: 120px; }
+                LineEdit { text <=> root.form-c; placeholder-text: "HH:MM"; horizontal-stretch: 0; width: 80px; }
+                ComboBox {
+                    horizontal-stretch: 2;
+                    model: root.form-show-names;
+                    current-index <=> root.form-show;
+                }
+                BoxButton {
+                    horizontal-stretch: 0;
+                    width: 72px;
+                    label: root.form-editing ? "Save" : "Add";
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.library-action("save-event", root.form-a + "\n" + root.form-b + "\n" + root.form-c + "\n" + root.form-show); }
+                }
+                if root.form-editing: BoxButton {
+                    horizontal-stretch: 0;
+                    width: 64px;
+                    label: "Delete";
+                    accent: root.primary-lighter;
+                    text-color: root.text-color;
+                    accent-text: root.text-color;
+                    clicked => { root.library-action("delete-event", ""); }
+                }
+                if root.form-editing: BoxButton {
+                    horizontal-stretch: 0;
+                    width: 64px;
+                    label: "New";
+                    accent: root.primary-lighter;
+                    text-color: root.text-color;
+                    accent-text: root.text-color;
+                    clicked => { root.library-action("new-drawer-entry", ""); }
+                }
+            }
+        }
+        if !root.focus-mode && root.active-tab == "player": Rectangle {
+            background: root.primary-darker;
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 6px;
+                LineEdit { text <=> root.form-a; placeholder-text: "Name (optional)"; horizontal-stretch: 2; }
+                LineEdit { text <=> root.form-b; placeholder-text: "YouTube or Vimeo link, stream address or video file path"; horizontal-stretch: 5; }
+                BoxButton {
+                    horizontal-stretch: 0;
+                    width: 72px;
+                    label: root.form-editing ? "Save" : "Add";
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.library-action("save-player", root.form-a + "\n" + root.form-b); }
+                }
+                if root.form-editing: BoxButton {
+                    horizontal-stretch: 0;
+                    width: 64px;
+                    label: "Delete";
+                    accent: root.primary-lighter;
+                    text-color: root.text-color;
+                    accent-text: root.text-color;
+                    clicked => { root.library-action("delete-player", ""); }
+                }
+                if root.form-editing: BoxButton {
+                    horizontal-stretch: 0;
+                    width: 64px;
+                    label: "New";
+                    accent: root.primary-lighter;
+                    text-color: root.text-color;
+                    accent-text: root.text-color;
+                    clicked => { root.library-action("new-drawer-entry", ""); }
+                }
+            }
+        }
+        if !root.focus-mode && root.active-tab == "rss": Rectangle {
+            background: root.primary-darker;
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 6px;
+                LineEdit { text <=> root.form-a; placeholder-text: "Feed addresses, separated by spaces (https://…)"; horizontal-stretch: 1; }
+                BoxButton {
+                    horizontal-stretch: 0;
+                    width: 96px;
+                    label: "Save feeds";
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.library-action("save-rss", root.form-a); }
+                }
+            }
+        }
         if !root.focus-mode: Rectangle {
             // The library keeps a usable share of short windows instead of the rail squeezing it.
             min-height: min(root.drawer-height * 1px, max(120px, root.height * 0.25));
@@ -829,9 +932,9 @@ export component ControlWindow inherits Window {
                     : root.active-tab == "scripture" ? "Drag a Bible file (.fsb or USFM) onto this window to add it."
                     : root.active-tab == "overlays" ? "No overlays yet. Open a show, click Edit, pick a slide and press Save as overlay. Click an overlay here to show or hide it over the output."
                     : root.active-tab == "templates" ? "No templates yet. Open a show, click Edit, pick a styled slide and press Save as template. Click a template here to restyle the open show."
-                    : root.active-tab == "calendar" ? "No events yet. Events saved in a FreeShow library (events.json) appear here and run at their set time."
-                    : root.active-tab == "player" ? "No player videos yet. YouTube, Vimeo and stream links saved in a FreeShow library appear here."
-                    : root.active-tab == "rss" ? "No headlines yet. Headlines appear here once the library has an RSS feed address (rssUrl in its settings)."
+                    : root.active-tab == "calendar" ? "No events yet. Type a name, date and time above and press Add. Leave the time blank for an all-day event, or pick a show to start it automatically at that time."
+                    : root.active-tab == "player" ? "No player videos yet. Paste a YouTube or Vimeo link, a stream address or a video file path above and press Add."
+                    : root.active-tab == "rss" ? "No headlines yet. Add a feed address above and press Save feeds; headlines appear here a moment later."
                     : "";
             }
             if root.drawer-rows.length == 0 && root.search-query != "": Text {
@@ -861,7 +964,13 @@ export component ControlWindow inherits Window {
                     accent: root.accent;
                     text-color: root.text-color;
                     accent-text: root.accent-text;
-                    clicked => { window-keys.focus(); root.choose-drawer(index); }
+                    clicked => {
+                        window-keys.focus();
+                        root.choose-drawer(index);
+                        if root.active-tab == "calendar" || root.active-tab == "player" {
+                            root.sync-drawer-form();
+                        }
+                    }
                 }
             }
         }

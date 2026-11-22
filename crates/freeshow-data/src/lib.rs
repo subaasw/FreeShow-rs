@@ -3979,6 +3979,12 @@ impl Catalog {
         }
     }
 
+    pub fn remove(&mut self, id: &str) -> bool {
+        self.document
+            .as_object_mut()
+            .is_some_and(|document| document.remove(id).is_some())
+    }
+
     pub fn entries(&self) -> Vec<(String, Value)> {
         self.document
             .as_object()
@@ -4762,6 +4768,25 @@ impl Library {
             let _ = fs::create_dir_all(parent);
         }
         fs::write(path, json.to_string()).is_ok()
+    }
+
+    /// Edits `settings_synced.json` in place, keeping every other key. A file that
+    /// exists but does not parse is left alone (returns false).
+    pub fn edit_synced_settings(&self, edit: impl FnOnce(&mut Map<String, Value>)) -> bool {
+        let path = self.synced_settings_path();
+        let mut json = match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(value) if value.is_object() => value,
+                _ => return false,
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
+            Err(_) => return false,
+        };
+        edit(json.as_object_mut().expect("synced settings object"));
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        atomic_write(&path, json.to_string().as_bytes()).is_ok()
     }
 
     /// Player-tab videos from `settings_synced.json`.
@@ -5881,7 +5906,12 @@ pub fn player_videos_from(value: &Value) -> Vec<PlayerVideo> {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|path| !path.is_empty())
-            .map(str::to_string);
+            .map(str::to_string)
+            .or_else(|| {
+                // FreeShow stores only the YouTube or Vimeo video id.
+                let video_id = entry.get("id").and_then(Value::as_str)?.trim();
+                player_link(&kind, video_id)
+            });
         videos.push(PlayerVideo {
             id: id.clone(),
             name: name.to_string(),
@@ -5890,6 +5920,60 @@ pub fn player_videos_from(value: &Value) -> Vec<PlayerVideo> {
         });
     }
     videos
+}
+
+/// The page to play for a FreeShow Player video id.
+pub fn player_link(kind: &str, video_id: &str) -> Option<String> {
+    if video_id.is_empty() {
+        return None;
+    }
+    match kind {
+        "youtube" => Some(format!("https://www.youtube.com/watch?v={video_id}")),
+        "vimeo" => Some(format!("https://vimeo.com/{video_id}")),
+        _ => None,
+    }
+}
+
+/// The FreeShow Player type and video id of a YouTube or Vimeo address.
+pub fn player_video_id(link: &str) -> Option<(&'static str, String)> {
+    let link = link.trim();
+    let rest = link
+        .strip_prefix("https://")
+        .or_else(|| link.strip_prefix("http://"))
+        .unwrap_or(link);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.trim_start_matches("www.").trim_start_matches("m.");
+    let clean = |id: &str| {
+        let id: String = id
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        (!id.is_empty()).then_some(id)
+    };
+    match host {
+        "youtu.be" => clean(path).map(|id| ("youtube", id)),
+        "youtube.com" | "music.youtube.com" => {
+            if let Some(query) = path.strip_prefix("watch?") {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("v="))
+                    .and_then(clean)
+                    .map(|id| ("youtube", id))
+            } else {
+                ["shorts/", "embed/", "live/"]
+                    .iter()
+                    .find_map(|prefix| path.strip_prefix(prefix))
+                    .and_then(clean)
+                    .map(|id| ("youtube", id))
+            }
+        }
+        "vimeo.com" | "player.vimeo.com" => path
+            .trim_start_matches("video/")
+            .split('/')
+            .find(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+            .map(|id| ("vimeo", id.to_string())),
+        _ => None,
+    }
 }
 
 /// The show-level timeline takes precedence over the active layout's timeline.
@@ -6437,6 +6521,36 @@ mod tests {
             vec!["Three".to_string(), "Four".to_string()]
         );
         assert_eq!(slides[2].lines, vec!["Five".to_string()]);
+    }
+
+    #[test]
+    fn player_links_round_trip_freeshow_video_ids() {
+        assert_eq!(
+            player_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=4"),
+            Some(("youtube", "dQw4w9WgXcQ".to_string()))
+        );
+        assert_eq!(
+            player_video_id("youtu.be/dQw4w9WgXcQ?si=x"),
+            Some(("youtube", "dQw4w9WgXcQ".to_string()))
+        );
+        assert_eq!(
+            player_video_id("https://youtube.com/shorts/abc_-1"),
+            Some(("youtube", "abc_-1".to_string()))
+        );
+        assert_eq!(
+            player_video_id("https://vimeo.com/channels/staff/144160599"),
+            Some(("vimeo", "144160599".to_string()))
+        );
+        assert_eq!(player_video_id("https://cdn.example/clip.mp4"), None);
+        let videos = player_videos_from(&serde_json::json!({
+            "a": {"name": "Intro", "type": "youtube", "id": "abc"},
+            "b": {"name": "Story", "type": "vimeo", "id": "123"},
+        }));
+        assert_eq!(
+            videos[0].path.as_deref(),
+            Some("https://www.youtube.com/watch?v=abc")
+        );
+        assert_eq!(videos[1].path.as_deref(), Some("https://vimeo.com/123"));
     }
 
     #[test]

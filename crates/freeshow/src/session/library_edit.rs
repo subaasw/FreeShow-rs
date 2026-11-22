@@ -331,6 +331,12 @@ impl Session {
             "rename-project" => self.rename_project(arg),
             "delete-project" => self.delete_current_project(),
             "remove-project-item" => self.remove_project_item(),
+            "new-drawer-entry" => self.new_drawer_entry(),
+            "save-event" => self.save_event(arg),
+            "delete-event" => self.delete_event(),
+            "save-player" => self.save_player_video(arg),
+            "delete-player" => self.delete_player_video(),
+            "save-rss" => self.save_rss_feeds(arg),
             other => Err(format!("unknown action {other:?}")),
         }
         .inspect(|message| self.notice = message.clone())
