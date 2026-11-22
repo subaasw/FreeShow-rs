@@ -23,7 +23,7 @@ use freeshow_core::{AppSettings, Rgb};
 use freeshow_data::{MediaEntry, MediaEntryKind};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
 use freeshow_obs::ObsControl;
-use freeshow_output::{Frame, Raster, clear_frame, decode_image, fit_raster};
+use freeshow_output::{Frame, Raster, clear_frame, decode_image, fit_raster, parse_color};
 use freeshow_pco::PlanSource;
 use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
@@ -49,6 +49,18 @@ slint::slint! {
         name: string,
         thumb: image,
         show-thumb: bool,
+    }
+
+    export struct SlideRowData {
+        label: string,
+        index: int,
+        has-color: bool,
+        group-color: color,
+        group-text: color,
+    }
+
+    export struct SlideGridRow {
+        items: [SlideRowData],
     }
 
     component RailButton inherits Rectangle {
@@ -173,10 +185,14 @@ slint::slint! {
         in property <color> accent;
         in property <color> text-color;
         in property <color> accent-text;
+        in property <bool> has-color: false;
+        in property <bool> full-color: false;
+        in property <color> group-color: #00000000;
+        in property <color> group-text: #f0f0ff;
         callback clicked();
         height: root.show-thumb ? 48px : 36px;
         border-radius: OperatorStyle.chrome-radius;
-        background: root.active ? root.accent : (pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent));
+        background: root.active ? root.accent : (root.full-color && root.has-color ? root.group-color : (pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent)));
         HorizontalLayout {
             padding-left: 8px;
             padding-right: 8px;
@@ -190,12 +206,18 @@ slint::slint! {
             }
             Text {
                 text: root.label;
-                color: root.active ? root.accent-text : root.text-color;
+                color: root.active ? root.accent-text : (root.has-color ? root.group-text : root.text-color);
                 font-size: 13px * OperatorStyle.font-scale;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
             }
+        }
+        if root.has-color && !root.full-color && !root.active: Rectangle {
+            y: parent.height - 2px;
+            height: 2px;
+            width: 100%;
+            background: root.group-color;
         }
         key-focus := FocusScope {
             width: 100%;
@@ -227,7 +249,9 @@ slint::slint! {
         in-out property <string> panel-title: "Shows";
         in property <string> data-path: "Data folder not set";
         in-out property <[DrawerRowData]> drawer-rows;
-        in-out property <[string]> slide-labels;
+        in-out property <[SlideGridRow]> slide-grid;
+        in-out property <int> slides-columns: 1;
+        in-out property <bool> full-colors: false;
         in-out property <[string]> project-names;
         in-out property <string> project-title: "Project";
         in-out property <string> lyrics: "";
@@ -451,17 +475,25 @@ slint::slint! {
                         vertical-stretch: 1;
                         spacing: 0;
                         Flickable {
-                            width: 280px;
+                            width: root.slides-columns > 1 ? 360px : 280px;
                             VerticalLayout {
                                 alignment: start;
-                                spacing: 0;
-                                for slide[index] in root.slide-labels: ListRow {
-                                    label: slide;
-                                    active: root.selected-slide == index;
-                                    accent: root.accent;
-                                    text-color: root.text-color;
-                                    accent-text: root.accent-text;
-                                    clicked => { root.choose-slide(index); }
+                                spacing: 2px;
+                                for row in root.slide-grid: HorizontalLayout {
+                                    spacing: 2px;
+                                    for slide in row.items: ListRow {
+                                        width: ((root.slides-columns > 1 ? 360px : 280px) / root.slides-columns);
+                                        label: slide.label;
+                                        active: root.selected-slide == slide.index;
+                                        accent: root.accent;
+                                        text-color: root.text-color;
+                                        accent-text: root.accent-text;
+                                        has-color: slide.has-color;
+                                        full-color: root.full-colors;
+                                        group-color: slide.group-color;
+                                        group-text: slide.group-text;
+                                        clicked => { root.choose-slide(slide.index); }
+                                    }
                                 }
                             }
                         }
@@ -659,6 +691,64 @@ fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     style.set_chrome_radius(theme.border_radius);
 }
 
+fn slide_grid(session: &Session) -> slint::ModelRc<SlideGridRow> {
+    let columns = session.slides_list_columns().max(1);
+    let full_colors = session.preferences.full_colors();
+    let rows = session
+        .slide_rows()
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>();
+    let grid = rows
+        .chunks(columns)
+        .map(|chunk| SlideGridRow {
+            items: slint::ModelRc::new(slint::VecModel::from(
+                chunk
+                    .iter()
+                    .map(|(index, row)| slide_row_data(*index, row, full_colors))
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect::<Vec<_>>();
+    slint::ModelRc::new(slint::VecModel::from(grid))
+}
+
+fn slide_row_data(index: usize, row: &session::SlideLabel, full_colors: bool) -> SlideRowData {
+    let default_text = slint::Color::from_argb_u8(255, 240, 240, 255);
+    if let Some(color) = row.color.as_deref().and_then(parse_color) {
+        let group = slint::Color::from_argb_u8(color.a, color.r, color.g, color.b);
+        SlideRowData {
+            label: row.text.as_str().into(),
+            index: index as i32,
+            has_color: true,
+            group_color: group,
+            group_text: if full_colors {
+                contrast_color(color)
+            } else {
+                group
+            },
+        }
+    } else {
+        SlideRowData {
+            label: row.text.as_str().into(),
+            index: index as i32,
+            has_color: false,
+            group_color: slint::Color::from_argb_u8(0, 0, 0, 0),
+            group_text: default_text,
+        }
+    }
+}
+
+fn contrast_color(color: freeshow_output::Rgba) -> slint::Color {
+    let lum =
+        0.2126 * f32::from(color.r) + 0.7152 * f32::from(color.g) + 0.0722 * f32::from(color.b);
+    if lum > 140.0 {
+        slint::Color::from_argb_u8(255, 16, 16, 20)
+    } else {
+        slint::Color::from_argb_u8(255, 240, 240, 255)
+    }
+}
+
 fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
     let values: Vec<slint::SharedString> = items.iter().map(|item| item.as_str().into()).collect();
     slint::ModelRc::new(slint::VecModel::from(values))
@@ -783,7 +873,9 @@ fn selected(index: Option<usize>) -> i32 {
 
 fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_drawer_rows(drawer_rows(session));
-    ui.set_slide_labels(strings(&session.slide_labels()));
+    ui.set_slide_grid(slide_grid(session));
+    ui.set_slides_columns(session.slides_list_columns() as i32);
+    ui.set_full_colors(session.preferences.full_colors());
     ui.set_project_names(strings(&session.project_labels()));
     ui.set_project_title(session.project_title().into());
     ui.set_lyrics(session.lyrics().into());

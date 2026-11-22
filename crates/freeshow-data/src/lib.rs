@@ -375,6 +375,7 @@ pub struct LayoutView {
 pub struct SlideView {
     pub id: String,
     pub group: Option<String>,
+    pub color: Option<String>,
     pub notes: String,
     pub lines: Vec<String>,
 }
@@ -928,6 +929,12 @@ impl ShowFile {
                 group: slide
                     .get("group")
                     .and_then(Value::as_str)
+                    .map(str::to_string),
+                color: slide
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|color| !color.is_empty())
                     .map(str::to_string),
                 notes: slide
                     .get("notes")
@@ -5223,6 +5230,7 @@ mod tests {
         assert_eq!(slides.len(), 1);
         assert_eq!(slides[0].id, "slide-1");
         assert_eq!(slides[0].group.as_deref(), Some("Verse"));
+        assert_eq!(slides[0].color, None);
         assert_eq!(
             slides[0].lines,
             vec!["Amazing grace, how sweet the sound".to_string()]
