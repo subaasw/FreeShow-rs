@@ -387,8 +387,15 @@ export component ControlWindow inherits Window {
                         width: parent.width - 16px;
                         x: 8px;
                         y: 6px;
-                        placeholder-text: "Search scripture";
+                        placeholder-text: "Search scripture: a reference like John 3:16, or words";
                         edited(value) => { root.search(value); }
+                        // Enter shows the first match, so a typed reference goes straight up.
+                        accepted => {
+                            if root.slide-cards.length > 0 {
+                                window-keys.focus();
+                                root.choose-slide(root.slide-cards[0].index);
+                            }
+                        }
                     }
                 }
                 HorizontalLayout {
@@ -430,7 +437,7 @@ export component ControlWindow inherits Window {
                                 group-text: slide.group-text;
                                 clicked => { window-keys.focus(); root.choose-slide(slide.index); }
                             }
-                            if root.slide-cards.length == 0 && root.active-tab != "scripture": Text {
+                            if root.slide-cards.length == 0: Text {
                                 x: 12px;
                                 y: 12px;
                                 width: slides-flick.width - 24px;
@@ -438,7 +445,9 @@ export component ControlWindow inherits Window {
                                 color: root.text-color;
                                 opacity: 0.6;
                                 font-size: 13px * OperatorStyle.font-scale;
-                                text: "Open a show from the library below or the project on the right. Its slides appear here.";
+                                text: root.active-tab == "scripture"
+                                    ? "Type a reference such as John 3:16 or a few words above and press Enter, or pick a book below to browse its verses."
+                                    : "Open a show from the library below or the project on the right. Its slides appear here.";
                             }
                         }
                         if root.editing: HorizontalLayout {
