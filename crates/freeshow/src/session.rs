@@ -234,6 +234,22 @@ fn named_source(output: &serde_json::Value, data_key: &str, fallback: &str) -> S
     })
 }
 
+fn export_stem(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '-',
+            other => other,
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "show".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl Session {
     pub fn empty() -> Self {
         Self {
@@ -690,6 +706,7 @@ impl Session {
                     None => "Icecast (not routed)",
                 }
                 .to_string(),
+                "Export text".to_string(),
             ],
             _ => Vec::new(),
         }
@@ -819,6 +836,24 @@ impl Session {
         self.video_duration = 0.0;
         self.audio_time = 0.0;
         self.audio_duration = 0.0;
+    }
+
+    /// Writes the open show as plain text under the library `Exports/` folder.
+    pub fn export_current_show_text(&self) -> Result<PathBuf, String> {
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| "no library is open".to_string())?;
+        let show = self
+            .current_show()
+            .ok_or_else(|| "no show is open".to_string())?;
+        let stem = export_stem(&show.name());
+        let path = root
+            .join(freeshow_data::EXPORTS_DIR)
+            .join(format!("{stem}.txt"));
+        show.write_plain_text(&path)
+            .map_err(|err| err.to_string())?;
+        Ok(path)
     }
 
     fn choose_template(&mut self, index: usize) -> DrawerAction {

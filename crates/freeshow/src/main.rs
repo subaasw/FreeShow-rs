@@ -2115,6 +2115,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     13 => current.toggle_icecast(None),
+                    14 => match current.export_current_show_text() {
+                        Ok(path) => tracing::info!("exported show text to {}", path.display()),
+                        Err(err) => tracing::warn!("show text was not exported: {err}"),
+                    },
                     _ => {}
                 }
                 if let Some(ui) = ui.upgrade() {

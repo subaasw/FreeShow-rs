@@ -186,6 +186,7 @@ pub const MEDIA_DIR: &str = "Media";
 pub const AUDIO_DIR: &str = "Audio";
 pub const IMPORTS_DIR: &str = "Imports";
 pub const BACKUPS_DIR: &str = "Backups";
+pub const EXPORTS_DIR: &str = "Exports";
 pub const PROJECTS_FILE: &str = "projects.json";
 pub const TEMPLATES_FILE: &str = "templates.json";
 pub const OVERLAYS_FILE: &str = "overlays.json";
@@ -708,6 +709,42 @@ impl ShowFile {
             .and_then(Value::as_str)
             .unwrap_or(&self.id)
             .to_string()
+    }
+
+    /// Layout-ordered lyrics in the same `[Group]` / blank-line shape the plain-text importer reads.
+    pub fn export_plain_text(&self) -> String {
+        let mut out = String::new();
+        let name = self.name();
+        if !name.trim().is_empty() {
+            out.push_str("Title: ");
+            out.push_str(&name);
+            out.push_str("\n\n");
+        }
+        for (index, slide) in self.ordered_slides().iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            if let Some(group) = slide
+                .group
+                .as_deref()
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+            {
+                out.push('[');
+                out.push_str(group);
+                out.push_str("]\n");
+            }
+            for line in &slide.lines {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Writes `export_plain_text` through the crash-safe library save path.
+    pub fn write_plain_text(&self, path: &Path) -> Result<(), DataError> {
+        atomic_write(path, self.export_plain_text().as_bytes())
     }
 
     /// Plain text of each slide, in the same order FreeShow stores slide objects.
@@ -5069,6 +5106,34 @@ mod tests {
         assert_eq!(slides[0].lines, vec!["In the beginning".to_string()]);
         assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
         assert_eq!(slides[1].lines, vec!["Praise the Lord".to_string()]);
+    }
+
+    #[test]
+    fn plain_text_export_round_trips_layout_lyrics() {
+        let imported = crate::import::import_show(
+            "Grace.txt",
+            b"Title: Amazing Grace\n\n[Verse]\nAmazing grace, how sweet the sound\n\n[Chorus]\nPraise God\n",
+        )
+        .unwrap();
+        let text = imported.export_plain_text();
+        assert!(text.starts_with("Title: Amazing Grace"));
+        assert!(text.contains("[Verse]"));
+        assert!(text.contains("Amazing grace, how sweet the sound"));
+        assert!(text.contains("[Chorus]"));
+        assert!(text.contains("Praise God"));
+        let again = crate::import::import_show("Grace.txt", text.as_bytes()).unwrap();
+        assert_eq!(again.name(), "Amazing Grace");
+        let slides = again.ordered_slides();
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].group.as_deref(), Some("Verse"));
+        assert_eq!(slides[0].lines, ["Amazing grace, how sweet the sound"]);
+        assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
+        assert_eq!(slides[1].lines, ["Praise God"]);
+        let path = std::env::temp_dir().join("freeshow-grace-export.txt");
+        again.write_plain_text(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, text);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
