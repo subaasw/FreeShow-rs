@@ -2764,7 +2764,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 let mut current = session.borrow_mut();
                 // As in FreeShow, a click outside the editor puts the slide on the output.
-                if ui.get_edit_mode() {
+                // Edit mode only applies where the editor is shown.
+                if ui.get_editing() {
                     current.select_slide_for_edit(index.max(0) as usize);
                 } else {
                     current.select_slide(index.max(0) as usize);
@@ -2773,7 +2774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             refresh(&ui, &session.borrow());
-            if ui.get_edit_mode() {
+            if ui.get_editing() {
                 publish(&edit_slot, edit_frame(&session.borrow()));
             }
             pump_live(&live_pump);
