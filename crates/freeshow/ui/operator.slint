@@ -979,9 +979,13 @@ export component ControlWindow inherits Window {
             background: root.primary-darker;
             HorizontalLayout {
                 padding-left: 12px;
+                spacing: root.chrome-status != "" ? 16px : 0px;
                 alignment: center;
                 Text {
                     text: root.chrome-status;
+                    // A long RSS ticker must elide, not widen the window past the screen.
+                    overflow: elide;
+                    horizontal-stretch: root.chrome-status != "" ? 2 : 0;
                     color: root.text-color;
                     font-size: 12px * OperatorStyle.font-scale;
                     vertical-alignment: center;
