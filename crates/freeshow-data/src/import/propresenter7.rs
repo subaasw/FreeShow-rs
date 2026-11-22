@@ -555,10 +555,12 @@ fn box_geometry(element: &wire::Element) -> Option<String> {
 
 fn box_fill(element: &wire::Element) -> Option<String> {
     let fill = element.fill.as_ref().filter(|fill| fill.enabled)?;
-    let color = fill.color.as_ref()?;
-    if color.alpha <= 0.0 {
-        return None;
-    }
+    let background = if let Some(gradient) = &fill.gradient {
+        gradient_fill(gradient)?
+    } else {
+        let color = fill.color.as_ref().filter(|color| color.alpha > 0.0)?;
+        format!("background-color:{};", css_color(color))
+    };
     let shape = element.path.as_ref()?.shape.as_ref()?;
     let geometry = match shape.kind() {
         wire::ShapeType::Rectangle
@@ -592,7 +594,46 @@ fn box_fill(element: &wire::Element) -> Option<String> {
         }
         wire::ShapeType::Unknown => return None,
     };
-    Some(format!("background-color:{};{geometry}", css_color(color)))
+    Some(format!("{background}{geometry}"))
+}
+
+fn gradient_fill(gradient: &wire::Gradient) -> Option<String> {
+    let stops: Vec<_> = gradient
+        .stops
+        .iter()
+        .filter_map(|stop| {
+            let position = stop
+                .position
+                .is_finite()
+                .then_some(stop.position)?
+                .clamp(0.0, 1.0);
+            Some((stop.color.as_ref()?, position))
+        })
+        .collect();
+    if !stops.iter().any(|(color, _)| color.alpha > 0.0) {
+        return None;
+    }
+    if let [(color, _)] = stops.as_slice() {
+        return Some(format!("background-color:{};", css_color(color)));
+    }
+    let start = match wire::GradientType::try_from(gradient.kind).ok()? {
+        wire::GradientType::Linear if gradient.angle.is_finite() => {
+            // Convert a right-facing, counterclockwise angle to CSS's up-facing clockwise angle.
+            format!(
+                "linear-gradient({}deg",
+                (90.0 - gradient.angle).rem_euclid(360.0)
+            )
+        }
+        wire::GradientType::Radial => "radial-gradient(circle at center".to_owned(),
+        _ => return None,
+    };
+    use std::fmt::Write;
+    let mut css = format!("background:{start}");
+    for (color, position) in stops {
+        let _ = write!(css, ", {} {}%", css_color(color), position * 100.0);
+    }
+    css.push_str(");");
+    Some(css)
 }
 
 fn text_item(text: &wire::Text, style: &mut String) -> Option<Value> {
@@ -903,10 +944,33 @@ mod tests {
                         alpha: 0.5,
                         ..Default::default()
                     }),
+                    ..Default::default()
                 }),
                 hidden,
                 ..Default::default()
             }),
+        };
+        let gradient_shape = |kind, gradient_type| {
+            let mut item = shape(kind, true, false);
+            let fill = item.element.as_mut().unwrap().fill.as_mut().unwrap();
+            fill.gradient = Some(wire::Gradient {
+                kind: gradient_type,
+                angle: 30.0,
+                stops: vec![
+                    wire::ColorStop {
+                        color: fill.color.take(),
+                        position: 0.25,
+                    },
+                    wire::ColorStop {
+                        color: Some(wire::Color {
+                            blue: 1.0,
+                            ..Default::default()
+                        }),
+                        position: 1.0,
+                    },
+                ],
+            });
+            item
         };
         elements.insert(0, shape(1, true, false));
         elements.extend([
@@ -917,13 +981,15 @@ mod tests {
             shape(3, true, false),
             shape(4, true, false),
             shape(5, true, false),
+            gradient_shape(3, wire::GradientType::Linear as i32),
+            gradient_shape(2, wire::GradientType::Radial as i32),
         ]);
 
         let show = crate::import::import_show("Shapes.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
         let items = show.show["slides"][&verse.id]["items"].as_array().unwrap();
         let style = "left:160px;top:90px;width:320px;height:180px;background-color:#ff000080;";
-        assert_eq!(items.len(), 8);
+        assert_eq!(items.len(), 10);
         assert_eq!(items[0], json!({"type":"shape","style":style,"lines":[]}));
         assert!(
             !items[1]["lines"][0]["text"][0]["value"]
@@ -943,6 +1009,19 @@ mod tests {
                 json!({"type":"shape","style":format!("{style}--shape-fill-polygon:{points};"),"lines":[]})
             );
         }
+        let bounds = "left:160px;top:90px;width:320px;height:180px;";
+        assert_eq!(
+            items[8]["style"],
+            format!(
+                "{bounds}background:linear-gradient(60deg, #ff000080 25%, #0000ff00 100%);--shape-fill-polygon:0.5 0,1 1,0 1;"
+            )
+        );
+        assert_eq!(
+            items[9]["style"],
+            format!(
+                "{bounds}background:radial-gradient(circle at center, #ff000080 25%, #0000ff00 100%);border-radius:50%;"
+            )
+        );
     }
 
     #[test]
@@ -1066,6 +1145,7 @@ mod tests {
                         blue: 1.0,
                         alpha: 1.0,
                     }),
+                    ..Default::default()
                 }),
                 hidden: false,
                 ..Default::default()

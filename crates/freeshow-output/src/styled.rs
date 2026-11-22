@@ -3394,47 +3394,61 @@ fn fill_item_background(
                     }
                 })
             });
-        for py in y0..y1 {
-            for px in x0..x1 {
-                if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
-                    let offset_x = px as f32 + 0.5 - cx;
-                    let offset_y = py as f32 + 0.5 - cy;
-                    let position = match linear {
-                        Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
-                        None => {
-                            if let Some([left, top, right, bottom]) = rectangular_focus {
-                                // Each stop lies on the rectangle interpolated between the focus and the box.
-                                let local_x = (px - x) as f32 + 0.5;
-                                let local_y = (py - y) as f32 + 0.5;
-                                1.0 - (local_x * left)
-                                    .min(local_y * top)
-                                    .min((w as f32 - local_x) * right)
-                                    .min((h as f32 - local_y) * bottom)
-                                    .min(1.0)
-                            } else if let Some((fx, fy, remaining)) = focus {
-                                // Intersect the ray from the focus through this pixel with the outer circle.
-                                let dx = offset_x / radius_to_corner - fx;
-                                let dy = offset_y / radius_to_corner - fy;
-                                let dot = dx * fx + dy * fy;
-                                let distance_squared = dx * dx + dy * dy;
-                                ((dot * dot + distance_squared * remaining).sqrt() + dot)
-                                    / remaining
-                            } else {
-                                (offset_x * offset_x + offset_y * offset_y).sqrt()
-                                    / radius_to_corner
-                            }
-                        }
-                    };
-                    paint(
-                        pixels,
-                        frame_w,
-                        frame_h,
-                        px,
-                        py,
-                        interpolate_stops(&gradient.stops, position),
-                    );
+        let mut draw_stop = |px, py| {
+            let offset_x = px as f32 + 0.5 - cx;
+            let offset_y = py as f32 + 0.5 - cy;
+            let position = match linear {
+                Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
+                None => {
+                    if let Some([left, top, right, bottom]) = rectangular_focus {
+                        // Each stop lies on the rectangle interpolated between the focus and the box.
+                        let local_x = (px - x) as f32 + 0.5;
+                        let local_y = (py - y) as f32 + 0.5;
+                        1.0 - (local_x * left)
+                            .min(local_y * top)
+                            .min((w as f32 - local_x) * right)
+                            .min((h as f32 - local_y) * bottom)
+                            .min(1.0)
+                    } else if let Some((fx, fy, remaining)) = focus {
+                        // Intersect the ray from the focus through this pixel with the outer circle.
+                        let dx = offset_x / radius_to_corner - fx;
+                        let dy = offset_y / radius_to_corner - fy;
+                        let dot = dx * fx + dy * fy;
+                        let distance_squared = dx * dx + dy * dy;
+                        ((dot * dot + distance_squared * remaining).sqrt() + dot) / remaining
+                    } else {
+                        (offset_x * offset_x + offset_y * offset_y).sqrt() / radius_to_corner
+                    }
+                }
+            };
+            paint(
+                pixels,
+                frame_w,
+                frame_h,
+                px,
+                py,
+                interpolate_stops(&gradient.stops, position),
+            );
+        };
+        if style.fill_polygon.is_empty() {
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
+                        draw_stop(px, py);
+                    }
                 }
             }
+        } else {
+            for_polygon_span(
+                slide,
+                text::Clip { x, y, w, h },
+                &style.fill_polygon,
+                |py, start, end| {
+                    for px in start..end {
+                        draw_stop(px, py);
+                    }
+                },
+            );
         }
         return;
     }
@@ -3442,12 +3456,22 @@ fn fill_item_background(
         return;
     };
     if !style.fill_polygon.is_empty() {
-        fill_polygon(
-            pixels,
+        for_polygon_span(
             slide,
             text::Clip { x, y, w, h },
             &style.fill_polygon,
-            background,
+            |py, start, end| {
+                fill_rect(
+                    pixels,
+                    frame_w,
+                    frame_h,
+                    start,
+                    py,
+                    end.saturating_sub(start),
+                    1,
+                    background,
+                );
+            },
         );
     } else if style.elliptical_background {
         let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
@@ -3483,12 +3507,11 @@ fn parse_fill_polygon(value: &str) -> Option<Vec<[f32; 2]>> {
     (vertices.len() >= 3).then_some(vertices)
 }
 
-fn fill_polygon(
-    pixels: &mut [u8],
+fn for_polygon_span(
     slide: &StyledSlide,
     bounds: text::Clip,
     vertices: &[[f32; 2]],
-    color: Rgba,
+    mut draw_span: impl FnMut(i32, i32, i32),
 ) {
     let text::Clip { x, y, w, h } = bounds;
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
@@ -3509,16 +3532,7 @@ fn fill_polygon(
         for &[left, right] in crossings.as_chunks::<2>().0 {
             let start = edge_to_pixel(left).max(x0);
             let end = edge_to_pixel(right).min(x1);
-            fill_rect(
-                pixels,
-                slide.output_width,
-                slide.output_height,
-                start,
-                py,
-                end.saturating_sub(start),
-                1,
-                color,
-            );
+            draw_span(py, start, end);
         }
     }
 }
@@ -3797,6 +3811,23 @@ mod tests {
         assert!((23..38).any(|x| (23..38).any(|y| {
             fill.pixel(x, y) == Rgba::TRANSPARENT && frame.pixel(x, y) == Rgba::WHITE
         })));
+    }
+
+    #[test]
+    fn gradient_fill_stays_within_the_polygon() {
+        let mut slide = style_slide(
+            "left:0px;top:0px;width:100px;height:100px;background:linear-gradient(90deg,#ff000080 25%,#0000ff 75%);--shape-fill-polygon:0.5 0,1 1,0 1;",
+        );
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = Rgba::TRANSPARENT;
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(20, 20), Rgba::TRANSPARENT);
+        assert_eq!(frame.pixel(20, 90), parse_color("#ff000080").unwrap());
+        assert_eq!(frame.pixel(80, 90), parse_color("#0000ff").unwrap());
+        assert_eq!(frame.pixel(50, 90).a, 193);
     }
 
     fn sample() -> StyledSlide {
