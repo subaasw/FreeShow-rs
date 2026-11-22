@@ -104,6 +104,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
         if order.is_empty() {
             continue;
         }
+        remove_terminal_timer(&mut order, &slides);
         if (layouts.len() + 2).saturating_mul(document.notes.len()) > 32 * 1024 * 1024 {
             return Err(invalid("arrangement notes exceed the import size limit"));
         }
@@ -123,6 +124,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
             .iter()
             .any(|node| !covered.contains(node["id"].as_str().unwrap()))
     {
+        remove_terminal_timer(&mut default_order, &slides);
         layouts.insert(
             "main".into(),
             json!({"name":"All slides","notes":document.notes,"slides":default_order}),
@@ -155,6 +157,31 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     Ok(show)
 }
 
+fn remove_terminal_timer(order: &mut [Value], slides: &Map<String, Value>) {
+    // FreeShow can advance into the next project item at the end of a layout.
+    for node in order.iter_mut().rev() {
+        let id = node["id"].as_str().unwrap();
+        let last_child = slides[id]["children"].as_array().and_then(|children| {
+            children
+                .iter()
+                .rev()
+                .filter_map(Value::as_str)
+                .find(|id| node["children"][*id]["disabled"] == false)
+        });
+        if let Some(child) = last_child {
+            node["children"][child]
+                .as_object_mut()
+                .unwrap()
+                .remove("nextTimer");
+            return;
+        }
+        if node["disabled"] == false {
+            node.as_object_mut().unwrap().remove("nextTimer");
+            return;
+        }
+    }
+}
+
 fn add_slide(
     cue: &wire::Cue,
     action: Option<&wire::PresentationSlide>,
@@ -164,6 +191,13 @@ fn add_slide(
 ) -> Value {
     let slide_id = format!("s{}", slides.len() + 1);
     let mut node = json!({"id": slide_id, "disabled": !cue.enabled});
+    if cue.enabled
+        && cue.completion_target() == wire::CompletionTarget::Next
+        && cue.completion_action() == wire::CompletionAction::AfterTime
+        && (0.001..=3600.0).contains(&cue.completion_time)
+    {
+        node["nextTimer"] = json!(cue.completion_time);
+    }
     let label = group.map_or(cue.name.as_str(), |group| group.name.as_str());
     let mut settings = json!({});
     let mut items = Vec::new();
@@ -415,6 +449,40 @@ fn invalid(error: impl std::fmt::Display) -> DataError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_timed_next_cues_for_each_layout_position() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        presentation.cues[1].enabled = true;
+        for (cue, seconds) in presentation.cues.iter_mut().zip([1.25, 2.5, 3.75]) {
+            cue.completion_action = wire::CompletionAction::AfterTime as i32;
+            cue.completion_target = wire::CompletionTarget::Next as i32;
+            cue.completion_time = seconds;
+        }
+        let mut verse_only = presentation.arrangements[0].clone();
+        verse_only.uuid = Some(wire::Uuid {
+            value: "verse-only".into(),
+        });
+        verse_only.groups.truncate(1);
+        presentation.arrangements.push(verse_only);
+        let mut show =
+            crate::import::import_show("Timed.pro", &presentation.encode_to_vec()).unwrap();
+        assert_eq!(show.next_timer_at(0), Some(3.75));
+        assert_eq!(show.next_timer_at(1), Some(1.25));
+        assert_eq!(show.next_timer_at(2), Some(2.5));
+        assert_eq!(show.next_timer_at(3), None);
+        assert!(show.set_active_layout("arrangement-3"));
+        assert_eq!(show.next_timer_at(0), Some(1.25));
+        assert_eq!(show.next_timer_at(1), None);
+
+        presentation.cues[1].enabled = false;
+        let mut show =
+            crate::import::import_show("Timed.pro", &presentation.encode_to_vec()).unwrap();
+        assert!(show.set_active_layout("arrangement-3"));
+        assert_eq!(show.next_timer_at(0), None);
+        assert_eq!(show.next_timer_at(1), None);
+    }
 
     #[test]
     fn imports_visible_solid_shapes_in_slide_element_order() {
