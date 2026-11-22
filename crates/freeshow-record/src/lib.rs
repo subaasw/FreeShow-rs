@@ -4,6 +4,23 @@ mod icecast;
 pub use icecast::IcecastSender;
 mod whip;
 pub use whip::whip_post;
+#[cfg(feature = "webrtc")]
+mod webrtc;
+#[cfg(feature = "webrtc")]
+pub use webrtc::WebrtcSender;
+
+#[cfg(not(feature = "webrtc"))]
+/// Stub used when the crate is built without the webrtc feature.
+pub struct WebrtcSender;
+
+#[cfg(not(feature = "webrtc"))]
+impl WebrtcSender {
+    pub fn open(_url: &str, _token: Option<&str>, _width: u32, _height: u32) -> Option<Self> {
+        None
+    }
+
+    pub fn submit(&self, _pixels: &[u8], _width: u32, _height: u32) {}
+}
 
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -70,7 +87,7 @@ impl ServiceCapture {
     }
 }
 
-enum Job {
+pub(crate) enum Job {
     Frame(Vec<u8>),
     Stop,
 }
@@ -206,19 +223,23 @@ fn rtmp_pipeline_audio(url: &str, width: u32, height: u32, output: &str) -> Vec<
         .collect()
 }
 
-fn encoders() -> [&'static str; 2] {
+pub(crate) fn encoders() -> [&'static str; 2] {
     [
         "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=2000",
         "vtenc_h264 realtime=true bitrate=2000",
     ]
 }
 
-fn gst_string(value: &str) -> String {
+pub(crate) fn gst_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+pub(crate) fn init_gstreamer() -> Result<(), String> {
+    gstreamer::init().map_err(|err| format!("GStreamer did not start: {err}"))
+}
+
 fn open_pipeline(descriptions: &[String]) -> Option<(gstreamer::Pipeline, AppSrc)> {
-    if let Err(err) = gstreamer::init() {
+    if let Err(err) = init_gstreamer() {
         tracing::error!("recording did not start: {err}");
         return None;
     }
