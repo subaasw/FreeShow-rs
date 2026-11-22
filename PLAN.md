@@ -117,7 +117,8 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
 - [x] ProPresenter 7 timed next-slide, loop-to-start, and specific-cue jumps within an arrangement, including slides with background media.
 - [x] ProPresenter 7 enabled, immediate global clear-audio and clear-background cues. Standalone cues retain the content already on audience and stage output.
-- [ ] Other ProPresenter 7 graphics, remaining RTF controls, and timeline/action parity.
+- [x] ProPresenter 7 timeline slide cues play at their recorded times in the imported arrangement.
+- [ ] Other ProPresenter 7 graphics, remaining RTF controls, timeline looping, and other timeline tracks and cue actions.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.
 - [x] ChurchApps service-plan lesson feeds and add-ons with downloadable media.
 - [x] Import stream-only lesson media by URL and resolve YouTube or Vimeo for playback when `yt-dlp` is installed.

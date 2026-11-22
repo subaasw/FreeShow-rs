@@ -200,11 +200,8 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
                 .cloned()
         });
     if let Some(key) = layout_key
-        && let Some(timeline) = layout_timeline(
-            document.timeline.as_ref(),
-            &show.show["layouts"][&key],
-            &cue_slides,
-        )
+        && let Some(recording) = document.timeline.as_ref()
+        && let Some(timeline) = layout_timeline(recording, &show.layout_steps(), &cue_slides)
     {
         show.show["layouts"][key]["timeline"] = timeline;
     }
@@ -403,11 +400,10 @@ fn unsupported_actions(cue: &wire::Cue) -> Vec<&'static str> {
 }
 
 fn layout_timeline(
-    timeline: Option<&wire::Timeline>,
-    layout: &Value,
+    timeline: &wire::Timeline,
+    steps: &[(String, Value)],
     cue_slides: &HashMap<String, String>,
 ) -> Option<Value> {
-    let timeline = timeline?;
     let cues = if !timeline.cues_v2.is_empty() {
         &timeline.cues_v2
     } else {
@@ -416,23 +412,10 @@ fn layout_timeline(
     if cues.is_empty() {
         return None;
     }
-    let mut slide_index = Vec::new();
-    let order = layout.get("slides")?.as_array()?;
-    for node in order {
-        let id = node.get("id")?.as_str()?;
-        slide_index.push(id.to_owned());
-        if let Some(array) = node.get("children").and_then(Value::as_array) {
-            for child in array {
-                if let Some(child_id) = child
-                    .as_str()
-                    .map(str::to_owned)
-                    .or_else(|| child.get("id").and_then(Value::as_str).map(str::to_owned))
-                {
-                    slide_index.push(child_id);
-                }
-            }
-        } else if let Some(map) = node.get("children").and_then(Value::as_object) {
-            slide_index.extend(map.keys().cloned());
+    let mut positions = HashMap::<&str, Vec<usize>>::new();
+    for (index, (id, node)) in steps.iter().enumerate() {
+        if node["disabled"] != true {
+            positions.entry(id).or_default().push(index);
         }
     }
     let mut current = 0usize;
@@ -444,23 +427,18 @@ fn layout_timeline(
         let Some(slide_id) = cue_slides.get(cue_id) else {
             continue;
         };
-        let found = slide_index
-            .iter()
-            .enumerate()
-            .find(|(i, id)| *i >= current && *id == slide_id)
-            .or_else(|| {
-                slide_index
-                    .iter()
-                    .enumerate()
-                    .find(|(_, id)| *id == slide_id)
-            });
-        let position = found.map(|(i, _)| i);
-        if let Some(i) = position {
-            current = i;
+        let Some(occurrences) = positions.get(slide_id.as_str()) else {
+            continue;
+        };
+        let offset = occurrences.partition_point(|index| *index < current);
+        let position = occurrences.get(offset).copied().unwrap_or(occurrences[0]);
+        if !cue.trigger_time.is_finite() || cue.trigger_time < 0.0 {
+            continue;
         }
+        current = position;
         actions.push(json!({
             "id": format!("t{}", index + 1),
-            "time": (cue.trigger_time * 1000.0).round(),
+            "time": (cue.trigger_time * 1000.0).round() as u64,
             "name": cue.name,
             "type": "slide",
             "data": { "id": slide_id, "index": position }
@@ -1116,9 +1094,12 @@ mod tests {
         let timeline = &show.show["layouts"][layout_id]["timeline"];
         assert_eq!(timeline["loop"], true);
         assert_eq!(timeline["duration"], 12.0);
-        assert_eq!(timeline["actions"][0]["time"], 1500.0);
+        assert_eq!(timeline["actions"][0]["time"], 1500);
         assert_eq!(timeline["actions"][0]["type"], "slide");
         assert_eq!(timeline["actions"][0]["data"]["id"], "s1");
+        let cues = crate::timeline_cues_from_show(&show.show);
+        assert_eq!(cues[0].time_ms, 1500);
+        assert_eq!(cues[0].slide_index, Some(1));
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
         let text = warnings
             .iter()

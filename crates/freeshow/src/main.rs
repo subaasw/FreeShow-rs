@@ -2289,6 +2289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut current = session.borrow_mut();
                 let now = std::time::Instant::now();
                 let timeline = current.tick_timeline(now);
+                current.refresh_output |= timeline;
                 if current.metronome_on {
                     current.update_metronome(now);
                 }
