@@ -139,6 +139,12 @@ pub enum DrawerAction {
     PlayCamera(String),
 }
 
+struct TimelineSoundtrack {
+    path: PathBuf,
+    restart: bool,
+    owned: bool,
+}
+
 pub struct Session {
     pub root: Option<PathBuf>,
     pub icecast: Option<(freeshow_core::IcecastDestination, bool)>,
@@ -180,7 +186,9 @@ pub struct Session {
     pub timeline_playing: bool,
     timeline_started: Option<std::time::Instant>,
     timeline_fired: usize,
-    timeline_loop_ms: Option<u64>,
+    timeline_loop: bool,
+    timeline_end_ms: Option<u64>,
+    timeline_soundtrack: Option<TimelineSoundtrack>,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     pub(crate) program_content: std::cell::RefCell<Option<crate::live::ProgramContent>>,
@@ -397,7 +405,9 @@ impl Session {
             timeline_playing: false,
             timeline_started: None,
             timeline_fired: 0,
-            timeline_loop_ms: None,
+            timeline_loop: false,
+            timeline_end_ms: None,
+            timeline_soundtrack: None,
             show_index: None,
             slide_index: None,
             program_content: Default::default(),
@@ -570,7 +580,9 @@ impl Session {
             timeline_playing: false,
             timeline_started: None,
             timeline_fired: 0,
-            timeline_loop_ms: None,
+            timeline_loop: false,
+            timeline_end_ms: None,
+            timeline_soundtrack: None,
             show_index: None,
             slide_index: None,
             program_content: Default::default(),
@@ -1529,21 +1541,39 @@ impl Session {
     }
 
     fn load_timeline(&mut self) {
+        self.stop_timeline();
         self.timeline_cues = self
             .current_show()
             .map(|show| timeline_cues_from_show(&show.show))
             .unwrap_or_default();
-        self.timeline_loop_ms = self
+        let (looping, end, soundtrack) = self
             .current_show()
-            .and_then(|show| timeline_for_show(&show.show))
-            .map(|(timeline, _)| timeline)
-            .filter(|timeline| timeline["loop"] == true)
-            .and_then(|timeline| {
-                let last = self.timeline_cues.last()?.time_ms;
-                let duration = timeline["duration"].as_f64().unwrap_or(0.0);
-                Some(((duration * 1000.0).round() as u64).max(last).max(1))
-            });
-        self.stop_timeline();
+            .and_then(|show| {
+                let (timeline, _) = timeline_for_show(&show.show)?;
+                let end = timeline["duration"]
+                    .as_f64()
+                    .filter(|duration| duration.is_finite() && *duration > 0.0)
+                    .map(|duration| (duration * 1000.0).round() as u64);
+                let soundtrack = timeline["soundtrack"]
+                    .as_str()
+                    .and_then(|id| show.show["media"][id]["path"].as_str())
+                    .map(PathBuf::from)
+                    .filter(|path| media_kind(path) == MediaKind::Audio && path.is_file());
+                Some((timeline["loop"] == true, end, soundtrack))
+            })
+            .unwrap_or_default();
+        self.timeline_loop = looping;
+        let last_cue = self.timeline_cues.last().map_or(0, |cue| cue.time_ms);
+        self.timeline_end_ms = end.map(|end| end.max(last_cue).max(1)).or_else(|| {
+            soundtrack
+                .is_none()
+                .then_some(last_cue.max(u64::from(looping)))
+        });
+        self.timeline_soundtrack = soundtrack.map(|path| TimelineSoundtrack {
+            path,
+            restart: true,
+            owned: false,
+        });
     }
 
     pub fn timeline_text(&self) -> String {
@@ -1554,7 +1584,9 @@ impl Session {
         let mut cues = parse_timeline_text(text);
         let Some(index) = self.show_index else {
             self.stop_timeline();
-            self.timeline_loop_ms = None;
+            self.timeline_loop = false;
+            self.timeline_end_ms = None;
+            self.timeline_soundtrack = None;
             self.timeline_cues = cues;
             return !self.timeline_cues.is_empty() || text.trim().is_empty();
         };
@@ -1621,7 +1653,7 @@ impl Session {
         if self.current_show().is_some() {
             self.load_timeline();
         }
-        if self.timeline_cues.is_empty() {
+        if self.timeline_cues.is_empty() && self.timeline_soundtrack.is_none() {
             return false;
         }
         self.timeline_playing = true;
@@ -1630,10 +1662,18 @@ impl Session {
         true
     }
 
-    pub fn stop_timeline(&mut self) {
+    pub fn stop_timeline(&mut self) -> bool {
         self.timeline_playing = false;
         self.timeline_started = None;
         self.timeline_fired = 0;
+        let stop_audio = self.timeline_soundtrack.as_mut().is_some_and(|track| {
+            std::mem::take(&mut track.owned) && self.playing_audio.as_ref() == Some(&track.path)
+        });
+        if stop_audio {
+            self.stop_audio();
+            self.refresh_output = true;
+        }
+        stop_audio
     }
 
     /// Fires due timeline cues. Returns true when the output should refresh.
@@ -1646,6 +1686,14 @@ impl Session {
         };
         let elapsed = now.saturating_duration_since(started).as_millis() as u64;
         let mut changed = false;
+        if let Some(track) = &mut self.timeline_soundtrack
+            && std::mem::take(&mut track.restart)
+        {
+            track.owned = true;
+            let path = track.path.clone();
+            self.queue_audio(path);
+            changed = true;
+        }
         while self.timeline_playing && self.timeline_fired < self.timeline_cues.len() {
             let cue = self.timeline_cues[self.timeline_fired].clone();
             if cue.time_ms > elapsed {
@@ -1654,20 +1702,50 @@ impl Session {
             self.timeline_fired += 1;
             changed |= self.run_timeline_cue(&cue);
         }
-        if self.timeline_playing && self.timeline_fired >= self.timeline_cues.len() {
-            match self.timeline_loop_ms {
-                Some(period) if elapsed >= period => {
-                    // Keep the original phase and skip entirely missed repetitions.
-                    // The final cue remains visible until the next timer tick.
-                    self.timeline_started =
-                        Some(now - std::time::Duration::from_millis(elapsed % period));
-                    self.timeline_fired = 0;
+        if self.timeline_playing
+            && self.timeline_fired >= self.timeline_cues.len()
+            && self
+                .timeline_end_ms
+                .map_or_else(|| !self.timeline_soundtrack_active(), |end| elapsed >= end)
+        {
+            if self.timeline_loop {
+                let period = self.timeline_end_ms.unwrap_or(elapsed).max(1);
+                // Keep the original phase and skip entirely missed repetitions.
+                self.timeline_started = Some(now - Duration::from_millis(elapsed % period));
+                self.timeline_fired = 0;
+                if let Some(track) = &mut self.timeline_soundtrack {
+                    track.restart = true;
                 }
-                Some(_) => {}
-                None => self.stop_timeline(),
+            } else {
+                changed |= self.stop_timeline();
             }
         }
         changed
+    }
+
+    fn timeline_soundtrack_active(&self) -> bool {
+        self.timeline_soundtrack.as_ref().is_some_and(|track| {
+            self.timeline_owns_audio(&track.path)
+                && !self
+                    .media_finished
+                    .as_ref()
+                    .is_some_and(|(path, audio)| *audio && Path::new(path) == track.path)
+        })
+    }
+
+    fn timeline_owns_audio(&self, path: &Path) -> bool {
+        self.timeline_soundtrack.as_ref().is_some_and(|track| {
+            track.owned && track.path == path && self.playing_audio.as_deref() == Some(path)
+        })
+    }
+
+    pub fn timeline_audio_failed(&mut self, path: &Path) {
+        if self.timeline_owns_audio(path) {
+            self.playing_audio = None;
+            self.audio_paused = false;
+            // Let the slides finish even if the audio file could not be opened.
+            self.timeline_soundtrack = None;
+        }
     }
 
     fn run_timeline_cue(&mut self, cue: &TimelineCue) -> bool {
@@ -2130,7 +2208,14 @@ impl Session {
                 .as_deref()
                 .is_some_and(|root| Library::open(root).media_video_type(path) == "foreground");
         }
-        self.pending_also = None;
+        self.pending_also = self
+            .pending_also
+            .take()
+            .or_else(|| self.pending_play.take())
+            .filter(|play| {
+                matches!(play, PendingPlay::StopAudio)
+                    || matches!(play, PendingPlay::Audio(path) if self.timeline_owns_audio(path))
+            });
         self.pending_play = Some(PendingPlay::Video(path.to_path_buf()));
     }
 
@@ -2894,6 +2979,12 @@ impl Session {
         [self.pending_play.take(), self.pending_also.take()]
     }
 
+    pub fn audio_change_pending(&self) -> bool {
+        [&self.pending_play, &self.pending_also]
+            .into_iter()
+            .any(|play| matches!(play, Some(PendingPlay::Audio(_) | PendingPlay::StopAudio)))
+    }
+
     /// Starts the first audio file listed on this slide, unless that file is already playing.
     fn start_slide_audio(&mut self) {
         let path = self.current_show().and_then(|show| {
@@ -2910,6 +3001,10 @@ impl Session {
         if self.playing_audio.as_ref() == Some(&path) && !self.audio_paused {
             return;
         }
+        self.queue_audio(path);
+    }
+
+    fn queue_audio(&mut self, path: PathBuf) {
         self.media_finished = None;
         self.playing_audio = Some(path.clone());
         self.audio_paused = false;
@@ -3067,6 +3162,9 @@ impl Session {
             return false;
         }
         self.media_finished = Some(key.clone());
+        if audio && self.timeline_owns_audio(Path::new(path)) {
+            return false;
+        }
         if !self.resume_after_effect(path, audio) {
             self.advance_playlist(path, audio);
         }
@@ -3431,6 +3529,7 @@ impl Session {
     pub fn audio_should_loop(&self) -> bool {
         self.playing_audio
             .as_ref()
+            .filter(|path| !self.timeline_owns_audio(path))
             .and_then(|path| {
                 self.root
                     .as_deref()
@@ -6821,6 +6920,65 @@ Second line"
         assert_eq!(session.slide_index, Some(2));
         session.stop_timeline();
         assert!(!session.tick_timeline(start + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn imported_timeline_soundtrack_preserves_cues_and_obeys_stop_and_loop() {
+        let mut show = ShowFile::blank("with-track", "With track");
+        let path = std::env::temp_dir().join(format!("{}.wav", new_id()));
+        std::fs::write(&path, b"RIFF").unwrap();
+        let verse = show.add_slide().unwrap();
+        show.show["origin"] = serde_json::json!("propresenter");
+        show.show["media"] = serde_json::json!({
+            "backing": {"path": path},
+            "motion": {"path": "motion.mp4"}
+        });
+        show.show["layouts"]["main"]["slides"][1]["background"] = serde_json::json!("motion");
+        show.show["layouts"]["main"]["timeline"] = serde_json::json!({
+            "soundtrack": "backing", "duration": 3.0, "loop": true,
+            "actions": [{"time": 0, "type": "slide", "data": {"id": verse, "index": 1}}]
+        });
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        assert!(session.present_show_id("with-track"));
+        assert!(session.save_timeline(&session.timeline_text()));
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(start));
+        assert_eq!(session.slide_index, Some(1));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Video(_)), Some(PendingPlay::Audio(audio))] if audio == path)
+        );
+        assert!(!session.tick_timeline(start + Duration::from_millis(2999)));
+        assert!(!session.tick_timeline(start + Duration::from_secs(3)));
+        assert!(session.tick_timeline(start + Duration::from_millis(3020)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == path)
+        );
+        assert!(session.stop_timeline());
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::StopAudio), None]
+        ));
+
+        // An audio-only timeline remains active until the track ends when duration is absent.
+        let timeline = &mut session.shows[0].show["layouts"]["main"]["timeline"];
+        *timeline = serde_json::json!({"soundtrack": "backing", "actions": []});
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(start));
+        assert!(session.timeline_playing);
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == path)
+        );
+        assert!(!session.finish_media(&path.to_string_lossy(), true));
+        assert!(session.tick_timeline(start + Duration::from_secs(1)));
+        assert!(!session.timeline_playing);
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::StopAudio), None]
+        ));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

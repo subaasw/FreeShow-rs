@@ -650,6 +650,9 @@ fn fade_into(
 
 fn sample_audio(session: &RefCell<Session>, audio: &RefCell<Option<AudioOutput>>) {
     let mut session = session.borrow_mut();
+    if session.audio_change_pending() {
+        return;
+    }
     if let Some(output) = audio.borrow().as_ref() {
         session.audio_time = output.position_seconds();
         session.audio_duration = output.duration_seconds();
@@ -720,7 +723,10 @@ fn start_pending(
                 Ok(output) => {
                     *playback.audio.borrow_mut() = Some(output);
                 }
-                Err(err) => tracing::error!("could not play audio: {err}"),
+                Err(err) => {
+                    session.borrow_mut().timeline_audio_failed(&path);
+                    tracing::error!("could not play audio: {err}");
+                }
             }
         }
         Some(PendingPlay::Video(path)) => {
