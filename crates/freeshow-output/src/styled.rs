@@ -47,6 +47,7 @@ pub struct BoxStyle {
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_radial_focus: Option<[f32; 2]>,
+    pptx_rectangular_focus: Option<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -112,6 +113,7 @@ impl Default for BoxStyle {
             backdrop: String::new(),
             gradient: None,
             pptx_radial_focus: None,
+            pptx_rectangular_focus: None,
         }
     }
 }
@@ -324,6 +326,9 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 }
             }
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
+            "--pptx-rectangular-focus" => {
+                style.pptx_rectangular_focus = parse_rectangular_focus(value)
+            }
             "border-radius" => {
                 if value == "50%" {
                     style.elliptical_background = true;
@@ -3129,6 +3134,23 @@ fn fill_item_background(
         let focus = style
             .pptx_radial_focus
             .map(|[x, y]| (x, y, 1.0 - (x * x + y * y)));
+        let rectangular_focus = style
+            .pptx_rectangular_focus
+            .map(|[left, top, right, bottom]| {
+                [
+                    left * w as f32,
+                    top * h as f32,
+                    right * w as f32,
+                    bottom * h as f32,
+                ]
+                .map(|margin| {
+                    if margin > 0.0 {
+                        margin.recip()
+                    } else {
+                        f32::INFINITY
+                    }
+                })
+            });
         for py in y0..y1 {
             for px in x0..x1 {
                 if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
@@ -3137,7 +3159,16 @@ fn fill_item_background(
                     let position = match linear {
                         Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
                         None => {
-                            if let Some((fx, fy, remaining)) = focus {
+                            if let Some([left, top, right, bottom]) = rectangular_focus {
+                                // Each stop lies on the rectangle interpolated between the focus and the box.
+                                let local_x = (px - x) as f32 + 0.5;
+                                let local_y = (py - y) as f32 + 0.5;
+                                1.0 - (local_x * left)
+                                    .min(local_y * top)
+                                    .min((w as f32 - local_x) * right)
+                                    .min((h as f32 - local_y) * bottom)
+                                    .min(1.0)
+                            } else if let Some((fx, fy, remaining)) = focus {
                                 // Intersect the ray from the focus through this pixel with the outer circle.
                                 let dx = offset_x / radius_to_corner - fx;
                                 let dy = offset_y / radius_to_corner - fy;
@@ -3188,6 +3219,20 @@ fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
     let x = components.next()?.parse::<f32>().ok()?;
     let y = components.next()?.parse::<f32>().ok()?;
     (components.next().is_none() && x * x + y * y < 1.0).then_some([x, y])
+}
+
+fn parse_rectangular_focus(value: &str) -> Option<[f32; 4]> {
+    let mut components = value.split_whitespace();
+    let mut edges = [0.0; 4];
+    for edge in &mut edges {
+        *edge = components.next()?.parse::<f32>().ok()?;
+    }
+    let [left, top, right, bottom] = edges;
+    (components.next().is_none()
+        && edges.iter().all(|&edge| (0.0..=1.0).contains(&edge))
+        && left + right <= 1.0
+        && top + bottom <= 1.0)
+        .then_some(edges)
 }
 
 fn parse_gradient(value: &str) -> Option<Gradient> {
@@ -3565,6 +3610,21 @@ mod tests {
         assert!(focus.r > 245 && focus.b < 10, "{focus:?}");
         assert!((165..=175).contains(&center.r), "{center:?}");
         assert!(corner.r < 10 && corner.b > 245, "{corner:?}");
+    }
+
+    #[test]
+    fn powerpoint_rectangular_gradient_interpolates_between_boxes() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%);--pptx-rectangular-focus:0.3 0.2 0.1 0.4;",
+        ));
+        let red = parse_color("#FF0000").unwrap();
+        assert_eq!(frame.pixel(330, 150), red);
+        assert_eq!(frame.pixel(825, 300), red);
+        for pixel in [frame.pixel(144, 216), frame.pixel(575, 54)] {
+            assert!((126..=130).contains(&pixel.r), "{pixel:?}");
+            assert!((125..=129).contains(&pixel.b), "{pixel:?}");
+        }
+        assert!(frame.pixel(959, 216).b > 250);
     }
 
     #[test]
