@@ -4615,6 +4615,40 @@ impl Session {
         wrote
     }
 
+    /// Moves to the next or previous verse, past the search results into the Bible.
+    fn step_verse(&mut self, delta: i64) -> bool {
+        let Some(index) = self.verse_index else {
+            return false;
+        };
+        let target = index as i64 + delta;
+        if target < 0 || target as usize >= self.verse_hits.len() {
+            let neighbour = self.verse_hits.get(index).and_then(|hit| {
+                let (book_chapter, verse) = hit.reference.rsplit_once(':')?;
+                let verse = verse.parse::<i64>().ok()? + delta;
+                (verse > 0).then(|| format!("{book_chapter}:{verse}"))
+            });
+            let bible = self.bibles.get(self.bible_index.unwrap_or(0));
+            let Some(hit) = neighbour
+                .zip(bible)
+                .and_then(|(query, bible)| bible.search(&query).into_iter().next())
+            else {
+                return false;
+            };
+            if delta > 0 {
+                self.verse_hits.push(hit);
+                self.verse_index = Some(self.verse_hits.len() - 1);
+            } else {
+                self.verse_hits.insert(0, hit);
+                self.verse_index = Some(0);
+            }
+        } else {
+            self.verse_index = Some(target as usize);
+        }
+        self.blanked = false;
+        self.slide_hidden = false;
+        true
+    }
+
     pub fn search(&mut self, query: &str) {
         let index = self.bible_index.unwrap_or(0);
         let Some(bible) = self.bibles.get(index) else {
@@ -4643,6 +4677,16 @@ impl Session {
     pub fn live_slide_index(&self) -> Option<usize> {
         if self.blanked || self.slide_hidden {
             return None;
+        }
+        if self.tab == "scripture" {
+            return match self.program_content.borrow().as_ref() {
+                Some(crate::live::ProgramContent::Scripture(lines))
+                    if *lines == self.output_lines() =>
+                {
+                    self.verse_index
+                }
+                _ => None,
+            };
         }
         let show = self.current_show()?;
         match self.program_content.borrow().as_ref() {
@@ -4773,6 +4817,9 @@ impl Session {
     pub fn advance_show(&mut self) -> bool {
         if self.preferences.out_locked() {
             return false;
+        }
+        if self.tab == "scripture" {
+            return self.step_verse(1);
         }
         if self.step_folder(1) {
             return true;
@@ -5027,6 +5074,9 @@ impl Session {
     pub fn retreat_show(&mut self) -> bool {
         if self.preferences.out_locked() {
             return false;
+        }
+        if self.tab == "scripture" {
+            return self.step_verse(-1);
         }
         if self.step_folder(-1) {
             return true;
@@ -9838,6 +9888,43 @@ Second line"
             snapshot.bibles[0].books[0].chapters[0].verses[0].text,
             "For God so loved the world"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn arrow_keys_step_through_verses_past_the_search_results() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-verse-step-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Bibles")).unwrap();
+        let verses = (15..=18)
+            .map(
+                |number| serde_json::json!({ "number": number, "text": format!("verse {number}") }),
+            )
+            .collect::<Vec<_>>();
+        let bible = BibleFile::from_document(
+            "kjv",
+            serde_json::json!({
+                "name": "KJV",
+                "books": [{ "name": "John", "number": 43, "chapters": [{ "number": 3, "verses": verses }] }]
+            }),
+        );
+        std::fs::write(root.join("Bibles/KJV.fsb"), bible.to_json().unwrap()).unwrap();
+        let mut session = Session::open(root.clone());
+        session.tab = "scripture".into();
+        session.search("John 3:16");
+        assert_eq!(session.verse_hits.len(), 1);
+        session.select_slide(0);
+        assert!(session.perform_shortcut("Right"));
+        assert_eq!(session.output_lines()[0], "John 3:17");
+        assert!(session.perform_shortcut("Right"));
+        assert!(!session.perform_shortcut("Right"), "John 3 ends at 18");
+        assert_eq!(session.output_lines()[0], "John 3:18");
+        assert_eq!(session.tab, "scripture", "the project did not take over");
+        for _ in 0..3 {
+            assert!(session.perform_shortcut("Left"));
+        }
+        assert_eq!(session.output_lines()[0], "John 3:15");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -224,7 +224,7 @@ export component SlideCard inherits Rectangle {
     in property <color> group-text: #f0f0ff;
     callback clicked();
     border-radius: OperatorStyle.chrome-radius;
-    background: root.live ? root.accent : (root.active ? #ffffff40 : (pointer.has-hover ? OperatorStyle.hover : #00000030));
+    background: root.live ? root.accent : (root.active ? (root.has-thumb ? #ffffffb0 : root.accent) : (pointer.has-hover ? OperatorStyle.hover : #00000030));
     if root.has-thumb: Rectangle {
         x: 3px;
         y: 3px;
@@ -270,8 +270,8 @@ export component SlideCard inherits Rectangle {
         Text {
             x: 10px;
             width: parent.width - 14px;
-            text: root.number + "  " + root.label;
-            color: root.has-color && !root.full-color ? root.group-text : (root.has-color ? root.group-text : root.text-color);
+            text: root.number > 0 ? root.number + "  " + root.label : root.label;
+            color: (root.live || root.active) && !root.has-thumb ? root.accent-text : (root.has-color ? root.group-text : root.text-color);
             font-size: 12px * OperatorStyle.font-scale;
             vertical-alignment: center;
             overflow: elide;
