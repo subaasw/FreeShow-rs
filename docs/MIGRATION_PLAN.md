@@ -208,7 +208,7 @@ Acceptance: a machine without a Rust toolchain can install a signed (or document
 Close the remaining gaps versus FreeShow 1.6.8 so a Sunday operator can run a service without falling back to Electron for core presentation work.
 
 - [x] Paint the compositor at the real output resolution (1920×1080 by default, or the active output's stored `bounds`) and re-measure the §4 budgets (Linux box, 22 Nov 2026: stills ~63 fps, video ~56 fps, Go/Next ~15 ms).
-- [ ] Remaining importers: MediaShout, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only shows, and project packages, each with a small fixture and tests.
+- [x] Remaining importers: MediaShout, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only shows, and project packages, each with a small fixture and tests. Native MediaShout `.mdb` and Canva presentations stay out (Canva needs an account).
 - [ ] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures.
 - [ ] Operator chrome, drawer, and output extras still listed as gaps.
 - [ ] Capture and I/O gaps.

@@ -15,12 +15,13 @@ use serde_json::{Value, json};
 
 use crate::{DataError, ShowFile};
 
+mod community;
 mod powerpoint;
 mod propresenter;
 mod propresenter7;
 mod rtf;
 
-const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
+pub(super) const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
 
 pub fn import_sources(
     imports: &Path,
@@ -59,6 +60,18 @@ pub fn import_sources(
             .ok()
             .is_some_and(|value| crate::is_lesson_document(&value))
         {
+            continue;
+        }
+        if community::is_project_package(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+            &bytes,
+        ) {
+            match community::import_project_package(&path, &bytes, shows, media) {
+                Ok(notes) => warnings.extend(notes),
+                Err(err) => warnings.push(format!("{}: {err}", path.display())),
+            }
             continue;
         }
         let found = if propresenter::is_bundle(&path) {
@@ -158,7 +171,15 @@ fn import_shows_from(
             .map(|(_, shows)| shows.into_iter().map(|(_, show)| show).collect());
     }
     if is_sqlite(file_name, bytes) {
+        if let Ok(songs) = community::softprojector_database(bytes)
+            && !songs.is_empty()
+        {
+            return Ok(songs);
+        }
         return openlp_database(bytes);
+    }
+    if let Some(shows) = community::import_shows(file_name, bytes, source, media)? {
+        return Ok(shows);
     }
     Ok(vec![import_one(file_name, bytes, source, media)?])
 }
@@ -325,14 +346,15 @@ struct LyricVerse {
     chords: Vec<Vec<ChordMark>>,
 }
 
-struct Section {
-    group: String,
-    lines: Vec<String>,
+#[derive(Clone)]
+pub(super) struct Section {
+    pub(super) group: String,
+    pub(super) lines: Vec<String>,
     chords: Vec<Vec<ChordMark>>,
 }
 
 impl Section {
-    fn plain(group: String, lines: Vec<String>) -> Self {
+    pub(super) fn plain(group: String, lines: Vec<String>) -> Self {
         let chords = (0..lines.len()).map(|_| Vec::new()).collect();
         Self {
             group,
@@ -342,7 +364,7 @@ impl Section {
     }
 }
 
-fn show_file(file_name: &str, name: &str, sections: Vec<Section>) -> ShowFile {
+pub(super) fn show_file(file_name: &str, name: &str, sections: Vec<Section>) -> ShowFile {
     let mut slides = serde_json::Map::new();
     let mut order = Vec::new();
     for (index, section) in sections.into_iter().enumerate() {
@@ -1240,7 +1262,7 @@ fn verse_group(name: &str) -> String {
     }
 }
 
-fn is_sqlite(file_name: &str, bytes: &[u8]) -> bool {
+pub(super) fn is_sqlite(file_name: &str, bytes: &[u8]) -> bool {
     let ext = Path::new(file_name)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1474,7 +1496,7 @@ fn file_stem(name: &str) -> String {
         .to_string()
 }
 
-fn file_stem_str(name: &str) -> String {
+pub(super) fn file_stem_str(name: &str) -> String {
     Path::new(name)
         .file_stem()
         .and_then(|stem| stem.to_str())
