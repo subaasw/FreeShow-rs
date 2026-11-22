@@ -157,7 +157,7 @@ The service path exists; the daily editor still feels thinner than Electron.
 
 - [x] Read more of library `settings.json` into `FreeShowPreferences` (language, `timeFormat`, autosave, `labelsDisabled`, `groupNumbers`, `formatNewShow`, `autoOutput`, `maxConnections`, outputs), with tests. Stage clocks, the autosave timer, and slide-group labels honor the matching keys. Still unread or unwired: styles, language UI, display names, `autoOutput`, `maxConnections`, `formatNewShow`, and `labelsDisabled`.
 - Theme hover, focus, and border overrides.
-- Drawer media as real files (thumbnails, duration, missing-file badges), not names only.
+- [x] Drawer media as real files (path, kind, image size, duration from common headers, missing-file badges, still thumbnails and kind icons), including `mediaFolders`.
 - Richer lyric editing: more than "plain text plus one box moved by 40 px". Item selection, typography, and adding/removing boxes, still writing valid FreeShow JSON.
 - Extract `slint!` from `main.rs` when this work lands, if it reduces file size; not as a standalone chore.
 

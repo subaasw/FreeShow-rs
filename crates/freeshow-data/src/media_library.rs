@@ -297,6 +297,7 @@ fn inspect_file(name: String, path: PathBuf) -> MediaEntry {
     } else {
         (None, None)
     };
+    let duration_secs = if exists { media_duration(&path) } else { None };
     MediaEntry {
         name,
         path,
@@ -304,8 +305,197 @@ fn inspect_file(name: String, path: PathBuf) -> MediaEntry {
         exists,
         width,
         height,
-        duration_secs: None,
+        duration_secs,
     }
+}
+
+/// Reads a duration in whole seconds from a common audio or video header.
+pub fn media_duration(path: &Path) -> Option<u32> {
+    let bytes = read_for_duration(path)?;
+    wav_duration(&bytes)
+        .or_else(|| mp4_duration(&bytes))
+        .or_else(|| flac_duration(&bytes))
+        .or_else(|| mp3_duration(&bytes))
+}
+
+fn read_for_duration(path: &Path) -> Option<Vec<u8>> {
+    let meta = fs::metadata(path).ok()?;
+    let len = meta.len() as usize;
+    let mut file = fs::File::open(path).ok()?;
+    use std::io::{Read, Seek, SeekFrom};
+    if len <= 2 * 1024 * 1024 {
+        let mut bytes = Vec::with_capacity(len);
+        file.read_to_end(&mut bytes).ok()?;
+        return Some(bytes);
+    }
+    let window = 1024 * 1024;
+    let mut head = vec![0u8; window];
+    let read_head = file.read(&mut head).ok()?;
+    head.truncate(read_head);
+    file.seek(SeekFrom::End(-(window as i64))).ok()?;
+    let mut tail = vec![0u8; window];
+    let read_tail = file.read(&mut tail).ok()?;
+    tail.truncate(read_tail);
+    head.extend(tail);
+    Some(head)
+}
+
+fn wav_duration(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 44 || !bytes.starts_with(b"RIFF") || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut index = 12;
+    let mut byte_rate = 0u32;
+    let mut data_size = None;
+    while index + 8 <= bytes.len() {
+        let kind = &bytes[index..index + 4];
+        let size = u32::from_le_bytes(bytes[index + 4..index + 8].try_into().ok()?) as usize;
+        let start = index + 8;
+        let end = start.saturating_add(size);
+        if kind == b"fmt " && size >= 16 && end <= bytes.len() {
+            byte_rate = u32::from_le_bytes(bytes[start + 8..start + 12].try_into().ok()?);
+        } else if kind == b"data" {
+            data_size = Some(size as u64);
+        }
+        index = start.saturating_add(size + size % 2);
+    }
+    if byte_rate == 0 {
+        return None;
+    }
+    let seconds = data_size? / u64::from(byte_rate);
+    u32::try_from(seconds).ok().filter(|seconds| *seconds > 0)
+}
+
+fn flac_duration(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 42 || !bytes.starts_with(b"fLaC") {
+        return None;
+    }
+    // STREAMINFO sample rate is 20 bits starting at byte 18 of the file.
+    let packed = u32::from_be_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+    let rate = packed >> 12;
+    let samples = ((u64::from(bytes[21]) & 0x0F) << 32)
+        | u64::from(u32::from_be_bytes(bytes[22..26].try_into().ok()?));
+    if rate == 0 || samples == 0 {
+        return None;
+    }
+    u32::try_from(samples / u64::from(rate))
+        .ok()
+        .filter(|seconds| *seconds > 0)
+}
+
+fn mp4_duration(bytes: &[u8]) -> Option<u32> {
+    let mvhd = find_box(bytes, *b"mvhd")?;
+    if mvhd.len() < 20 {
+        return None;
+    }
+    let version = mvhd[0];
+    let (timescale, duration) = if version == 1 {
+        if mvhd.len() < 28 {
+            return None;
+        }
+        let timescale = u32::from_be_bytes(mvhd[20..24].try_into().ok()?);
+        let duration = u64::from_be_bytes(mvhd[24..32].try_into().ok()?);
+        (timescale, duration)
+    } else {
+        let timescale = u32::from_be_bytes(mvhd[12..16].try_into().ok()?);
+        let duration = u64::from(u32::from_be_bytes(mvhd[16..20].try_into().ok()?));
+        (timescale, duration)
+    };
+    if timescale == 0 || duration == 0 {
+        return None;
+    }
+    u32::try_from(duration / u64::from(timescale))
+        .ok()
+        .filter(|seconds| *seconds > 0)
+}
+
+fn find_box(data: &[u8], typ: [u8; 4]) -> Option<&[u8]> {
+    let mut index = 0;
+    while index + 8 <= data.len() {
+        let mut size = u32::from_be_bytes(data[index..index + 4].try_into().ok()?) as usize;
+        let box_type: [u8; 4] = data[index + 4..index + 8].try_into().ok()?;
+        let mut header = 8;
+        if size == 1 {
+            if index + 16 > data.len() {
+                return None;
+            }
+            size = u64::from_be_bytes(data[index + 8..index + 16].try_into().ok()?) as usize;
+            header = 16;
+        } else if size == 0 {
+            size = data.len() - index;
+        }
+        if size < header || index + size > data.len() {
+            return None;
+        }
+        let payload = &data[index + header..index + size];
+        if box_type == typ {
+            return Some(payload);
+        }
+        if box_type == *b"moov" || box_type == *b"trak" || box_type == *b"mdia" {
+            if let Some(found) = find_box(payload, typ) {
+                return Some(found);
+            }
+        }
+        index += size;
+    }
+    None
+}
+
+fn mp3_duration(bytes: &[u8]) -> Option<u32> {
+    let start = if bytes.starts_with(b"ID3") && bytes.len() >= 10 {
+        let size = ((u32::from(bytes[6]) & 0x7F) << 21)
+            | ((u32::from(bytes[7]) & 0x7F) << 14)
+            | ((u32::from(bytes[8]) & 0x7F) << 7)
+            | (u32::from(bytes[9]) & 0x7F);
+        10 + size as usize
+    } else {
+        0
+    };
+    if start + 4 > bytes.len() || bytes[start] != 0xFF || bytes[start + 1] & 0xE0 != 0xE0 {
+        return None;
+    }
+    // Look for a Xing/Info header in the first frame payload.
+    let window = &bytes[start..bytes.len().min(start + 4096)];
+    let tag = window
+        .windows(4)
+        .position(|chunk| chunk == b"Xing" || chunk == b"Info")?;
+    let flags_at = tag + 4;
+    if flags_at + 8 > window.len() {
+        return None;
+    }
+    let flags = u32::from_be_bytes(window[flags_at..flags_at + 4].try_into().ok()?);
+    if flags & 1 == 0 {
+        return None;
+    }
+    let frames = u32::from_be_bytes(window[flags_at + 4..flags_at + 8].try_into().ok()?);
+    let header = u32::from_be_bytes(window[0..4].try_into().ok()?);
+    let version = (header >> 19) & 0b11;
+    let layer = (header >> 17) & 0b11;
+    let sr_index = (header >> 10) & 0b11;
+    let mpeg1 = version == 0b11;
+    let rate: u32 = match (mpeg1, sr_index) {
+        (true, 0) => 44100,
+        (true, 1) => 48000,
+        (true, 2) => 32000,
+        (false, 0) => 22050,
+        (false, 1) => 24000,
+        (false, 2) => 16000,
+        _ => return None,
+    };
+    let samples: u64 = if layer == 0b01 {
+        // Layer III
+        if mpeg1 { 1152 } else { 576 }
+    } else if layer == 0b10 {
+        1152
+    } else {
+        384
+    };
+    if frames == 0 {
+        return None;
+    }
+    u32::try_from(u64::from(frames) * samples / u64::from(rate))
+        .ok()
+        .filter(|seconds| *seconds > 0)
 }
 
 #[cfg(test)]
@@ -394,6 +584,56 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].exists);
         assert_eq!(entries[0].label(), "gone.png  missing");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn pcm_wav(samples: u32, rate: u32) -> Vec<u8> {
+        let data_size = samples * 2;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.extend(vec![0u8; data_size as usize]);
+        bytes
+    }
+
+    fn mp4_with_duration(timescale: u32, duration: u32) -> Vec<u8> {
+        let mut mvhd = vec![0u8; 20];
+        mvhd[12..16].copy_from_slice(&timescale.to_be_bytes());
+        mvhd[16..20].copy_from_slice(&duration.to_be_bytes());
+        mvhd.extend(vec![0u8; 80]);
+        let mut mvhd_box = (8 + mvhd.len() as u32).to_be_bytes().to_vec();
+        mvhd_box.extend_from_slice(b"mvhd");
+        mvhd_box.extend(mvhd);
+        let mut moov = (8 + mvhd_box.len() as u32).to_be_bytes().to_vec();
+        moov.extend_from_slice(b"moov");
+        moov.extend(mvhd_box);
+        let mut ftyp = 16u32.to_be_bytes().to_vec();
+        ftyp.extend_from_slice(b"ftypisom");
+        ftyp.extend_from_slice(&0u32.to_be_bytes());
+        ftyp.extend(moov);
+        ftyp
+    }
+
+    #[test]
+    fn media_headers_report_duration() {
+        assert_eq!(wav_duration(&pcm_wav(16_000, 8_000)), Some(2));
+        assert_eq!(mp4_duration(&mp4_with_duration(1_000, 12_500)), Some(12));
+        let root = root("duration");
+        fs::write(root.join("Media/song.wav"), pcm_wav(8_000, 8_000)).unwrap();
+        fs::write(root.join("Media/clip.mp4"), mp4_with_duration(600, 1_800)).unwrap();
+        let entries = Library::open(&root).list_media_entries().unwrap();
+        assert_eq!(entries[0].label(), "clip.mp4  0:03");
+        assert_eq!(entries[1].label(), "song.wav  0:01");
         let _ = fs::remove_dir_all(&root);
     }
 }

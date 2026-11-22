@@ -18,9 +18,12 @@ use church_import::ChurchImport;
 use freeshow_ai::SlideAssist;
 use freeshow_cloud::CloudBackup;
 use freeshow_core::{AppSettings, Rgb, ThemePalette};
+use freeshow_data::{MediaEntry, MediaEntryKind};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
 use freeshow_obs::ObsControl;
-use freeshow_output::{Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, clear_frame};
+use freeshow_output::{
+    Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, clear_frame, decode_image, fit_raster,
+};
 use freeshow_pco::PlanSource;
 use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
@@ -38,6 +41,12 @@ slint::slint! {
     }
 
     struct DrawerTab { id: string, label: string }
+
+    export struct DrawerRowData {
+        name: string,
+        thumb: image,
+        show-thumb: bool,
+    }
 
     component RailButton inherits Rectangle {
         in property <string> label;
@@ -116,20 +125,33 @@ slint::slint! {
     component ListRow inherits Rectangle {
         in property <string> label;
         in property <bool> active;
+        in property <image> thumb;
+        in property <bool> show-thumb;
         in property <color> accent;
         in property <color> text-color;
         in property <color> accent-text;
         callback clicked();
-        height: 36px;
+        height: root.show-thumb ? 48px : 36px;
         background: root.active ? root.accent : transparent;
-        Text {
-            text: root.label;
-            color: root.active ? root.accent-text : root.text-color;
-            font-size: 13px * OperatorStyle.font-scale;
-            vertical-alignment: center;
-            x: 8px;
-            width: parent.width - 12px;
-            overflow: elide;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            alignment: center;
+            if root.show-thumb: Image {
+                source: root.thumb;
+                width: 56px;
+                height: 40px;
+                image-fit: contain;
+            }
+            Text {
+                text: root.label;
+                color: root.active ? root.accent-text : root.text-color;
+                font-size: 13px * OperatorStyle.font-scale;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
         }
         TouchArea {
             width: 100%;
@@ -153,7 +175,7 @@ slint::slint! {
         in-out property <string> active-tab: "shows";
         in-out property <string> panel-title: "Shows";
         in property <string> data-path: "Data folder not set";
-        in-out property <[string]> drawer-names;
+        in-out property <[DrawerRowData]> drawer-rows;
         in-out property <[string]> slide-labels;
         in-out property <[string]> project-names;
         in-out property <string> project-title: "Project";
@@ -273,8 +295,10 @@ slint::slint! {
                         VerticalLayout {
                             spacing: 0;
                             alignment: start;
-                            for item[index] in root.drawer-names: ListRow {
-                                label: item;
+                            for item[index] in root.drawer-rows: ListRow {
+                                label: item.name;
+                                thumb: item.thumb;
+                                show-thumb: item.show-thumb;
                                 active: root.selected-drawer == index;
                                 accent: root.accent;
                                 text-color: root.text-color;
@@ -525,12 +549,125 @@ fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
     slint::ModelRc::new(slint::VecModel::from(values))
 }
 
+fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
+    let rows = if session.tab == "media" {
+        session
+            .media
+            .iter()
+            .map(|entry| DrawerRowData {
+                name: entry.label().into(),
+                thumb: media_thumb(entry),
+                show_thumb: true,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        session
+            .drawer()
+            .into_iter()
+            .map(|name| DrawerRowData {
+                name: name.into(),
+                thumb: slint::Image::default(),
+                show_thumb: false,
+            })
+            .collect()
+    };
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+const THUMB_WIDTH: u32 = 56;
+const THUMB_HEIGHT: u32 = 40;
+
+fn media_thumb(entry: &MediaEntry) -> slint::Image {
+    if entry.exists && entry.kind == MediaEntryKind::Image {
+        if let Some(image) = std::fs::read(&entry.path)
+            .ok()
+            .and_then(|bytes| decode_image(&bytes))
+        {
+            return slint_image(&fit_raster(&image, THUMB_WIDTH, THUMB_HEIGHT));
+        }
+    }
+    slint_image(&kind_thumb(entry))
+}
+
+fn slint_image(raster: &Raster) -> slint::Image {
+    let needed = raster.width as usize * raster.height as usize * 4;
+    if raster.width == 0 || raster.height == 0 || raster.rgba.len() < needed {
+        return slint::Image::default();
+    }
+    slint::Image::from_rgba8(
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            &raster.rgba,
+            raster.width,
+            raster.height,
+        ),
+    )
+}
+
+fn kind_thumb(entry: &MediaEntry) -> Raster {
+    let mut rgba = vec![0x1c, 0x1c, 0x28, 0xff].repeat((THUMB_WIDTH * THUMB_HEIGHT) as usize);
+    let color = if !entry.exists {
+        [0x88, 0x44, 0x44, 0xff]
+    } else {
+        match entry.kind {
+            MediaEntryKind::Video => [0xf0, 0xf0, 0xff, 0xff],
+            MediaEntryKind::Audio => [0x88, 0xcc, 0xff, 0xff],
+            MediaEntryKind::Camera => [0xff, 0xcc, 0x66, 0xff],
+            _ => [0xaa, 0xaa, 0xbb, 0xff],
+        }
+    };
+    match entry.kind {
+        MediaEntryKind::Video if entry.exists => draw_play(&mut rgba, color),
+        MediaEntryKind::Audio if entry.exists => draw_bars(&mut rgba, color),
+        _ => fill_rect(&mut rgba, 18, 10, 20, 20, color),
+    }
+    Raster {
+        width: THUMB_WIDTH,
+        height: THUMB_HEIGHT,
+        rgba,
+    }
+}
+
+fn put_pixel(rgba: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
+    if x >= THUMB_WIDTH || y >= THUMB_HEIGHT {
+        return;
+    }
+    let index = ((y * THUMB_WIDTH + x) * 4) as usize;
+    rgba[index..index + 4].copy_from_slice(&color);
+}
+
+fn fill_rect(rgba: &mut [u8], x: u32, y: u32, width: u32, height: u32, color: [u8; 4]) {
+    for row in y..y + height {
+        for column in x..x + width {
+            put_pixel(rgba, column, row, color);
+        }
+    }
+}
+
+fn draw_play(rgba: &mut [u8], color: [u8; 4]) {
+    for y in 10..30 {
+        let inset = (y as i32 - 20).unsigned_abs();
+        let start = 22 + inset / 2;
+        let end = 38 - inset;
+        for x in start..end {
+            put_pixel(rgba, x, y, color);
+        }
+    }
+}
+
+fn draw_bars(rgba: &mut [u8], color: [u8; 4]) {
+    for (index, height) in [10u32, 22, 16, 28, 12].into_iter().enumerate() {
+        let x = 16 + index as u32 * 6;
+        let y = 32 - height;
+        fill_rect(rgba, x, y, 3, height, color);
+    }
+}
+
 fn selected(index: Option<usize>) -> i32 {
     index.map(|value| value as i32).unwrap_or(-1)
 }
 
 fn refresh(ui: &ControlWindow, session: &Session) {
-    ui.set_drawer_names(strings(&session.drawer()));
+    ui.set_drawer_rows(drawer_rows(session));
     ui.set_slide_labels(strings(&session.slide_labels()));
     ui.set_project_names(strings(&session.project_labels()));
     ui.set_project_title(session.project_title().into());
