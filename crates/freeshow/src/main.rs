@@ -1329,11 +1329,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::error!("could not create settings file: {err}");
     }
 
-    slint::BackendSelector::new()
-        .backend_name("winit".into())
-        .renderer_name("femtovg-wgpu".into())
-        .require_wgpu_30(slint::wgpu_30::WGPUConfiguration::default())
-        .select()?;
+    present::select_renderer()?;
 
     let mut session = if let Some(root) = settings.data_path.clone() {
         let planned = freeshow_pco::PlanningCenter.sync(&root);

@@ -2,22 +2,69 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use freeshow_output::Frame;
 use slint::wgpu_30::wgpu;
+
+static SOFTWARE: AtomicBool = AtomicBool::new(false);
+
+/// Picks the renderer: femtovg on wgpu when a GPU adapter exists, otherwise
+/// Slint's software renderer so the app still opens on VMs, remote desktops and
+/// machines without working GPU drivers. `FREESHOW_RENDERER=software` forces it.
+pub fn select_renderer() -> Result<(), slint::PlatformError> {
+    let forced = std::env::var("FREESHOW_RENDERER").is_ok_and(|value| value.trim() == "software");
+    if !forced {
+        match slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name("femtovg-wgpu".into())
+            .require_wgpu_30(slint::wgpu_30::WGPUConfiguration::default())
+            .select()
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => tracing::warn!("no GPU renderer ({err}); using the software renderer"),
+        }
+    }
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("software".into())
+        .select()?;
+    SOFTWARE.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// True when frames are copied into images instead of uploaded with wgpu.
+pub fn software_rendering() -> bool {
+    SOFTWARE.load(Ordering::Relaxed)
+}
 
 /// Holds the next compositor frame and uploads it with wgpu on the next render.
 /// Slide pixels are produced by `freeshow-output`, not by Slint widgets.
 pub struct FrameSlot {
     pending: Rc<RefCell<Option<Frame>>>,
     redraw: Rc<dyn Fn()>,
+    /// Software renderer: frames become images right away.
+    direct: Option<Rc<dyn Fn(slint::Image)>>,
 }
 
 impl FrameSlot {
     pub fn publish(&self, frame: Frame) {
+        if let Some(apply) = &self.direct {
+            apply(frame_image(&frame));
+            return;
+        }
         *self.pending.borrow_mut() = Some(frame);
         (self.redraw)();
     }
+}
+
+fn frame_image(frame: &Frame) -> slint::Image {
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+        &frame.pixels,
+        frame.width,
+        frame.height,
+    );
+    slint::Image::from_rgba8(buffer)
 }
 
 pub fn attach_frame(
@@ -26,6 +73,14 @@ pub fn attach_frame(
     apply: impl Fn(slint::Image) + 'static,
     redraw: impl Fn() + 'static,
 ) -> Result<FrameSlot, slint::PlatformError> {
+    if software_rendering() {
+        apply(frame_image(&initial));
+        return Ok(FrameSlot {
+            pending: Rc::new(RefCell::new(None)),
+            redraw: Rc::new(redraw),
+            direct: Some(Rc::new(apply)),
+        });
+    }
     let pending = Rc::new(RefCell::new(Some(initial)));
     let pending_for_render = Rc::clone(&pending);
     window
@@ -83,5 +138,6 @@ pub fn attach_frame(
     Ok(FrameSlot {
         pending,
         redraw: Rc::new(redraw),
+        direct: None,
     })
 }
