@@ -18,6 +18,7 @@ use crate::{DataError, ShowFile};
 mod powerpoint;
 mod propresenter;
 mod propresenter7;
+mod rtf;
 
 const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
 
@@ -1024,116 +1025,7 @@ fn plain(text: &str) -> (String, Vec<Section>) {
 }
 
 fn decode_rtf(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::<u16>::new();
-    let mut stack = Vec::new();
-    let (mut skip, mut unicode_fallback) = (false, 1_usize);
-    let mut fallback = 0_usize;
-    let mut index = 0;
-    while index < chars.len() {
-        let ch = chars[index];
-        index += 1;
-        match ch {
-            '{' => stack.push((skip, unicode_fallback)),
-            '}' => {
-                if let Some(state) = stack.pop() {
-                    (skip, unicode_fallback) = state;
-                }
-            }
-            '\\' => {
-                let Some(&next) = chars.get(index) else {
-                    break;
-                };
-                if !next.is_ascii_alphabetic() {
-                    index += 1;
-                    let literal = match next {
-                        '*' => {
-                            skip = true;
-                            None
-                        }
-                        '\\' | '{' | '}' => Some(next),
-                        '~' => Some('\u{a0}'),
-                        '_' => Some('\u{2011}'),
-                        '\'' if index + 2 <= chars.len() => {
-                            let hex: String = chars[index..index + 2].iter().collect();
-                            index += 2;
-                            u8::from_str_radix(&hex, 16).ok().map(|byte| {
-                                // RTF's default ANSI encoding is Windows-1252.
-                                const C1: [char; 32] = [
-                                    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š',
-                                    '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’', '“',
-                                    '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž',
-                                    'Ÿ',
-                                ];
-                                if (0x80..0xa0).contains(&byte) {
-                                    C1[(byte - 0x80) as usize]
-                                } else {
-                                    char::from(byte)
-                                }
-                            })
-                        }
-                        _ => None,
-                    };
-                    if let Some(ch) = literal {
-                        if fallback > 0 {
-                            fallback -= 1;
-                        } else if !skip {
-                            out.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
-                        }
-                    }
-                    continue;
-                }
-                let start = index;
-                while chars.get(index).is_some_and(char::is_ascii_alphabetic) {
-                    index += 1;
-                }
-                let word: String = chars[start..index].iter().collect();
-                let start = index;
-                if chars.get(index) == Some(&'-') {
-                    index += 1;
-                }
-                while chars.get(index).is_some_and(char::is_ascii_digit) {
-                    index += 1;
-                }
-                let number = chars[start..index]
-                    .iter()
-                    .collect::<String>()
-                    .parse::<i32>()
-                    .ok();
-                if chars.get(index) == Some(&' ') {
-                    index += 1;
-                }
-                match word.as_str() {
-                    "fonttbl" | "colortbl" | "stylesheet" | "info" | "pict" | "object"
-                    | "header" | "footer" => skip = true,
-                    "uc" => unicode_fallback = number.unwrap_or(1).clamp(0, 16) as usize,
-                    "u" if !skip => {
-                        if let Some(code) = number {
-                            out.push(code as u16);
-                            fallback = unicode_fallback;
-                        }
-                    }
-                    "par" | "line" if !skip => out.push(b'\n' as u16),
-                    "tab" if !skip => out.push(b'\t' as u16),
-                    "bin" => {
-                        index = index
-                            .saturating_add(number.unwrap_or(0).max(0) as usize)
-                            .min(chars.len())
-                    }
-                    _ => {}
-                }
-            }
-            '\r' | '\n' => {}
-            _ => {
-                if fallback > 0 {
-                    fallback -= 1;
-                } else if !skip {
-                    out.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
-                }
-            }
-        }
-    }
-    String::from_utf16_lossy(&out)
+    rtf::decode(text).plain_text()
 }
 
 fn order_sections(verses: &[LyricVerse], order: &str) -> Vec<Section> {
