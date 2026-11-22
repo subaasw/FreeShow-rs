@@ -274,7 +274,11 @@ mod gst_player {
 
         /// Poll a secondary preview without waiting on the caller's event loop.
         pub fn try_next_frame(&mut self) -> Option<Raster> {
-            self.poll_frame(gst::ClockTime::ZERO)
+            // Read preroll before trying the regular queue, which can clear it.
+            self.sink
+                .try_pull_preroll(gst::ClockTime::ZERO)
+                .and_then(Self::sample_raster)
+                .or_else(|| self.poll_frame(gst::ClockTime::ZERO))
         }
 
         pub fn take_error(&self) -> Option<MediaError> {
@@ -310,7 +314,12 @@ mod gst_player {
         }
 
         fn pull(&mut self, wait: gst::ClockTime) -> Option<Raster> {
-            let sample = self.sink.try_pull_sample(wait)?;
+            self.sink
+                .try_pull_sample(wait)
+                .and_then(Self::sample_raster)
+        }
+
+        fn sample_raster(sample: gst::Sample) -> Option<Raster> {
             let buffer = sample.buffer()?;
             let caps = sample.caps()?;
             let structure = caps.structure(0)?;
@@ -890,6 +899,26 @@ mod gst_player {
     #[cfg(test)]
     mod audio_tests {
         use super::*;
+
+        #[test]
+        fn secondary_preview_reads_the_preroll_before_playing() {
+            gst::init().unwrap();
+            let audio = AudioBranch::new_targets(Vec::new()).unwrap();
+            let mut player = VideoPlayer::from_launch_with_audio(
+                "videotestsrc pattern=red num-buffers=2 ! video/x-raw,format=RGBA,width=8,height=8 ! appsink name=sink",
+                audio,
+            )
+            .unwrap();
+            player.pipeline.set_state(gst::State::Ready).unwrap();
+            player.pipeline.set_state(gst::State::Paused).unwrap();
+            let (result, state, _) = player.pipeline.state(gst::ClockTime::from_seconds(3));
+            result.unwrap();
+            assert_eq!(state, gst::State::Paused);
+            let frame = player
+                .try_next_frame()
+                .expect("the preview has a preroll frame");
+            assert_eq!(&frame.rgba[..4], &[255, 0, 0, 255]);
+        }
 
         #[test]
         fn camera_pipeline_uses_the_selected_source_without_recreating_it() {
