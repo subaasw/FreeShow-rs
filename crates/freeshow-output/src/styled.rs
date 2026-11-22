@@ -1529,7 +1529,30 @@ fn draw_item_content(
             } else {
                 cursor_x
             };
+            let width = text::measure(&shown, size, typeface, tracking, word_gap);
             if run.paint {
+                if let Some(color) = run_style.background {
+                    let left = draw_x.round() as i32;
+                    let top = (baseline - text::ascent(size, typeface)).round() as i32;
+                    let right = left
+                        .saturating_add(width)
+                        .min(clip.x.saturating_add(clip.w));
+                    let bottom = top
+                        .saturating_add(text::line_height(size, typeface))
+                        .min(clip.y.saturating_add(clip.h));
+                    let left = left.max(clip.x);
+                    let top = top.max(clip.y);
+                    fill_rect(
+                        pixels,
+                        slide.output_width,
+                        slide.output_height,
+                        left,
+                        top,
+                        right.saturating_sub(left),
+                        bottom.saturating_sub(top),
+                        color,
+                    );
+                }
                 if let Some(shadow) = run_style.shadow {
                     for (dx, dy) in shadow_offsets(shadow, slide) {
                         text::draw(
@@ -1591,7 +1614,7 @@ fn draw_item_content(
                         slide.output_height,
                         draw_x,
                         baseline,
-                        text::measure(&shown, size, typeface, tracking, word_gap),
+                        width,
                         size,
                         run_style.color,
                         &clip,
@@ -1604,7 +1627,7 @@ fn draw_item_content(
                         slide.output_height,
                         draw_x,
                         baseline,
-                        text::measure(&shown, size, typeface, tracking, word_gap),
+                        width,
                         size,
                         run_style.color,
                         &clip,
@@ -1612,7 +1635,7 @@ fn draw_item_content(
                 }
             }
             if run.place_on.is_none() {
-                cursor_x += text::measure(&shown, size, typeface, tracking, word_gap) as f32;
+                cursor_x += width as f32;
             }
         }
         cursor_y += bar_h;
@@ -2591,6 +2614,7 @@ fn paint_strike(
 
 fn apply_run_style(style: &mut BoxStyle, css: &str) {
     let parsed = parse_style(css);
+    style.background = parsed.background;
     if css.contains("font-size") {
         style.font_px = parsed.font_px;
     }
@@ -4155,6 +4179,26 @@ mod tests {
         ));
         assert!(frame_has_red(&shadowed));
         assert!(!frame_has_red(&plain));
+    }
+
+    #[test]
+    fn text_run_background_paints_behind_only_that_runs_glyphs() {
+        let mut slide = shadow_slide("font-size:48px;color:#ffffff;background-color:#ffff00;");
+        let item = &mut slide.items[0];
+        item.style = "left:0px;top:0px;width:160px;height:24px;background-color:#0000ff;".into();
+        item.line_bg = parse_color("#ff0000");
+        item.lines[0].runs.push(TextRun {
+            text: "A".into(),
+            style: "font-size:48px;color:#ffffff;".into(),
+            place_on: None,
+            paint: true,
+        });
+        let frame = render_styled(&slide);
+        let pixel = |x: usize, y: usize| &frame.pixels[(y * 160 + x) * 4..(y * 160 + x + 1) * 4];
+        assert_eq!(pixel(0, 0), [255, 255, 0, 255]);
+        assert_eq!(pixel(38, 0), [255, 0, 0, 255]);
+        assert_eq!(pixel(0, 24), [255, 0, 0, 255]);
+        assert!((0..24).any(|y| (0..24).any(|x| pixel(x, y) == [255, 255, 255, 255])));
     }
 
     fn shadow_slide(run: &str) -> StyledSlide {
