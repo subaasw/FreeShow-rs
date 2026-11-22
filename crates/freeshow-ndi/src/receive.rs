@@ -55,26 +55,96 @@ pub fn omt_receive_pipeline(name: &str, width: u32, height: u32) -> String {
 
 /// Known NDI sources. Empty when the finder plugin is missing.
 pub fn ndi_sources() -> Vec<NetworkSource> {
-    sources_from_factory("ndisrc")
+    let mut sources = sources_from_env("FREESHOW_NDI_SOURCES", SourceKind::Ndi);
+    for source in sources_from_factory("ndisrc") {
+        if !sources.iter().any(|existing| existing.name == source.name) {
+            sources.push(source);
+        }
+    }
+    sources
 }
 
 pub fn omt_sources() -> Vec<NetworkSource> {
-    let kind = SourceKind::Omt;
-    sources_from_factory("omtsrc")
+    let mut sources = sources_from_env("FREESHOW_OMT_SOURCES", SourceKind::Omt);
+    for source in sources_from_factory("omtsrc")
         .into_iter()
         .chain(sources_from_factory("omtinput"))
-        .map(|mut source| {
-            source.kind = kind;
-            source
+    {
+        if !sources.iter().any(|existing| existing.name == source.name) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
+/// Parse a comma- or newline-separated list of source names.
+pub fn parse_source_list(text: &str, kind: SourceKind) -> Vec<NetworkSource> {
+    text.split([',', '\n', ';'])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| NetworkSource {
+            name: name.to_string(),
+            kind,
         })
         .collect()
 }
 
+fn sources_from_env(var: &str, kind: SourceKind) -> Vec<NetworkSource> {
+    std::env::var(var)
+        .ok()
+        .map(|value| parse_source_list(&value, kind))
+        .unwrap_or_default()
+}
+
 fn sources_from_factory(factory: &str) -> Vec<NetworkSource> {
-    // Source discovery needs an NDI/OMT finder plugin. When it is missing the
-    // operator can still open a source by name; the list stays empty.
-    let _ = factory;
-    Vec::new()
+    let kind = if factory.starts_with("ndi") {
+        SourceKind::Ndi
+    } else {
+        SourceKind::Omt
+    };
+    if !element_available(factory) {
+        return Vec::new();
+    }
+    if gstreamer::init().is_err() {
+        return Vec::new();
+    }
+    let monitor = gstreamer::DeviceMonitor::new();
+    let _ = monitor.add_filter(Some("Video/Source"), None);
+    let _ = monitor.start();
+    let mut sources = Vec::new();
+    for device in monitor.devices() {
+        let name = device.display_name().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let class = device.device_class().to_ascii_lowercase();
+        let looks = class.contains("ndi")
+            || class.contains("omt")
+            || name.to_ascii_lowercase().contains("ndi")
+            || name.to_ascii_lowercase().contains("omt")
+            || factory_matches(&device, factory);
+        if looks
+            && !sources
+                .iter()
+                .any(|source: &NetworkSource| source.name == name)
+        {
+            sources.push(NetworkSource { name, kind });
+        }
+    }
+    monitor.stop();
+    sources
+}
+
+fn factory_matches(device: &gstreamer::Device, factory: &str) -> bool {
+    device
+        .properties()
+        .and_then(|values| {
+            values
+                .get::<String>("device.api")
+                .ok()
+                .or_else(|| values.get::<String>("api").ok())
+        })
+        .is_some_and(|api| api.contains(factory) || factory.contains(&api))
 }
 
 /// Receives one NDI or OMT picture as RGBA frames. Disabled when the plugin is missing.
@@ -165,6 +235,19 @@ mod tests {
         let omt = omt_receive_pipeline("Lobby", 1280, 720);
         assert!(omt.contains("Lobby"));
         assert!(omt.contains("width=1280"));
+    }
+
+    #[test]
+    fn source_lists_parse_and_stay_empty_without_a_plugin() {
+        let listed = parse_source_list("Cam 1, Lobby\n ", SourceKind::Ndi);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "Cam 1");
+        if !ndi_receive_available() {
+            // DeviceMonitor has nothing to find; the explicit list still works.
+            assert!(sources_from_factory("ndisrc").is_empty());
+        }
+        let _ = ndi_sources();
+        let _ = omt_sources();
     }
 
     #[test]
