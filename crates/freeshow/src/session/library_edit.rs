@@ -639,7 +639,9 @@ impl Session {
 
     fn remove_project_item(&mut self) -> Result<String, String> {
         let id = self.project_id.clone().ok_or("open a project first")?;
-        let index = self.project_item;
+        let index = self
+            .highlighted_project_item()
+            .ok_or("click the project item to remove first")?;
         let label = self
             .project_labels()
             .get(index)
@@ -899,11 +901,37 @@ mod tests {
             .unwrap();
         assert_eq!(session.project_title(), "Sunday 9am");
         session.project_item = 0;
+        assert!(
+            session.library_action("remove-project-item", "").is_err(),
+            "Untitled 2 is open, so no project row is highlighted"
+        );
+        session.pick_project_item(0).unwrap();
         session.library_action("remove-project-item", "").unwrap();
         assert_eq!(session.project_labels(), ["Untitled 2"]);
         session.library_action("delete-project", "").unwrap();
         assert!(session.project_id.is_none());
         assert!(session.library_action("rename-project", "x").is_err());
+    }
+
+    #[test]
+    fn the_project_highlight_follows_the_open_show() {
+        let (_dir, mut session) = library("highlight");
+        assert!(session.create_project());
+        assert!(session.create_show());
+        assert!(session.create_show());
+        session.pick_project_item(0).unwrap();
+        assert_eq!(session.highlighted_project_item(), Some(0));
+        let other = session
+            .shows
+            .iter()
+            .position(|s| s.name() == "Untitled 2")
+            .unwrap();
+        session.show_index = Some(other);
+        assert_eq!(session.highlighted_project_item(), None);
+        assert!(session.add_current_show());
+        assert_eq!(session.highlighted_project_item(), Some(2));
+        session.library_action("remove-project-item", "").unwrap();
+        assert_eq!(session.project_labels(), ["Untitled", "Untitled 2"]);
     }
 
     #[test]

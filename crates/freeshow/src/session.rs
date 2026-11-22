@@ -4600,7 +4600,26 @@ impl Session {
         if !self.projects.append_show(&project_id, &show_id) {
             return false;
         }
+        // The new item is the one the operator is looking at.
+        self.project_item = self.project_labels().len().saturating_sub(1);
         self.save_projects()
+    }
+
+    /// The project row to highlight: the picked item, unless the operator has since opened
+    /// a different show from the library.
+    pub fn highlighted_project_item(&self) -> Option<usize> {
+        let item = self
+            .current_project()?
+            .shows
+            .get(self.project_item)?
+            .clone();
+        match item.kind.as_str() {
+            "show" | "" => self
+                .current_show()
+                .is_some_and(|show| show.id == item.id)
+                .then_some(self.project_item),
+            _ => Some(self.project_item),
+        }
     }
 
     pub fn reload_import_catalog(&mut self, imported_project: Option<String>) {

@@ -395,7 +395,11 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     } else {
         selected(session.slide_index)
     });
-    ui.set_selected_project(session.project_item as i32);
+    ui.set_selected_project(
+        session
+            .highlighted_project_item()
+            .map_or(-1, |item| item as i32),
+    );
 }
 
 /// Settings, Inspector and Stage editor data.
