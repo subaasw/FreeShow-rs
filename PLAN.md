@@ -93,7 +93,7 @@ placeholder until the compositor grows those sources.
 
 - [x] Native macOS `.app`/`.dmg` with bundled runtime and documented signing.
 - [ ] Verify macOS distribution with Developer ID/notarization and on additional OS/architecture hosts.
-- [ ] Verify the implemented Windows x86-64 installer in native CI.
+- [x] Windows x86-64 installer verified in native CI, including install, H.264 playback without the build SDK, and uninstall.
 - [x] Linux runtime tarball and desktop installer verified on Ubuntu 24.04 x86-64.
 - [ ] Verify the three-platform release workflow against one revision and its lockfile.
 
