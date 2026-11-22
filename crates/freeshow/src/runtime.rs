@@ -88,7 +88,7 @@ pub fn check(media: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     let report = freeshow_media::check_runtime()?;
     println!(
         "{}",
-        serde_json::json!({"gstreamer":report.version,"missing":report.missing,"ndi_plugin":report.ndi_plugin})
+        serde_json::json!({"checked_at":freeshow_core::local_timestamp(),"gstreamer":report.version,"missing":report.missing,"ndi_plugin":report.ndi_plugin})
     );
     if !report.missing.is_empty() {
         return Err("required GStreamer elements are missing".into());

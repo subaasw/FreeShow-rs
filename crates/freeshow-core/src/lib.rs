@@ -9,7 +9,7 @@ mod log;
 mod settings;
 mod theme;
 
-pub use log::{init_logging, log_file_path};
+pub use log::{init_logging, local_timestamp, log_file_path};
 pub use settings::{
     AppSettings, SettingsError, WindowPlacement, WindowProfile, config_dir, next_output_monitor,
     output_monitor_index,
