@@ -1107,8 +1107,20 @@ impl ShowFile {
         let stanzas = split_stanzas(stanzas, split_lines);
         let mut slides = serde_json::Map::new();
         let mut order = Vec::new();
-        for (index, (group, chunk)) in stanzas.iter().enumerate() {
-            let id = format!("s{}", index + 1);
+        let mut seen: Vec<(&str, &str, String)> = Vec::new();
+        for (group, chunk) in &stanzas {
+            // A chorus sung again is the same slide shown twice in the layout, as in FreeShow.
+            if let Some((_, _, id)) = seen.iter().find(|(seen_group, seen_chunk, _)| {
+                !group.is_empty() && *seen_group == group && *seen_chunk == chunk
+            }) {
+                order.push(serde_json::json!({ "id": id }));
+                continue;
+            }
+            let id = format!("s{}", slides.len() + 1);
+            seen.push((group, chunk, id.clone()));
+            let (global_group, color) = default_group(group)
+                .map(|(global, color)| (Value::from(global), Value::from(color)))
+                .unwrap_or((Value::Null, Value::Null));
             let lines: Vec<Value> = if chunk.is_empty() {
                 vec![serde_json::json!({
                     "align": "",
@@ -1129,8 +1141,8 @@ impl ShowFile {
                 id.clone(),
                 serde_json::json!({
                     "group": group,
-
-                    "color": null,
+                    "globalGroup": global_group,
+                    "color": color,
                     "settings": {},
                     "notes": "",
                     "items": [{
@@ -3204,6 +3216,26 @@ fn formatted_stanzas(text: &str) -> Vec<(String, String)> {
             (group, lines.join("\n"))
         })
         .collect()
+}
+
+/// FreeShow's built-in group for a slide group name like "Verse 2" or "Pre-Chorus": its id and colour.
+pub fn default_group(group: &str) -> Option<(&'static str, &'static str)> {
+    let key = group
+        .trim()
+        .trim_end_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
+        .to_ascii_lowercase()
+        .replace(['-', ' ', '_'], "");
+    Some(match key.as_str() {
+        "break" | "interlude" | "instrumental" => ("break", "#f5255e"),
+        "bridge" => ("bridge", "#f52598"),
+        "chorus" | "refrain" => ("chorus", "#f525d2"),
+        "intro" => ("intro", "#d525f5"),
+        "outro" | "ending" | "coda" => ("outro", "#a525f5"),
+        "prechorus" => ("pre_chorus", "#8825f5"),
+        "tag" | "vamp" => ("tag", "#7525f5"),
+        "verse" => ("verse", "#5825f5"),
+        _ => return None,
+    })
 }
 
 fn group_header(line: &str) -> Option<String> {
@@ -6394,6 +6426,27 @@ mod tests {
             vec!["Three".to_string(), "Four".to_string()]
         );
         assert_eq!(slides[2].lines, vec!["Five".to_string()]);
+    }
+
+    #[test]
+    fn typed_groups_get_freeshow_colours_and_a_repeated_chorus_is_one_slide() {
+        let mut show = ShowFile::blank("grace", "Grace");
+        let text = "[Verse 1]\nAmazing grace\n\n[Chorus]\nMy chains are gone\n\n[Verse 2]\nTwas grace\n\n[Chorus]\nMy chains are gone\n\n[Bridge]\nAnd like a flood";
+        assert!(show.replace_lyrics_with_split(text, true, 0));
+        let slides = show.ordered_slides();
+        assert_eq!(slides.len(), 5, "the layout still plays the chorus twice");
+        assert_eq!(slides[1].id, slides[3].id);
+        assert_eq!(show.show["slides"].as_object().unwrap().len(), 4);
+        let colour = |index: usize| show.show["slides"][&slides[index].id]["color"].clone();
+        assert_eq!(colour(0), "#5825f5");
+        assert_eq!(colour(1), "#f525d2");
+        assert_eq!(colour(4), "#f52598");
+        assert_eq!(show.show["slides"][&slides[1].id]["globalGroup"], "chorus");
+        assert_eq!(
+            default_group("Pre-Chorus 2"),
+            Some(("pre_chorus", "#8825f5"))
+        );
+        assert_eq!(default_group("Welcome"), None);
     }
 
     #[test]
