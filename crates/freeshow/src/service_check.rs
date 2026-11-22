@@ -135,40 +135,11 @@ fn write_bench_clip(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let location = path
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let status = std::process::Command::new("gst-launch-1.0")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .args([
-            "-e",
-            "videotestsrc",
-            "num-buffers=90",
-            "pattern=smpte",
-            "!",
-            "video/x-raw,width=1920,height=1080,framerate=30/1",
-            "!",
-            "videoconvert",
-            "!",
-            "x264enc",
-            "tune=zerolatency",
-            "speed-preset=ultrafast",
-            "!",
-            "mp4mux",
-            "!",
-            "filesink",
-            &format!("location={location}"),
-        ])
-        .status()?;
-    if !status.success() || !path.is_file() {
-        return Err("could not encode a 1080p30 bench clip".into());
-    }
+    freeshow_media::write_benchmark_video(path)?;
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn rss_mb() -> Option<f64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
@@ -177,6 +148,45 @@ fn rss_mb() -> Option<f64> {
             return Some(kb / 1024.0);
         }
     }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn rss_mb() -> Option<f64> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let kb = std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    Some(kb / 1024.0)
+}
+
+#[cfg(windows)]
+fn rss_mb() -> Option<f64> {
+    use windows_sys::Win32::System::{
+        ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        Threading::GetCurrentProcess,
+    };
+
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size,
+        ..Default::default()
+    };
+    // The pseudo-handle needs no cleanup and the output buffer is sized for the API.
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    (ok != 0).then_some(counters.WorkingSetSize as f64 / (1024.0 * 1024.0))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rss_mb() -> Option<f64> {
     None
 }
 
@@ -738,6 +748,12 @@ fn wait_http(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn benchmark_reports_current_resident_memory() {
+        assert!(rss_mb().is_some_and(|mb| mb.is_finite() && mb > 0.0));
+    }
 
     #[test]
     fn sample_library_presents_and_answers_on_the_web() {
