@@ -104,7 +104,7 @@ The operator window is Slint 1.18 (`backend-winit`, `renderer-femtovg-wgpu`). Au
 - **Serialization:** `serde` / `serde_json` for FreeShow JSON. Prefer `Value` plus typed views over a single huge fully-typed `Show` struct that can lose unknown fields.
 - **Async:** tokio in `freeshow-remote` (and similar servers). GStreamer and cpal stay on their own threads. The Slint event loop is the UI thread.
 - **Formatting:** `rustfmt` (edition 2024). `cargo fmt --all -- --check` in CI.
-- **Lints:** `cargo clippy --workspace --all-targets --locked` in CI. Do **not** flip on `-D warnings` or `clippy::pedantic` in one shot; the tree already has dozens of default-allow or style warnings (`too_many_arguments` in the compositor, `bool_comparison` in tests). Tighten crate-by-crate: pedantic where a crate is small and clean (`freeshow-core` is a good first candidate).
+- **Lints:** `cargo clippy --workspace --all-targets --locked -- -D warnings` in CI. Do not enable `clippy::pedantic` in one shot; tighten it crate-by-crate where a crate is small and clean (`freeshow-core` is a good first candidate). Paint helpers may allow `clippy::too_many_arguments`.
 - **CI:** a Quality workflow for fmt, clippy, and tests on Linux, Windows, and macOS, separate from the existing installer workflows. Cache cargo registries; do not package in the quality job.
 - **Lockfile:** `--locked` in CI. Do not casually bump transitive deps during a feature commit.
 - **Simplicity:** small conventional commits, no dead code, no speculative abstractions. Karpathy-style: the file that parses `.show` files should look like it parses `.show` files.
@@ -149,7 +149,7 @@ Restore a compile-clean `main`, document the architecture, and put format/lint/t
 - [x] Quality CI: `fmt`, `clippy`, and `test` on Linux, Windows, and macOS, without building installers.
 - [x] `rust-toolchain.toml` (stable + rustfmt + clippy) so local and CI toolchains match.
 
-Acceptance: `main` compiles on Linux, Windows, and macOS; `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked`, and `cargo test --workspace --locked` run in CI on all three.
+Acceptance: `main` compiles on Linux, Windows, and macOS; `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` run in CI on all three.
 
 ### M2. Operator, settings, and editing depth
 

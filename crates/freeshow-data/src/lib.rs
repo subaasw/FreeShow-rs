@@ -553,9 +553,7 @@ impl ShowFile {
     /// Appends an empty slide to the active layout and returns its id.
     pub fn add_slide(&mut self) -> Option<String> {
         let id = {
-            let Some(slides) = self.show.get_mut("slides").and_then(Value::as_object_mut) else {
-                return None;
-            };
+            let slides = self.show.get_mut("slides").and_then(Value::as_object_mut)?;
             let mut number = slides.len() + 1;
             let mut id = format!("s{number}");
             while slides.contains_key(&id) {
@@ -1109,10 +1107,7 @@ impl ShowFile {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if triggers
-                .iter()
-                .any(|trigger| *trigger == "index_select_slide")
-            {
+            if triggers.contains(&"index_select_slide") {
                 let value = action.pointer("/actionValues/index_select_slide");
                 let index = value.and_then(|value| {
                     value
@@ -1129,10 +1124,7 @@ impl ShowFile {
                     return Some(SlideJump::Index { show_id, index });
                 }
             }
-            if triggers
-                .iter()
-                .any(|trigger| *trigger == "name_select_slide")
-            {
+            if triggers.contains(&"name_select_slide") {
                 let value = action.pointer("/actionValues/name_select_slide");
                 let name = value.and_then(|value| {
                     value
@@ -1144,7 +1136,7 @@ impl ShowFile {
                     return Some(SlideJump::Name(name.to_string()));
                 }
             }
-            if triggers.iter().any(|trigger| *trigger == "id_select_group") {
+            if triggers.contains(&"id_select_group") {
                 let value = action.pointer("/actionValues/id_select_group");
                 let id = value.and_then(|value| {
                     value
@@ -1156,10 +1148,10 @@ impl ShowFile {
                     return Some(SlideJump::Group(id.to_string()));
                 }
             }
-            if triggers.iter().any(|trigger| *trigger == "next_slide") {
+            if triggers.contains(&"next_slide") {
                 return Some(SlideJump::Next);
             }
-            if triggers.iter().any(|trigger| *trigger == "previous_slide") {
+            if triggers.contains(&"previous_slide") {
                 return Some(SlideJump::Previous);
             }
         }
@@ -1526,7 +1518,7 @@ impl ShowFile {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if triggers.iter().any(|trigger| *trigger == "change_volume") {
+            if triggers.contains(&"change_volume") {
                 let value = action.pointer("/actionValues/change_volume");
                 let channel = value
                     .and_then(|value| value.get("channelId"))
@@ -1546,7 +1538,7 @@ impl ShowFile {
                     use_db,
                 });
             }
-            if triggers.iter().any(|trigger| *trigger == "mute") {
+            if triggers.contains(&"mute") {
                 let value = action.pointer("/actionValues/mute");
                 let channel = value
                     .and_then(|value| value.get("id"))
@@ -1592,16 +1584,10 @@ impl ShowFile {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if triggers
-                .iter()
-                .any(|trigger| *trigger == "clear_next_timer")
-            {
+            if triggers.contains(&"clear_next_timer") {
                 steps.push(TimerStep::Clear);
             }
-            if triggers
-                .iter()
-                .any(|trigger| *trigger == "set_next_slide_timer")
-            {
+            if triggers.contains(&"set_next_slide_timer") {
                 let value = action.pointer("/actionValues/set_next_slide_timer");
                 let seconds = value.and_then(|value| {
                     value
@@ -1893,9 +1879,7 @@ impl ShowFile {
     /// How many lines the line-reveal items on this slide have. `None` when none reveal.
     pub fn line_reveal_lines(&self, index: usize) -> Option<usize> {
         let steps = self.layout_steps();
-        let Some((slide_id, _)) = steps.get(index) else {
-            return None;
-        };
+        let (slide_id, _) = steps.get(index)?;
         let items = self
             .show
             .pointer(&format!("/slides/{slide_id}/items"))
@@ -1970,12 +1954,12 @@ impl ShowFile {
                 if line_reveal && current && line_index >= reveal as usize {
                     continue;
                 }
-                if current && !line_reveal {
-                    if let Some((start, end)) = page {
-                        if line_index < start || line_index >= end {
-                            continue;
-                        }
-                    }
+                if current
+                    && !line_reveal
+                    && let Some((start, end)) = page
+                    && (line_index < start || line_index >= end)
+                {
+                    continue;
                 }
                 lines.push(line_value(line));
             }
@@ -2049,24 +2033,23 @@ impl ShowFile {
         }
         let scan_items = node.pointer("/actions/startTimer").and_then(Value::as_bool) == Some(true)
             || action_trigger(node, "start_slide_timers");
-        if scan_items {
-            if let Some(items) = self
+        if scan_items
+            && let Some(items) = self
                 .show
                 .pointer(&format!("/slides/{slide_id}/items"))
                 .and_then(Value::as_array)
-            {
-                for item in items {
-                    if item.get("type").and_then(Value::as_str) != Some("timer") {
-                        continue;
-                    }
-                    let id = item
-                        .pointer("/timer/id")
-                        .and_then(Value::as_str)
-                        .or_else(|| item.get("timerId").and_then(Value::as_str))
-                        .filter(|id| !id.is_empty());
-                    if let Some(id) = id {
-                        ids.push(id.to_string());
-                    }
+        {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) != Some("timer") {
+                    continue;
+                }
+                let id = item
+                    .pointer("/timer/id")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("timerId").and_then(Value::as_str))
+                    .filter(|id| !id.is_empty());
+                if let Some(id) = id {
+                    ids.push(id.to_string());
                 }
             }
         }
@@ -2076,9 +2059,7 @@ impl ShowFile {
     /// The output style this slide turns on, from `change_output_style` or `outputStyle`.
     pub fn output_style_at(&self, index: usize) -> Option<String> {
         let steps = self.layout_steps();
-        let Some((_, node)) = steps.get(index) else {
-            return None;
-        };
+        let (_, node) = steps.get(index)?;
         if let Some(actions) = node
             .pointer("/actions/slideActions")
             .and_then(Value::as_array)
@@ -2112,9 +2093,7 @@ impl ShowFile {
     /// Audio stream this slide starts: a saved id, a file path, or a web address.
     pub fn audio_stream_at(&self, index: usize) -> Option<String> {
         let steps = self.layout_steps();
-        let Some((_, node)) = steps.get(index) else {
-            return None;
-        };
+        let (_, node) = steps.get(index)?;
         if let Some(actions) = node
             .pointer("/actions/slideActions")
             .and_then(Value::as_array)
@@ -2796,10 +2775,10 @@ fn variable_key(
     index: Option<usize>,
 ) -> Option<String> {
     let map = json.get("variables")?.as_object()?;
-    if let Some(id) = id.filter(|id| !id.is_empty()) {
-        if map.contains_key(id) {
-            return Some(id.to_string());
-        }
+    if let Some(id) = id.filter(|id| !id.is_empty())
+        && map.contains_key(id)
+    {
+        return Some(id.to_string());
     }
     if let Some(name) = name.filter(|name| !name.is_empty()) {
         let query = variable_name_id(name);
@@ -3605,7 +3584,7 @@ impl Library {
             }
             shows.push(ShowFile::load(&path)?);
         }
-        shows.sort_by(|a, b| a.name().cmp(&b.name()));
+        shows.sort_by_key(|a| a.name());
         Ok(shows)
     }
 
@@ -3626,10 +3605,10 @@ impl Library {
     }
 
     pub fn load_stage_layout(&self) -> StageLayout {
-        if let Some(id) = self.assigned_stage_id() {
-            if let Some(layout) = self.stage_layout(&id) {
-                return layout;
-            }
+        if let Some(id) = self.assigned_stage_id()
+            && let Some(layout) = self.stage_layout(&id)
+        {
+            return layout;
         }
         stage_layout::load_stage_file(&self.stage_path())
     }
@@ -4548,10 +4527,10 @@ impl Library {
         let Some(style) = json.pointer(&format!("/styles/{id}")) else {
             return 0;
         };
-        if let Some(layers) = style.get("layers").and_then(Value::as_array) {
-            if !layers.iter().any(|layer| layer.as_str() == Some("slide")) {
-                return 0;
-            }
+        if let Some(layers) = style.get("layers").and_then(Value::as_array)
+            && !layers.iter().any(|layer| layer.as_str() == Some("slide"))
+        {
+            return 0;
         }
         style
             .get("lines")
@@ -4641,7 +4620,7 @@ impl Library {
             }
             bibles.push(BibleFile::load(&path)?);
         }
-        bibles.sort_by(|a, b| a.name().cmp(&b.name()));
+        bibles.sort_by_key(|a| a.name());
         Ok(bibles)
     }
 
@@ -4652,10 +4631,10 @@ impl Library {
         let mut names = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
-            if entry.file_type()?.is_file() {
-                if let Some(name) = entry.file_name().to_str() {
-                    names.push(name.to_string());
-                }
+            if entry.file_type()?.is_file()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                names.push(name.to_string());
             }
         }
         names.sort();

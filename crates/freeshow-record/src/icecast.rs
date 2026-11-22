@@ -129,8 +129,10 @@ mod tests {
         gst::init().unwrap();
         // Some Windows SDK builds omit libshout. The app can run without it.
         if gst::ElementFactory::find("shout2send").is_none() {
-            assert!(cfg!(windows), "expected shout2send on the native test host");
-            return;
+            if cfg!(windows) {
+                return;
+            }
+            panic!("expected shout2send on the native test host");
         }
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

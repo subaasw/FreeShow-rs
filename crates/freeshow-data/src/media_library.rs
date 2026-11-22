@@ -431,10 +431,10 @@ fn find_box(data: &[u8], typ: [u8; 4]) -> Option<&[u8]> {
         if box_type == typ {
             return Some(payload);
         }
-        if box_type == *b"moov" || box_type == *b"trak" || box_type == *b"mdia" {
-            if let Some(found) = find_box(payload, typ) {
-                return Some(found);
-            }
+        if (box_type == *b"moov" || box_type == *b"trak" || box_type == *b"mdia")
+            && let Some(found) = find_box(payload, typ)
+        {
+            return Some(found);
         }
         index += size;
     }

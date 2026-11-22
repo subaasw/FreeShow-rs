@@ -123,15 +123,15 @@ pub(super) fn hydrate_plan(
                     }
                 }
             }
-            if files.is_empty() && kind == "lessonAddOn" {
-                if let Some(add_on) = feed["files"]
+            if files.is_empty()
+                && kind == "lessonAddOn"
+                && let Some(add_on) = feed["files"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .find(|entry| entry["id"] == related)
-                {
-                    files = add_on["files"].as_array().cloned().unwrap_or_default();
-                }
+            {
+                files = add_on["files"].as_array().cloned().unwrap_or_default();
             }
             if files.is_empty() && kind == "lessonAddOn" {
                 let key = format!("addon:{related}");

@@ -282,6 +282,7 @@ fn push_frame(appsrc: &AppSrc, pixels: &[u8]) {
 }
 
 /// Build a webrtcbin answer for tests and loopback WHIP endpoints.
+#[cfg(test)]
 pub(crate) fn answer_sdp(offer: &str) -> Result<String, String> {
     init_gstreamer()?;
     if gstreamer::ElementFactory::find("webrtcbin").is_none() {
@@ -372,6 +373,7 @@ pub(crate) fn answer_sdp(offer: &str) -> Result<String, String> {
 }
 
 /// Create a local WHIP offer from the encode pipeline, used by tests.
+#[cfg(test)]
 pub(crate) fn whip_offer_sdp(width: u32, height: u32) -> Result<String, String> {
     let (pipeline, _appsrc, webrtc) = open_encode_pipeline(width, height)?;
     let result = local_offer(&webrtc);

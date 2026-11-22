@@ -100,7 +100,7 @@ pub fn backup_library(
     }
     if let Some(url) = cloud_url.filter(|url| !url.is_empty()) {
         match fs::read(&path)
-            .and_then(|bytes| put_zip(url, token, &bytes).map_err(|err| std::io::Error::other(err)))
+            .and_then(|bytes| put_zip(url, token, &bytes).map_err(std::io::Error::other))
         {
             Ok(()) => report.uploaded = true,
             Err(err) => tracing::error!("cloud upload was not completed: {err}"),
@@ -252,7 +252,7 @@ fn newest_zip(dir: &Path) -> Option<PathBuf> {
             Some((modified, entry.path()))
         })
         .collect::<Vec<_>>();
-    zips.sort_by(|left, right| left.0.cmp(&right.0));
+    zips.sort_by_key(|left| left.0);
     zips.pop().map(|(_, path)| path)
 }
 

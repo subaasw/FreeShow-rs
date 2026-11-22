@@ -127,10 +127,9 @@ pub fn install(uninstall: bool) -> Result<(), Box<dyn std::error::Error>> {
         if let Err(error) = std::process::Command::new("update-desktop-database")
             .arg(desktop.parent().unwrap())
             .status()
+            && error.kind() != std::io::ErrorKind::NotFound
         {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error.into());
-            }
+            return Err(error.into());
         }
         println!(
             "{}",

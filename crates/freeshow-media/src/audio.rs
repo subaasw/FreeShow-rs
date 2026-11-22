@@ -325,7 +325,7 @@ impl DeviceAudioOutput {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| fill_locked(&state, data, rate, channels),
-                |err| tracing_audio(err),
+                tracing_audio,
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_output_stream(
@@ -337,7 +337,7 @@ impl DeviceAudioOutput {
                         *slot = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
                     }
                 },
-                |err| tracing_audio(err),
+                tracing_audio,
                 None,
             ),
             cpal::SampleFormat::U16 => device.build_output_stream(
@@ -350,7 +350,7 @@ impl DeviceAudioOutput {
                         *slot = (shifted * f32::from(u16::MAX)) as u16;
                     }
                 },
-                |err| tracing_audio(err),
+                tracing_audio,
                 None,
             ),
             other => {
@@ -594,10 +594,10 @@ impl AudioOutput {
             output.set_volume(volume);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
-            if let Ok(mut playback) = network.playback.lock() {
-                playback.set_volume(volume);
-            }
+        if let Some(network) = &self.network
+            && let Ok(mut playback) = network.playback.lock()
+        {
+            playback.set_volume(volume);
         }
     }
 
@@ -616,10 +616,10 @@ impl AudioOutput {
             output.seek_seconds(seconds);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
-            if let Ok(mut playback) = network.playback.lock() {
-                playback.seek_seconds(seconds);
-            }
+        if let Some(network) = &self.network
+            && let Ok(mut playback) = network.playback.lock()
+        {
+            playback.seek_seconds(seconds);
         }
     }
 
@@ -667,10 +667,10 @@ impl AudioOutput {
             output.set_looping(looping);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
-            if let Ok(mut playback) = network.playback.lock() {
-                playback.set_looping(looping);
-            }
+        if let Some(network) = &self.network
+            && let Ok(mut playback) = network.playback.lock()
+        {
+            playback.set_looping(looping);
         }
     }
 
@@ -679,10 +679,10 @@ impl AudioOutput {
             output.set_span(from, to);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
-            if let Ok(mut playback) = network.playback.lock() {
-                playback.set_span(from, to);
-            }
+        if let Some(network) = &self.network
+            && let Ok(mut playback) = network.playback.lock()
+        {
+            playback.set_span(from, to);
         }
     }
 
@@ -691,10 +691,10 @@ impl AudioOutput {
             output.set_rate(rate);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
-            if let Ok(mut playback) = network.playback.lock() {
-                playback.set_rate(rate);
-            }
+        if let Some(network) = &self.network
+            && let Ok(mut playback) = network.playback.lock()
+        {
+            playback.set_rate(rate);
         }
     }
 }

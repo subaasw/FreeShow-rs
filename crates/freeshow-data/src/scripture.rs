@@ -220,8 +220,10 @@ fn read_xml(text: &str, kind: XmlKind) -> Result<Value, DataError> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    let mut build = Build::default();
-    build.strip_brackets = kind == XmlKind::OpenSong;
+    let mut build = Build {
+        strip_brackets: kind == XmlKind::OpenSong,
+        ..Default::default()
+    };
     let mut skip = 0u32;
     loop {
         match reader.read_event_into(&mut buf) {

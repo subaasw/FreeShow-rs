@@ -752,7 +752,9 @@ fn page_break(event: &quick_xml::events::BytesStart<'_>) -> bool {
         .contains("page-break-after")
 }
 
-fn opensong(text: &str) -> Result<(String, Vec<Section>, Option<Vec<u8>>), DataError> {
+type OpenSongDoc = (String, Vec<Section>, Option<Vec<u8>>);
+
+fn opensong(text: &str) -> Result<OpenSongDoc, DataError> {
     let mut title = String::new();
     let mut lyrics = String::new();
     let mut backgrounds = String::new();
@@ -1669,7 +1671,7 @@ how sweet</lines></verse></lyrics></song>"#;
         let rtf = "{\\rtf1 Amazing grace\\par how sweet\\par\\par Praise God}";
         let show = import_show("song.rtf", rtf.as_bytes()).unwrap();
         assert!(show.ordered_slides()[0].lines[0].contains("Amazing grace"));
-        assert!(show.plain_text("s2").contains("Praise God") || show.ordered_slides().len() >= 1);
+        assert!(show.plain_text("s2").contains("Praise God") || !show.ordered_slides().is_empty());
 
         let bytes = pptx_with_slide("Amazing grace");
         let show = import_show("slides.pptx", &bytes).unwrap();

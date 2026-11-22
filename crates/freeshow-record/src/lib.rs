@@ -392,7 +392,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let frame = vec![255_u8, 0, 0, 255].repeat(64 * 48);
+        let frame = [255_u8, 0, 0, 255].repeat(64 * 48);
         ServiceCapture.submit(&frame, 64, 48);
         std::thread::sleep(std::time::Duration::from_millis(1200));
         ServiceCapture.stop_rtmp();
@@ -510,8 +510,8 @@ mod tests {
         while std::time::Instant::now() < end {
             if let Some(sample) = sink.try_pull_sample(gstreamer::ClockTime::from_mseconds(100)) {
                 let map = sample.buffer().unwrap().map_readable().unwrap();
-                for bytes in map.as_slice().chunks_exact(4) {
-                    let value = f32::from_le_bytes(bytes.try_into().unwrap());
+                for bytes in map.as_slice().as_chunks::<4>().0 {
+                    let value = f32::from_le_bytes(*bytes);
                     energy += f64::from(value * value);
                     samples += 1;
                 }
@@ -583,7 +583,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let capture = ServiceCapture;
         assert!(capture.toggle_file(&path, 320, 180));
-        let frame = vec![255u8, 0, 0, 255].repeat(320 * 180);
+        let frame = [255u8, 0, 0, 255].repeat(320 * 180);
         for _ in 0..8 {
             capture.submit(&frame, 320, 180);
             std::thread::sleep(std::time::Duration::from_millis(20));

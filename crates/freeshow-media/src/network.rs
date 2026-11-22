@@ -231,8 +231,10 @@ mod tests {
                 let map = sample.buffer().unwrap().map_readable().unwrap();
                 last = map
                     .as_slice()
-                    .chunks_exact(4)
-                    .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).abs())
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|bytes| f32::from_le_bytes(*bytes).abs())
                     .fold(0.0_f32, f32::max);
                 if (last - expected).abs() < 0.01 {
                     return;

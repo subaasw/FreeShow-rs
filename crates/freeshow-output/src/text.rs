@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#![allow(clippy::too_many_arguments)]
+
 //! Proportional text for slide items.
 //!
 //! Face lookup, in order: the hardcoded Arial paths when the family is Arial;

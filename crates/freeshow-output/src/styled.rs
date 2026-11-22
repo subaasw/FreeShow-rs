@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#![allow(clippy::too_many_arguments)]
+
 use crate::{Rgba, paint, text};
 
 /// FreeShow lays items out in a 1920×1080 slide. The compositor scales that
@@ -535,7 +537,7 @@ pub fn slide_frames(from: &crate::Frame, to: &crate::Frame, t: f32, way: SlideWa
         SlideWay::BottomTop => (0, shift_y, 0, remain_y),
     };
     let mut pixels = vec![0u8; from.pixels.len()];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     blit_frame(&mut pixels, width, height, from, out_x, out_y);
@@ -552,7 +554,7 @@ pub fn slide_frames(from: &crate::Frame, to: &crate::Frame, t: f32, way: SlideWa
 pub fn scale_frames(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Frame {
     let t = t.clamp(0.0, 1.0);
     let mut pixels = vec![0u8; from.pixels.len()];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     paint_scaled(&mut pixels, from, 1.0 - t);
@@ -680,7 +682,7 @@ fn bounce_in_out(t: f32) -> f32 {
 pub fn blur_frames(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Frame {
     let t = t.clamp(0.0, 1.0);
     let mut pixels = vec![0u8; from.pixels.len()];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     paint_blurred(&mut pixels, from, t, 1.0 - t);
@@ -696,7 +698,7 @@ pub fn blur_frames(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Fra
 pub fn spin_frames(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Frame {
     let t = t.clamp(0.0, 1.0);
     let mut pixels = vec![0u8; from.pixels.len()];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     paint_spin(&mut pixels, from, 1.0 - t);
@@ -1675,16 +1677,15 @@ fn blend_rect(
                 let luma = 0.2126 * f32::from(painted[0])
                     + 0.7152 * f32::from(painted[1])
                     + 0.0722 * f32::from(painted[2]);
-                for channel in 0..3 {
-                    let color = f32::from(painted[channel]);
-                    painted[channel] = (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
+                for sample in &mut painted[..3] {
+                    let color = f32::from(*sample);
+                    *sample = (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
                 }
             }
             if invert > 0.0 {
-                for channel in 0..3 {
-                    let color = f32::from(painted[channel]);
-                    painted[channel] =
-                        (color * (1.0 - invert) + (255.0 - color) * invert).round() as u8;
+                for sample in &mut painted[..3] {
+                    let color = f32::from(*sample);
+                    *sample = (color * (1.0 - invert) + (255.0 - color) * invert).round() as u8;
                 }
             }
             if sepia > 0.0 {
@@ -1696,23 +1697,20 @@ fn blend_rect(
                     (red * 0.349 + green * 0.686 + blue * 0.168).clamp(0.0, 255.0),
                     (red * 0.272 + green * 0.534 + blue * 0.131).clamp(0.0, 255.0),
                 ];
-                for channel in 0..3 {
-                    let color = f32::from(painted[channel]);
-                    painted[channel] =
-                        (color * (1.0 - sepia) + toned[channel] * sepia).round() as u8;
+                for (sample, tone) in painted[..3].iter_mut().zip(&toned) {
+                    let color = f32::from(*sample);
+                    *sample = (color * (1.0 - sepia) + tone * sepia).round() as u8;
                 }
             }
             if (brightness - 1.0).abs() > 0.001 {
-                for channel in 0..3 {
-                    painted[channel] = (f32::from(painted[channel]) * brightness)
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
+                for sample in &mut painted[..3] {
+                    *sample = (f32::from(*sample) * brightness).round().clamp(0.0, 255.0) as u8;
                 }
             }
             if (contrast - 1.0).abs() > 0.001 {
-                for channel in 0..3 {
-                    let color = f32::from(painted[channel]);
-                    painted[channel] = ((color - 128.0) * contrast + 128.0)
+                for sample in &mut painted[..3] {
+                    let color = f32::from(*sample);
+                    *sample = ((color - 128.0) * contrast + 128.0)
                         .round()
                         .clamp(0.0, 255.0) as u8;
                 }
@@ -2599,15 +2597,15 @@ fn filter_pixel(
         let luma = 0.2126 * f32::from(painted[0])
             + 0.7152 * f32::from(painted[1])
             + 0.0722 * f32::from(painted[2]);
-        for channel in 0..3 {
-            let color = f32::from(painted[channel]);
-            painted[channel] = (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
+        for sample in &mut painted[..3] {
+            let color = f32::from(*sample);
+            *sample = (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
         }
     }
     if invert > 0.0 {
-        for channel in 0..3 {
-            let color = f32::from(painted[channel]);
-            painted[channel] = (color * (1.0 - invert) + (255.0 - color) * invert).round() as u8;
+        for sample in &mut painted[..3] {
+            let color = f32::from(*sample);
+            *sample = (color * (1.0 - invert) + (255.0 - color) * invert).round() as u8;
         }
     }
     if sepia > 0.0 {
@@ -2619,22 +2617,20 @@ fn filter_pixel(
             (red * 0.349 + green * 0.686 + blue * 0.168).clamp(0.0, 255.0),
             (red * 0.272 + green * 0.534 + blue * 0.131).clamp(0.0, 255.0),
         ];
-        for channel in 0..3 {
-            let color = f32::from(painted[channel]);
-            painted[channel] = (color * (1.0 - sepia) + toned[channel] * sepia).round() as u8;
+        for (sample, tone) in painted[..3].iter_mut().zip(&toned) {
+            let color = f32::from(*sample);
+            *sample = (color * (1.0 - sepia) + tone * sepia).round() as u8;
         }
     }
     if (brightness - 1.0).abs() > 0.001 {
-        for channel in 0..3 {
-            painted[channel] = (f32::from(painted[channel]) * brightness)
-                .round()
-                .clamp(0.0, 255.0) as u8;
+        for sample in &mut painted[..3] {
+            *sample = (f32::from(*sample) * brightness).round().clamp(0.0, 255.0) as u8;
         }
     }
     if (contrast - 1.0).abs() > 0.001 {
-        for channel in 0..3 {
-            let color = f32::from(painted[channel]);
-            painted[channel] = ((color - 128.0) * contrast + 128.0)
+        for sample in &mut painted[..3] {
+            let color = f32::from(*sample);
+            *sample = ((color - 128.0) * contrast + 128.0)
                 .round()
                 .clamp(0.0, 255.0) as u8;
         }
@@ -2643,9 +2639,9 @@ fn filter_pixel(
         let luma = 0.2126 * f32::from(painted[0])
             + 0.7152 * f32::from(painted[1])
             + 0.0722 * f32::from(painted[2]);
-        for channel in 0..3 {
-            let color = f32::from(painted[channel]);
-            painted[channel] = (luma + (color - luma) * saturate).round().clamp(0.0, 255.0) as u8;
+        for sample in &mut painted[..3] {
+            let color = f32::from(*sample);
+            *sample = (luma + (color - luma) * saturate).round().clamp(0.0, 255.0) as u8;
         }
     }
     if hue_changes(hue) {
@@ -2819,7 +2815,7 @@ fn paint_inset_shadow(
 fn shadow_offsets(shadow: TextShadow, slide: &StyledSlide) -> Vec<(f32, f32)> {
     let ox = scale(shadow.x, slide.output_width, slide.source_width) as f32;
     let oy = scale(shadow.y, slide.output_height, slide.source_height) as f32;
-    let radius = scale(shadow.blur, slide.output_height, slide.source_height).clamp(0, 8) as i32;
+    let radius = scale(shadow.blur, slide.output_height, slide.source_height).clamp(0, 8);
     let mut offsets = Vec::new();
     for dy in -radius..=radius {
         for dx in -radius..=radius {
@@ -4282,7 +4278,7 @@ mod tests {
     #[test]
     fn blur_spreads_the_outgoing_slide() {
         let mut pixels = vec![0u8; 8 * 2 * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
         for x in 0..4 {
@@ -4313,7 +4309,7 @@ mod tests {
     #[test]
     fn spin_turns_the_outgoing_slide_halfway() {
         let mut pixels = vec![0u8; 4 * 4 * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
         for y in 0..4 {

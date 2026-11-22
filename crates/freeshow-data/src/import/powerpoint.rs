@@ -568,14 +568,13 @@ fn slide_content(xml: &str, size: &SlideSize) -> Result<SlideContent, DataError>
                 }
                 if matches!(name.as_str(), "sp" | "pic" | "cxnSp")
                     && stack.last().map(String::as_str) == Some(name.as_str())
+                    && let Some(mut object) = current.take()
                 {
-                    if let Some(mut object) = current.take() {
-                        if matches!(object.kind, ObjectKind::Shape) && !object.lines.is_empty() {
-                            object.kind = ObjectKind::Text;
-                        }
-                        if object.width > 0.0 || object.height > 0.0 || !object.lines.is_empty() {
-                            objects.push(object);
-                        }
+                    if matches!(object.kind, ObjectKind::Shape) && !object.lines.is_empty() {
+                        object.kind = ObjectKind::Text;
+                    }
+                    if object.width > 0.0 || object.height > 0.0 || !object.lines.is_empty() {
+                        objects.push(object);
                     }
                 }
                 if name == "spTree" {
