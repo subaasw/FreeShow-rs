@@ -103,7 +103,7 @@ payload and colors. Current Output boxes mirror the active audience picture, inc
 - [ ] Verify Developer ID signing, notarization, and compatibility on additional macOS versions.
 - [x] Windows x86-64 installer verified in native CI, including install, H.264 playback without the build SDK, and uninstall.
 - [x] Linux runtime tarball and desktop installer verified on Ubuntu 24.04 x86-64.
-- [ ] Verify the three-platform release workflow against one revision and its lockfile.
+- [x] Verify the three-platform release workflow against one revision and its lockfile. All three native jobs passed and uploaded installers for `e075bea`. [Release run](https://github.com/subaasw/FreeShow-rs/actions/runs/45023447856)
 
 Acceptance: a fresh machine can install the app without a Rust toolchain.
 
