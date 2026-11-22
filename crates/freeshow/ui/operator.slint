@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Operator, output and stage windows. Compiled by build.rs (slint-build).
 
-import { ComboBox, LineEdit, Palette, Slider, TextEdit } from "std-widgets.slint";
+import { ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow } from "widgets.slint";
 import { SettingsPanel, SettingsData, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
 
@@ -412,8 +412,13 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Delete"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("delete-slide", ""); } }
                         }
                     }
-                    VerticalLayout {
+                    editor-scroll := ScrollView {
                         horizontal-stretch: 1;
+                        content-width: self.visible-width;
+                        content-height: max(self.visible-height, editor-column.min-height);
+                    editor-column := VerticalLayout {
+                        width: editor-scroll.visible-width;
+                        height: editor-scroll.content-height;
                         padding: 12px;
                         spacing: 8px;
                         alignment: start;
@@ -480,6 +485,7 @@ export component ControlWindow inherits Window {
                             font-size: 12px;
                             wrap: word-wrap;
                         }
+                    }
                     }
                 }
             }
@@ -712,7 +718,9 @@ export component ControlWindow inherits Window {
             }
         }
         if !root.focus-mode: Rectangle {
-            height: root.drawer-height * 1px;
+            min-height: min(root.drawer-height * 1px, 120px);
+            preferred-height: root.drawer-height * 1px;
+            max-height: root.drawer-height * 1px;
             background: root.primary;
             if root.drawer-rows.length == 0 && root.search-query == "": Text {
                 x: 16px;
