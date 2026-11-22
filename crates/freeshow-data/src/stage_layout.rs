@@ -22,6 +22,8 @@ pub enum StageItemKind {
     SlideTracker,
     /// An image or video file from the library.
     Media,
+    /// A live camera feed from the discovered native devices.
+    Camera,
     CurrentOutput,
     QrCode,
     /// A FreeShow item this app does not draw yet, shown as its label.
@@ -95,6 +97,8 @@ pub struct StageItemSpec {
     pub timer_id: Option<String>,
     /// Media path for a `media` item.
     pub src: Option<String>,
+    pub device_name: Option<String>,
+    pub device_type: Option<String>,
     pub output_source: Option<String>,
     pub show_output_label: bool,
     pub include_media: bool,
@@ -267,6 +271,16 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .get("src")
                 .and_then(Value::as_str)
                 .filter(|src| !src.is_empty())
+                .map(str::to_string),
+            device_name: item_value
+                .pointer("/device/name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+            device_type: item_value
+                .pointer("/device/type")
+                .and_then(Value::as_str)
+                .filter(|kind| !kind.is_empty())
                 .map(str::to_string),
             output_source: item_value
                 .pointer("/currentOutput/source")
