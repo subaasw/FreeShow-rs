@@ -97,6 +97,31 @@ impl Frame {
             a: self.pixels[index + 3],
         }
     }
+
+    /// Paints an opaque filled circle, used for draw-on-output brushes.
+    pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: i32, color: Rgba) {
+        let radius = radius.max(1);
+        let r2 = radius * radius;
+        let width = self.width as i32;
+        let height = self.height as i32;
+        let y0 = (cy - radius).max(0);
+        let y1 = (cy + radius).min(height.saturating_sub(1));
+        let x0 = (cx - radius).max(0);
+        let x1 = (cx + radius).min(width.saturating_sub(1));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= r2 {
+                    let index = ((y as u32 * self.width + x as u32) * 4) as usize;
+                    self.pixels[index] = color.r;
+                    self.pixels[index + 1] = color.g;
+                    self.pixels[index + 2] = color.b;
+                    self.pixels[index + 3] = color.a.max(self.pixels[index + 3]);
+                }
+            }
+        }
+    }
 }
 
 /// Default audience framebuffer. 1920×4 is a multiple of wgpu's 256-byte row alignment.

@@ -282,8 +282,11 @@ slint::slint! {
         callback dismiss-guide();
         callback save-shortcuts(string);
         callback save-layouts(string);
+        callback save-variables(string);
         in-out property <bool> show-layouts: false;
         in-out property <string> layout-text: "";
+        in-out property <bool> show-variables: false;
+        in-out property <string> variable-text: "";
         callback hotkey(string, bool, bool, bool);
         callback set-search(string);
         callback select-tab(string);
@@ -698,6 +701,38 @@ slint::slint! {
                             text-color: root.text-color;
                             accent-text: root.text-color;
                             clicked => { root.show-layouts = false; }
+                        }
+                    }
+                }
+            }
+            if root.show-variables: Rectangle {
+                height: 180px;
+                background: root.primary;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    TextEdit {
+                        text <=> root.variable-text;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        HeaderButton {
+                            label: "Save";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.save-variables(root.variable-text); }
+                        }
+                        HeaderButton {
+                            label: "Close";
+                            accent: root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.show-variables = false; }
                         }
                     }
                 }
@@ -2257,6 +2292,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        control.on_save_variables(move |text| {
+            session.borrow_mut().save_variables(&text);
+            if let Some(ui) = ui.upgrade() {
+                ui.set_show_variables(false);
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
         control.on_hotkey(move |text, ctrl, alt, shift| {
             let mut chord = String::new();
             if ctrl {
@@ -2670,6 +2717,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                         }
+                    }
+                    28 => {
+                        let _ = current.toggle_watermark();
+                    }
+                    29 => {
+                        if let Some(ui) = ui.upgrade() {
+                            let open = !ui.get_show_variables();
+                            ui.set_show_variables(open);
+                            if open {
+                                ui.set_variable_text(current.variable_text().into());
+                            }
+                        }
+                    }
+                    30 => current.clear_drawing(),
+                    31 => {
+                        let _ = current.toggle_first_interaction();
                     }
                     _ => {}
                 }

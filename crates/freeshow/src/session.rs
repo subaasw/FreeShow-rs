@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeshow_data::{
-    AUDIO_DIR, BibleFile, Catalog, FreeShowPreferences, Library, MEDIA_DIR, MediaEntry, MixStep,
-    OutlinedBook, ProjectsFile, ShowFile, SlideBackdrop, SlideJump, StageLayout, TimerStep,
-    VerseHit, default_stage, new_id,
+    AUDIO_DIR, BibleFile, Catalog, DrawStroke, FreeShowPreferences, Library, MEDIA_DIR, MediaEntry,
+    MixStep, OutlinedBook, ProjectsFile, ShowFile, SlideBackdrop, SlideJump, StageLayout,
+    TimerStep, VerseHit, default_stage, new_id,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 use freeshow_output::{
@@ -112,6 +112,9 @@ pub struct Session {
     pub guide_visible: bool,
     pub kiosk: bool,
     pub always_on_top: bool,
+    pub active_scene: Option<String>,
+    pub active_interaction: Option<String>,
+    pub draw_strokes: Vec<DrawStroke>,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     /// The selected text box on the current slide.
@@ -294,6 +297,9 @@ impl Session {
             guide_visible: false,
             kiosk: false,
             always_on_top: true,
+            active_scene: None,
+            active_interaction: None,
+            draw_strokes: Vec::new(),
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -423,7 +429,8 @@ impl Session {
         let guide_visible = !preferences.guide_seen();
         let kiosk = preferences.output_kiosk();
         let always_on_top = preferences.output_always_on_top();
-        Self {
+        let draw_strokes = preferences.draw_strokes();
+        let mut session = Self {
             root: Some(root),
             icecast: library.icecast(),
             preferences,
@@ -447,6 +454,9 @@ impl Session {
             guide_visible,
             kiosk,
             always_on_top,
+            active_scene: None,
+            active_interaction: None,
+            draw_strokes,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -521,7 +531,10 @@ impl Session {
             running: None,
             recording: false,
             warnings,
-        }
+        };
+        session.restore_watermark();
+        session.apply_active_scenes();
+        session
     }
 
     pub fn timer_label(&self) -> String {
@@ -841,6 +854,18 @@ impl Session {
                 "Shortcuts".to_string(),
                 "Save layout".to_string(),
                 "Window layouts".to_string(),
+                if self.preferences.watermark_enabled() {
+                    "Hide watermark".to_string()
+                } else {
+                    "Watermark".to_string()
+                },
+                "Variables".to_string(),
+                "Clear drawing".to_string(),
+                if self.active_interaction.is_some() {
+                    "End interaction".to_string()
+                } else {
+                    "Ask".to_string()
+                },
             ],
             _ => Vec::new(),
         }
@@ -1054,6 +1079,213 @@ impl Session {
                 self.active_overlays.push(id);
             }
         }
+    }
+
+    fn watermark_overlay_id(&self) -> Option<String> {
+        if self.overlay_catalog.get("watermark").is_some() {
+            return Some("watermark".to_string());
+        }
+        self.overlay_catalog
+            .id_named("Watermark")
+            .or_else(|| self.overlay_catalog.id_named("watermark"))
+    }
+
+    fn restore_watermark(&mut self) {
+        let Some(id) = self.watermark_overlay_id() else {
+            return;
+        };
+        if !self.preferences.watermark_enabled() {
+            self.active_overlays.retain(|active| active != &id);
+            return;
+        }
+        if !self.active_overlays.iter().any(|active| active == &id) {
+            self.active_overlays.push(id);
+        }
+    }
+
+    /// Turns the catalog watermark overlay on or off and stores the choice.
+    pub fn toggle_watermark(&mut self) -> bool {
+        let enabled = !self.preferences.watermark_enabled();
+        self.patch_special("watermark", serde_json::Value::Bool(enabled));
+        self.restore_watermark();
+        true
+    }
+
+    fn resolve_overlay_id(&self, id_or_name: &str) -> Option<String> {
+        if self.overlay_catalog.get(id_or_name).is_some() {
+            return Some(id_or_name.to_string());
+        }
+        self.overlay_catalog.id_named(id_or_name)
+    }
+
+    /// Applies a named or id-addressed scene: overlays, hidden overlays, and media.
+    pub fn start_scene(&mut self, id_or_name: &str) -> bool {
+        let Some(scene) = self.preferences.scene(id_or_name) else {
+            return false;
+        };
+        for hidden in &scene.hidden_overlays {
+            if let Some(id) = self.resolve_overlay_id(hidden) {
+                self.active_overlays.retain(|active| active != &id);
+            }
+        }
+        for overlay in &scene.overlays {
+            if let Some(id) = self.resolve_overlay_id(overlay)
+                && !self.active_overlays.iter().any(|active| active == &id)
+            {
+                self.active_overlays.push(id);
+            }
+        }
+        self.restore_locked_overlays();
+        self.restore_watermark();
+        if let Some(media) = &scene.media {
+            self.play_scene_media(media);
+        }
+        self.active_scene = Some(scene.id);
+        true
+    }
+
+    fn apply_active_scenes(&mut self) {
+        let output_id = self.output_id();
+        let ids = self.preferences.active_scene_ids(&output_id);
+        for id in ids {
+            let _ = self.start_scene(&id);
+        }
+    }
+
+    fn play_scene_media(&mut self, media: &str) {
+        let direct = PathBuf::from(media);
+        let path = if direct.is_file() {
+            Some(direct)
+        } else {
+            self.media.iter().find_map(|entry| {
+                let name = entry
+                    .path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("");
+                (entry.name == media
+                    || entry.label() == media
+                    || name == media
+                    || entry.path.ends_with(media))
+                .then(|| entry.path.clone())
+            })
+        };
+        let Some(path) = path else {
+            return;
+        };
+        match media_kind(&path) {
+            MediaKind::Image => {
+                let raster = self.load_still(&path);
+                self.set_still_underlay(path, raster);
+                self.background_transition = true;
+            }
+            MediaKind::Video => {
+                self.background_path = Some(path.clone());
+                self.background_transition = true;
+                self.pending_play = Some(PendingPlay::Video(path));
+            }
+            MediaKind::Audio => {
+                self.pending_play = Some(PendingPlay::Audio(path));
+            }
+            MediaKind::Other => {}
+        }
+    }
+
+    /// Starts a stored interaction: runs its action and/or shows its questions.
+    pub fn start_interaction(&mut self, id_or_name: &str) -> bool {
+        let Some(spec) = self.preferences.interaction(id_or_name) else {
+            return false;
+        };
+        if let Some(action) = &spec.action {
+            self.run_interaction_action(action);
+        }
+        if spec.questions.is_empty() {
+            return true;
+        }
+        self.active_interaction = Some(spec.id);
+        true
+    }
+
+    pub fn stop_interaction(&mut self) {
+        self.active_interaction = None;
+    }
+
+    /// Starts the first stored interaction, or stops the one that is already on.
+    pub fn toggle_first_interaction(&mut self) -> bool {
+        if self.active_interaction.is_some() {
+            self.stop_interaction();
+            return true;
+        }
+        let Some(spec) = self.preferences.interactions().into_iter().next() else {
+            return false;
+        };
+        self.start_interaction(&spec.id)
+    }
+
+    fn run_interaction_action(&mut self, action: &str) {
+        match action.trim().to_ascii_lowercase().as_str() {
+            "next" | "next_slide" => {
+                let _ = self.advance_show();
+            }
+            "previous" | "previous_slide" => {
+                let _ = self.retreat_show();
+            }
+            "clear" => self.clear_output(),
+            other if other.starts_with("overlay:") => {
+                if let Some(id) = self.resolve_overlay_id(other.trim_start_matches("overlay:"))
+                    && !self.active_overlays.iter().any(|active| active == &id)
+                {
+                    self.active_overlays.push(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn interaction_lines(&self) -> Vec<String> {
+        let Some(id) = &self.active_interaction else {
+            return Vec::new();
+        };
+        self.preferences
+            .interaction(id)
+            .map(|spec| {
+                let mut lines = Vec::new();
+                if !spec.name.is_empty() {
+                    lines.push(spec.name);
+                }
+                lines.extend(spec.questions);
+                lines
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn variable_text(&self) -> String {
+        let Some(root) = &self.root else {
+            return String::new();
+        };
+        Library::open(root).variable_editor_text()
+    }
+
+    pub fn save_variables(&mut self, text: &str) -> bool {
+        let Some(root) = &self.root else {
+            return false;
+        };
+        Library::open(root).save_variables_text(text)
+    }
+
+    pub fn clear_drawing(&mut self) {
+        self.draw_strokes.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn add_draw_point(&mut self, x: f32, y: f32, size: f32, color: &str) {
+        self.draw_strokes.push(DrawStroke {
+            x,
+            y,
+            size,
+            color: color.to_string(),
+            up: false,
+        });
     }
 
     /// Selects the first show and first slide and applies that slide.
@@ -5281,6 +5513,98 @@ mod tests {
         let functions = session.drawer();
         assert!(functions.contains(&"Save layout".to_string()));
         assert!(functions.contains(&"Window layouts".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scenes_watermark_variables_and_draw_apply_on_output() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-scenes-draw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = root.join("Config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{
+                "special": {"guideSeen": true, "watermark": true},
+                "activeScenes": {"default": ["warm"]}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("overlays.json"),
+            r#"{
+                "watermark": {
+                    "name": "Watermark",
+                    "items": [{
+                        "style": "top:0px;left:0px;height:80px;width:200px;",
+                        "lines": [{"text": [{"value": "WM", "style": "font-size:20px;color:#F0008C;"}]}]
+                    }]
+                },
+                "logo": {"name": "Logo"}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("settings_synced.json"),
+            r##"{
+                "variables": {"speaker": {"name": "speaker", "text": "Alex"}},
+                "scenes": {
+                    "warm": {
+                        "name": "Warm",
+                        "content": {"overlays": ["logo"]}
+                    }
+                },
+                "interactions": {
+                    "quiz": {
+                        "name": "Welcome",
+                        "inputs": [{"type": "text", "question": "What is your name?"}]
+                    }
+                },
+                "drawSettings": {
+                    "paint": {
+                        "color": "#ffff00",
+                        "size": 20,
+                        "lines": [{"x": 100, "y": 100, "size": 20, "color": "#ffff00"}]
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        assert_eq!(session.active_scene.as_deref(), Some("warm"));
+        assert!(session.active_overlays.contains(&"watermark".to_string()));
+        assert!(session.active_overlays.contains(&"logo".to_string()));
+        assert_eq!(session.draw_strokes.len(), 1);
+        let frame = crate::live::audience_frame(&session);
+        let dot = frame.pixel(100, 100);
+        assert_eq!((dot.r, dot.g, dot.b), (255, 255, 0));
+        assert!(session.variable_text().contains("speaker=Alex"));
+        assert!(session.save_variables("speaker=Jordan\n"));
+        assert!(
+            freeshow_data::Library::open(&root)
+                .variables()
+                .iter()
+                .any(|(name, value)| name.contains("speaker") && value == "Jordan")
+        );
+        assert!(session.start_interaction("quiz"));
+        let lines = session.interaction_lines();
+        assert!(lines.iter().any(|line| line.contains("What is your name?")));
+        assert!(session.toggle_watermark());
+        assert!(!session.preferences.watermark_enabled());
+        assert!(!session.active_overlays.contains(&"watermark".to_string()));
+        session.clear_drawing();
+        assert!(session.draw_strokes.is_empty());
+        session.add_draw_point(200.0, 80.0, 16.0, "#00ff00");
+        let painted = crate::live::audience_frame(&session);
+        let dot = painted.pixel(200, 80);
+        assert_eq!((dot.r, dot.g, dot.b), (0, 255, 0));
+        session.tab = "functions".to_string();
+        let functions = session.drawer();
+        assert!(functions.contains(&"Watermark".to_string()));
+        assert!(functions.contains(&"Variables".to_string()));
+        assert!(functions.contains(&"Clear drawing".to_string()));
+        assert!(functions.contains(&"End interaction".to_string()));
         let _ = std::fs::remove_dir_all(&root);
     }
 
