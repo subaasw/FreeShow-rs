@@ -68,7 +68,20 @@ pub fn import_sources(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("slides");
-            powerpoint::import(name, &bytes, Some(media)).map(|show| vec![show])
+            powerpoint::import(name, &bytes, Some(media)).map(|show| {
+                if let Some(extra) = show
+                    .show
+                    .pointer("/settings/importWarnings")
+                    .and_then(|value| value.as_array())
+                {
+                    for warning in extra {
+                        if let Some(warning) = warning.as_str() {
+                            warnings.push(format!("{}: {warning}", path.display()));
+                        }
+                    }
+                }
+                vec![show]
+            })
         } else if extension.eq_ignore_ascii_case("pro") {
             let name = path
                 .file_name()
