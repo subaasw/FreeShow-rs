@@ -1123,8 +1123,11 @@ impl ShowFile {
         let mut seen: Vec<(&str, &str, String)> = Vec::new();
         for (group, chunk) in &stanzas {
             // A chorus sung again is the same slide shown twice in the layout, as in FreeShow.
+            // A bare "[Chorus]" with no lines under it repeats the chorus written earlier.
             if let Some((_, _, id)) = seen.iter().find(|(seen_group, seen_chunk, _)| {
-                !group.is_empty() && *seen_group == group && *seen_chunk == chunk
+                !group.is_empty()
+                    && *seen_group == group
+                    && (*seen_chunk == chunk || (chunk.is_empty() && !seen_chunk.is_empty()))
             }) {
                 order.push(serde_json::json!({ "id": id }));
                 continue;
@@ -6735,6 +6738,14 @@ mod tests {
             Some(("pre_chorus", "#8825f5"))
         );
         assert_eq!(default_group("Welcome"), None);
+        for format in [true, false] {
+            let mut show = ShowFile::blank("bare", "Bare");
+            let text = "[Verse 1]\nBlessed assurance\n\n[Chorus]\nThis is my story\n\n[Verse 2]\nPerfect submission\n\n[Chorus]";
+            assert!(show.replace_lyrics_with_split(text, format, 0));
+            let slides = show.ordered_slides();
+            assert_eq!(slides.len(), 4, "format {format}");
+            assert_eq!(slides[1].id, slides[3].id, "a bare [Chorus] repeats it");
+        }
     }
 
     #[test]
