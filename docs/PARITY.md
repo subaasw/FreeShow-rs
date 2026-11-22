@@ -4,9 +4,9 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 ## Score
 
-- **Feature-weighted parity: 94.6%**
-- Sub-features: **83 done / 7 partial / 8 not-yet** (98 leaves).
-- Area rows (derived from leaves): **8 done / 9 partial / 0 not-yet** (17 areas).
+- **Feature-weighted parity: 95.2%**
+- Sub-features: **84 done / 6 partial / 8 not-yet** (98 leaves).
+- Area rows (derived from leaves): **9 done / 8 partial / 0 not-yet** (17 areas).
 - Scoring: each leaf has a weight (Sunday-operator impact). `done` scores 1, `partial` scores 1/2, `not-yet` scores 0. The percentage is `100 × Σ(weight × score) / Σ(weight)`. Credential-gated work is included as `not-yet` so the number stays honest about 1.6.8.
 
 ## Areas
@@ -21,7 +21,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Shows, projects, templates, overlays, scripture storage | done | 100% | 6 done |
 | Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions | done | 100% | 9 done |
 | Slide editing, project order, go to slide | partial | 93% | 4 done, 1 partial |
-| Audience compositor | partial | 94% | 6 done, 1 partial |
+| Audience compositor | done | 100% | 7 done |
 | Preview matches output | done | 100% | 1 done |
 | Images, video, audio, cameras | partial | 92% | 6 done, 1 not-yet |
 | Scripture import and search | done | 100% | 1 done |
@@ -126,7 +126,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Live effects library | done | 1 | `effectsLibrary` washes/particles |
 | HTML / web / website boxes | done | 1 | URL preview or stripped HTML snippet |
 | Weather boxes | done | 0.8 | Cached Open-Meteo reports auto-refresh (default 600s) and paint into weather boxes |
-| Item box-shadow, pixel radius, backdrop-filter | partial | 1.2 | Called out from M3; some typography extras still differ from Electron |
+| Item box-shadow, pixel radius, backdrop-filter | done | 1.2 | Stacked inset/outset `box-shadow` layers, 1–4 value `border-radius` in px or %, CSS corner fitting, and `backdrop-filter` (also on rotated items) |
 
 ### Preview matches output
 
