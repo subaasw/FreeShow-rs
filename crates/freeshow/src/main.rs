@@ -272,6 +272,18 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     }
     ui.set_group(session.group().into());
     ui.set_item_label(session.item_label().into());
+    ui.set_show_name(session.show_name().into());
+    ui.set_notice(session.notice.clone().into());
+    ui.set_can_restore(session.can_restore_show());
+    ui.set_project_choices(strings(&session.project_choices()));
+    ui.set_project_choice(session.project_choice_index());
+    // Do not rewrite the show text under the operator's cursor while they type.
+    if !(ui.get_text_mode() && ui.get_text_focused()) {
+        let text = session.show_text();
+        if ui.get_show_text().as_str() != text {
+            ui.set_show_text(text.into());
+        }
+    }
     refresh_panels(ui, session);
     ui.set_selected_drawer(match session.tab.as_str() {
         "shows" => selected(session.visible_drawer_index(session.show_index)),
@@ -3095,21 +3107,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let spell_timer = Rc::new(slint::Timer::default());
+    let lyrics_timer = Rc::new(slint::Timer::default());
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let spell_timer = Rc::clone(&spell_timer);
+        let lyrics_timer = Rc::clone(&lyrics_timer);
+        let preview_slot = Rc::clone(&preview_slot);
         control.on_lyrics_edited(move |_| {
+            {
+                let ui = ui.clone();
+                let session = Rc::clone(&session);
+                spell_timer.start(
+                    slint::TimerMode::SingleShot,
+                    std::time::Duration::from_millis(400),
+                    move || {
+                        if let Some(ui) = ui.upgrade() {
+                            let note = spelling_note(&session.borrow(), ui.get_lyrics().as_str());
+                            ui.set_spelling(note.into());
+                        }
+                    },
+                );
+            }
+            // Slide text saves itself shortly after typing stops, like FreeShow.
             let ui = ui.clone();
             let session = Rc::clone(&session);
-            spell_timer.start(
+            let preview_slot = Rc::clone(&preview_slot);
+            lyrics_timer.start(
                 slint::TimerMode::SingleShot,
-                std::time::Duration::from_millis(400),
+                std::time::Duration::from_millis(600),
                 move || {
-                    if let Some(ui) = ui.upgrade() {
-                        let note = spelling_note(&session.borrow(), ui.get_lyrics().as_str());
-                        ui.set_spelling(note.into());
+                    let Some(ui) = ui.upgrade() else {
+                        return;
+                    };
+                    let text = ui.get_lyrics();
+                    if session.borrow().lyrics() == text.as_str() {
+                        return;
                     }
+                    if !session.borrow_mut().save_lyrics(text.as_str()) {
+                        session.borrow_mut().notice = "Could not save the slide text".into();
+                    }
+                    refresh(&ui, &session.borrow());
+                    publish(&preview_slot, audience_frame(&session.borrow()));
+                },
+            );
+        });
+    }
+    let notice_timer = Rc::new(slint::Timer::default());
+    let library_done: Rc<dyn Fn(&ControlWindow)> = {
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        let notice_timer = Rc::clone(&notice_timer);
+        Rc::new(move |ui: &ControlWindow| {
+            refresh(ui, &session.borrow());
+            publish(&preview_slot, audience_frame(&session.borrow()));
+            let ui = ui.as_weak();
+            let session = Rc::clone(&session);
+            notice_timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_secs(8),
+                move || {
+                    session.borrow_mut().notice.clear();
+                    if let Some(ui) = ui.upgrade() {
+                        ui.set_notice("".into());
+                    }
+                },
+            );
+        })
+    };
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let library_done = Rc::clone(&library_done);
+        control.on_library_action(move |action, arg| {
+            let _ = session
+                .borrow_mut()
+                .library_action(action.as_str(), arg.as_str());
+            if let Some(ui) = ui.upgrade() {
+                if action == "delete-show" || action == "restore-show" {
+                    ui.set_text_mode(false);
+                }
+                library_done(&ui);
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let library_done = Rc::clone(&library_done);
+        let timer = Rc::new(slint::Timer::default());
+        control.on_show_text_edited(move |_| {
+            let ui = ui.clone();
+            let session = Rc::clone(&session);
+            let library_done = Rc::clone(&library_done);
+            timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(700),
+                move || {
+                    let Some(ui) = ui.upgrade() else {
+                        return;
+                    };
+                    let text = ui.get_show_text();
+                    let _ = session
+                        .borrow_mut()
+                        .library_action("show-text", text.as_str());
+                    library_done(&ui);
                 },
             );
         });
@@ -3249,7 +3351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     {
         // Closing the operator window quits FreeShow even while an output is open,
-        // after saving slide text the operator typed but has not saved yet.
+        // after saving text the operator typed but the autosave has not caught yet.
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         control.window().on_close_requested(move || {
@@ -3258,6 +3360,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let lyrics = ui.get_lyrics();
                 if session.tab == "shows" && session.lyrics() != lyrics.as_str() {
                     session.save_lyrics(lyrics.as_str());
+                }
+                if ui.get_text_mode() {
+                    let _ = session.library_action("show-text", ui.get_show_text().as_str());
                 }
             }
             let _ = slint::quit_event_loop();

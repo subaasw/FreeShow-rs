@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Operator, output and stage windows. Compiled by build.rs (slint-build).
 
-import { LineEdit, Palette, Slider, TextEdit } from "std-widgets.slint";
+import { ComboBox, LineEdit, Palette, Slider, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow } from "widgets.slint";
 import { SettingsPanel, SettingsData, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
 
@@ -130,6 +130,19 @@ export component ControlWindow inherits Window {
     callback add-to-project();
     callback create-show();
     callback add-slide();
+    // One callback for library edits: rename/duplicate/delete shows, slide order, projects.
+    callback library-action(string, string);
+    callback show-text-edited(string);
+    in property <string> show-name;
+    in-out property <string> show-text;
+    in-out property <bool> text-mode: false;
+    out property <bool> text-focused: show-editor.has-focus;
+    in property <string> notice;
+    in property <bool> can-restore;
+    in property <[string]> project-choices;
+    in property <int> project-choice;
+    property <bool> confirm-show-delete: false;
+    property <bool> confirm-project-delete: false;
     callback create-project();
     callback search(string);
     callback set-volume(float);
@@ -150,6 +163,15 @@ export component ControlWindow inherits Window {
         { id: "rss", label: "RSS", short: "R" },
         { id: "functions", label: "Functions", short: "F" },
     ];
+
+    Timer {
+        interval: 3s;
+        running: root.confirm-show-delete || root.confirm-project-delete;
+        triggered => {
+            root.confirm-show-delete = false;
+            root.confirm-project-delete = false;
+        }
+    }
 
     forward-focus: window-keys;
     window-keys := FocusScope {
@@ -277,26 +299,47 @@ export component ControlWindow inherits Window {
                             vertical-alignment: center;
                         }
                         Rectangle { horizontal-stretch: 1; background: root.primary; }
-                        HeaderButton {
-                            label: "Show";
+                        if root.active-tab == "shows" && root.show-name != "": LineEdit {
+                            width: 200px;
+                            height: 30px;
+                            text: root.show-name;
+                            placeholder-text: "Show name";
+                            accepted(value) => { root.library-action("rename-show", value); }
+                        }
+                        if root.active-tab == "shows": HeaderButton {
+                            label: "New show";
                             accent: root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-color;
                             clicked => { root.create-show(); }
                         }
-                        HeaderButton {
-                            label: "Slide";
+                        if root.active-tab == "shows" && root.show-name != "": HeaderButton {
+                            label: "Duplicate";
                             accent: root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-color;
-                            clicked => { root.add-slide(); }
+                            clicked => { root.library-action("duplicate-show", ""); }
                         }
-                        HeaderButton {
-                            label: "Save";
-                            accent: root.primary-lighter;
+                        if root.active-tab == "shows" && root.show-name != "": HeaderButton {
+                            label: root.confirm-show-delete ? "Confirm" : "Delete";
+                            accent: root.confirm-show-delete ? #c0392b : root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-color;
-                            clicked => { root.save-lyrics(root.lyrics); }
+                            clicked => {
+                                if (root.confirm-show-delete) {
+                                    root.confirm-show-delete = false;
+                                    root.library-action("delete-show", "");
+                                } else {
+                                    root.confirm-show-delete = true;
+                                }
+                            }
+                        }
+                        if root.active-tab == "shows" && root.show-name != "": HeaderButton {
+                            label: root.text-mode ? "Slide text" : "Show text";
+                            accent: root.text-mode ? root.accent : root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-mode ? root.accent-text : root.text-color;
+                            clicked => { root.text-mode = !root.text-mode; }
                         }
                         Slider {
                             width: 120px;
@@ -327,27 +370,40 @@ export component ControlWindow inherits Window {
                 HorizontalLayout {
                     vertical-stretch: 1;
                     spacing: 0;
-                    Flickable {
+                    VerticalLayout {
                         width: root.slides-columns > 1 ? 360px : 280px;
-                        VerticalLayout {
-                            alignment: start;
-                            spacing: 2px;
-                            for row in root.slide-grid: HorizontalLayout {
+                        spacing: 4px;
+                        Flickable {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
                                 spacing: 2px;
-                                for slide in row.items: ListRow {
-                                    width: ((root.slides-columns > 1 ? 360px : 280px) / root.slides-columns);
-                                    label: slide.label;
-                                    active: root.selected-slide == slide.index;
-                                    accent: root.accent;
-                                    text-color: root.text-color;
-                                    accent-text: root.accent-text;
-                                    has-color: slide.has-color;
-                                    full-color: root.full-colors;
-                                    group-color: slide.group-color;
-                                    group-text: slide.group-text;
-                                    clicked => { root.choose-slide(slide.index); }
+                                for row in root.slide-grid: HorizontalLayout {
+                                    spacing: 2px;
+                                    for slide in row.items: ListRow {
+                                        width: ((root.slides-columns > 1 ? 360px : 280px) / root.slides-columns);
+                                        label: slide.label;
+                                        active: root.selected-slide == slide.index;
+                                        accent: root.accent;
+                                        text-color: root.text-color;
+                                        accent-text: root.accent-text;
+                                        has-color: slide.has-color;
+                                        full-color: root.full-colors;
+                                        group-color: slide.group-color;
+                                        group-text: slide.group-text;
+                                        clicked => { root.choose-slide(slide.index); }
+                                    }
                                 }
                             }
+                        }
+                        if root.active-tab == "shows" && root.show-name != "": HorizontalLayout {
+                            padding: 4px;
+                            spacing: 4px;
+                            BoxButton { label: "Add"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-slide(); } }
+                            BoxButton { label: "Copy"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("duplicate-slide", ""); } }
+                            BoxButton { label: "Up"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-up", ""); } }
+                            BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-down", ""); } }
+                            BoxButton { label: "Delete"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("delete-slide", ""); } }
                         }
                     }
                     VerticalLayout {
@@ -388,12 +444,28 @@ export component ControlWindow inherits Window {
                             text-color: root.text-color;
                             set(key, value) => { root.inspector-set(key, value); }
                         }
-                        TextEdit {
+                        if !root.text-mode: TextEdit {
                             text <=> root.lyrics;
                             min-height: 160px;
                             vertical-stretch: 1;
                             wrap: word-wrap;
                             edited(text) => { root.lyrics-edited(text); }
+                        }
+                        show-editor := TextEdit {
+                            visible: root.text-mode;
+                            max-height: root.text-mode ? 100000px : 0px;
+                            text <=> root.show-text;
+                            min-height: root.text-mode ? 260px : 0px;
+                            vertical-stretch: root.text-mode ? 1 : 0;
+                            wrap: word-wrap;
+                            edited(text) => { root.show-text-edited(text); }
+                        }
+                        if root.text-mode: Text {
+                            text: "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
+                            color: root.text-color;
+                            opacity: 0.7;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
                         }
                         if root.spelling != "": Text {
                             text: root.spelling;
@@ -412,11 +484,21 @@ export component ControlWindow inherits Window {
                     padding: 12px;
                     spacing: 8px;
                     alignment: start;
-                    Text {
+                    if root.project-names.length == 0 && root.project-title == "Project": Text {
                         text: root.project-title;
                         color: root.text-color;
                         font-size: 16px * OperatorStyle.font-scale;
                         font-weight: 700;
+                    }
+                    if root.project-choices.length > 1: ComboBox {
+                        model: root.project-choices;
+                        current-index: root.project-choice;
+                        selected(value) => { root.library-action("open-project", "\{self.current-index}"); }
+                    }
+                    if root.project-title != "Project" || root.project-names.length > 0: LineEdit {
+                        text: root.project-title;
+                        placeholder-text: "Project name";
+                        accepted(value) => { root.library-action("rename-project", value); }
                     }
                     HorizontalLayout {
                         spacing: 6px;
@@ -424,6 +506,24 @@ export component ControlWindow inherits Window {
                         BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.move-project(1); } }
                         BoxButton { label: "Add"; accent: root.accent; text-color: root.text-color; accent-text: root.accent-text; clicked => { root.add-to-project(); } }
                         BoxButton { label: "New"; accent: root.accent; text-color: root.text-color; accent-text: root.accent-text; clicked => { root.create-project(); } }
+                    }
+                    if root.project-title != "Project" || root.project-names.length > 0: HorizontalLayout {
+                        spacing: 6px;
+                        BoxButton { label: "Remove item"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("remove-project-item", ""); } }
+                        BoxButton {
+                            label: root.confirm-project-delete ? "Confirm" : "Delete project";
+                            accent: root.confirm-project-delete ? #c0392b : root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => {
+                                if (root.confirm-project-delete) {
+                                    root.confirm-project-delete = false;
+                                    root.library-action("delete-project", "");
+                                } else {
+                                    root.confirm-project-delete = true;
+                                }
+                            }
+                        }
                     }
                     if root.project-names.length == 0: Text {
                         text: "No project open";
@@ -639,12 +739,20 @@ export component ControlWindow inherits Window {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: root.import-status == "" ? root.data-path : root.import-status;
+                    text: root.import-status != "" ? root.import-status : (root.notice != "" ? root.notice : root.data-path);
                     overflow: elide;
                     horizontal-stretch: 1;
                     color: root.text-color;
                     font-size: 12px * OperatorStyle.font-scale;
                     vertical-alignment: center;
+                }
+                if root.can-restore: HeaderButton {
+                    height: 24px;
+                    label: "Restore";
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.library-action("restore-show", ""); }
                 }
                 if root.import-running: HeaderButton {
                     label: "Cancel import";

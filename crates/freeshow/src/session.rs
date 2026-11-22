@@ -14,6 +14,7 @@ use freeshow_data::{
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 
+mod library_edit;
 mod panels;
 use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
@@ -160,6 +161,10 @@ pub struct Session {
     metronome_started: Option<std::time::Instant>,
     pub metronome_beat: u32,
     history: Vec<EditSnapshot>,
+    /// Last library action result, shown in the status bar.
+    pub notice: String,
+    /// Shows deleted this session, newest last, for Restore.
+    deleted_shows: Vec<ShowFile>,
     redo: Vec<EditSnapshot>,
     pub focus_mode: bool,
     pub guide_visible: bool,
@@ -374,6 +379,8 @@ impl Session {
             metronome_started: None,
             metronome_beat: 0,
             history: Vec::new(),
+            notice: String::new(),
+            deleted_shows: Vec::new(),
             redo: Vec::new(),
             focus_mode: false,
             guide_visible: false,
@@ -475,10 +482,7 @@ impl Session {
         let mut warnings = Vec::new();
         let projects =
             take(library.load_projects(), &mut warnings).unwrap_or_else(ProjectsFile::empty);
-        let project_id = projects
-            .projects()
-            .first()
-            .map(|project| project.id.clone());
+        let project_id = library_edit::startup_project(&projects, &root);
         let template_catalog =
             take(library.load_templates(), &mut warnings).unwrap_or_else(Catalog::empty);
         let templates = template_catalog.names();
@@ -547,6 +551,8 @@ impl Session {
             metronome_started: None,
             metronome_beat: 0,
             history: Vec::new(),
+            notice: String::new(),
+            deleted_shows: Vec::new(),
             redo: Vec::new(),
             focus_mode,
             guide_visible,
@@ -4055,7 +4061,7 @@ impl Session {
         let mut show = ShowFile::blank(&id, &name);
         let path = Library::open(&root)
             .shows_dir()
-            .join(format!("{name}.show"));
+            .join(format!("{}.show", library_edit::show_file_name(&name)));
         if show.save(&path).is_err() {
             return false;
         }
@@ -4100,7 +4106,7 @@ impl Session {
         );
         let path = Library::open(&root)
             .shows_dir()
-            .join(format!("{name}.show"));
+            .join(format!("{}.show", library_edit::show_file_name(&name)));
         if show.save(&path).is_err() {
             return false;
         }
@@ -4200,6 +4206,7 @@ impl Session {
         }
         self.project_id = Some(id);
         self.project_item = 0;
+        self.remember_project();
         true
     }
 
@@ -5051,6 +5058,7 @@ fn slide_label_with_group(slide: &freeshow_data::SlideView, group: Option<&str>)
                 format!("{group}: {text}")
             }
         }
+        _ if text.is_empty() => "(empty slide)".to_string(),
         _ => text.to_string(),
     }
 }
