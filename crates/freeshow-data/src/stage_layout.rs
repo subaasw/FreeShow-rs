@@ -43,6 +43,24 @@ pub struct StageClockOptions {
     pub date_format: String,
 }
 
+/// Slide tracker options stored on a FreeShow stage item as `tracker`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageTrackerOptions {
+    /// `number` ("2 / 5") or `bar` (a progress bar); FreeShow also has `group` and `project`.
+    pub kind: String,
+    /// Bar colour such as `#F0008C`; empty uses the theme accent.
+    pub accent: String,
+}
+
+impl Default for StageTrackerOptions {
+    fn default() -> Self {
+        Self {
+            kind: "number".into(),
+            accent: String::new(),
+        }
+    }
+}
+
 impl Default for StageClockOptions {
     fn default() -> Self {
         Self {
@@ -221,6 +239,7 @@ pub struct StageItemSpec {
     pub url: Option<String>,
     pub chart: Option<ChartItem>,
     pub clock: StageClockOptions,
+    pub tracker: StageTrackerOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,16 +452,23 @@ fn merge_item_options(
     item: &mut serde_json::Map<String, Value>,
     modeled: &serde_json::Map<String, Value>,
 ) {
-    if let Some(Value::Object(clock)) = modeled.get("clock") {
+    for group in ["clock", "tracker"] {
+        let Some(Value::Object(fresh)) = modeled.get(group) else {
+            continue;
+        };
         let target = item
-            .entry("clock")
+            .entry(group)
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         if !target.is_object() {
             *target = Value::Object(serde_json::Map::new());
         }
         if let Some(target) = target.as_object_mut() {
-            for (key, value) in clock {
+            for (key, value) in fresh {
                 target.insert(key.clone(), value.clone());
+            }
+            // An accent cleared in the editor goes back to the theme colour.
+            if group == "tracker" && !fresh.contains_key("accent") {
+                target.remove("accent");
             }
         }
     }
@@ -497,6 +523,13 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
                     "dateFormat": item.clock.date_format,
                 }),
             );
+        }
+        if item.kind == StageItemKind::SlideTracker {
+            let mut tracker = serde_json::json!({ "type": item.tracker.kind });
+            if !item.tracker.accent.is_empty() {
+                tracker["accent"] = Value::String(item.tracker.accent.clone());
+            }
+            object.insert("tracker".into(), tracker);
         }
         if let Some(timer) = &item.timer_id {
             object.insert("timer".into(), serde_json::json!({ "id": timer }));
@@ -704,6 +737,19 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                     })
                     .to_string(),
             },
+            tracker: StageTrackerOptions {
+                kind: item_value
+                    .pointer("/tracker/type")
+                    .and_then(Value::as_str)
+                    .filter(|kind| !kind.is_empty())
+                    .unwrap_or("number")
+                    .to_string(),
+                accent: item_value
+                    .pointer("/tracker/accent")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
         });
     }
     if items.is_empty() {
@@ -764,6 +810,7 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         url: None,
         chart: None,
         clock: StageClockOptions::default(),
+        tracker: StageTrackerOptions::default(),
     }
 }
 
@@ -907,8 +954,9 @@ mod tests {
               "styled":{"type":"text","style":"","lines":[{"align":"","text":[{"value":"Hi","style":"color:red;"}]}]},
               "c":{"type":"clock","clock":{"seconds":true,"extra":"keep"},"style":""},
               "t":{"type":"timer","style":""},
-              "m":{"type":"media","src":"old.png","flipX":true,"style":""}
-            },"itemOrder":["next","styled","c","t","m"]}}"##,
+              "m":{"type":"media","src":"old.png","flipX":true,"style":""},
+              "tr":{"type":"slide_tracker","tracker":{"type":"number","oneLetter":true},"style":""}
+            },"itemOrder":["next","styled","c","t","m","tr"]}}"##,
         )
         .unwrap();
         let mut layout = load_stage_file(&path);
@@ -921,6 +969,8 @@ mod tests {
         layout.items[3].timer_id = Some("sermon".into());
         layout.items[4].src = Some("Media/bg.mp4".into());
         layout.items[4].fit = Some("cover".into());
+        layout.items[5].tracker.kind = "bar".into();
+        layout.items[5].tracker.accent = "#00ff00".into();
         write_stage_layout(&path, &layout).unwrap();
         let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let items = &saved["default"]["items"];
@@ -937,6 +987,9 @@ mod tests {
         assert_eq!(items["m"]["src"], "Media/bg.mp4");
         assert_eq!(items["m"]["fit"], "cover");
         assert_eq!(items["m"]["flipX"], true);
+        assert_eq!(items["tr"]["tracker"]["type"], "bar");
+        assert_eq!(items["tr"]["tracker"]["accent"], "#00ff00");
+        assert_eq!(items["tr"]["tracker"]["oneLetter"], true);
         let mut layout = load_stage_file(&path);
         assert_eq!(layout.items[0].offset, 1);
         assert!(!layout.items[2].clock.seconds);

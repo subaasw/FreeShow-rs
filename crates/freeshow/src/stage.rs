@@ -245,6 +245,12 @@ pub fn paint_stage_at(
                                 .filter(|url| !url.is_empty())
                                 .map(|url| freeshow_output::web_preview(url, 800, 450))
                         }),
+                    StageItemKind::SlideTracker if item.tracker.kind == "bar" => {
+                        fit = Fit::Fill;
+                        index.filter(|_| !slides.is_empty()).map(|index| {
+                            progress_bar(index + 1, slides.len(), &item.tracker.accent)
+                        })
+                    }
                     StageItemKind::Chart => item.chart.as_ref().and_then(|chart| {
                         let points: Vec<_> = chart
                             .samples()
@@ -452,6 +458,31 @@ fn slide_at(slides: &[StageSlide], index: Option<usize>, offset: i64) -> Option<
     slides.get(index?.checked_add_signed(isize::try_from(offset).ok()?)?)
 }
 
+/// A slide tracker drawn as a bar, `done` of `total` filled with the accent colour.
+fn progress_bar(done: usize, total: usize, accent: &str) -> Raster {
+    const WIDTH: usize = 400;
+    let fill = parse_color(accent).unwrap_or(Rgba {
+        r: 0xF0,
+        g: 0x00,
+        b: 0x8C,
+        a: 255,
+    });
+    let filled = WIDTH * done.min(total) / total.max(1);
+    let mut rgba = Vec::with_capacity(WIDTH * 4);
+    for x in 0..WIDTH {
+        if x < filled {
+            rgba.extend_from_slice(&[fill.r, fill.g, fill.b, fill.a]);
+        } else {
+            rgba.extend_from_slice(&[255, 255, 255, 50]);
+        }
+    }
+    Raster {
+        width: WIDTH as u32,
+        height: 1,
+        rgba,
+    }
+}
+
 fn tracker_text(slides: &[StageSlide], index: Option<usize>) -> Vec<String> {
     let Some(index) = index.filter(|_| !slides.is_empty()) else {
         return Vec::new();
@@ -591,6 +622,7 @@ mod tests {
             url: None,
             chart: None,
             clock: StageClockOptions::default(),
+            tracker: freeshow_data::StageTrackerOptions::default(),
         }
     }
 
@@ -959,5 +991,16 @@ mod tests {
             Some("PTZ Front")
         );
         assert_eq!(resolve_camera_name("Lobby", &available), None);
+    }
+
+    #[test]
+    fn a_progress_bar_tracker_fills_its_share_of_the_slides() {
+        let bar = progress_bar(1, 4, "#00ff00");
+        assert_eq!((bar.width, bar.height), (400, 1));
+        assert_eq!(&bar.rgba[..4], &[0, 255, 0, 255]);
+        assert_eq!(&bar.rgba[99 * 4..100 * 4], &[0, 255, 0, 255]);
+        assert_eq!(&bar.rgba[100 * 4..101 * 4], &[255, 255, 255, 50]);
+        let themed = progress_bar(4, 4, "");
+        assert_eq!(&themed.rgba[399 * 4..], &[0xF0, 0x00, 0x8C, 255]);
     }
 }

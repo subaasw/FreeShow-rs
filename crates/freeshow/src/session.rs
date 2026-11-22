@@ -6356,6 +6356,7 @@ impl Session {
             url: None,
             chart: None,
             clock: freeshow_data::StageClockOptions::default(),
+            tracker: freeshow_data::StageTrackerOptions::default(),
         });
         self.save_stage_layout().then_some(id)
     }
