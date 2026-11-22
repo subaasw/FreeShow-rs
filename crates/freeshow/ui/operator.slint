@@ -421,6 +421,16 @@ export component ControlWindow inherits Window {
                                 group-text: slide.group-text;
                                 clicked => { window-keys.focus(); root.choose-slide(slide.index); }
                             }
+                            if root.slide-cards.length == 0 && root.active-tab != "scripture": Text {
+                                x: 12px;
+                                y: 12px;
+                                width: slides-flick.width - 24px;
+                                wrap: word-wrap;
+                                color: root.text-color;
+                                opacity: 0.6;
+                                font-size: 13px * OperatorStyle.font-scale;
+                                text: "Open a show from the library below or the project on the right. Its slides appear here.";
+                            }
                         }
                         if root.editing: HorizontalLayout {
                             padding: 4px;
@@ -799,7 +809,8 @@ export component ControlWindow inherits Window {
             }
         }
         if !root.focus-mode: Rectangle {
-            min-height: min(root.drawer-height * 1px, 120px);
+            // The library keeps a usable share of short windows instead of the rail squeezing it.
+            min-height: min(root.drawer-height * 1px, max(120px, root.height * 0.25));
             preferred-height: root.drawer-height * 1px;
             max-height: root.drawer-height * 1px;
             background: root.primary;
