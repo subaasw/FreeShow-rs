@@ -251,8 +251,15 @@ pub(super) fn resolve_standalone_media(show: &mut ShowFile, source: &std::path::
 
 fn text_item(element: &wire::Element) -> Option<Value> {
     let text = element.text.as_ref().filter(|_| !element.hidden)?;
-    let content = rtf(&text.rtf);
-    if content.trim().is_empty() {
+    let content = String::from_utf8_lossy(&text.rtf);
+    let rich = content
+        .trim_start()
+        .starts_with("{\\rtf")
+        .then(|| super::rtf::decode(&content));
+    if rich.as_ref().map_or_else(
+        || content.trim().is_empty(),
+        |rtf| rtf.plain_text().trim().is_empty(),
+    ) {
         return None;
     }
     let mut style = element
@@ -277,6 +284,7 @@ fn text_item(element: &wire::Element) -> Option<Value> {
     };
     style.push_str(&format!("align-items:{vertical};"));
     let mut alignment = "";
+    let (mut underline, mut strike) = (false, false);
     if let Some(attributes) = &text.attributes {
         if let Some(font) = &attributes.font {
             let family = if font.family.is_empty() {
@@ -318,8 +326,8 @@ fn text_item(element: &wire::Element) -> Option<Value> {
                 attributes.kerning.clamp(-500.0, 500.0)
             ));
         }
-        let underline = attributes.underline.as_ref().is_some_and(|d| d.style != 0);
-        let strike = attributes
+        underline = attributes.underline.as_ref().is_some_and(|d| d.style != 0);
+        strike = attributes
             .strikethrough
             .as_ref()
             .is_some_and(|d| d.style != 0);
@@ -330,10 +338,15 @@ fn text_item(element: &wire::Element) -> Option<Value> {
             _ => {}
         }
     }
-    Some(json!({
-        "style":style,
-        "lines":content.lines().map(|line| json!({"align":alignment,"text":[{"value":line,"style":""}]})).collect::<Vec<_>>()
-    }))
+    let lines = if let Some(rtf) = rich {
+        rtf.styled_lines(alignment, underline, strike)
+    } else {
+        content
+            .lines()
+            .map(|line| json!({"align":alignment,"text":[{"value":line,"style":""}]}))
+            .collect()
+    };
+    Some(json!({"style":style,"lines":lines}))
 }
 
 fn valid_size(size: &wire::Size) -> bool {
@@ -368,4 +381,55 @@ fn rtf(bytes: &[u8]) -> String {
 
 fn invalid(error: impl std::fmt::Display) -> DataError {
     DataError::Scripture(format!("ProPresenter 7: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imports_mixed_rtf_runs_into_the_existing_propresenter_text_box() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let text = presentation.cues[0].actions[0]
+            .slide
+            .as_mut()
+            .unwrap()
+            .presentation
+            .as_mut()
+            .unwrap()
+            .slide
+            .as_mut()
+            .unwrap()
+            .elements[0]
+            .element
+            .as_mut()
+            .unwrap()
+            .text
+            .as_mut()
+            .unwrap();
+        text.rtf = br"{\rtf1\ansi{\fonttbl{\f0 Arial;}{\f1 Times New Roman;}}{\colortbl;\red255\green0\blue0;}
+\qc\f0\fs48 A {\f1\cf1\b0\i0\ul\strike red \u-10179?\u-8704?}\par\ql\ulnone\strike0 Last}"
+            .to_vec();
+        let show = crate::import::import_show("Mixed.pro", &presentation.encode_to_vec()).unwrap();
+        let verse = &show.ordered_slides()[1];
+        assert_eq!(verse.lines, ["A red 😀", "Last", "Another text box"]);
+        let item = &show.show["slides"][&verse.id]["items"][0];
+        let rows = &item["lines"];
+        assert_eq!(rows[0]["align"], "center");
+        assert_eq!(rows[1]["align"], "left");
+        assert_eq!(
+            rows[0]["text"][0],
+            json!({"value":"A ","style":"font-family:Arial;font-size:24px;"})
+        );
+        assert_eq!(
+            rows[0]["text"][1],
+            json!({"value":"red 😀","style":"font-family:Times New Roman;font-size:24px;color:#ff0000;font-weight:normal;font-style:normal;text-decoration:underline line-through;"})
+        );
+        assert_eq!(rows[1]["text"][0]["value"], "Last");
+        assert_eq!(
+            rows[1]["text"][0]["style"],
+            "font-family:Arial;font-size:24px;text-decoration:none;"
+        );
+    }
 }

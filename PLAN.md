@@ -104,7 +104,8 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 
 - [x] ProPresenter 4–6 XML bundles and their slide-background media.
 - [x] ProPresenter 7 protobuf, arrangements, original text-box geometry, and box-level styling.
-- [ ] ProPresenter 7 mixed RTF styling, non-text graphics, and timeline/action parity.
+- [x] ProPresenter 7 mixed RTF fonts, colors, emphasis, and paragraph alignment.
+- [ ] ProPresenter 7 non-text graphics, remaining RTF controls, and timeline/action parity.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.
 - [x] ChurchApps service-plan lesson feeds and add-ons with downloadable media.
 - [ ] Stream-only lesson media without a direct downloadable URL.
