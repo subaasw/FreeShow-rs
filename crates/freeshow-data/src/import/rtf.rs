@@ -314,6 +314,16 @@ impl Reader {
             }
             "par" | "line" if self.state.destination == Body => self.emit(b'\n' as u16),
             "tab" if self.state.destination == Body => self.emit(b'\t' as u16),
+            "emdash" if self.state.destination == Body => self.emit('—' as u16),
+            "endash" if self.state.destination == Body => self.emit('–' as u16),
+            "lquote" if self.state.destination == Body => self.emit('‘' as u16),
+            "rquote" if self.state.destination == Body => self.emit('’' as u16),
+            "ldblquote" if self.state.destination == Body => self.emit('“' as u16),
+            "rdblquote" if self.state.destination == Body => self.emit('”' as u16),
+            "bullet" if self.state.destination == Body => self.emit('•' as u16),
+            "emspace" if self.state.destination == Body => self.emit('\u{2003}' as u16),
+            "enspace" if self.state.destination == Body => self.emit('\u{2002}' as u16),
+            "qmspace" if self.state.destination == Body => self.emit('\u{2005}' as u16),
             "f" if self.state.destination == FontTable => {
                 self.state.format.font = number;
                 self.font_name.clear();
@@ -402,8 +412,12 @@ pub(super) fn decode(text: &str) -> Document {
         let ch = chars[index];
         index += 1;
         match ch {
-            '{' => reader.stack.push(reader.state),
+            '{' => {
+                reader.fallback = 0;
+                reader.stack.push(reader.state);
+            }
             '}' => {
+                reader.fallback = 0;
                 if let Some(state) = reader.stack.pop() {
                     reader.state = state;
                 }
@@ -418,6 +432,10 @@ pub(super) fn decode(text: &str) -> Document {
                 }
                 if !next.is_ascii_alphabetic() {
                     index += 1;
+                    if reader.fallback > 0 {
+                        reader.fallback -= 1;
+                        continue;
+                    }
                     let literal = match next {
                         '*' => {
                             reader.state.destination = Destination::Ignore;
@@ -457,6 +475,9 @@ pub(super) fn decode(text: &str) -> Document {
                     index = index
                         .saturating_add(number.unwrap_or(0).max(0) as usize)
                         .min(chars.len());
+                    reader.fallback = reader.fallback.saturating_sub(1);
+                } else if reader.fallback > 0 {
+                    reader.fallback -= 1;
                 } else {
                     reader.control(&word, number);
                 }
@@ -547,6 +568,25 @@ mod tests {
     fn unicode_fallback_counts_escaped_bytes_before_decoding() {
         let japanese = decode(r"{\rtf1\ansicpg932\uc2\u26085\'93\'fa\'96\'7b}");
         assert_eq!(japanese.plain_text(), "日本");
+    }
+
+    #[test]
+    fn unicode_fallback_counts_controls_and_ends_at_group_boundaries() {
+        let document = decode(r"{\rtf1\uc4\u8212\emdash\b\*\bin3 {\}A{\u8217}B\u8216{C}D}");
+        assert_eq!(document.plain_text(), "—A’B‘CD");
+        assert_eq!(
+            document.styled_lines("", false, false)[0]["text"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn imports_typographic_spacing() {
+        let document = decode(r"{\rtf1 A\emspace B\enspace C\qmspace D}");
+        assert_eq!(document.plain_text(), "A\u{2003}B\u{2002}C\u{2005}D");
     }
 
     #[test]

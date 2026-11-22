@@ -113,6 +113,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 protobuf, arrangements, original text-box geometry, and box-level styling.
 - [x] ProPresenter 7 mixed RTF fonts, colors, emphasis, paragraph alignment, all caps, and letter spacing.
 - [x] ProPresenter RTF hex escapes decoded with their document code page and font charset.
+- [x] ProPresenter RTF typographic punctuation and spacing, including Unicode fallback encoded as control words.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
 - [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
 - [x] ProPresenter 7 timed next-slide, loop-to-start, and specific-cue jumps within an arrangement, including slides with background media.
