@@ -232,7 +232,9 @@ export component SlideCard inherits Rectangle {
     in property <color> group-text: #f0f0ff;
     callback clicked();
     border-radius: OperatorStyle.chrome-radius;
-    background: root.live ? root.accent : (root.active ? (root.has-thumb ? #ffffffb0 : root.accent) : (pointer.has-hover ? OperatorStyle.hover : #00000030));
+    background: root.live ? root.accent : (root.active ? (root.has-thumb ? #ffffffb0 : #ffffff28) : (pointer.has-hover ? OperatorStyle.hover : #00000030));
+    border-width: root.active && !root.live && !root.has-thumb ? 1px : 0px;
+    border-color: root.accent;
     if root.has-thumb: Rectangle {
         x: 3px;
         y: 3px;
@@ -277,12 +279,28 @@ export component SlideCard inherits Rectangle {
         }
         Text {
             x: 10px;
-            width: parent.width - 14px;
+            width: parent.width - (root.live && !root.has-thumb ? 56px : 14px);
             text: root.number > 0 ? root.number + "  " + root.label : root.label;
-            color: (root.live || root.active) && !root.has-thumb ? root.accent-text : (root.has-color ? root.group-text : root.text-color);
+            color: root.live && !root.has-thumb ? root.accent-text : (root.has-color ? root.group-text : root.text-color);
             font-size: 12px * OperatorStyle.font-scale;
             vertical-alignment: center;
             overflow: elide;
+        }
+    }
+    if root.live && !root.has-thumb: Rectangle {
+        x: parent.width - 46px;
+        y: (parent.height - 16px) / 2;
+        width: 38px;
+        height: 16px;
+        border-radius: 3px;
+        background: #c0392b;
+        Text {
+            text: "LIVE";
+            color: #ffffff;
+            font-size: 10px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
     }
     pointer := TouchArea {
