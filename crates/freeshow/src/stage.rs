@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use freeshow_data::{
@@ -15,6 +16,46 @@ pub struct StageSlide {
     pub notes: String,
 }
 
+#[derive(Default)]
+pub struct StageMedia {
+    files: HashMap<String, StageFile>,
+}
+
+#[derive(Default)]
+struct StageFile {
+    picture: Option<Raster>,
+    video: Option<freeshow_media::VideoPlayer>,
+}
+
+impl StageMedia {
+    pub fn update<'a>(&mut self, root: Option<&Path>, sources: impl Iterator<Item = &'a str>) {
+        let sources: HashSet<_> = sources.collect();
+        self.files.retain(|src, _| sources.contains(src.as_str()));
+        for src in sources {
+            let file = self.files.entry(src.to_owned()).or_insert_with(|| {
+                let Some(path) = crate::live::resolve_media(root, src) else {
+                    return StageFile::default();
+                };
+                if freeshow_media::media_kind(&path) == freeshow_media::MediaKind::Video {
+                    let video = freeshow_media::VideoPlayer::open_with_network(&path, &[], &[]).ok();
+                    StageFile { picture: None, video }
+                } else {
+                    let picture = std::fs::read(path).ok()
+                        .and_then(|bytes| freeshow_output::decode_image(&bytes));
+                    StageFile { picture, video: None }
+                }
+            });
+            if let Some(frame) = file.video.as_mut().and_then(|player| player.try_next_frame()) {
+                file.picture = Some(frame);
+            }
+        }
+    }
+
+    fn picture(&self, src: &str) -> Option<Raster> {
+        self.files.get(src)?.picture.clone()
+    }
+}
+
 /// Values the stage boxes need that are not part of the layout.
 #[derive(Default)]
 pub struct StageContext<'a> {
@@ -22,10 +63,11 @@ pub struct StageContext<'a> {
     pub timers: &'a [(String, String)],
     /// Variable values, keyed by raw id and by name.
     pub variables: &'a [(String, String)],
-    /// Library root, used to load media boxes.
-    pub root: Option<&'a Path>,
     /// The active audience output id, saved name, and composited picture.
     pub audience: Option<(&'a str, &'a str, &'a Raster)>,
+    pub media: Option<&'a StageMedia>,
+    pub current_background: Option<(&'a Raster, Fit, bool, bool)>,
+    pub still_backgrounds: Option<&'a HashMap<i64, String>>,
 }
 
 pub fn paint_stage(
@@ -48,6 +90,9 @@ pub fn paint_stage(
         .filter_map(|item| {
             let mut lines = lines_for(item, slides, index, clock, timer, context);
             let output_preview = item.kind == StageItemKind::CurrentOutput;
+            let mut fit = item.fit.as_deref().map(Fit::named).unwrap_or(Fit::Contain);
+            let mut flip_x = item.flip_x;
+            let mut flip_y = item.flip_y;
             let image = if output_preview {
                 let (id, name, image) = context.audience?;
                 if item
@@ -60,21 +105,37 @@ pub fn paint_stage(
                 if item.show_output_label && !name.is_empty() {
                     lines.push(name.to_owned());
                 }
+                fit = Fit::Contain;
                 Some(image.clone())
-            } else if item.kind == StageItemKind::Media {
-                item.src
-                    .as_deref()
-                    .and_then(|src| crate::live::load_image(context.root, src))
-            } else if item.kind == StageItemKind::QrCode {
-                item.qr.as_ref().and_then(|qr| {
-                    freeshow_output::qr_image(&qr.text, &qr.color, &qr.background)
-                })
             } else {
-                None
+                match item.kind {
+                    StageItemKind::Media => {
+                        item.src.as_deref().and_then(|src| context.media?.picture(src))
+                    }
+                    StageItemKind::QrCode => {
+                        fit = Fit::Contain;
+                        item.qr.as_ref().and_then(|qr| {
+                            freeshow_output::qr_image(&qr.text, &qr.color, &qr.background)
+                        })
+                    }
+                    StageItemKind::Slide if item.include_media && item.offset == 0 => {
+                        context.current_background.map(|(image, audience_fit, x, y)| {
+                            fit = audience_fit;
+                            flip_x = x;
+                            flip_y = y;
+                            image.clone()
+                        })
+                    }
+                    StageItemKind::Slide if item.include_media => context
+                        .still_backgrounds
+                        .and_then(|backgrounds| backgrounds.get(&item.offset))
+                        .and_then(|src| context.media?.picture(src)),
+                    _ => None,
+                }
             };
             if image.is_some() && !output_preview {
                 lines.clear();
-            } else if item.kind == StageItemKind::Media {
+            } else if image.is_none() && item.kind == StageItemKind::Media {
                 lines = vec![media_label(item)];
             }
             if lines.iter().all(|line| line.is_empty()) && image.is_none() {
@@ -111,11 +172,7 @@ pub fn paint_stage(
                     })
                     .collect(),
                 image,
-                fit: if output_preview || item.kind == StageItemKind::QrCode {
-                    Fit::Contain
-                } else {
-                    Fit::Fill
-                },
+                fit,
                 line_bg: output_preview.then_some(Rgba {
                     r: 0,
                     g: 0,
@@ -124,8 +181,8 @@ pub fn paint_stage(
                 }),
                 line_gap: 0.0,
                 line_radius: 0.0,
-                flip_x: false,
-                flip_y: false,
+                flip_x,
+                flip_y,
                 opacity: 1.0,
                 grayscale: 0.0,
                 invert: 0.0,
@@ -346,6 +403,10 @@ mod tests {
             src: None,
             output_source: None,
             show_output_label: false,
+            include_media: false,
+            fit: None,
+            flip_x: false,
+            flip_y: false,
             qr: None,
             clock: StageClockOptions::default(),
         }

@@ -182,6 +182,32 @@ pub fn stage_frame(session: &Session) -> Frame {
             .unwrap_or_default();
         (slides, session.slide_index)
     };
+    let root = session.root.as_deref();
+    let mut still_backgrounds = std::collections::HashMap::new();
+    if session.tab != "scripture" && let Some(index) = index
+        && let Some(show) = session.show_index.and_then(|slot| session.shows.get(slot))
+    {
+        for item in &session.stage.items {
+            if item.kind != freeshow_data::StageItemKind::Slide || !item.include_media || item.offset == 0 {
+                continue;
+            }
+            let Some(target) = i64::try_from(index).ok()
+                .and_then(|index| index.checked_add(item.offset))
+                .and_then(|index| usize::try_from(index).ok())
+            else { continue };
+            if let freeshow_data::SlideBackdrop::Picture { path, .. } = show.backdrop_at(target)
+                && freeshow_media::media_kind(Path::new(&path)) == freeshow_media::MediaKind::Image
+            {
+                still_backgrounds.insert(item.offset, path);
+            }
+        }
+    }
+    let sources = session.stage.items.iter()
+        .filter(|item| item.kind == freeshow_data::StageItemKind::Media)
+        .filter_map(|item| item.src.as_deref())
+        .chain(still_backgrounds.values().map(String::as_str));
+    let mut media = session.stage_media.borrow_mut();
+    media.update(root, sources);
     crate::stage::paint_stage(
         &slides,
         index,
@@ -191,10 +217,14 @@ pub fn stage_frame(session: &Session) -> Frame {
         &crate::stage::StageContext {
             timers: &timers,
             variables: &variables,
-            root: session.root.as_deref(),
+            media: Some(&media),
             audience: audience
                 .as_ref()
                 .map(|(id, name, image)| (id.as_str(), name.as_str(), image)),
+            current_background: session.underlay.as_ref().filter(|_| !session.blanked).map(|image| (
+                image, session.background_fit, session.background_flip_x, session.background_flip_y
+            )),
+            still_backgrounds: Some(&still_backgrounds),
         },
     )
 }
@@ -541,7 +571,7 @@ pub(crate) fn load_image(root: Option<&Path>, src: &str) -> Option<Raster> {
     decode_image(&bytes)
 }
 
-fn resolve_media(root: Option<&Path>, src: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_media(root: Option<&Path>, src: &str) -> Option<PathBuf> {
     let path = PathBuf::from(src);
     if path.is_file() {
         return Some(path);
@@ -646,6 +676,58 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!green.is_empty(), "the styled text did not render");
         assert!(green.iter().all(|(x, y)| (33..590).contains(x) && (45..204).contains(y)));
+    }
+
+    #[test]
+    fn stage_lyrics_can_mirror_the_current_background() {
+        use freeshow_data::StageItemKind;
+        let mut session = Session::empty();
+        session.stage.items.retain(|item| item.kind == StageItemKind::Slide);
+        assert!(!session.stage.items.is_empty());
+        session.stage.items.truncate(1);
+        let box_spec = &mut session.stage.items[0];
+        box_spec.style = "left:0px;top:0px;width:320px;height:180px;".into();
+        box_spec.include_media = true;
+        session.underlay = Some(Raster { width: 16, height: 9, rgba: [255, 0, 0, 255].repeat(144) });
+        let frame = stage_frame(&session);
+        assert_eq!(frame.pixel(80, 45), parse_color("#ff0000").unwrap());
+        assert_ne!(frame.pixel(170, 100), parse_color("#ff0000").unwrap());
+        session.stage.items[0].include_media = false;
+        assert_ne!(stage_frame(&session).pixel(80, 45), parse_color("#ff0000").unwrap());
+    }
+
+    #[test]
+    fn stage_video_boxes_decode_local_clips_without_using_audience_playback() {
+        let root = std::env::temp_dir().join(freeshow_data::new_id());
+        let library = freeshow_data::Library::open(&root);
+        let stage_path = library.stage_path();
+        std::fs::create_dir_all(stage_path.parent().unwrap()).unwrap();
+        std::fs::write(root.join("clip.mp4"),
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4"))
+            .unwrap();
+        std::fs::write(stage_path, r##"{
+            "layout":{"settings":{"color":"#111111"}, "items":{"clip":{"type":"media", "src":"clip.mp4",
+            "style":"left:0px;top:0px;width:320px;height:180px;"}}}
+        }"##).unwrap();
+        let mut session = Session::empty();
+        session.root = Some(root.clone());
+        session.stage = library.load_stage_layout();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let frame = stage_frame(&session);
+            let pixel = frame.pixel(80, 45);
+            if pixel.r < 50 && pixel.g > 100 && pixel.b < 50 {
+                assert_eq!(frame.pixel(180, 100), parse_color("#111111").unwrap());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "stage clip produced no picture");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(session.underlay.is_none());
+        session.stage.items.clear();
+        assert_eq!(stage_frame(&session).pixel(80, 45), parse_color("#111111").unwrap());
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -176,6 +176,7 @@ pub struct Session {
     /// Countdown captured when this slide was shown. A later timer action does not change it.
     timed_seconds: Option<f64>,
     pub stage: StageLayout,
+    pub stage_media: std::cell::RefCell<crate::stage::StageMedia>,
     pub timer_left: u64,
     pub timer_deadline: Option<Instant>,
     pub timers: Vec<NamedTimer>,
@@ -263,6 +264,7 @@ impl Session {
             pending_actions: None,
             timed_seconds: None,
             stage: default_stage(),
+            stage_media: Default::default(),
             timer_left: 300,
             timer_deadline: None,
             timers: vec![NamedTimer::default_countdown()],
@@ -395,6 +397,7 @@ impl Session {
             pending_actions: None,
             timed_seconds: None,
             stage,
+            stage_media: Default::default(),
             timer_left: 300,
             timer_deadline: None,
             timers,
