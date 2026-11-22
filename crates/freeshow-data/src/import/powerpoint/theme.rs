@@ -8,34 +8,147 @@ use super::{Archive, invalid, read_xml, relationships};
 use crate::DataError;
 
 #[derive(Clone)]
-pub(super) enum Color {
-    Rgb(String),
+pub(super) struct Color {
+    value: ColorValue,
+    transforms: Vec<Transform>,
+}
+
+type Rgb = [f64; 3];
+
+#[derive(Clone)]
+enum ColorValue {
+    Rgb(Rgb),
     Scheme(String),
+}
+
+#[derive(Clone, Copy)]
+enum Transform {
+    Tint(f64),
+    Shade(f64),
+    Lightness { scale: f64, offset: f64 },
 }
 
 impl Color {
     pub(super) fn parse(kind: &str, attr: impl FnOnce(&str) -> Option<String>) -> Option<Self> {
         let value = attr(if kind == "sysClr" { "lastClr" } else { "val" })?;
-        match kind {
-            "schemeClr" => Some(Self::Scheme(value)),
+        let value = match kind {
+            "schemeClr" => ColorValue::Scheme(value),
             "sysClr" | "srgbClr"
                 if value.len() == 6 && value.bytes().all(|ch| ch.is_ascii_hexdigit()) =>
             {
-                Some(Self::Rgb(format!("#{value}")))
+                let raw = u32::from_str_radix(&value, 16).ok()?;
+                ColorValue::Rgb([16, 8, 0].map(|bit| f64::from((raw >> bit) & 255) / 255.0))
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        Some(Self {
+            value,
+            transforms: Vec::new(),
+        })
     }
 
     fn in_node(node: Node<'_, '_>) -> Option<Self> {
         let color = node.children().find(Node::is_element)?;
-        // shortcut: solid colors with transforms need DrawingML color math.
-        if color.children().any(|node| node.is_element()) {
-            return None;
-        }
-        Self::parse(color.tag_name().name(), |key| {
+        let mut parsed = Self::parse(color.tag_name().name(), |key| {
             color.attribute(key).map(str::to_owned)
-        })
+        })?;
+        for transform in color.children().filter(Node::is_element) {
+            if !parsed.add_transform(transform.tag_name().name(), transform.attribute("val")) {
+                return None;
+            }
+        }
+        Some(parsed)
+    }
+
+    pub(super) fn add_transform(&mut self, kind: &str, value: Option<&str>) -> bool {
+        let Some(percent) = value.and_then(percentage) else {
+            return false;
+        };
+        let transform = match kind {
+            "tint" if (0.0..=1.0).contains(&percent) => Transform::Tint(percent),
+            "shade" if (0.0..=1.0).contains(&percent) => Transform::Shade(percent),
+            "lum" => Transform::Lightness {
+                scale: 0.0,
+                offset: percent,
+            },
+            "lumMod" => Transform::Lightness {
+                scale: percent,
+                offset: 0.0,
+            },
+            "lumOff" => Transform::Lightness {
+                scale: 1.0,
+                offset: percent,
+            },
+            _ => return false,
+        };
+        self.transforms.push(transform);
+        true
+    }
+
+    pub(super) fn literal(&self) -> Option<String> {
+        self.resolve(|_| None).map(hex)
+    }
+
+    fn resolve(&self, scheme: impl FnOnce(&str) -> Option<Rgb>) -> Option<Rgb> {
+        let mut rgb = match &self.value {
+            ColorValue::Rgb(rgb) => *rgb,
+            ColorValue::Scheme(slot) => scheme(slot)?,
+        };
+        for transform in &self.transforms {
+            rgb = transform.apply(rgb);
+        }
+        Some(rgb)
+    }
+}
+
+fn percentage(value: &str) -> Option<f64> {
+    let (number, divisor) = value
+        .strip_suffix('%')
+        .map_or((value, 100_000.0), |value| (value, 100.0));
+    let parsed = number.parse::<f64>().ok()?;
+    parsed.is_finite().then(|| parsed / divisor)
+}
+
+fn hex(rgb: Rgb) -> String {
+    let [r, g, b] = rgb.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8);
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+impl Transform {
+    fn apply(self, rgb: Rgb) -> Rgb {
+        match self {
+            // DrawingML tint and shade mix with white or black in linear RGB.
+            Self::Tint(factor) => rgb.map(|c| to_srgb(1.0 - (1.0 - to_linear(c)) * factor)),
+            Self::Shade(factor) => rgb.map(|c| to_srgb(to_linear(c) * factor)),
+            Self::Lightness { scale, offset } => {
+                let [r, g, b] = rgb;
+                let light = (r.max(g).max(b) + r.min(g).min(b)) / 2.0;
+                let changed = (light * scale + offset).clamp(0.0, 1.0);
+                let span = 1.0 - (2.0 * light - 1.0).abs();
+                if span == 0.0 {
+                    return [changed; 3];
+                }
+                // Rescale the channels around the new HSL lightness, keeping hue and saturation.
+                let ratio = (1.0 - (2.0 * changed - 1.0).abs()) / span;
+                rgb.map(|c| (changed + (c - light) * ratio).clamp(0.0, 1.0))
+            }
+        }
+    }
+}
+
+fn to_linear(value: f64) -> f64 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn to_srgb(value: f64) -> f64 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -43,7 +156,7 @@ type ColorMap = HashMap<String, String>;
 
 #[derive(Default)]
 struct Theme {
-    colors: ColorMap,
+    colors: HashMap<String, Rgb>,
     fills: Vec<Option<Color>>,
     backgrounds: Vec<Option<Color>>,
 }
@@ -57,7 +170,8 @@ impl Theme {
         };
         if let Some(scheme) = child(elements, "clrScheme") {
             for slot in scheme.children().filter(Node::is_element) {
-                if let Some(Color::Rgb(color)) = Color::in_node(slot) {
+                if let Some(color) = Color::in_node(slot).and_then(|color| color.resolve(|_| None))
+                {
                     theme.colors.insert(slot.tag_name().name().into(), color);
                 }
             }
@@ -125,30 +239,32 @@ impl ThemeReader {
         let Some(theme) = &context.theme else {
             return Ok(None);
         };
-        let resolve = |color: &Color| match color {
-            Color::Rgb(rgb) => Some(rgb.clone()),
-            Color::Scheme(slot) => {
-                let key = context.colors.get(slot).map_or_else(
-                    || match slot.as_str() {
-                        "bg1" => "lt1",
-                        "bg2" => "lt2",
-                        "tx1" => "dk1",
-                        "tx2" => "dk2",
-                        slot => slot,
-                    },
-                    String::as_str,
-                );
-                theme.colors.get(key).cloned()
-            }
+        let resolve = |slot: &str| {
+            let key = context.colors.get(slot).map_or_else(
+                || match slot {
+                    "bg1" => "lt1",
+                    "bg2" => "lt2",
+                    "tx1" => "dk1",
+                    "tx2" => "dk2",
+                    slot => slot,
+                },
+                String::as_str,
+            );
+            theme.colors.get(key).copied()
         };
-        Ok(match style {
-            Some(index) => match theme.style(index) {
-                Some(Color::Scheme(slot)) if slot == "phClr" => color.and_then(resolve),
-                Some(fill) => resolve(fill),
-                None => None,
-            },
-            None => color.and_then(resolve),
-        })
+        let rgb = match style {
+            Some(index) => theme.style(index).and_then(|fill| {
+                fill.resolve(|slot| {
+                    if slot == "phClr" {
+                        color?.resolve(resolve)
+                    } else {
+                        resolve(slot)
+                    }
+                })
+            }),
+            None => color.and_then(|color| color.resolve(resolve)),
+        };
+        Ok(rgb.map(hex))
     }
 
     fn load_xml(

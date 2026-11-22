@@ -291,14 +291,19 @@ fn find_background(
                         (Some("solidFill" | "bgRef"), "srgbClr" | "sysClr" | "schemeClr") => {
                             color = Color::parse(&name, |key| attribute(&element, key));
                         }
-                        (Some("schemeClr"), _)
+                        (Some("srgbClr" | "sysClr" | "schemeClr"), _)
                             if stack.len() >= 2
                                 && matches!(
                                     stack[stack.len() - 2].as_str(),
                                     "solidFill" | "bgRef"
                                 ) =>
                         {
-                            color = None;
+                            let value = attribute(&element, "val");
+                            color = color.and_then(|mut color| {
+                                color
+                                    .add_transform(&name, value.as_deref())
+                                    .then_some(color)
+                            });
                         }
                         (Some("blipFill"), "blip") => {
                             picture = relationship_attr(&element, "embed")
@@ -338,10 +343,12 @@ fn find_background(
                 inset,
             })
             .or(Some(Background::Unsupported))
-    } else if style.is_some() || matches!(color, Some(Color::Scheme(_))) {
+    } else if style.is_none()
+        && let Some(rgb) = color.as_ref().and_then(Color::literal)
+    {
+        Some(Background::Color(rgb))
+    } else if style.is_some() || color.is_some() {
         Some(Background::Theme { style, color })
-    } else if let Some(Color::Rgb(color)) = color {
-        Some(Background::Color(color))
     } else if depth.is_some() {
         Some(Background::Unsupported)
     } else if level < 2 {
@@ -559,6 +566,8 @@ mod tests {
             r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></p:bgPr></p:bg></p:cSld></p:sld>"#,
             r#"<p:sld xmlns:p="p"><p:cSld><p:bg><p:bgRef idx="1"/></p:bg></p:cSld></p:sld>"#,
             r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1001"><a:srgbClr val="112233"/></p:bgRef></p:bg></p:cSld></p:sld>"#,
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1003"><a:srgbClr val="FF0000"><a:lumMod val="50000"/></a:srgbClr></p:bgRef></p:bg></p:cSld></p:sld>"#,
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="FF0000"><a:tint val="50000"/></a:srgbClr></a:solidFill></p:bgPr></p:bg></p:cSld></p:sld>"#,
         ];
         let layout_rel = br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
         let files = archive(&[
@@ -567,11 +576,14 @@ mod tests {
             ("ppt/slides/slide3.xml", slides[2].as_bytes()),
             ("ppt/slides/slide4.xml", slides[3].as_bytes()),
             ("ppt/slides/slide5.xml", slides[4].as_bytes()),
+            ("ppt/slides/slide6.xml", slides[5].as_bytes()),
+            ("ppt/slides/slide7.xml", slides[6].as_bytes()),
             ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide3.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide4.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide5.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide6.xml.rels", layout_rel),
             ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p" xmlns:a="a"><p:clrMapOvr><a:overrideClrMapping bg1="accent1"/></p:clrMapOvr></p:sldLayout>"#),
             ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#),
             ("ppt/slideMasters/slideMaster1.xml", br#"<p:sldMaster xmlns:p="p" xmlns:a="a">
@@ -586,8 +598,11 @@ mod tests {
                     <a:accent2><a:srgbClr val="0066AA"/></a:accent2>
                 </a:clrScheme>
                 <a:fmtScheme>
-                    <a:fillStyleLst><a:solidFill><a:srgbClr val="FF8800"/></a:solidFill></a:fillStyleLst>
-                    <a:bgFillStyleLst><a:gradFill/><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>
+                    <a:fillStyleLst><a:solidFill><a:srgbClr val="FF0000"><a:shade val="50000"/></a:srgbClr></a:solidFill></a:fillStyleLst>
+                    <a:bgFillStyleLst>
+                        <a:gradFill/><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                        <a:solidFill><a:schemeClr val="phClr"><a:lumOff val="50%"/></a:schemeClr></a:solidFill>
+                    </a:bgFillStyleLst>
                 </a:fmtScheme>
             </a:themeElements></a:theme>"#),
         ]);
@@ -596,8 +611,10 @@ mod tests {
         assert_eq!(slides["s1"]["settings"]["color"], "#0066AA");
         assert_eq!(slides["s2"]["settings"]["color"], "#FFFFFF");
         assert_eq!(slides["s3"]["settings"]["color"], "#CC0000");
-        assert_eq!(slides["s4"]["settings"]["color"], "#FF8800");
+        assert_eq!(slides["s4"]["settings"]["color"], "#BC0000");
         assert!(slides["s5"]["settings"]["color"].is_null());
+        assert_eq!(slides["s6"]["settings"]["color"], "#FF8080");
+        assert_eq!(slides["s7"]["settings"]["color"], "#FFBCBC");
     }
 
     #[test]
