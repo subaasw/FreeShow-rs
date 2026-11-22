@@ -76,10 +76,28 @@ pub(super) struct Cue {
     pub uuid: Option<Uuid>,
     #[prost(string, tag = "2")]
     pub name: String,
+    #[prost(enumeration = "CompletionTarget", tag = "3")]
+    pub completion_target: i32,
+    #[prost(enumeration = "CompletionAction", tag = "5")]
+    pub completion_action: i32,
     #[prost(message, repeated, tag = "10")]
     pub actions: Vec<Action>,
     #[prost(bool, tag = "12")]
     pub enabled: bool,
+    #[prost(double, tag = "13")]
+    pub completion_time: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+pub(super) enum CompletionTarget {
+    None = 0,
+    Next = 1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+pub(super) enum CompletionAction {
+    First = 0,
+    AfterTime = 3,
 }
 
 #[derive(Clone, PartialEq, Message)]
