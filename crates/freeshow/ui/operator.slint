@@ -28,6 +28,7 @@ export struct SlideRowData {
 
 export component ControlWindow inherits Window {
     title: "FreeShow";
+    icon: @image-url("../../../assets/freeshow.png");
     in property <string> theme-font-family;
     // Std widgets follow the FreeShow theme: dark palettes get dark inputs.
     in property <bool> dark-chrome: true;
@@ -261,11 +262,12 @@ export component ControlWindow inherits Window {
                     accent-text: root.accent-text;
                     clicked => { root.get-update(); }
                 }
+                // Picking the output screen is an action, not an on/off state, so it stays neutral.
                 HeaderButton {
                     label: root.screen-label;
-                    accent: root.accent;
+                    accent: root.primary-lighter;
                     text-color: root.text-color;
-                    accent-text: root.accent-text;
+                    accent-text: root.text-color;
                     clicked => { root.choose-screen(); }
                 }
                 HeaderButton {
@@ -1162,6 +1164,7 @@ export component OutputWindow inherits Window {
         hotkey(text, ctrl, alt, shift) => { root.hotkey(text, ctrl, alt, shift); }
     }
     title: "FreeShow Output";
+    icon: @image-url("../../../assets/freeshow.png");
     background: #000;
     preferred-width: 960px;
     preferred-height: 540px;
@@ -1182,6 +1185,7 @@ export component StageWindow inherits Window {
         hotkey(text, ctrl, alt, shift) => { root.hotkey(text, ctrl, alt, shift); }
     }
     title: "FreeShow Stage";
+    icon: @image-url("../../../assets/freeshow.png");
     background: #000;
     preferred-width: 960px;
     preferred-height: 540px;
