@@ -5,7 +5,9 @@
 //! feature is enabled.
 
 mod audio;
+mod dsp;
 mod runtime;
+mod stream;
 pub use runtime::{RuntimeStatus, check_runtime};
 mod network;
 mod video;
@@ -14,6 +16,10 @@ pub use network::{network_audio_mix, network_channel};
 
 pub use audio::{
     AudioOutput, AudioPlaybackOptions, Pcm, Playback, apply_volume, decode_audio, output_devices,
+};
+pub use dsp::{AudioEffect, apply_effects, effects_from_value};
+pub use stream::{
+    first_http_url, resolve_playable_path, resolve_stream_page, ytdlp_available, ytdlp_path,
 };
 pub use video::{VideoPlayer, cameras, video_output_devices};
 

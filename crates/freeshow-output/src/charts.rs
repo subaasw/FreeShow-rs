@@ -416,6 +416,180 @@ fn draw_text(raster: &mut Raster, text: &str, x: i32, baseline: i32, font_px: f3
     );
 }
 
+pub fn html_snippet(html: &str, width: u32, height: u32) -> Raster {
+    let width = width.max(160);
+    let height = height.max(90);
+    let mut raster = solid(
+        width,
+        height,
+        Rgba {
+            r: 0x12,
+            g: 0x12,
+            b: 0x18,
+            a: 255,
+        },
+    );
+    let text = strip_html(html);
+    let font = (height as f32 * 0.08).clamp(16.0, 28.0);
+    let mut y = (font * 1.4) as i32;
+    for line in wrap_plain(&text, 48) {
+        if line.is_empty() {
+            y += (font * 0.8) as i32;
+            continue;
+        }
+        draw_text(&mut raster, &line, 16, y, font, Rgba::WHITE);
+        y += (font * 1.25) as i32;
+        if y as u32 + font as u32 > height {
+            break;
+        }
+    }
+    raster
+}
+
+pub fn weather_card(
+    title: &str,
+    temperature: &str,
+    detail: &str,
+    width: u32,
+    height: u32,
+) -> Raster {
+    let width = width.max(160);
+    let height = height.max(90);
+    let mut raster = solid(
+        width,
+        height,
+        Rgba {
+            r: 0x1c,
+            g: 0x3a,
+            b: 0x5a,
+            a: 255,
+        },
+    );
+    let title_size = (height as f32 * 0.12).clamp(16.0, 32.0);
+    let temp_size = (height as f32 * 0.28).clamp(28.0, 72.0);
+    draw_text(
+        &mut raster,
+        title,
+        20,
+        (height as f32 * 0.22) as i32,
+        title_size,
+        Rgba::WHITE,
+    );
+    draw_text(
+        &mut raster,
+        temperature,
+        20,
+        (height as f32 * 0.55) as i32,
+        temp_size,
+        Rgba::WHITE,
+    );
+    if !detail.is_empty() {
+        draw_text(
+            &mut raster,
+            detail,
+            20,
+            (height as f32 * 0.82) as i32,
+            title_size,
+            Rgba::WHITE,
+        );
+    }
+    raster
+}
+
+pub fn strip_html(html: &str) -> String {
+    let mut out = String::new();
+    let mut chars = html.chars().peekable();
+    let mut skipping = false;
+    while let Some(ch) = chars.next() {
+        if ch == '<' {
+            let mut tag = String::new();
+            for next in chars.by_ref() {
+                if next == '>' {
+                    break;
+                }
+                tag.push(next);
+            }
+            let name = tag
+                .trim()
+                .trim_start_matches('/')
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if name == "script" || name == "style" {
+                skipping = !tag.trim_start().starts_with('/');
+            }
+            if matches!(
+                name.as_str(),
+                "p" | "div" | "br" | "li" | "h1" | "h2" | "h3" | "tr"
+            ) && !out.ends_with('\n')
+                && !out.is_empty()
+            {
+                out.push('\n');
+            }
+            continue;
+        }
+        if skipping {
+            continue;
+        }
+        if ch == '&' {
+            let mut entity = String::new();
+            while let Some(&next) = chars.peek() {
+                if next == ';' || entity.len() > 8 {
+                    break;
+                }
+                entity.push(chars.next().unwrap());
+            }
+            if chars.peek() == Some(&';') {
+                let _ = chars.next();
+            }
+            out.push(match entity.as_str() {
+                "amp" => '&',
+                "lt" => '<',
+                "gt" => '>',
+                "quot" => '"',
+                "nbsp" => ' ',
+                "apos" => '\'',
+                _ => ' ',
+            });
+        } else {
+            out.push(ch);
+        }
+    }
+    let mut cleaned = String::new();
+    for (index, line) in out.lines().enumerate() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if index > 0 {
+            cleaned.push('\n');
+        }
+        cleaned.push_str(&line);
+    }
+    cleaned
+}
+
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if line.is_empty() {
+                line.push_str(word);
+            } else if line.len() + 1 + word.len() <= width {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut line));
+                line = word.to_string();
+            }
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +664,15 @@ mod tests {
                 a: 255
             }
         ));
+    }
+
+    #[test]
+    fn html_snippet_strips_tags_and_entities() {
+        assert_eq!(strip_html("<p>Hello&nbsp;<b>world</b></p>"), "Hello world");
+        let raster = html_snippet("<h1>Title</h1><p>Body &amp; more</p>", 320, 180);
+        assert_eq!(raster.width, 320);
+        let card = weather_card("Kathmandu", "18°C", "Clear", 320, 180);
+        assert_eq!(card.width, 320);
     }
 
     #[test]

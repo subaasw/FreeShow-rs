@@ -427,12 +427,13 @@ impl DeviceAudioOutput {
 }
 
 /// One decoded track sent to the physical destinations in the library routing graph.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AudioPlaybackOptions {
     pub looping: bool,
     pub from_seconds: f64,
     pub to_seconds: f64,
     pub rate: f64,
+    pub effects: Vec<crate::AudioEffect>,
 }
 
 impl Default for AudioPlaybackOptions {
@@ -442,6 +443,7 @@ impl Default for AudioPlaybackOptions {
             from_seconds: 0.0,
             to_seconds: 0.0,
             rate: 1.0,
+            effects: Vec::new(),
         }
     }
 }
@@ -495,7 +497,9 @@ impl AudioOutput {
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("wav");
-        let pcm = Arc::new(decode_with_hint(&bytes, extension)?);
+        let mut decoded = decode_with_hint(&bytes, extension)?;
+        crate::apply_effects(&mut decoded, &options.effects);
+        let pcm = Arc::new(decoded);
         // Keep a silent clock for an intentionally disconnected source, so end
         // actions and playlist advancement still run without leaking to Main.
         #[cfg(feature = "gst")]
@@ -759,6 +763,7 @@ mod tests {
                 from_seconds: 0.8,
                 to_seconds: 1.2,
                 rate: 1.0,
+                effects: Vec::new(),
             },
         )
         .unwrap();

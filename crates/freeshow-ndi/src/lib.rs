@@ -5,6 +5,12 @@ use std::sync::mpsc;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
 
+mod receive;
+pub use receive::{
+    NetworkReceiver, NetworkSource, SourceKind, element_available, ndi_receive_available,
+    ndi_receive_pipeline, ndi_sources, omt_receive_available, omt_receive_pipeline, omt_sources,
+};
+
 /// Sends the audience picture to an NDI receiver. The show keeps running when
 /// the NDI plugin is missing.
 pub trait VideoSend {

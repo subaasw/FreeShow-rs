@@ -2,14 +2,20 @@
 
 mod church_import;
 mod desktop;
+#[cfg_attr(not(test), allow(dead_code))]
+mod feeds;
 mod lang;
 mod live;
 mod present;
 mod runtime;
 mod service_check;
 mod session;
+#[cfg_attr(not(test), allow(dead_code))]
+mod spell;
 mod stage;
 mod theme;
+#[cfg_attr(not(test), allow(dead_code))]
+mod update;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -1130,9 +1136,19 @@ impl NdiBroadcast {
     fn open(session: &session::Session) -> Self {
         let mut audience = Vec::new();
         let mut stage = Vec::new();
+        let mut opened = std::collections::BTreeSet::new();
         for target in session.ndi_outputs() {
+            let source_name = target.grouped_name();
+            let key = target
+                .group
+                .clone()
+                .map(|group| format!("{}:{group}", target.stage))
+                .unwrap_or_else(|| target.id.clone());
+            if !opened.insert(key) {
+                continue;
+            }
             let sender = freeshow_ndi::NdiSender::open_routed(
-                &target.name,
+                &source_name,
                 session.output_width,
                 session.output_height,
                 &target.id,
@@ -1219,7 +1235,88 @@ fn submit_network(picture: NetworkPicture, frame: &Frame) {
     webrtc_out().submit(picture, &frame.pixels, frame.width, frame.height);
     if matches!(picture, NetworkPicture::Audience) {
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+        hardware().submit(&frame.pixels, frame.width, frame.height);
     }
+}
+
+struct HardwareBroadcast {
+    camera: freeshow_record::OptionalSink,
+    blackmagic: freeshow_record::OptionalSink,
+    share: freeshow_record::OptionalSink,
+}
+
+impl HardwareBroadcast {
+    fn open(session: &session::Session) -> Self {
+        let width = session.output_width;
+        let height = session.output_height;
+        let camera = session
+            .virtual_camera_device()
+            .map(|device| {
+                freeshow_record::OptionalSink::open(
+                    &freeshow_record::virtual_camera_pipeline(&device, width, height),
+                    width,
+                    height,
+                )
+            })
+            .unwrap_or_else(|| freeshow_record::OptionalSink::disabled(width, height));
+        let blackmagic = session
+            .blackmagic_device()
+            .map(|device| {
+                freeshow_record::OptionalSink::open(
+                    &freeshow_record::blackmagic_pipeline(device, width, height),
+                    width,
+                    height,
+                )
+            })
+            .unwrap_or_else(|| freeshow_record::OptionalSink::disabled(width, height));
+        let share = session
+            .capture_share_name()
+            .and_then(|name| {
+                let pipeline = freeshow_record::spout_syphon_pipeline(&name, width, height)?;
+                Some(freeshow_record::OptionalSink::open(
+                    &pipeline, width, height,
+                ))
+            })
+            .unwrap_or_else(|| freeshow_record::OptionalSink::disabled(width, height));
+        Self {
+            camera,
+            blackmagic,
+            share,
+        }
+    }
+
+    fn submit(&self, pixels: &[u8], width: u32, height: u32) {
+        self.camera.submit(pixels, width, height);
+        self.blackmagic.submit(pixels, width, height);
+        self.share.submit(pixels, width, height);
+    }
+}
+
+static HARDWARE: std::sync::OnceLock<HardwareBroadcast> = std::sync::OnceLock::new();
+
+fn hardware() -> &'static HardwareBroadcast {
+    HARDWARE.get_or_init(|| HardwareBroadcast {
+        camera: freeshow_record::OptionalSink::disabled(1, 1),
+        blackmagic: freeshow_record::OptionalSink::disabled(1, 1),
+        share: freeshow_record::OptionalSink::disabled(1, 1),
+    })
+}
+
+fn open_network_receive(session: &session::Session) -> Option<freeshow_ndi::NetworkReceiver> {
+    let (kind, name) = session.network_receive()?;
+    let receiver = match kind {
+        freeshow_ndi::SourceKind::Ndi => freeshow_ndi::NetworkReceiver::open_ndi(
+            &name,
+            session.output_width,
+            session.output_height,
+        ),
+        freeshow_ndi::SourceKind::Omt => freeshow_ndi::NetworkReceiver::open_omt(
+            &name,
+            session.output_width,
+            session.output_height,
+        ),
+    };
+    receiver.is_live().then_some(receiver)
 }
 
 fn fade_into(
@@ -1323,6 +1420,9 @@ fn start_pending(
                     from_seconds: from,
                     to_seconds: to,
                     rate: tempo,
+                    effects: freeshow_media::effects_from_value(
+                        &session.borrow().preferences.audio_effects,
+                    ),
                 },
             ) {
                 Ok(output) => {
@@ -2010,6 +2110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("{warning}");
     }
     let _ = NDI.set(NdiBroadcast::open(&session));
+    let _ = HARDWARE.set(HardwareBroadcast::open(&session));
+    let _network_in = open_network_receive(&session);
     let _ = WEBRTC.set(WebrtcBroadcast::open(&session));
     for target in session.omt_outputs() {
         tracing::warn!(
@@ -2863,6 +2965,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             from_seconds: from,
                             to_seconds: to,
                             rate: tempo,
+                            effects: freeshow_media::effects_from_value(
+                                &session.borrow().preferences.audio_effects,
+                            ),
                         },
                     ) {
                         Ok(output) => {
@@ -3317,6 +3422,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     freeshow_timecode::MtcInput::default().start();
     freeshow_timecode::LtcInput.start();
+    let mut rtmp_started = false;
     if let Ok(url) = std::env::var("FREESHOW_RTMP")
         && !url.trim().is_empty()
     {
@@ -3324,12 +3430,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .borrow()
             .network_output("rtmp")
             .unwrap_or_else(|| "default".into());
-        let _ = freeshow_record::ServiceCapture.start_rtmp_routed(
+        rtmp_started |= freeshow_record::ServiceCapture.start_rtmp_routed(
             &url,
             output_width,
             output_height,
             &output_id,
         );
+    }
+    for dest in session.borrow().rtmp_destinations() {
+        rtmp_started |= freeshow_record::ServiceCapture.start_rtmp_routed(
+            &dest.url,
+            output_width,
+            output_height,
+            &dest.id,
+        );
+    }
+    if rtmp_started {
         let frame = last_output.borrow();
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
     }

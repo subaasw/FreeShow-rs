@@ -43,7 +43,8 @@ mod gst_player {
             routes: &[SpeakerRoute],
             network: &[NetworkRoute],
         ) -> Result<Self, MediaError> {
-            Self::from_launch_network(&video_launch(path), routes, network)
+            let path = crate::resolve_playable_path(path);
+            Self::from_launch_network(&video_launch(&path), routes, network)
         }
 
         pub fn open_camera(name: &str) -> Result<Self, MediaError> {

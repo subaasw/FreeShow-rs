@@ -4,8 +4,13 @@ mod icecast;
 pub use icecast::IcecastSender;
 mod whip;
 pub use whip::whip_post;
+mod sinks;
 #[cfg(feature = "webrtc")]
 mod webrtc;
+pub use sinks::{
+    OptionalSink, blackmagic_available, blackmagic_pipeline, element_available, spout_available,
+    spout_syphon_pipeline, syphon_available, virtual_camera_available, virtual_camera_pipeline,
+};
 #[cfg(feature = "webrtc")]
 pub use webrtc::WebrtcSender;
 

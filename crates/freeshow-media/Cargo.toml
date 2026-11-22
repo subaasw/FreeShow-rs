@@ -17,6 +17,7 @@ cpal = "0.15"
 freeshow-output = { path = "../freeshow-output" }
 gstreamer = { version = "0.23", optional = true }
 gstreamer-app = { version = "0.23", optional = true }
+serde_json = "1"
 symphonia = { version = "0.5", default-features = false, features = ["wav", "mp3", "flac", "ogg", "vorbis", "pcm", "isomp4", "aac"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

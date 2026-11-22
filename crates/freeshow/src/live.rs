@@ -96,7 +96,57 @@ pub fn audience_frame(session: &Session) -> Frame {
     paint_interaction(&mut frame, session);
     paint_drawing(&mut frame, session);
     paint_effects(&mut frame, session);
-    frame
+    delayed_audience_frame(frame, session.preferences.output_delay_ms())
+}
+
+thread_local! {
+    static OUTPUT_DELAY: std::cell::RefCell<OutputDelay> = const { std::cell::RefCell::new(OutputDelay::new()) };
+}
+
+/// A short frame buffer used when `special.outputDelayMs` is greater than zero.
+pub struct OutputDelay {
+    frames: std::collections::VecDeque<(u128, Frame)>,
+}
+
+impl OutputDelay {
+    pub const fn new() -> Self {
+        Self {
+            frames: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Returns the frame that is `delay_ms` old. A delay of 0 is a no-op.
+    pub fn push(&mut self, frame: Frame, delay_ms: u32, now_ms: u128) -> Frame {
+        if delay_ms == 0 {
+            self.frames.clear();
+            return frame;
+        }
+        let width = frame.width;
+        let height = frame.height;
+        self.frames.push_back((now_ms, frame));
+        let Some(due) = now_ms.checked_sub(u128::from(delay_ms)) else {
+            return clear_frame(width, height);
+        };
+        let mut released = None;
+        while self.frames.front().is_some_and(|(time, _)| *time <= due) {
+            released = self.frames.pop_front();
+        }
+        released
+            .map(|(_, frame)| frame)
+            .unwrap_or_else(|| clear_frame(width, height))
+    }
+}
+
+fn delayed_audience_frame(frame: Frame, delay_ms: u32) -> Frame {
+    if delay_ms == 0 {
+        OUTPUT_DELAY.with(|buffer| buffer.borrow_mut().frames.clear());
+        return frame;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    OUTPUT_DELAY.with(|buffer| buffer.borrow_mut().push(frame, delay_ms, now_ms))
 }
 
 fn paint_effects(frame: &mut Frame, session: &Session) {
@@ -565,10 +615,16 @@ fn styled_item(
                 .collect()
         })
         .unwrap_or_default();
-    let qr = item.get("type").and_then(|value| value.as_str()) == Some("qr_code");
+    let kind = item
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let qr = kind == "qr_code";
     let image = if qr {
         freeshow_data::QrItem::parse(item)
             .and_then(|qr| freeshow_output::qr_image(&qr.text, &qr.color, &qr.background))
+    } else if let Some(raster) = box_item_image(item) {
+        Some(raster)
     } else {
         item.get("src")
             .and_then(|value| value.as_str())
@@ -816,6 +872,127 @@ fn font_size_px(style: &str) -> Option<u32> {
         let part = part.trim().strip_prefix("font-size:")?;
         part.trim().trim_end_matches("px").trim().parse().ok()
     })
+}
+
+fn box_item_image(item: &serde_json::Value) -> Option<Raster> {
+    let kind = item
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match kind {
+        "web" | "html" | "website" => Some(html_box_image(item)),
+        "weather" => Some(weather_box_image(item)),
+        _ => None,
+    }
+}
+
+fn box_size(item: &serde_json::Value) -> (u32, u32) {
+    let width = json_number(item.get("width"))
+        .or_else(|| json_number(item.pointer("/style/width")))
+        .unwrap_or(640.0)
+        .clamp(160.0, 1920.0) as u32;
+    let height = json_number(item.get("height"))
+        .or_else(|| json_number(item.pointer("/style/height")))
+        .unwrap_or(360.0)
+        .clamp(90.0, 1080.0) as u32;
+    (width, height)
+}
+
+fn html_box_image(item: &serde_json::Value) -> Raster {
+    let (width, height) = box_size(item);
+    let src = item
+        .get("src")
+        .or_else(|| item.get("url"))
+        .or_else(|| item.pointer("/web/src"))
+        .or_else(|| item.pointer("/web/url"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(src) = src {
+        if freeshow_media::is_remote_url(src) {
+            return freeshow_output::web_preview(src, width, height);
+        }
+        return freeshow_output::html_snippet(src, width, height);
+    }
+    let html = item
+        .get("html")
+        .or_else(|| item.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if html.trim().is_empty() {
+        let text = item
+            .get("lines")
+            .and_then(|value| value.as_array())
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(|line| {
+                        if let Some(text) = line.get("text").and_then(|value| value.as_str()) {
+                            return Some(text.to_string());
+                        }
+                        line.get("text")
+                            .and_then(|value| value.as_array())
+                            .map(|runs| {
+                                runs.iter()
+                                    .filter_map(|run| run.get("value").and_then(|v| v.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            })
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        return freeshow_output::html_snippet(&text, width, height);
+    }
+    freeshow_output::html_snippet(html, width, height)
+}
+
+fn weather_box_image(item: &serde_json::Value) -> Raster {
+    let (width, height) = box_size(item);
+    let weather = item.get("weather").unwrap_or(item);
+    let fahrenheit = weather
+        .get("useFahrenheit")
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    let lat = weather
+        .get("latitude")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let lon = weather
+        .get("longitude")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let temperature = weather
+        .get("temperature")
+        .or_else(|| weather.get("temp"))
+        .and_then(|value| value.as_f64())
+        .map(|c| {
+            if fahrenheit {
+                format!("{:.0}°F", c * 9.0 / 5.0 + 32.0)
+            } else {
+                format!("{:.0}°C", c)
+            }
+        })
+        .or_else(|| {
+            weather
+                .get("temperatureLabel")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "—".to_string());
+    let detail = weather
+        .get("description")
+        .or_else(|| weather.get("text"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_default();
+    let title = if lat == 0.0 && lon == 0.0 {
+        "Weather".to_string()
+    } else {
+        format!("{lat:.2}, {lon:.2}")
+    };
+    freeshow_output::weather_card(&title, &temperature, &detail, width, height)
 }
 
 pub(crate) fn load_image(root: Option<&Path>, src: &str) -> Option<Raster> {
@@ -1101,6 +1278,53 @@ mod tests {
                 assert_eq!(audience.pixel(x, y), stage.pixel(x, y));
             }
         }
+    }
+
+    #[test]
+    fn html_and_weather_boxes_paint_into_the_item() {
+        let html = serde_json::json!({
+            "type": "html",
+            "html": "<h1>Hello</h1><p>World</p>",
+            "style": "top:0px;left:0px;width:400px;height:200px;"
+        });
+        let web = serde_json::json!({
+            "type": "web",
+            "src": "https://example.org/announcements",
+            "style": "top:0px;left:0px;width:400px;height:200px;"
+        });
+        let weather = serde_json::json!({
+            "type": "weather",
+            "weather": {"latitude": 27.7, "longitude": 85.3, "temperature": 18.0, "description": "Clear"},
+            "style": "top:0px;left:0px;width:400px;height:200px;"
+        });
+        assert!(box_item_image(&html).is_some());
+        let preview = box_item_image(&web).unwrap();
+        assert!(preview.width >= 160);
+        let card = box_item_image(&weather).unwrap();
+        assert!(card.width >= 160);
+        assert!(card.height >= 90);
+    }
+
+    #[test]
+    fn output_delay_releases_the_older_frame_and_zero_is_a_passthrough() {
+        let first = Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![255, 0, 0, 255],
+        };
+        let second = Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 255, 255],
+        };
+        let mut buffer = OutputDelay::new();
+        let early = buffer.push(first.clone(), 100, 10);
+        assert_eq!(early.pixels, vec![0, 0, 0, 255]);
+        let released = buffer.push(second.clone(), 100, 120);
+        assert_eq!(released.pixels, first.pixels);
+        let now = buffer.push(second.clone(), 0, 200);
+        assert_eq!(now.pixels, second.pixels);
+        assert!(buffer.frames.is_empty());
     }
 
     #[test]
