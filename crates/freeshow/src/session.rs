@@ -225,6 +225,7 @@ pub struct Session {
     pub background_transition: bool,
     /// Path of the picture currently behind the slide, when one is showing.
     background_path: Option<PathBuf>,
+    imported_foreground_active: bool,
     pub volume: f32,
     /// The main channel is muted. Playback stays silent until a slide unmutes it.
     pub audio_muted: bool,
@@ -440,6 +441,7 @@ impl Session {
             background_blur_opacity: 0.3,
             background_transition: false,
             background_path: None,
+            imported_foreground_active: false,
             volume: 1.0,
             audio_muted: false,
             unmuted_volumes: Default::default(),
@@ -615,6 +617,7 @@ impl Session {
             background_blur_opacity: 0.3,
             background_transition: false,
             background_path: None,
+            imported_foreground_active: false,
             volume,
             audio_muted,
             unmuted_volumes: Default::default(),
@@ -1753,10 +1756,11 @@ impl Session {
             "next" | "next_slide" | "go" => self.advance_show(),
             "previous" | "previous_slide" => self.retreat_show(),
             "slide" => self.run_timeline_slide(cue),
-            "background" if !self.preferences.out_locked() => cue
-                .data
-                .as_deref()
-                .is_some_and(|id| self.run_timeline_background(id)),
+            "background" | "foreground" if !self.preferences.out_locked() => {
+                cue.data.as_deref().is_some_and(|id| {
+                    self.run_timeline_picture(id, cue.kind.eq_ignore_ascii_case("foreground"))
+                })
+            }
             "overlay" => {
                 if let Some(id) = cue
                     .data
@@ -1787,7 +1791,7 @@ impl Session {
         }
     }
 
-    fn run_timeline_background(&mut self, id: &str) -> bool {
+    fn run_timeline_picture(&mut self, id: &str, foreground: bool) -> bool {
         let Some(media) = self
             .current_show()
             .and_then(|show| show.show["media"].get(id))
@@ -1802,8 +1806,8 @@ impl Session {
             return false;
         };
         let retrigger = media["retrigger"] == true;
-        match media_kind(&path) {
-            MediaKind::Image => self.show_background_still(&path, false, retrigger),
+        let shown = match media_kind(&path) {
+            MediaKind::Image => self.show_background_still(&path, foreground, retrigger),
             MediaKind::Video if path.is_file() => {
                 let loops = media["loop"] != false;
                 let muted = media["muted"] != false;
@@ -1817,14 +1821,18 @@ impl Session {
                     || self.media_loop != loops
                     || self.media_muted != muted
                 {
-                    self.queue_background_video(&path, Some((loops, muted)), false);
+                    self.queue_background_video(&path, Some((loops, muted)), foreground);
                 } else {
-                    self.slide_hidden = false;
+                    self.slide_hidden = foreground;
                 }
                 true
             }
             _ => false,
+        };
+        if shown {
+            self.imported_foreground_active = foreground;
         }
+        shown
     }
 
     fn run_timeline_slide(&mut self, cue: &TimelineCue) -> bool {
@@ -2141,6 +2149,7 @@ impl Session {
     }
 
     fn remember_background(&mut self, path: &Path) {
+        self.imported_foreground_active = false;
         let Some(root) = self.root.clone() else {
             self.reset_background_look();
             return;
@@ -2216,32 +2225,35 @@ impl Session {
     }
 
     /// Starts the video behind this slide. The same clip is left running.
-    fn play_slide_video(&mut self, path: &Path) {
-        let flags = self
-            .current_show()
-            .and_then(|show| show.media_flags(&path.to_string_lossy()));
+    fn play_slide_video(&mut self, path: &Path, foreground: bool) {
+        let flags = self.current_show().and_then(|show| {
+            show.backdrop_media_flags_at(self.slide_index?, &path.to_string_lossy())
+        });
         if self.background_path.as_deref() == Some(path) {
             if !self.timeline_playing {
                 self.background_transition = false;
             }
-            if let Some((_, _, video_type)) = &flags
+            if foreground {
+                self.slide_hidden = true;
+            } else if let Some((_, _, video_type)) = &flags
                 && video_type.is_some()
             {
                 self.slide_hidden = video_type.as_deref() == Some("foreground");
             }
             return;
         }
-        let foreground = flags
-            .as_ref()
-            .and_then(|(_, _, kind)| kind.as_deref())
-            .map_or_else(
-                || {
-                    self.root.as_deref().is_some_and(|root| {
-                        Library::open(root).media_video_type(path) == "foreground"
-                    })
-                },
-                |kind| kind == "foreground",
-            );
+        let foreground = foreground
+            || flags
+                .as_ref()
+                .and_then(|(_, _, kind)| kind.as_deref())
+                .map_or_else(
+                    || {
+                        self.root.as_deref().is_some_and(|root| {
+                            Library::open(root).media_video_type(path) == "foreground"
+                        })
+                    },
+                    |kind| kind == "foreground",
+                );
         self.queue_background_video(
             path,
             flags.map(|(loops, muted, _)| (loops, muted)),
@@ -2316,6 +2328,7 @@ impl Session {
     }
 
     fn reset_background_look(&mut self) {
+        self.imported_foreground_active = false;
         self.background_fit = Fit::Contain;
         self.background_flip_x = false;
         self.background_flip_y = false;
@@ -2556,6 +2569,9 @@ impl Session {
             return;
         }
         if !continuation {
+            if self.imported_foreground_active {
+                self.clear_background();
+            }
             self.effect_playing = None;
             self.effect_return = None;
             self.timed_seconds = self
@@ -2582,13 +2598,18 @@ impl Session {
                     SlideBackdrop::Picture { path, foreground } => {
                         let path = PathBuf::from(path);
                         if media_kind(&path) == MediaKind::Video {
-                            self.play_slide_video(&path);
+                            self.play_slide_video(&path, foreground);
                         } else if media_kind(&path) == MediaKind::Image {
                             let file_foreground = self.root.as_deref().is_some_and(|root| {
                                 Library::open(root).media_video_type(&path) == "foreground"
                             });
                             self.show_background_still(&path, foreground || file_foreground, false);
                         }
+                        self.imported_foreground_active = foreground
+                            && self.background_path.as_ref() == Some(&path)
+                            && self
+                                .current_show()
+                                .is_some_and(|show| show.show["origin"] == "propresenter");
                     }
                 }
             }
@@ -7053,6 +7074,69 @@ Second line"
         assert_eq!(session.background_path.as_ref(), Some(&still));
         assert_eq!(session.slide_index, Some(0));
         assert!(!session.slide_hidden);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imported_foreground_cues_hide_the_slide_until_the_next_slide() {
+        let root = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let still = root.join("announcement.png");
+        std::fs::write(
+            &still,
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-cover.png"),
+        )
+        .unwrap();
+        let mut show = ShowFile::blank("foreground", "Foreground");
+        let first = show.ordered_slides()[0].id.clone();
+        let second = show.add_slide().unwrap();
+        for id in [&first, &second] {
+            show.show["slides"][id]["items"] = serde_json::json!([
+                {"type":"shape","style":"left:0px;top:0px;width:1920px;height:1080px;background:#ff0000;"}
+            ]);
+        }
+        show.show["origin"] = serde_json::json!("propresenter");
+        show.show["media"]["notice"] =
+            serde_json::json!({"path": still, "videoType": "foreground"});
+        show.show["layouts"]["main"]["timeline"]["actions"] = serde_json::json!([
+            {"time": 100, "type": "foreground", "data": {"id": "notice"}},
+            {"time": 200, "type": "slide", "data": {"id": second, "index": 1}}
+        ]);
+        let mut session = Session::empty();
+        session.output_width = 160;
+        session.output_height = 90;
+        session.shows = vec![show];
+        assert!(session.present_show_id("foreground"));
+        assert!(session.save_timeline(&session.timeline_text()));
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        let before = crate::live::audience_frame(&session);
+        assert_eq!(
+            before.pixel(0, 0),
+            freeshow_output::parse_color("#ff0000").unwrap()
+        );
+        assert!(session.tick_timeline(start + Duration::from_millis(100)));
+        assert_eq!(session.slide_index, Some(0));
+        assert!(session.slide_hidden);
+        assert!(session.underlay.is_some());
+        let foreground = crate::live::audience_frame(&session);
+        assert_ne!(foreground.pixel(0, 0), before.pixel(0, 0));
+        assert!(session.tick_timeline(start + Duration::from_millis(200)));
+        assert_eq!(session.slide_index, Some(1));
+        assert!(!session.slide_hidden);
+        assert!(session.underlay.is_none());
+        assert_eq!(
+            crate::live::audience_frame(&session).pixel(0, 0),
+            before.pixel(0, 0)
+        );
+        session.shows[0].show["layouts"]["main"]["slides"][0]["background"] =
+            serde_json::json!("notice");
+        session.select_slide(0);
+        assert!(session.slide_hidden);
+        assert!(session.underlay.is_some());
+        session.select_slide(1);
+        assert!(!session.slide_hidden);
+        assert!(session.underlay.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
