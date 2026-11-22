@@ -43,7 +43,10 @@ mod gst_player {
             routes: &[SpeakerRoute],
             network: &[NetworkRoute],
         ) -> Result<Self, MediaError> {
-            let location = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+            let location = path
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
             Self::from_launch_network(
                 &format!(
                     "filesrc location=\"{location}\" ! decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
@@ -378,7 +381,7 @@ mod gst_player {
 
     #[cfg(target_os = "macos")]
     fn macos_speaker_devices() -> Result<Vec<(u32, String)>, MediaError> {
-        use coreaudio::audio_unit::{Scope, macos_helpers};
+        use coreaudio::audio_unit::{macos_helpers, Scope};
         // GStreamer's macOS provider can block discovery in a headless process.
         // Query output metadata through the CoreAudio bindings CPAL already
         // uses, then pass the native device ID to osxaudiosink.
@@ -518,7 +521,13 @@ mod gst_player {
                     .build()
                     .map_err(video_error)?;
                 bin.add_many([
-                    &queue, &normalize, &input_format, &convert, &filter, &resample, &gain_element,
+                    &queue,
+                    &normalize,
+                    &input_format,
+                    &convert,
+                    &filter,
+                    &resample,
+                    &gain_element,
                     &sink,
                 ])
                 .map_err(video_error)?;
@@ -594,35 +603,53 @@ mod gst_player {
             let input_format = self.input_format.clone();
             let filter = self.filter.clone();
             let volume = self.volume.clone();
-            let update = move || {
+            let update = move || -> bool {
                 let queued = pending.lock().unwrap().take();
                 let Some(MixUpdate { matrix, caps, gain }) = queued else {
-                    return;
+                    return true;
                 };
                 volume.set_property("volume", 0.0_f64);
                 let was_explicit = !convert
                     .property::<gst::Array>("mix-matrix")
                     .as_slice()
                     .is_empty();
-                convert.set_property("mix-matrix", &matrix);
+                let current_outputs = convert_channels(&convert);
+                let next_outputs = caps
+                    .structure(0)
+                    .and_then(|structure| structure.get::<i32>("channels").ok());
+                let channels_change = current_outputs != next_outputs;
+                // GStreamer 1.26 rejects a mix-matrix whose row count does not
+                // already match the converter's output channel count.
+                if was_explicit && channels_change {
+                    convert.set_property("mix-matrix", &gst::Array::new(Vec::<gst::Array>::new()));
+                }
                 filter.set_property("caps", &caps);
-                if was_explicit || !matrix.as_slice().is_empty() {
-                    // Older audioconvert versions skip rebuilding the matrix when caps are equal.
-                    let current = convert.static_pad("sink").and_then(|pad| pad.current_caps());
-                    let is_f32 = current
-                        .as_ref()
-                        .and_then(|caps| caps.structure(0))
-                        .and_then(|caps| caps.get::<&str>("format").ok())
-                        == Some("F32LE");
-                    let format = if is_f32 { "F64LE" } else { "F32LE" };
-                    input_format.set_property(
-                        "caps",
-                        gst::Caps::builder("audio/x-raw")
-                            .field("format", format)
-                            .build(),
-                    );
+                let rebuild = was_explicit || !matrix.as_slice().is_empty();
+                if rebuild && channels_change {
+                    kick_convert_format(&input_format, &convert);
+                }
+                let current_outputs = convert_channels(&convert);
+                let matrix_rows = matrix.as_slice().len() as i32;
+                // Before the converter has negotiated, install the matrix first.
+                // After that, wait until the output channel count matches, because
+                // GStreamer 1.26 rejects a mix-matrix of the wrong height.
+                let fits = matrix.as_slice().is_empty()
+                    || next_outputs.is_none()
+                    || current_outputs.is_none()
+                    || current_outputs == Some(matrix_rows);
+                if !fits {
+                    pending
+                        .lock()
+                        .unwrap()
+                        .replace(MixUpdate { matrix, caps, gain });
+                    return false;
+                }
+                convert.set_property("mix-matrix", &matrix);
+                if rebuild {
+                    kick_convert_format(&input_format, &convert);
                 }
                 volume.set_property("volume", gain);
+                true
             };
             // An IDLE probe can execute on the operator thread while holding the pad
             // lock. Negotiate an active branch from its streaming task instead.
@@ -630,12 +657,15 @@ mod gst_player {
                 self.upstream.add_probe(
                     gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
                     move |_, _| {
-                        update();
-                        gst::PadProbeReturn::Remove
+                        if update() {
+                            gst::PadProbeReturn::Remove
+                        } else {
+                            gst::PadProbeReturn::Ok
+                        }
                     },
                 );
             } else {
-                update();
+                let _ = update();
             }
         }
     }
@@ -715,15 +745,50 @@ mod gst_player {
                     .max(if full_source { inputs.max(2) } else { 2 });
                 let matrix = freeshow_core::speaker_matrix(inputs, outputs, &output.routes);
                 let rows: Vec<_> = matrix.into_iter().map(gst::Array::new).collect();
-                output.configure(
-                    rows,
-                    gst::Caps::builder("audio/x-raw")
-                        .field("channels", i32::from(outputs))
-                        .build(),
-                    1.0,
-                );
+                output.configure(rows, output_caps(outputs), 1.0);
             }
         }
+    }
+
+    fn output_caps(channels: u16) -> gst::Caps {
+        let caps = gst::Caps::builder("audio/x-raw").field("channels", i32::from(channels));
+        let mask = match channels {
+            1 => 0x0,
+            2 => 0x3,
+            3 => 0xb,
+            4 => 0x33,
+            5 => 0x37,
+            6 => 0x3f,
+            7 => 0x13f,
+            8 => 0xc3f,
+            _ => return caps.build(),
+        };
+        caps.field("channel-mask", gst::Bitmask::new(mask)).build()
+    }
+
+    fn convert_channels(convert: &gst::Element) -> Option<i32> {
+        convert
+            .static_pad("src")
+            .and_then(|pad| pad.current_caps())
+            .and_then(|caps| caps.structure(0)?.get::<i32>("channels").ok())
+    }
+
+    fn kick_convert_format(input_format: &gst::Element, convert: &gst::Element) {
+        let current = convert
+            .static_pad("sink")
+            .and_then(|pad| pad.current_caps());
+        let is_f32 = current
+            .as_ref()
+            .and_then(|caps| caps.structure(0))
+            .and_then(|caps| caps.get::<&str>("format").ok())
+            == Some("F32LE");
+        let format = if is_f32 { "F64LE" } else { "F32LE" };
+        input_format.set_property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", format)
+                .build(),
+        );
     }
 
     fn attach_audio(pipeline: &gst::Pipeline, audio: &AudioBranch) {
@@ -793,11 +858,15 @@ mod gst_player {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     if let Some(frame) = player.next_frame() {
-                        let center = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
+                        let center =
+                            ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
                         let pixel = &frame.rgba[center..center + 4];
                         // JPEG conversion can shift the color through its YUV color space.
                         if compressed {
-                            assert!(pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40, "{pixel:?}");
+                            assert!(
+                                pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40,
+                                "{pixel:?}"
+                            );
                         } else {
                             assert_eq!(pixel, &[255, 0, 0, 255]);
                         }
@@ -807,7 +876,11 @@ mod gst_player {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "camera produced no frame (compressed={compressed}): {:?}",
-                        player.pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error])
+                        player
+                            .pipeline
+                            .bus()
+                            .unwrap()
+                            .pop_filtered(&[gst::MessageType::Error])
                     );
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -1068,7 +1141,7 @@ mod gst_player {
 }
 
 #[cfg(feature = "gst")]
-pub use gst_player::{VideoPlayer, cameras, video_output_devices};
+pub use gst_player::{cameras, video_output_devices, VideoPlayer};
 
 #[cfg(not(feature = "gst"))]
 pub struct VideoPlayer;
@@ -1211,7 +1284,10 @@ mod tests {
         gst::init().expect("gstreamer");
         let path =
             std::env::temp_dir().join(format!("freeshow-rust-loop-{}.mkv", std::process::id()));
-        let location = path.to_string_lossy().replace('\\', "\\\\").replace('"', "");
+        let location = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "");
         let writer = gst::parse::launch(&format!(
             "videotestsrc num-buffers=3 pattern=red ! videoconvert ! avenc_mjpeg ! matroskamux ! filesink location=\"{location}\""
         ))
@@ -1263,7 +1339,10 @@ mod tests {
         gst::init().expect("gstreamer");
         let path =
             std::env::temp_dir().join(format!("freeshow-rust-mute-{}.wav", std::process::id()));
-        let location = path.to_string_lossy().replace('\\', "\\\\").replace('"', "");
+        let location = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "");
         let writer = gst::parse::launch(&format!(
             "audiotestsrc num-buffers=8 ! audioconvert ! wavenc ! filesink location=\"{location}\""
         ))
