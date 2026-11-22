@@ -314,6 +314,22 @@ fn spelling_note(session: &Session, text: &str) -> String {
     }
 }
 
+/// Tells the operator when another program holds the phone remote or stage port.
+fn busy_ports_notice(remote: u16, stage: u16) -> Option<String> {
+    let busy = |port: u16| std::net::TcpListener::bind(("0.0.0.0", port)).is_err();
+    let names: Vec<String> = [("remote", remote), ("stage", stage)]
+        .into_iter()
+        .filter(|(_, port)| busy(*port))
+        .map(|(name, port)| format!("{name} port {port}"))
+        .collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "The {} is in use by another program, so that page is off. Close the other program or pick another port in Settings, Connection, then restart.",
+            names.join(" and ")
+        )
+    })
+}
+
 fn show_now_playing(ui: &ControlWindow, session: &Session) {
     let (name, time, progress, paused) = session.now_playing().unwrap_or_default();
     if ui.get_now_playing().as_str() != name {
@@ -3012,6 +3028,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     };
+    if let Some(notice) = busy_ports_notice(remote_ports.remote, remote_ports.stage) {
+        tracing::warn!("{notice}");
+        session.borrow_mut().notice = notice;
+        refresh(&control, &session.borrow());
+    }
     let (stage_frame_tx, stage_frame_rx) = mpsc::sync_channel(1);
     let max_connections = session.borrow().preferences.max_connections();
     freeshow_remote::spawn_limited(
