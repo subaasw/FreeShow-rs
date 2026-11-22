@@ -82,6 +82,9 @@ pub struct OutputPreference {
     pub enabled: bool,
     pub active: bool,
     pub style: String,
+    /// Stored `bounds.width` / `bounds.height` of this output, when present.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 impl FreeShowPreferences {
@@ -125,6 +128,16 @@ impl FreeShowPreferences {
 
     pub fn max_connections(&self) -> u32 {
         self.max_connections.unwrap_or(10)
+    }
+
+    /// Pixel size of the active (or first enabled) output, when `bounds` were stored.
+    pub fn configured_output_size(&self) -> Option<(u32, u32)> {
+        let output = self
+            .outputs
+            .iter()
+            .find(|output| output.active && output.enabled)
+            .or_else(|| self.outputs.iter().find(|output| output.enabled))?;
+        Some((output.width?, output.height?))
     }
 
     /// Formats a 24-hour `HH:MM:SS` clock, honoring `timeFormat` and seconds.
@@ -4699,6 +4712,16 @@ fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
                 .and_then(Value::as_str)
                 .unwrap_or("default")
                 .to_string(),
+            width: output
+                .pointer("/bounds/width")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0),
+            height: output
+                .pointer("/bounds/height")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0),
         })
         .collect()
 }
@@ -5886,6 +5909,8 @@ mod tests {
                     enabled: true,
                     active: true,
                     style: "wide".into(),
+                    width: None,
+                    height: None,
                 },
                 OutputPreference {
                     id: "stage".into(),
@@ -5893,6 +5918,8 @@ mod tests {
                     enabled: false,
                     active: false,
                     style: "".into(),
+                    width: None,
+                    height: None,
                 },
             ]
         );

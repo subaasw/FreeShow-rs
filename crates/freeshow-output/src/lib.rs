@@ -12,11 +12,11 @@ pub use charts::{ChartPoint, chart_image, display_url, web_preview};
 pub use styled::qr_image;
 pub use styled::{
     Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, SlideWay, StyledItem, StyledLine,
-    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, crop_raster, crossfade,
-    decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
-    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, fit_raster,
-    image_frame, over, parse_color, parse_style, placed_image, render_styled, scale_frames,
-    slide_frames, slide_way, spin_frames, with_underlay,
+    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, crop_raster,
+    crossfade, decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast,
+    filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity, filter_saturate,
+    filter_sepia, fit_raster, image_frame, over, parse_color, parse_style, placed_image,
+    render_styled, scale_frames, slide_frames, slide_way, spin_frames, with_underlay,
 };
 
 use font8x8::{BASIC_FONTS, LATIN_FONTS, UnicodeFonts};
@@ -98,9 +98,24 @@ impl Frame {
     }
 }
 
-/// 960 * 4 is a multiple of wgpu's 256-byte row alignment.
-pub const OUTPUT_WIDTH: u32 = 960;
-pub const OUTPUT_HEIGHT: u32 = 540;
+/// Default audience framebuffer. 1920×4 is a multiple of wgpu's 256-byte row alignment.
+pub const OUTPUT_WIDTH: u32 = 1920;
+pub const OUTPUT_HEIGHT: u32 = 1080;
+
+/// Snap a size so `width * 4` meets wgpu's 256-byte row alignment (width is a multiple of 64).
+pub fn aligned_output_size(width: u32, height: u32) -> (u32, u32) {
+    let width = if width == 0 {
+        OUTPUT_WIDTH
+    } else {
+        width.max(64) & !63
+    };
+    let height = if height == 0 {
+        OUTPUT_HEIGHT
+    } else {
+        height.max(1)
+    };
+    (width, height)
+}
 
 pub fn render(slide: &SlideContent) -> Frame {
     let width = slide.width;

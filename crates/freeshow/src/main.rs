@@ -23,9 +23,7 @@ use freeshow_core::{AppSettings, Rgb};
 use freeshow_data::{MediaEntry, MediaEntryKind};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
 use freeshow_obs::ObsControl;
-use freeshow_output::{
-    Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, clear_frame, decode_image, fit_raster,
-};
+use freeshow_output::{Frame, Raster, clear_frame, decode_image, fit_raster};
 use freeshow_pco::PlanSource;
 use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
@@ -823,8 +821,8 @@ impl NdiBroadcast {
         for target in session.ndi_outputs() {
             let sender = freeshow_ndi::NdiSender::open_routed(
                 &target.name,
-                OUTPUT_WIDTH,
-                OUTPUT_HEIGHT,
+                session.output_width,
+                session.output_height,
                 &target.id,
             );
             if target.stage {
@@ -869,8 +867,8 @@ impl WebrtcBroadcast {
             let Some(sender) = freeshow_record::WebrtcSender::open(
                 &target.url,
                 target.token.as_deref(),
-                OUTPUT_WIDTH,
-                OUTPUT_HEIGHT,
+                session.output_width,
+                session.output_height,
             ) else {
                 tracing::warn!("WebRTC output {} did not start", target.id);
                 continue;
@@ -1670,6 +1668,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     control.set_panel_title("Shows".into());
     refresh(&control, &session);
     apply_chrome(&control, &session, settings.output_screen);
+    let output_width = session.output_width;
+    let output_height = session.output_height;
 
     let output = OutputWindow::new()?;
     let stage = StageWindow::new()?;
@@ -1680,7 +1680,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_redraw = output.as_weak();
     let output_slot = attach_frame(
         output.window(),
-        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        clear_frame(output_width, output_height),
         move |image| {
             if let Some(output) = output_weak.upgrade() {
                 output.set_frame(image);
@@ -1696,7 +1696,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stage_redraw = stage.as_weak();
     let stage_slot = attach_frame(
         stage.window(),
-        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        clear_frame(output_width, output_height),
         move |image| {
             if let Some(stage) = stage_weak.upgrade() {
                 stage.set_frame(image);
@@ -1712,7 +1712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let preview_redraw = control.as_weak();
     let preview_slot = attach_frame(
         control.window(),
-        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        clear_frame(output_width, output_height),
         move |image| {
             if let Some(control) = preview_weak.upgrade() {
                 control.set_preview(image);
@@ -1731,8 +1731,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_fade = Rc::new(slint::Timer::default());
     let stage_fade = Rc::new(slint::Timer::default());
     let next_slide = Rc::new(slint::Timer::default());
-    let last_output = Rc::new(RefCell::new(clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)));
-    let last_stage = Rc::new(RefCell::new(clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)));
+    let last_output = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
+    let last_stage = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
     if session.slide_index.is_some() {
         let audience = audience_frame(&session);
         let stage = stage_frame(&session);
@@ -1863,7 +1863,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         current.clear_output();
                         stop_video(&video_timer, &video_player);
                         *audio_out.borrow_mut() = None;
-                        let blank = clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+                        let blank = clear_frame(output_width, output_height);
                         next_slide.stop();
                         *last_output.borrow_mut() = blank.clone();
                         publish_audience(&output_slot, blank.clone());
@@ -2025,8 +2025,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let path = dir.join(format!("freeshow-{stamp}.mp4"));
                         current.recording = freeshow_record::ServiceCapture.toggle_file(
                             &path,
-                            OUTPUT_WIDTH,
-                            OUTPUT_HEIGHT,
+                            output_width,
+                            output_height,
                         );
                         if current.recording {
                             let frame = last_output.borrow();
@@ -2633,8 +2633,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| "default".into());
         let _ = freeshow_record::ServiceCapture.start_rtmp_routed(
             &url,
-            OUTPUT_WIDTH,
-            OUTPUT_HEIGHT,
+            output_width,
+            output_height,
             &output_id,
         );
         let frame = last_output.borrow();

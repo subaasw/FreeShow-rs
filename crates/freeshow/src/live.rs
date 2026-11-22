@@ -59,8 +59,8 @@ pub fn audience_frame(session: &Session) -> Frame {
         if let Some(image) = &session.underlay {
             placed_image(
                 image,
-                OUTPUT_WIDTH,
-                OUTPUT_HEIGHT,
+                session.output_width,
+                session.output_height,
                 session.background_fit,
                 session.background_flip_x,
                 session.background_flip_y,
@@ -70,15 +70,20 @@ pub fn audience_frame(session: &Session) -> Frame {
                 session.background_blur_opacity,
             )
         } else {
-            clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)
+            clear_frame(session.output_width, session.output_height)
         }
     } else {
-        clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)
+        clear_frame(session.output_width, session.output_height)
     };
     frame = paint_overlays(frame, session, true);
     if !session.blanked && !session.slide_hidden {
         let slide = if session.tab == "scripture" {
-            lines_frame(&session.output_lines(), true)
+            lines_frame_at(
+                &session.output_lines(),
+                true,
+                session.output_width,
+                session.output_height,
+            )
         } else {
             show_frame(session, session.slide_index)
         };
@@ -118,8 +123,8 @@ fn paint_overlays(mut frame: Frame, session: &Session, under_slide: bool) -> Fra
             })
             .unwrap_or_default();
         let layer = render_styled(&StyledSlide {
-            output_width: OUTPUT_WIDTH,
-            output_height: OUTPUT_HEIGHT,
+            output_width: session.output_width,
+            output_height: session.output_height,
             source_width: SOURCE_WIDTH,
             source_height: SOURCE_HEIGHT,
             background: Rgba::TRANSPARENT,
@@ -240,7 +245,7 @@ pub fn stage_frame(session: &Session) -> Frame {
             .filter(|item| item.kind == freeshow_data::StageItemKind::Camera)
             .filter_map(|item| item.device_name.as_deref()),
     );
-    crate::stage::paint_stage(
+    crate::stage::paint_stage_at(
         &slides,
         index,
         &session.stage,
@@ -266,6 +271,8 @@ pub fn stage_frame(session: &Session) -> Frame {
             still_backgrounds: Some(&still_backgrounds),
             twelve_hour: session.preferences.uses_12_hour_clock(),
         },
+        session.output_width,
+        session.output_height,
     )
 }
 
@@ -279,12 +286,12 @@ fn local_clock() -> String {
 
 fn show_frame(session: &Session, index: Option<usize>) -> Frame {
     let Some(index) = index else {
-        return clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+        return clear_frame(session.output_width, session.output_height);
     };
     let Some(show) = session.show_index.and_then(|slot| session.shows.get(slot)) else {
-        return clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+        return clear_frame(session.output_width, session.output_height);
     };
-    frame_for_slide(
+    frame_for_slide_at(
         show,
         index,
         session.root.as_deref(),
@@ -293,9 +300,12 @@ fn show_frame(session: &Session, index: Option<usize>) -> Frame {
         session.click_revealed,
         session.style_page(),
         &session_variables(session),
+        session.output_width,
+        session.output_height,
     )
 }
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn frame_for_slide(
     show: &ShowFile,
@@ -307,19 +317,46 @@ pub fn frame_for_slide(
     page: Option<(usize, usize)>,
     variables: &[(String, String)],
 ) -> Frame {
+    frame_for_slide_at(
+        show,
+        index,
+        root,
+        over_media,
+        reveal,
+        clicks_shown,
+        page,
+        variables,
+        OUTPUT_WIDTH,
+        OUTPUT_HEIGHT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn frame_for_slide_at(
+    show: &ShowFile,
+    index: usize,
+    root: Option<&Path>,
+    over_media: bool,
+    reveal: Option<u32>,
+    clicks_shown: bool,
+    page: Option<(usize, usize)>,
+    variables: &[(String, String)],
+    output_width: u32,
+    output_height: u32,
+) -> Frame {
     let Some(slide_id) = show
         .ordered_slides()
         .get(index)
         .map(|slide| slide.id.clone())
     else {
-        return clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+        return clear_frame(output_width, output_height);
     };
     let Some(slide) = show
         .show
         .get("slides")
         .and_then(|slides| slides.get(&slide_id))
     else {
-        return clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+        return clear_frame(output_width, output_height);
     };
     let background = slide
         .pointer("/settings/color")
@@ -353,8 +390,8 @@ pub fn frame_for_slide(
         })
         .unwrap_or_default();
     render_styled(&StyledSlide {
-        output_width: OUTPUT_WIDTH,
-        output_height: OUTPUT_HEIGHT,
+        output_width,
+        output_height,
         source_width,
         source_height,
         background,
@@ -695,24 +732,29 @@ pub(crate) fn resolve_media(root: Option<&Path>, src: &str) -> Option<PathBuf> {
     joined.is_file().then_some(joined)
 }
 
-fn lines_frame(lines: &[String], over_media: bool) -> Frame {
+fn lines_frame_at(
+    lines: &[String],
+    over_media: bool,
+    output_width: u32,
+    output_height: u32,
+) -> Frame {
     if lines.is_empty() {
         return if over_media {
             render_styled(&StyledSlide {
-                output_width: OUTPUT_WIDTH,
-                output_height: OUTPUT_HEIGHT,
+                output_width,
+                output_height,
                 source_width: SOURCE_WIDTH,
                 source_height: SOURCE_HEIGHT,
                 background: Rgba::TRANSPARENT,
                 items: Vec::new(),
             })
         } else {
-            clear_frame(OUTPUT_WIDTH, OUTPUT_HEIGHT)
+            clear_frame(output_width, output_height)
         };
     }
     render_styled(&StyledSlide {
-        output_width: OUTPUT_WIDTH,
-        output_height: OUTPUT_HEIGHT,
+        output_width,
+        output_height,
         source_width: SOURCE_WIDTH,
         source_height: SOURCE_HEIGHT,
         background: if over_media {
@@ -820,7 +862,7 @@ mod tests {
         assert!(
             green
                 .iter()
-                .all(|(x, y)| (33..590).contains(x) && (45..204).contains(y))
+                .all(|(x, y)| (66..1180).contains(x) && (90..408).contains(y))
         );
     }
 
@@ -844,7 +886,7 @@ mod tests {
         });
         let frame = stage_frame(&session);
         assert_eq!(frame.pixel(80, 45), parse_color("#ff0000").unwrap());
-        assert_ne!(frame.pixel(170, 100), parse_color("#ff0000").unwrap());
+        assert_ne!(frame.pixel(400, 200), parse_color("#ff0000").unwrap());
         session.stage.items[0].include_media = false;
         assert_ne!(
             stage_frame(&session).pixel(80, 45),
@@ -875,7 +917,7 @@ mod tests {
             let frame = stage_frame(&session);
             let pixel = frame.pixel(80, 45);
             if pixel.r < 50 && pixel.g > 100 && pixel.b < 50 {
-                assert_eq!(frame.pixel(180, 100), parse_color("#111111").unwrap());
+                assert_eq!(frame.pixel(400, 200), parse_color("#111111").unwrap());
                 break;
             }
             assert!(
@@ -922,14 +964,14 @@ mod tests {
         let foreground = parse_color("#c01054").unwrap();
         let quiet_zone = parse_color("#fff").unwrap();
         for frame in [&audience, &stage] {
-            assert_eq!(frame.pixel(40, 0), quiet_zone);
-            assert_eq!(frame.pixel(119, 79), quiet_zone);
-            assert_ne!(frame.pixel(39, 0), quiet_zone);
-            assert_ne!(frame.pixel(120, 79), quiet_zone);
-            assert_eq!(frame.pixel(52, 12), foreground);
+            assert_eq!(frame.pixel(80, 0), quiet_zone);
+            assert_eq!(frame.pixel(238, 158), quiet_zone);
+            assert_ne!(frame.pixel(79, 0), quiet_zone);
+            assert_ne!(frame.pixel(240, 158), quiet_zone);
+            assert_eq!(frame.pixel(104, 24), foreground);
         }
-        for y in 0..80 {
-            for x in 40..120 {
+        for y in 0..160 {
+            for x in 80..240 {
                 assert_eq!(audience.pixel(x, y), stage.pixel(x, y));
             }
         }
@@ -1034,9 +1076,9 @@ mod tests {
         let stage = stage_frame(&session);
         let picture = parse_color("#f00").unwrap();
         assert_eq!(stage.pixel(80, 50), picture);
-        assert_eq!(stage.pixel(240, 50), picture);
-        assert_eq!(stage.pixel(400, 50), parse_color("#222").unwrap());
-        assert!((70..90).any(|y| (160..320).any(|x| stage.pixel(x, y).g > 200)));
+        assert_eq!(stage.pixel(480, 50), picture);
+        assert_eq!(stage.pixel(800, 50), parse_color("#222").unwrap());
+        assert!((70..180).any(|y| (320..640).any(|x| stage.pixel(x, y).g > 200)));
         std::fs::remove_dir_all(temporary).unwrap();
     }
 
@@ -1248,6 +1290,26 @@ mod tests {
         let filled = frame_for_slide(&show, 0, None, true, None, true, None, &[]);
         assert_eq!(filled.pixel(0, 0).r, 255);
         assert_eq!(filled.pixel(0, 0).g, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn configured_output_bounds_size_the_framebuffer() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-output-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Shows")).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"outputs":{"default":{"enabled":true,"active":true,"name":"Main","style":"default","bounds":{"x":0,"y":0,"width":1280,"height":720}}}}"#,
+        )
+        .unwrap();
+        let session = crate::session::Session::open(root.clone());
+        assert_eq!((session.output_width, session.output_height), (1280, 720));
+        let frame = audience_frame(&session);
+        assert_eq!((frame.width, frame.height), (1280, 720));
+        let stage = stage_frame(&session);
+        assert_eq!((stage.width, stage.height), (1280, 720));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
