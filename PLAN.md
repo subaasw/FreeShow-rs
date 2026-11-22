@@ -105,7 +105,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.
 - [x] ChurchApps service-plan lesson feeds and add-ons with downloadable media.
 - [ ] Stream-only lesson media without a direct downloadable URL.
-- [ ] Background lesson downloads with progress and cancellation.
+- [x] Background lesson downloads with progress and cancellation.
 - [x] ProPresenter bundle backgrounds land in `Media/` and stay linked.
 - [ ] Background media from the other import formats.
 

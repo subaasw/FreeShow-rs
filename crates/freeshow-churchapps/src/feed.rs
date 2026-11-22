@@ -32,7 +32,9 @@ pub(super) fn hydrate_plan(
     base: &str,
     plan: &mut Value,
     cache: &mut HashMap<String, Value>,
+    control: &crate::ImportControl,
 ) -> Result<(), String> {
+    control.check()?;
     let mut feed = Value::Null;
     if plan["contentType"] == "venue" {
         let venue = plan["contentId"]
@@ -92,6 +94,7 @@ pub(super) fn hydrate_plan(
 
     for item in plan["items"].as_array_mut().into_iter().flatten() {
         for child in item["children"].as_array_mut().into_iter().flatten() {
+            control.check()?;
             let kind = child["itemType"].as_str().unwrap_or("").to_string();
             if !["lessonSection", "lessonAction", "lessonAddOn"].contains(&kind.as_str()) {
                 continue;
@@ -199,7 +202,8 @@ mod tests {
                 response(clip),
             ]
         });
-        let document = fetch_plans_from(&base, &base, "test-account-token").unwrap();
+        let document =
+            fetch_plans_from(&base, &base, "test-account-token", &Default::default()).unwrap();
         let plans = plans_from_document(&document).unwrap();
         assert_eq!(write_plans(&root, &plans).unwrap(), 6);
         let requests = server.join().unwrap();
@@ -306,7 +310,7 @@ mod tests {
         ]
         });
         assert!(
-            fetch_plans_from(&base, &base, "token")
+            fetch_plans_from(&base, &base, "token", &Default::default())
                 .unwrap_err()
                 .contains("503")
         );
@@ -322,7 +326,8 @@ mod tests {
                 "invalid",
                 "Invalid",
                 "",
-                &[json!("not a media object")]
+                &[json!("not a media object")],
+                &Default::default(),
             )
             .is_err()
         );
@@ -332,7 +337,8 @@ mod tests {
                 "stream",
                 "Stream",
                 "",
-                &[json!({"streamUrl":"https://vimeo.com/123","fileType":"video"})]
+                &[json!({"streamUrl":"https://vimeo.com/123","fileType":"video"})],
+                &Default::default(),
             )
             .unwrap_err()
             .contains("downloadable")
@@ -354,7 +360,13 @@ mod tests {
         )]);
         let mut plan =
             json!({"id":"p1","name":"Sunday","contentType":"venue","contentId":"v1","items":[]});
-        hydrate_plan("http://127.0.0.1:1", &mut plan, &mut cache).unwrap();
+        hydrate_plan(
+            "http://127.0.0.1:1",
+            &mut plan,
+            &mut cache,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(plan["items"][0]["children"][0]["id"], "a1");
         assert_eq!(plan["items"][0]["children"].as_array().unwrap().len(), 1);
         assert_eq!(plan["items"][1]["children"][0]["id"], "v1_s1_a0");
@@ -367,7 +379,13 @@ mod tests {
         );
         let mut standalone = json!({"id":"p2","items":[{"children":[{"id":"doc","itemType":"lessonAddOn","relatedId":"document"}]}]});
         cache.insert("addon:document".into(), json!({"name":"Sheet","file":{"contentPath":"https://cdn.invalid/sheet.png","fileType":"image/png"}}));
-        hydrate_plan("http://127.0.0.1:1", &mut standalone, &mut cache).unwrap();
+        hydrate_plan(
+            "http://127.0.0.1:1",
+            &mut standalone,
+            &mut cache,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             standalone["items"][0]["children"][0]["files"][0]["url"],
             "https://cdn.invalid/sheet.png"

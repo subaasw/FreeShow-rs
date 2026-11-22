@@ -2714,6 +2714,11 @@ impl ProjectsFile {
         }
     }
 
+    pub fn project_matches(&self, other: &Self, id: &str) -> bool {
+        self.document.get("projects").and_then(|projects| projects.get(id))
+            == other.document.get("projects").and_then(|projects| projects.get(id))
+    }
+
     pub fn projects(&self) -> Vec<ProjectEntry> {
         let Some(projects) = self.document.get("projects").and_then(Value::as_object) else {
             return Vec::new();

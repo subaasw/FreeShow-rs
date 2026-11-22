@@ -2822,6 +2822,64 @@ impl Session {
         self.save_projects()
     }
 
+    pub fn reload_import_catalog(&mut self, imported_project: Option<String>) {
+        let Some(root) = &self.root else {
+            return;
+        };
+        let library = Library::open(root);
+        if let Ok(mut shows) = library.list_shows() {
+            if let Some(show) = self.current_show() {
+                let previous_slide = self.slide_index.and_then(|index| {
+                    show.ordered_slides().get(index).map(|slide| slide.id.clone())
+                });
+                let index = shows
+                    .iter()
+                    .position(|fresh| fresh.id == show.id)
+                    .unwrap_or_else(|| {
+                        shows.push(show.clone());
+                        shows.len() - 1
+                    });
+                self.show_index = Some(index);
+                if let Some(previous) = previous_slide {
+                    let ordered = shows[index].ordered_slides();
+                    self.slide_index = ordered
+                        .iter()
+                        .position(|slide| slide.id == previous)
+                        .or_else(|| (!ordered.is_empty()).then_some(0));
+                }
+            }
+            self.shows = shows;
+        } else {
+            tracing::error!("could not reload shows after ChurchApps import");
+        }
+        if let Ok(projects) = library.load_projects() {
+            let active_item = self
+                .current_project()
+                .and_then(|project| project.shows.get(self.project_item).map(|item| item.id.clone()));
+            self.projects = projects;
+            match self.current_project() {
+                Some(project) => {
+                    let previous_index = self.project_item;
+                    self.project_item = active_item
+                        .and_then(|id| {
+                            if project.shows.get(previous_index).is_some_and(|item| item.id == id) {
+                                Some(previous_index)
+                            } else {
+                                project.shows.iter().position(|item| item.id == id)
+                            }
+                        })
+                        .unwrap_or_else(|| previous_index.min(project.shows.len().saturating_sub(1)));
+                }
+                None => {
+                    self.project_id = imported_project;
+                    self.project_item = 0;
+                }
+            }
+        } else {
+            tracing::error!("could not reload projects after ChurchApps import");
+        }
+    }
+
     /// Writes shows and the project file when their bytes differ. Unchanged files are left alone.
     pub fn autosave(&self) -> usize {
         let mut wrote = 0;
@@ -6005,6 +6063,39 @@ mod tests {
         assert!((session.audio_tempo() - 1.5).abs() < 0.001);
         assert!((session.audio_routes()[0].gain - 0.2).abs() < 0.001);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn background_import_refresh_keeps_the_open_show_and_project_cursor() {
+        let root = std::env::temp_dir().join(freeshow_data::new_id());
+        let library = Library::open(&root);
+        ShowFile::blank("live", "Z Live")
+            .save(&library.shows_dir().join("live.show"))
+            .unwrap();
+        let mut projects = ProjectsFile::empty();
+        projects.add_project("active", "Active service");
+        projects.append_show("active", "live");
+        projects.append_show("active", "live");
+        projects.save(&library.projects_path()).unwrap();
+        let mut session = Session::open(root.clone());
+        session.show_index = Some(0);
+        session.slide_index = Some(0);
+        session.project_item = 1;
+
+        ShowFile::blank("lesson", "A Lesson")
+            .save(&library.shows_dir().join("lesson.show"))
+            .unwrap();
+        projects.add_project("lessons", "Lessons.church");
+        projects.append_show("lessons", "lesson");
+        projects.save(&library.projects_path()).unwrap();
+
+        session.reload_import_catalog(Some("lessons".into()));
+        assert_eq!(session.shows[0].id, "lesson");
+        assert_eq!(session.current_show().unwrap().id, "live");
+        assert_eq!(session.slide_index, Some(0));
+        assert_eq!(session.project_id.as_deref(), Some("active"));
+        assert_eq!(session.project_item, 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

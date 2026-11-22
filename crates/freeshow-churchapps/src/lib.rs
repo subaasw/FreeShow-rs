@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use freeshow_data::{Library, ProjectsFile, ShowFile};
@@ -20,6 +22,7 @@ pub trait ContentSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncReport {
+    pub errors: usize,
     pub shows: usize,
     pub project_id: Option<String>,
 }
@@ -27,6 +30,7 @@ pub struct SyncReport {
 impl SyncReport {
     fn none() -> Self {
         Self {
+            errors: 0,
             shows: 0,
             project_id: None,
         }
@@ -41,17 +45,125 @@ impl ContentSource for ChurchApps {
     }
 
     fn sync(&self, library: &Path) -> SyncReport {
-        let local = lessons::import_sources(library);
-        match load_configured(library) {
-            Ok(report) => SyncReport {
-                shows: report.shows + local.shows,
-                project_id: report.project_id.or(local.project_id),
-            },
-            Err(err) => {
-                tracing::error!("churchapps: {err}");
-                local
+        self.prepare(library, &ImportControl::default())
+            .map(|prepared| prepared.publish(library))
+            .unwrap_or_else(|_| SyncReport::none())
+    }
+}
+
+#[derive(Default)]
+pub struct ImportControl {
+    cancelled: AtomicBool,
+    progress: Mutex<Option<Transfer>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transfer {
+    pub label: String,
+    pub received: u64,
+    pub total: Option<u64>,
+}
+
+impl ImportControl {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub fn progress(&self) -> Option<Transfer> {
+        self.progress.lock().unwrap().clone()
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            Err("ChurchApps import cancelled".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn transfer(&self, label: &str, received: u64, total: Option<u64>) {
+        let mut progress = self.progress.lock().unwrap();
+        let state = progress.get_or_insert_with(|| Transfer {
+            label: label.into(),
+            received,
+            total,
+        });
+        if state.label != label {
+            label.clone_into(&mut state.label);
+        }
+        state.received = received;
+        state.total = total;
+    }
+}
+
+#[derive(Default)]
+pub struct PreparedSync {
+    lessons: Vec<ShowFile>,
+    plans: Vec<ServicePlan>,
+    plan_shows: Vec<ShowFile>,
+    project_baseline: Option<ProjectsFile>,
+    errors: Vec<String>,
+}
+
+impl ChurchApps {
+    /// Resolve sources and populate the media cache without writing shows or projects.
+    pub fn prepare(&self, library: &Path, control: &ImportControl) -> Result<PreparedSync, String> {
+        let mut prepared = PreparedSync::default();
+        prepared.lessons = lessons::prepare_sources(library, control, &mut prepared.errors);
+        control.check()?;
+        if let Err(error) = load_configured(library, control, &mut prepared) {
+            prepared.errors.push(error);
+        }
+        control.check()?;
+        Ok(prepared)
+    }
+}
+
+impl PreparedSync {
+    /// Publish on the caller's library thread so project changes made while
+    /// downloading are included when the project file is read.
+    pub fn publish(self, root: &Path) -> SyncReport {
+        for error in &self.errors {
+            tracing::error!("churchapps: {error}");
+        }
+        let mut report = SyncReport {
+            errors: self.errors.len(),
+            ..SyncReport::none()
+        };
+        for lesson in self.lessons {
+            match lessons::publish_lesson(root, lesson) {
+                Ok(lesson) => {
+                    report.shows += lesson.shows;
+                    report.project_id = lesson.project_id;
+                }
+                Err(error) => {
+                    report.errors += 1;
+                    tracing::error!("churchapps: {error}");
+                }
             }
         }
+        if !self.plans.is_empty() {
+            match publish_plans(
+                root,
+                &self.plans,
+                &self.plan_shows,
+                self.project_baseline.as_ref(),
+            ) {
+                Ok(count) => {
+                    report.shows += count;
+                    report.project_id = Some(self.plans[0].id.clone());
+                }
+                Err(error) => {
+                    report.errors += 1;
+                    tracing::error!("churchapps: {error}");
+                }
+            }
+        }
+        report
     }
 }
 
@@ -98,10 +210,15 @@ struct LyricSection {
     slides: Vec<String>,
 }
 
-fn load_configured(library: &Path) -> Result<SyncReport, String> {
+fn load_configured(
+    library: &Path,
+    control: &ImportControl,
+    prepared: &mut PreparedSync,
+) -> Result<(), String> {
+    let baseline = Library::open(library).load_projects();
     let document = if let Ok(path) = std::env::var("FREESHOW_CHURCHAPPS_FILE") {
         if path.trim().is_empty() {
-            return Ok(SyncReport::none());
+            return Ok(());
         }
         if std::fs::metadata(&path)
             .map_err(|err| err.to_string())?
@@ -116,25 +233,25 @@ fn load_configured(library: &Path) -> Result<SyncReport, String> {
             .ok()
             .filter(|token| !token.trim().is_empty())
         else {
-            return Ok(SyncReport::none());
+            return Ok(());
         };
-        fetch_plans(token.trim())?
+        fetch_plans_from(API, "https://api.lessons.church", token.trim(), control)?
     };
     let value: Value = serde_json::from_str(&document).map_err(|err| err.to_string())?;
     if freeshow_data::is_lesson_document(&value) {
-        return import_lesson_document(library, &value);
+        prepared
+            .lessons
+            .push(lessons::prepare_lesson(library, &value, control)?);
+        return Ok(());
     }
     let plans = plans_from_document(&document)?;
     if plans.is_empty() {
         return Err("churchapps returned no plans".to_string());
     }
-    let project_id = plans[0].id.clone();
-    let shows = write_plans(library, &plans)?;
-    tracing::info!("churchapps wrote {shows} shows");
-    Ok(SyncReport {
-        shows,
-        project_id: Some(project_id),
-    })
+    prepared.project_baseline = Some(baseline.map_err(|error| error.to_string())?);
+    prepared.plan_shows = prepare_plans(library, &plans, control)?;
+    prepared.plans = plans;
+    Ok(())
 }
 
 pub(crate) fn plans_from_document(document: &str) -> Result<Vec<ServicePlan>, String> {
@@ -153,15 +270,22 @@ pub(crate) fn plans_from_document(document: &str) -> Result<Vec<ServicePlan>, St
     Ok(parsed)
 }
 
+#[cfg(test)]
 pub(crate) fn write_plans(library_root: &Path, plans: &[ServicePlan]) -> Result<usize, String> {
+    let shows = prepare_plans(library_root, plans, &ImportControl::default())?;
+    publish_plans(library_root, plans, &shows, None)
+}
+
+fn prepare_plans(
+    library_root: &Path,
+    plans: &[ServicePlan],
+    control: &ImportControl,
+) -> Result<Vec<ShowFile>, String> {
     let library = Library::open(library_root);
-    std::fs::create_dir_all(library.shows_dir()).map_err(|err| err.to_string())?;
-    let mut projects =
-        ProjectsFile::load(&library.projects_path()).map_err(|err| err.to_string())?;
-    // Finish every download before replacing any show or the project list.
     let mut prepared = Vec::new();
     for plan in plans {
         for entry in &plan.entries {
+            control.check()?;
             let show = match entry {
                 PlanEntry::Show(song) => show_file(song),
                 PlanEntry::Media {
@@ -170,13 +294,35 @@ pub(crate) fn write_plans(library_root: &Path, plans: &[ServicePlan]) -> Result<
                     notes,
                     files,
                     ..
-                } => lessons::plan_media_show(&library, id, name, notes, files)?,
+                } => lessons::plan_media_show(&library, id, name, notes, files, control)?,
                 PlanEntry::Section { .. } => continue,
             };
             prepared.push(show);
         }
     }
-    for show in &prepared {
+    Ok(prepared)
+}
+
+fn publish_plans(
+    library_root: &Path,
+    plans: &[ServicePlan],
+    shows: &[ShowFile],
+    baseline: Option<&ProjectsFile>,
+) -> Result<usize, String> {
+    let library = Library::open(library_root);
+    std::fs::create_dir_all(library.shows_dir()).map_err(|err| err.to_string())?;
+    let mut projects = library.load_projects().map_err(|err| err.to_string())?;
+    if let Some(baseline) = baseline
+        && let Some(plan) = plans
+            .iter()
+            .find(|plan| !projects.project_matches(baseline, &plan.id))
+    {
+        return Err(format!(
+            "project {} changed during import; service plans were not applied",
+            plan.name
+        ));
+    }
+    for show in shows {
         let path = library
             .shows_dir()
             .join(format!("{}.show", file_id(&show.id)));
@@ -204,7 +350,7 @@ pub(crate) fn write_plans(library_root: &Path, plans: &[ServicePlan]) -> Result<
     projects
         .save(&library.projects_path())
         .map_err(|err| err.to_string())?;
-    Ok(prepared.len())
+    Ok(shows.len())
 }
 
 fn parse_plan(plan: &Value) -> Result<Option<ServicePlan>, String> {
@@ -603,11 +749,13 @@ fn file_id(id: &str) -> String {
         .collect()
 }
 
-fn fetch_plans(token: &str) -> Result<String, String> {
-    fetch_plans_from(API, "https://api.lessons.church", token)
-}
-
-fn fetch_plans_from(api: &str, lessons_api: &str, token: &str) -> Result<String, String> {
+fn fetch_plans_from(
+    api: &str,
+    lessons_api: &str,
+    token: &str,
+    control: &ImportControl,
+) -> Result<String, String> {
+    control.check()?;
     let plans: Vec<Value> = serde_json::from_str(&get_json(
         &format!("{api}/doing/plans/presenter"),
         Some(token),
@@ -616,6 +764,7 @@ fn fetch_plans_from(api: &str, lessons_api: &str, token: &str) -> Result<String,
     let mut assembled = Vec::new();
     let mut feeds = HashMap::new();
     for mut plan in plans {
+        control.check()?;
         let church = plan
             .get("churchId")
             .and_then(Value::as_str)
@@ -639,13 +788,14 @@ fn fetch_plans_from(api: &str, lessons_api: &str, token: &str) -> Result<String,
                 continue;
             };
             for child in children.iter_mut() {
+                control.check()?;
                 attach_arrangement(api, &church, child)?;
             }
         }
         if let Some(plan) = plan.as_object_mut() {
             plan.insert("items".to_string(), Value::Array(items));
         }
-        feed::hydrate_plan(lessons_api, &mut plan, &mut feeds)?;
+        feed::hydrate_plan(lessons_api, &mut plan, &mut feeds, control)?;
         assembled.push(plan);
     }
     serde_json::to_string(&serde_json::json!({ "plans": assembled })).map_err(|err| err.to_string())
@@ -732,6 +882,38 @@ mod tests {
         }]
       }]
     }"#;
+
+    #[test]
+    fn plan_publication_keeps_projects_saved_after_preparation() {
+        let root = std::env::temp_dir().join(freeshow_data::new_id());
+        let library = Library::open(&root);
+        let plans = vec![ServicePlan {
+            id: "imported".into(),
+            name: "Imported Service".into(),
+            entries: vec![PlanEntry::Section {
+                id: "item".into(),
+                name: "Opening".into(),
+                notes: String::new(),
+            }],
+        }];
+        let baseline = library.load_projects().unwrap();
+        let shows = prepare_plans(&root, &plans, &ImportControl::default()).unwrap();
+        assert!(!library.projects_path().exists());
+        let mut operator = ProjectsFile::empty();
+        operator.add_project("operator", "Operator edits");
+        operator.save(&library.projects_path()).unwrap();
+        publish_plans(&root, &plans, &shows, Some(&baseline)).unwrap();
+        let projects = library.load_projects().unwrap().projects();
+        assert!(projects.iter().any(|project| project.id == "operator"));
+        assert!(projects.iter().any(|project| project.id == "imported"));
+        let refresh_baseline = library.load_projects().unwrap();
+        let mut edited = refresh_baseline.clone();
+        edited.set_project_name("imported", "Operator renamed this plan");
+        edited.save(&library.projects_path()).unwrap();
+        assert!(publish_plans(&root, &plans, &shows, Some(&refresh_baseline)).is_err());
+        assert_eq!(library.load_projects().unwrap(), edited);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_churchapps_plan_becomes_shows() {

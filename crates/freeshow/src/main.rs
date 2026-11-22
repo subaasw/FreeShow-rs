@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod church_import;
 mod live;
 mod desktop;
 mod runtime;
@@ -14,7 +15,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 
 use freeshow_ai::SlideAssist;
-use freeshow_churchapps::ContentSource;
+use church_import::ChurchImport;
 use freeshow_cloud::CloudBackup;
 use freeshow_core::{AppSettings, Rgb, ThemePalette};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
@@ -163,6 +164,9 @@ slint::slint! {
         in-out property <int> selected-slide: -1;
         in-out property <int> selected-project: -1;
         in-out property <image> preview;
+        in property <string> import-status;
+        in property <bool> import-running;
+        callback cancel-import();
         callback open-output();
         callback open-stage();
         callback choose-screen();
@@ -455,10 +459,18 @@ slint::slint! {
                     padding-left: 12px;
                     alignment: center;
                     Text {
-                        text: root.data-path;
+                        text: root.import-status == "" ? root.data-path : root.import-status;
+                        overflow: elide;
                         color: root.text-color;
                         font-size: 12px * OperatorStyle.font-scale;
                         vertical-alignment: center;
+                    }
+                    if root.import-running: HeaderButton {
+                        label: "Cancel import";
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        accent-text: root.accent-text;
+                        clicked => { root.cancel-import(); }
                     }
                 }
             }
@@ -1189,7 +1201,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut session = if let Some(root) = settings.data_path.clone() {
         let planned = freeshow_pco::PlanningCenter.sync(&root);
-        let church = freeshow_churchapps::ChurchApps.sync(&root);
         if let Some(obs) = freeshow_obs::ObsOutput::configured()
             && let Ok(scene) = std::env::var("FREESHOW_OBS_SCENE")
             && !scene.trim().is_empty()
@@ -1207,7 +1218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = freeshow_cloud::LibraryCloud.backup(&root);
         }
         let mut session = Session::open(root);
-        if let Some(id) = church.project_id.or(planned.project_id) {
+        if let Some(id) = planned.project_id {
             session.project_id = Some(id);
             session.project_item = 0;
         }
@@ -1242,6 +1253,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let control = ControlWindow::new()?;
+    let startup_import = session.root.clone().and_then(|root| match ChurchImport::start(root) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            tracing::error!("could not start ChurchApps import: {error}");
+            None
+        }
+    });
+    let church_import = Rc::new(RefCell::new(startup_import));
+    {
+        let church_import = Rc::clone(&church_import);
+        control.on_cancel_import(move || {
+            if let Some(job) = church_import.borrow().as_ref() {
+                job.control.cancel();
+            }
+        });
+    }
+
     apply_theme(&control, &theme.palette);
     control.set_theme_font_family(theme.font_family.into());
     control
@@ -1432,6 +1460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio_out = Rc::clone(&audio_out);
         let video_player = Rc::clone(&video_player);
         let video_timer = Rc::clone(&video_timer);
+        let church_import = Rc::clone(&church_import);
         control.on_choose_drawer(move |index| {
             let playback = LivePlayback {
                 audio: Rc::clone(&audio_out),
@@ -1637,14 +1666,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tracing::error!("could not load churchapps without a library");
                             return;
                         };
-                        let report = freeshow_churchapps::ChurchApps.sync(&root);
-                        let fresh = Session::open(root);
-                        current.shows = fresh.shows;
-                        current.projects = fresh.projects;
-                        current.warnings = fresh.warnings;
-                        if let Some(id) = report.project_id {
-                            current.project_id = Some(id);
-                            current.project_item = 0;
+                        if church_import.borrow().is_none() {
+                            match ChurchImport::start(root) {
+                                Ok(job) => {
+                                    church_import.replace(Some(job));
+                                }
+                                Err(error) => {
+                                    tracing::error!("could not start ChurchApps import: {error}");
+                                    if let Some(ui) = ui.upgrade() {
+                                        ui.set_import_status("Could not start ChurchApps import".into());
+                                    }
+                                }
+                            }
                         }
                     }
                     7 => {
@@ -1655,6 +1688,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = freeshow_cloud::LibraryCloud.backup(&root);
                     }
                     8 => {
+                        if let Some(job) = church_import.borrow().as_ref() {
+                            job.control.cancel();
+                        }
                         let Some(root) = current.root.clone() else {
                             tracing::error!("could not restore without a library");
                             return;
@@ -2120,6 +2156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         video: Rc::clone(&remote_video),
         timer: Rc::clone(&remote_video_timer),
     };
+    let import_snapshot = Arc::clone(&snapshot);
     let remote_timer = slint::Timer::default();
     remote_timer.start(
         slint::TimerMode::Repeated,
@@ -2287,6 +2324,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let wrote = autosave_session.borrow().autosave();
             if wrote > 0 {
                 tracing::info!("autosave wrote {wrote} files");
+            }
+        },
+    );
+    let import_session = Rc::clone(&session);
+    let import_ui = control.as_weak();
+    let import_timer = slint::Timer::default();
+    import_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(150),
+        move || {
+            let mut active = church_import.borrow_mut();
+            let Some(job) = active.as_ref() else {
+                return;
+            };
+            let Some(ui) = import_ui.upgrade() else {
+                return;
+            };
+            let Some(result) = job.result() else {
+                ui.set_import_running(true);
+                ui.set_import_status(job.status().into());
+                return;
+            };
+            let job = active.take().unwrap();
+            ui.set_import_running(false);
+            let mut current = import_session.borrow_mut();
+            if job.control.is_cancelled() || current.root.as_ref() != Some(&job.root) {
+                ui.set_import_status("ChurchApps import cancelled".into());
+                return;
+            }
+            match result {
+                Ok(prepared) => {
+                    let report = prepared.publish(&job.root);
+                    if report.project_id.is_some() {
+                        current.reload_import_catalog(report.project_id);
+                        if let Ok(mut snapshot) = import_snapshot.lock() {
+                            *snapshot = current.to_snapshot();
+                        }
+                        refresh(&ui, &current);
+                    }
+                    let status = match (report.shows, report.errors > 0) {
+                        (0, false) => String::new(),
+                        (0, true) => "ChurchApps import failed. See the log.".into(),
+                        (count, false) => format!("ChurchApps prepared {count} shows"),
+                        (count, true) => format!("ChurchApps prepared {count} shows. See the log for skipped sources."),
+                    };
+                    ui.set_import_status(status.into());
+                }
+                Err(error) => {
+                    tracing::error!("churchapps: {error}");
+                    ui.set_import_status("ChurchApps import failed. See the log.".into());
+                }
             }
         },
     );

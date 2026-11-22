@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{SyncReport, file_id};
+use super::{ImportControl, SyncReport, file_id};
 use freeshow_data::{Catalog, Library, ProjectsFile, ShowFile, is_lesson_document, new_id};
 use serde_json::{Map, Value, json};
 use std::fs::{self, OpenOptions};
@@ -14,11 +14,15 @@ fn error(error: impl ToString) -> String {
     error.to_string()
 }
 
-pub(super) fn import_sources(root: &Path) -> SyncReport {
+pub(super) fn prepare_sources(
+    root: &Path,
+    control: &ImportControl,
+    errors: &mut Vec<String>,
+) -> Vec<ShowFile> {
     let library = Library::open(root);
-    let mut report = SyncReport::none();
+    let mut prepared = Vec::new();
     let Ok(entries) = fs::read_dir(library.imports_dir()) else {
-        return report;
+        return prepared;
     };
     let mut paths: Vec<_> = entries
         .filter_map(Result::ok)
@@ -26,6 +30,9 @@ pub(super) fn import_sources(root: &Path) -> SyncReport {
         .collect();
     paths.sort();
     for path in paths {
+        if control.is_cancelled() {
+            break;
+        }
         let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -41,24 +48,39 @@ pub(super) fn import_sources(root: &Path) -> SyncReport {
             let value: Value =
                 serde_json::from_slice(&fs::read(&path).map_err(error)?).map_err(error)?;
             if extension == "json" && !is_lesson_document(&value) {
-                return Ok(SyncReport::none());
+                return Ok(None);
             }
-            import_lesson_document(root, &value)
+            prepare_lesson(root, &value, control).map(Some)
         })();
         match found {
-            Ok(found) => {
-                report.shows += found.shows;
-                report.project_id = found.project_id.or(report.project_id);
-            }
-            Err(message) => tracing::error!("lesson {}: {message}", path.display()),
+            Ok(Some(show)) => prepared.push(show),
+            Ok(None) => {}
+            Err(message) => errors.push(format!("lesson {}: {message}", path.display())),
         }
     }
-    report
+    prepared
 }
 
-/// Import an Open Lesson Playlist or Open Lesson Format document. All downloads
-/// finish before either the show or its Lessons.church project is published.
+#[cfg(test)]
+fn import_sources(root: &Path) -> SyncReport {
+    super::PreparedSync {
+        lessons: prepare_sources(root, &ImportControl::default(), &mut Vec::new()),
+        ..Default::default()
+    }
+    .publish(root)
+}
+
 pub fn import_lesson_document(root: &Path, lesson: &Value) -> Result<SyncReport, String> {
+    let show = prepare_lesson(root, lesson, &ImportControl::default())?;
+    publish_lesson(root, show)
+}
+
+pub(super) fn prepare_lesson(
+    root: &Path,
+    lesson: &Value,
+    control: &ImportControl,
+) -> Result<ShowFile, String> {
+    control.check()?;
     if !is_lesson_document(lesson) {
         return Err("not an Open Lesson Playlist/Format document".into());
     }
@@ -73,8 +95,76 @@ pub fn import_lesson_document(root: &Path, lesson: &Value) -> Result<SyncReport,
     } else {
         format!("{title} - {name}")
     };
-    let base = file_id(&display);
-    fs::create_dir_all(library.shows_dir()).map_err(error)?;
+    // Reopening an imported lesson keeps operator edits and requires no network.
+    let (_, existing) = lesson_destination(&library, title, name, &display)?;
+    if let Some(show) = existing {
+        return Ok(show);
+    }
+    let mut show = ShowFile::blank(&new_id(), &display);
+    show.show["origin"] = json!("lessons");
+    show.show["category"] = json!("lessons");
+    show.show["meta"] = json!({"title":title,"name":name,"venue":lesson["venueName"]});
+    show.show["reference"] = json!({"type":"lessons","data":{"about":lesson["programAbout"],"studyName":lesson["studyName"]}});
+    show.show["layouts"]["main"]["notes"] = lesson
+        .get("lessonDescription")
+        .cloned()
+        .unwrap_or(json!(""));
+    show.show["slides"] = json!({});
+    show.show["media"] = json!({});
+    let files = lesson_groups(lesson)?;
+    let count: usize = files.iter().map(Vec::len).sum();
+    if count == 0 {
+        return Err("lesson contains no media".into());
+    }
+    let mut cache = MediaCache::open(&library)?;
+    let mut order = Vec::<Value>::new();
+    let mut index = 0;
+    for group in files {
+        let mut parent = None;
+        for file in group {
+            index += 1;
+            let id = format!("s{index}");
+            let media_id = format!("m{index}");
+            let source = file["url"].as_str().unwrap();
+            let file_name = file["name"].as_str().unwrap_or("Media");
+            let extension = media_extension(&file)?;
+            let loops = file["loopVideo"].as_bool() == Some(true)
+                || file["loop"].as_bool() == Some(true)
+                || file_name.contains("Title");
+            tracing::info!("preparing lesson media {index}/{count}: {file_name}");
+            let path = cache.download(source, extension, file_name, control)?;
+            show.show["media"][&media_id] =
+                json!({"name":file_name,"path":path,"muted":false,"loop":loops});
+            show.show["slides"][&id] = json!({"group":file_name,"color":"","settings":{},"notes":"","items":[],"children":[]});
+            let mut node = json!({"background":media_id});
+            if !loops && is_video(extension) && index < count {
+                node["actions"] = json!({"nextAfterMedia":true});
+            }
+            if let Some(parent_id) = &parent {
+                show.show["slides"][parent_id]["children"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(id));
+                show.show["slides"][&id]["group"] = Value::Null;
+                order.last_mut().unwrap()["children"][&id] = node;
+            } else {
+                node["id"] = json!(id);
+                order.push(node);
+                parent = Some(id);
+            }
+        }
+    }
+    show.show["layouts"]["main"]["slides"] = json!(order);
+    Ok(show)
+}
+
+fn lesson_destination(
+    library: &Library,
+    title: &str,
+    name: &str,
+    display: &str,
+) -> Result<(PathBuf, Option<ShowFile>), String> {
+    let base = file_id(display);
     let mut existing = None;
     let mut destination = PathBuf::new();
     for suffix in 0..10_000 {
@@ -103,69 +193,27 @@ pub fn import_lesson_document(root: &Path, lesson: &Value) -> Result<SyncReport,
     if destination.as_os_str().is_empty() {
         return Err("too many lesson filename collisions".into());
     }
-    // Reopening an imported lesson keeps operator edits and requires no network.
-    let show = if let Some(show) = existing {
-        show
+    Ok((destination, existing))
+}
+
+pub(super) fn publish_lesson(root: &Path, show: ShowFile) -> Result<SyncReport, String> {
+    let library = Library::open(root);
+    let title = show.show["meta"]["title"].as_str().unwrap();
+    let name = show.show["meta"]["name"].as_str().unwrap();
+    let display = if title == name {
+        title.to_owned()
     } else {
-        let mut show = ShowFile::blank(&new_id(), &display);
-        show.show["origin"] = json!("lessons");
-        show.show["category"] = json!("lessons");
-        show.show["meta"] = json!({"title":title,"name":name,"venue":lesson["venueName"]});
-        show.show["reference"] = json!({"type":"lessons","data":{"about":lesson["programAbout"],"studyName":lesson["studyName"]}});
-        show.show["layouts"]["main"]["notes"] = lesson
-            .get("lessonDescription")
-            .cloned()
-            .unwrap_or(json!(""));
-        show.show["slides"] = json!({});
-        show.show["media"] = json!({});
-        let files = lesson_groups(lesson)?;
-        let count: usize = files.iter().map(Vec::len).sum();
-        if count == 0 {
-            return Err("lesson contains no media".into());
-        }
-        let mut cache = MediaCache::open(&library)?;
-        let mut order = Vec::<Value>::new();
-        let mut index = 0;
-        for group in files {
-            let mut parent = None;
-            for file in group {
-                index += 1;
-                let id = format!("s{index}");
-                let media_id = format!("m{index}");
-                let source = file["url"].as_str().unwrap();
-                let file_name = file["name"].as_str().unwrap_or("Media");
-                let extension = media_extension(&file)?;
-                let loops = file["loopVideo"].as_bool() == Some(true)
-                    || file["loop"].as_bool() == Some(true)
-                    || file_name.contains("Title");
-                tracing::info!("preparing lesson media {index}/{count}: {file_name}");
-                let path = cache.download(source, extension)?;
-                show.show["media"][&media_id] =
-                    json!({"name":file_name,"path":path,"muted":false,"loop":loops});
-                show.show["slides"][&id] = json!({"group":file_name,"color":"","settings":{},"notes":"","items":[],"children":[]});
-                let mut node = json!({"background":media_id});
-                if !loops && is_video(extension) && index < count {
-                    node["actions"] = json!({"nextAfterMedia":true});
-                }
-                if let Some(parent_id) = &parent {
-                    show.show["slides"][parent_id]["children"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(json!(id));
-                    show.show["slides"][&id]["group"] = Value::Null;
-                    order.last_mut().unwrap()["children"][&id] = node;
-                } else {
-                    node["id"] = json!(id);
-                    order.push(node);
-                    parent = Some(id);
-                }
-            }
-        }
-        show.show["layouts"]["main"]["slides"] = json!(order);
+        format!("{title} - {name}")
+    };
+    fs::create_dir_all(library.shows_dir()).map_err(error)?;
+    let (destination, existing) = lesson_destination(&library, title, name, &display)?;
+    let mut projects = ProjectsFile::load(&library.projects_path()).map_err(error)?;
+    let show = if let Some(existing) = existing {
+        existing
+    } else {
         show.save(&destination).map_err(error)?;
         show
     };
-    let mut projects = ProjectsFile::load(&library.projects_path()).map_err(error)?;
     projects.add_project("lessons", "Lessons.church");
     if !projects
         .projects()
@@ -177,6 +225,7 @@ pub fn import_lesson_document(root: &Path, lesson: &Value) -> Result<SyncReport,
         projects.save(&library.projects_path()).map_err(error)?;
     }
     Ok(SyncReport {
+        errors: 0,
         shows: 1,
         project_id: Some("lessons".into()),
     })
@@ -232,6 +281,7 @@ pub(super) fn plan_media_show(
     name: &str,
     notes: &str,
     files: &[Value],
+    control: &ImportControl,
 ) -> Result<ShowFile, String> {
     let mut files = files.to_vec();
     for file in &mut files {
@@ -271,7 +321,12 @@ pub(super) fn plan_media_show(
         let slide_id = format!("s{}", index + 1);
         let media_id = format!("m{}", index + 1);
         let extension = media_extension(file)?;
-        let path = cache.download(file["url"].as_str().unwrap(), extension)?;
+        let path = cache.download(
+            file["url"].as_str().unwrap(),
+            extension,
+            file["name"].as_str().unwrap_or("Media"),
+            control,
+        )?;
         show.show["media"][&media_id] = json!({"name":file["name"],"path":path,
             "type":if is_video(extension) {"video"} else {"image"},
             "loop":file["loopVideo"].as_bool().unwrap_or(false),"muted":false});
@@ -349,7 +404,14 @@ impl MediaCache {
         })
     }
 
-    fn download(&mut self, url: &str, extension: &str) -> Result<PathBuf, String> {
+    fn download(
+        &mut self,
+        url: &str,
+        extension: &str,
+        label: &str,
+        control: &ImportControl,
+    ) -> Result<PathBuf, String> {
+        control.check()?;
         if let Some(entry) = self.index.get(url) {
             let name = entry["file"].as_str().unwrap_or("");
             let size = entry["bytes"].as_u64().unwrap_or(0);
@@ -364,6 +426,7 @@ impl MediaCache {
             }
         }
         // Media requests carry no ChurchApps account token, including redirects.
+        control.transfer(label, 0, None);
         let response = self.agent.get(url).call().map_err(|err| match err {
             ureq::Error::Status(code, _) => format!("lesson media returned HTTP {code}"),
             ureq::Error::Transport(_) => "lesson media download failed".into(),
@@ -389,14 +452,27 @@ impl MediaCache {
                 .create_new(true)
                 .open(&partial)
                 .map_err(error)?;
-            let size = std::io::copy(&mut response.into_reader().take(MAX_MEDIA + 1), &mut file)
-                .map_err(error)?;
+            let mut body = response.into_reader().take(MAX_MEDIA + 1);
+            let mut buffer = [0; 64 * 1024];
+            let mut size = 0;
+            loop {
+                control.check()?;
+                let count = body.read(&mut buffer).map_err(error)?;
+                control.check()?;
+                if count == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..count]).map_err(error)?;
+                size += count as u64;
+                control.transfer(label, size, expected);
+            }
             if size == 0 || size > MAX_MEDIA || expected.is_some_and(|expected| expected != size) {
                 return Err("lesson media download is empty, incomplete, or too large".into());
             }
             file.flush().map_err(error)?;
             file.sync_all().map_err(error)?;
             drop(file);
+            control.check()?;
             fs::rename(&partial, &final_path).map_err(error)?;
             self.index
                 .insert(url.to_string(), json!({"file":name,"bytes":size}));
@@ -508,6 +584,7 @@ pub(super) mod tests {
         assert_eq!(
             report,
             SyncReport {
+                errors: 0,
                 shows: 1,
                 project_id: Some("lessons".into())
             }
@@ -586,6 +663,73 @@ pub(super) mod tests {
         assert!(!shows[0].nexts_after_media_at(0));
         assert_eq!(import_sources(&root).shows, 1);
         assert_eq!(library.list_shows().unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelling_after_progress_discards_the_partial_file_and_never_publishes() {
+        let root = root("cancel");
+        let library = Library::open(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = std::io::BufReader::new(&mut stream);
+            use std::io::BufRead;
+            loop {
+                let mut line = String::new();
+                if request.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 131072\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.write_all(&[1; 65536]).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            let _ = stream.write_all(&[2; 65536]);
+        });
+        let control = std::sync::Arc::new(ImportControl::default());
+        let worker = {
+            let root = root.clone();
+            let control = control.clone();
+            thread::spawn(move || {
+                let lesson = json!({
+                    "lessonName": "Cancelled",
+                    "lessonImage": format!("http://{address}/cover.png"),
+                    "messages": [{"files": []}]
+                });
+                prepare_lesson(&root, &lesson, &control)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let progress = loop {
+            if let Some(progress) = control.progress().filter(|transfer| transfer.received > 0) {
+                break progress;
+            }
+            assert!(Instant::now() < deadline, "no transfer progress");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(progress.total, Some(131072));
+        assert!(!library.projects_path().exists());
+        control.cancel();
+        resume.send(()).unwrap();
+        assert!(matches!(worker.join().unwrap(), Err(error) if error.contains("cancelled")));
+        server.join().unwrap();
+        assert!(library.list_shows().unwrap().is_empty());
+        assert!(!library.projects_path().exists());
+        assert_eq!(
+            fs::read_dir(library.media_dir().join("Lessons"))
+                .unwrap()
+                .count(),
+            0
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
