@@ -94,7 +94,7 @@ placeholder until the compositor grows those sources.
 - [ ] Verify macOS distribution with Developer ID/notarization and on additional OS/architecture hosts.
 - [ ] Verify the implemented Windows x86-64 installer in native CI.
 - [x] Linux runtime tarball and desktop installer verified on Ubuntu 24.04 x86-64.
-- [ ] Release workflow that builds all three from the lockfile.
+- [ ] Verify the three-platform release workflow against one revision and its lockfile.
 
 Acceptance: a fresh machine can install the app without a Rust toolchain.
 

@@ -1,0 +1,74 @@
+name: Three-platform release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    branches: [main]
+    paths: ['.github/workflows/release.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    uses: ./.github/workflows/linux.yml
+  windows:
+    uses: ./.github/workflows/windows.yml
+  macos:
+    name: macOS ARM64 app and disk image
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native build and media dependencies
+        id: deps
+        run: |
+          test "$(uname -m)" = arm64
+          brew install pkgconf gstreamer
+          pkgconfig="$(brew --prefix)/lib/pkgconfig"
+          echo "PKG_CONFIG_PATH=$pkgconfig" >> "$GITHUB_ENV"
+          echo "gstreamer=$(PKG_CONFIG_PATH="$pkgconfig" pkg-config --modversion gstreamer-1.0)" >> "$GITHUB_OUTPUT"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Restore native compilation cache
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: macos-26-arm64-gst${{ steps.deps.outputs.gstreamer }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: macos-26-arm64-gst${{ steps.deps.outputs.gstreamer }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile native workspace tests
+        run: bash scripts/ci-run.sh cargo test --locked --workspace --no-run
+      - name: Run native workspace tests
+        timeout-minutes: 12
+        run: bash scripts/ci-run.sh cargo test --locked --workspace
+      - name: Build and verify the macOS disk image
+        run: bash scripts/ci-run.sh scripts/package.sh
+      - name: Upload disk image, checksum and verification report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: freeshow-macos-arm64
+          path: |
+            dist/freeshow-aarch64-apple-darwin/*.dmg
+            dist/freeshow-aarch64-apple-darwin/*.sha256
+            dist/freeshow-aarch64-apple-darwin/macos-verification.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Save native compilation cache
+        if: always() && steps.native-cache.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
