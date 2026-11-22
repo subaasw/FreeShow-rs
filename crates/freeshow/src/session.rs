@@ -101,6 +101,8 @@ pub struct Session {
     folder_paths: Vec<PathBuf>,
     folder_index: usize,
     pub tab: String,
+    /// Quick-search text that filters the current drawer list.
+    pub search_query: String,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     /// The selected text box on the current slide.
@@ -271,6 +273,7 @@ impl Session {
             folder_paths: Vec::new(),
             folder_index: 0,
             tab: "shows".to_string(),
+            search_query: String::new(),
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -394,6 +397,7 @@ impl Session {
             .map(|(width, height)| aligned_output_size(width, height))
             .unwrap_or((OUTPUT_WIDTH, OUTPUT_HEIGHT));
         let active_overlays = preferences.locked_overlay_ids(&library.audience_output().0);
+        freeshow_output::register_custom_fonts(&preferences.custom_font_files());
         Self {
             root: Some(root),
             icecast: library.icecast(),
@@ -408,6 +412,7 @@ impl Session {
             folder_paths: Vec::new(),
             folder_index: 0,
             tab: "shows".to_string(),
+            search_query: String::new(),
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -687,7 +692,11 @@ impl Session {
         }
     }
 
-    pub fn drawer(&self) -> Vec<String> {
+    pub fn set_search(&mut self, query: impl Into<String>) {
+        self.search_query = query.into();
+    }
+
+    fn drawer_names(&self) -> Vec<String> {
         match self.tab.as_str() {
             "shows" => self.shows.iter().map(ShowFile::name).collect(),
             "media" => self.media.iter().map(MediaEntry::label).collect(),
@@ -724,6 +733,30 @@ impl Session {
             ],
             _ => Vec::new(),
         }
+    }
+
+    fn drawer_entries(&self) -> Vec<(usize, String)> {
+        let query = self.search_query.trim().to_ascii_lowercase();
+        self.drawer_names()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, name)| query.is_empty() || name.to_ascii_lowercase().contains(&query))
+            .collect()
+    }
+
+    pub fn drawer(&self) -> Vec<String> {
+        self.drawer_entries()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// Visible row for a real drawer index, after the current search filter.
+    pub fn visible_drawer_index(&self, real: Option<usize>) -> Option<usize> {
+        let real = real?;
+        self.drawer_entries()
+            .iter()
+            .position(|(index, _)| *index == real)
     }
 
     pub fn slide_labels(&self) -> Vec<String> {
@@ -810,7 +843,16 @@ impl Session {
             .unwrap_or_else(|| show.plain_text(&slide.id))
     }
 
+    /// Real drawer index for a visible (search-filtered) row.
+    pub fn drawer_real_index(&self, visible: usize) -> usize {
+        self.drawer_entries()
+            .get(visible)
+            .map(|(real, _)| *real)
+            .unwrap_or(visible)
+    }
+
     pub fn select_drawer(&mut self, index: usize) -> DrawerAction {
+        let index = self.drawer_real_index(index);
         match self.tab.as_str() {
             "shows" => {
                 if index < self.shows.len() {
@@ -3128,7 +3170,11 @@ impl Session {
             unique_name(name, self.shows.iter().map(ShowFile::name).collect())
         };
         let mut show = ShowFile::blank(id, &name);
-        let _ = show.replace_lyrics_with(text, self.preferences.format_new_show());
+        let _ = show.replace_lyrics_with_split(
+            text,
+            self.preferences.format_new_show(),
+            self.preferences.split_lines(),
+        );
         let path = Library::open(&root)
             .shows_dir()
             .join(format!("{name}.show"));
@@ -3165,7 +3211,11 @@ impl Session {
             let Some(show) = self.shows.get_mut(index) else {
                 return false;
             };
-            if !show.replace_lyrics_with(text, self.preferences.format_new_show()) {
+            if !show.replace_lyrics_with_split(
+                text,
+                self.preferences.format_new_show(),
+                self.preferences.split_lines(),
+            ) {
                 return false;
             }
             match show.path.clone() {
@@ -4662,6 +4712,33 @@ mod tests {
         let slides = show.ordered_slides();
         assert_eq!(slides[0].group.as_deref(), Some("Verse"));
         assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn drawer_search_filters_shows_and_maps_the_visible_row() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_project());
+        assert!(session.create_show());
+        session.shows[0].show["name"] = serde_json::json!("Amazing Grace");
+        assert!(session.create_show());
+        session.shows[1].show["name"] = serde_json::json!("Holy Holy");
+        session.tab = "shows".to_string();
+        assert_eq!(
+            session.drawer(),
+            vec!["Amazing Grace".to_string(), "Holy Holy".to_string()]
+        );
+        session.set_search("holy");
+        assert_eq!(session.drawer(), vec!["Holy Holy".to_string()]);
+        assert_eq!(session.drawer_real_index(0), 1);
+        assert_eq!(session.visible_drawer_index(Some(1)), Some(0));
+        session.select_drawer(0);
+        assert_eq!(session.show_index, Some(1));
+        session.set_search("");
+        assert_eq!(session.drawer().len(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

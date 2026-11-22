@@ -188,6 +188,91 @@ impl FreeShowPreferences {
             .any(|id| id == overlay_id)
     }
 
+    /// Bottom drawer height in pixels. FreeShow stores 300 by default.
+    pub fn drawer_height(&self) -> u32 {
+        stored_size(&self.drawer, "height", 40, 800)
+            .or_else(|| stored_size(&self.resized, "drawer", 40, 800))
+            .unwrap_or(300)
+    }
+
+    /// Left show-list width. This operator window uses 240 when unset.
+    pub fn left_panel_width(&self) -> u32 {
+        stored_size(&self.resized, "leftPanel", 80, 800).unwrap_or(240)
+    }
+
+    /// Right project-list width. This operator window uses 260 when unset.
+    pub fn right_panel_width(&self) -> u32 {
+        stored_size(&self.resized, "rightPanel", 80, 800).unwrap_or(260)
+    }
+
+    /// Slide-list columns in grid mode (1–12, default 4).
+    pub fn slides_columns(&self) -> u32 {
+        stored_size(&self.slides_options, "columns", 1, 12).unwrap_or(4)
+    }
+
+    /// `grid`, `simple`, `groups`, `list`, or `lyrics`. Missing settings use `grid`.
+    pub fn slides_mode(&self) -> &str {
+        self.slides_options
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|mode| matches!(*mode, "grid" | "simple" | "groups" | "list" | "lyrics"))
+            .unwrap_or("grid")
+    }
+
+    /// Local custom fonts as `(family, path)` pairs. Google-only entries have no path.
+    pub fn custom_font_files(&self) -> Vec<(String, std::path::PathBuf)> {
+        let Some(list) = self.custom_fonts.as_array() else {
+            return Vec::new();
+        };
+        let mut fonts = Vec::new();
+        for entry in list {
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            let path = entry
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from);
+            if let (Some(name), Some(path)) = (name, path) {
+                fonts.push((name.to_string(), path));
+            }
+        }
+        fonts
+    }
+
+    /// Metronome tempo in BPM. Accepts `tempo` or `bpm`. Missing or 0 means 120.
+    pub fn metronome_bpm(&self) -> u32 {
+        stored_size(&self.metronome, "tempo", 20, 400)
+            .or_else(|| stored_size(&self.metronome, "bpm", 20, 400))
+            .unwrap_or(120)
+    }
+
+    pub fn metronome_beats(&self) -> u32 {
+        stored_size(&self.metronome, "beats", 1, 16).unwrap_or(4)
+    }
+
+    /// `send` or `receive` when a timecode mode was stored.
+    pub fn timecode_kind(&self) -> Option<&str> {
+        self.timecode
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|kind| *kind == "send" || *kind == "receive")
+    }
+
+    pub fn timecode_framerate(&self) -> f64 {
+        self.timecode
+            .get("framerate")
+            .and_then(Value::as_f64)
+            .filter(|rate| *rate > 0.0 && *rate <= 120.0)
+            .unwrap_or(30.0)
+    }
+
     /// Pixel size of the active (or first enabled) output, when `bounds` were stored.
     pub fn configured_output_size(&self) -> Option<(u32, u32)> {
         let output = self
@@ -671,6 +756,16 @@ impl ShowFile {
 
     /// When `format` is true, group headers such as `[Verse]` or `Chorus:` become slide groups.
     pub fn replace_lyrics_with(&mut self, text: &str, format: bool) -> bool {
+        self.replace_lyrics_with_split(text, format, 0)
+    }
+
+    /// Like `replace_lyrics_with`, then splits any stanza longer than `split_lines`.
+    pub fn replace_lyrics_with_split(
+        &mut self,
+        text: &str,
+        format: bool,
+        split_lines: u32,
+    ) -> bool {
         let layout_id = self
             .show
             .pointer("/settings/activeLayout")
@@ -718,6 +813,7 @@ impl ShowFile {
                 })
                 .collect()
         };
+        let stanzas = split_stanzas(stanzas, split_lines);
         let mut slides = serde_json::Map::new();
         let mut order = Vec::new();
         for (index, (group, chunk)) in stanzas.iter().enumerate() {
@@ -2697,6 +2793,24 @@ impl ShowFile {
         *value = Value::String(next);
         true
     }
+}
+
+fn split_stanzas(stanzas: Vec<(String, String)>, split_lines: u32) -> Vec<(String, String)> {
+    if split_lines == 0 {
+        return stanzas;
+    }
+    let mut split = Vec::new();
+    for (group, chunk) in stanzas {
+        let lines: Vec<&str> = chunk.split('\n').collect();
+        if lines.len() as u32 <= split_lines {
+            split.push((group, chunk));
+            continue;
+        }
+        for part in lines.chunks(split_lines as usize) {
+            split.push((group.clone(), part.join("\n")));
+        }
+    }
+    split
 }
 
 fn formatted_stanzas(text: &str) -> Vec<(String, String)> {
@@ -4771,7 +4885,12 @@ impl Library {
 
     /// Converts song files in `Imports/` into `Shows/*.show`.
     pub fn import_show_sources(&self) -> Result<Vec<String>, DataError> {
-        import::import_sources(&self.imports_dir(), &self.shows_dir(), &self.media_dir())
+        import::import_sources_split(
+            &self.imports_dir(),
+            &self.shows_dir(),
+            &self.media_dir(),
+            self.preferences().split_lines(),
+        )
     }
 
     pub fn list_bibles(&self) -> Result<Vec<BibleFile>, DataError> {
@@ -4848,6 +4967,15 @@ fn stored_value(json: &Value, name: &str) -> Value {
         .cloned()
         .filter(|value| !value.is_null())
         .unwrap_or(Value::Null)
+}
+
+fn stored_size(json: &Value, name: &str, min: u32, max: u32) -> Option<u32> {
+    let value = json.get(name)?;
+    let number = value
+        .as_u64()
+        .or_else(|| value.as_f64().map(|number| number.round() as u64))?;
+    let number = u32::try_from(number).ok()?;
+    (min..=max).contains(&number).then_some(number)
 }
 
 fn locked_overlay_ids(locked: &Value, output_id: &str) -> Vec<String> {
@@ -5288,6 +5416,16 @@ mod tests {
         assert_eq!(slides[0].lines, vec!["In the beginning".to_string()]);
         assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
         assert_eq!(slides[1].lines, vec!["Praise the Lord".to_string()]);
+        let mut show = ShowFile::blank("sunday", "Sunday");
+        assert!(show.replace_lyrics_with_split("One\nTwo\nThree\nFour\nFive", false, 2));
+        let slides = show.ordered_slides();
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[0].lines, vec!["One".to_string(), "Two".to_string()]);
+        assert_eq!(
+            slides[1].lines,
+            vec!["Three".to_string(), "Four".to_string()]
+        );
+        assert_eq!(slides[2].lines, vec!["Five".to_string()]);
     }
 
     #[test]
@@ -6149,6 +6287,22 @@ mod tests {
         assert!(preferences.out_locked());
         assert_eq!(preferences.split_lines(), 4);
         assert!(preferences.full_colors());
+        assert_eq!(preferences.drawer_height(), 220);
+        assert_eq!(preferences.left_panel_width(), 240);
+        assert_eq!(preferences.right_panel_width(), 260);
+        assert_eq!(preferences.slides_columns(), 4);
+        assert_eq!(preferences.slides_mode(), "grid");
+        assert_eq!(
+            preferences.custom_font_files(),
+            vec![(
+                "Display".to_string(),
+                std::path::PathBuf::from("fonts/Display.ttf")
+            )]
+        );
+        assert_eq!(preferences.metronome_bpm(), 80);
+        assert_eq!(preferences.metronome_beats(), 4);
+        assert_eq!(preferences.timecode_kind(), None);
+        // resized.drawer is 320 in this fixture, but drawer.height (220) wins.
         assert!(!preferences.alert_updates());
         assert_eq!(
             preferences.locked_overlay_ids("default"),

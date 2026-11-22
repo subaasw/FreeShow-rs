@@ -7,6 +7,7 @@
 mod charts;
 mod styled;
 mod text;
+pub use text::register_custom_fonts;
 
 pub use charts::{ChartPoint, chart_image, display_url, web_preview};
 pub use styled::qr_image;
