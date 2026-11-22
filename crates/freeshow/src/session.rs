@@ -1021,10 +1021,17 @@ impl Session {
                 .rss_items
                 .iter()
                 .map(|item| {
-                    if item.link.is_empty() {
-                        item.title.clone()
-                    } else {
-                        format!("{} — {}", item.title, item.link)
+                    // The site name is enough to tell feeds apart; a full link only crowds the row.
+                    let site = item
+                        .link
+                        .split("://")
+                        .nth(1)
+                        .and_then(|rest| rest.split('/').next())
+                        .map(|host| host.trim_start_matches("www."))
+                        .filter(|host| !host.is_empty());
+                    match site {
+                        Some(site) => format!("{} · {site}", item.title),
+                        None => item.title.clone(),
                     }
                 })
                 .collect(),
