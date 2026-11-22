@@ -160,6 +160,13 @@ mod gst_player {
             self.looping.set(looping);
         }
 
+        /// When `sync` is false, decoded frames are delivered as soon as they
+        /// are ready instead of being paced to the pipeline clock. File
+        /// playback stays clock-synced by default.
+        pub fn set_sync(&self, sync: bool) {
+            self.sink.set_property("sync", sync);
+        }
+
         pub fn set_muted(&self, muted: bool) {
             self.muted.set(muted);
             self.apply_gain();
@@ -256,6 +263,12 @@ mod gst_player {
 
         pub fn next_frame(&mut self) -> Option<Raster> {
             self.poll_frame(gst::ClockTime::from_mseconds(40))
+        }
+
+        /// Wait up to `wait` for the next decoded frame.
+        pub fn next_frame_wait(&mut self, wait: std::time::Duration) -> Option<Raster> {
+            let nanos = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+            self.poll_frame(gst::ClockTime::from_nseconds(nanos))
         }
 
         /// Poll a secondary preview without waiting on the caller's event loop.
@@ -1183,6 +1196,10 @@ impl VideoPlayer {
         None
     }
 
+    pub fn next_frame_wait(&mut self, _wait: std::time::Duration) -> Option<Raster> {
+        None
+    }
+
     pub fn try_next_frame(&mut self) -> Option<Raster> {
         None
     }
@@ -1194,6 +1211,8 @@ impl VideoPlayer {
     pub fn set_paused(&self, _paused: bool) {}
 
     pub fn set_looping(&self, _looping: bool) {}
+
+    pub fn set_sync(&self, _sync: bool) {}
 
     pub fn set_rate(&self, _rate: f64) {}
 
