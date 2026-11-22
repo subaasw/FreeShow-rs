@@ -457,6 +457,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         text_duration: settings.text_duration,
         media_transition: settings.media_transition.into(),
         media_duration: settings.media_duration,
+        addresses: settings.addresses.into(),
     });
     ui.set_theme_names(strings(&settings.themes));
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
@@ -1909,7 +1910,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             match result {
                 Ok(()) => {
-                    ui.set_settings_status(format!("Saved {key}").into());
+                    ui.set_settings_status(
+                        format!("Saved {}", session::setting_label(&key)).into(),
+                    );
                     let current = session.borrow();
                     if key.starts_with("output")
                         && let Some(output) = output_window.upgrade()
