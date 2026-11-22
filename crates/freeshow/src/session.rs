@@ -1091,6 +1091,28 @@ impl Session {
             .collect()
     }
 
+    /// Which visible drawer rows are on air: showing overlays and the playing audio file.
+    pub fn drawer_on(&self) -> Vec<bool> {
+        self.drawer_entries()
+            .into_iter()
+            .map(|(index, name)| match self.tab.as_str() {
+                "overlays" => self
+                    .overlay_catalog
+                    .id_named(&name)
+                    .is_some_and(|id| self.active_overlays.contains(&id)),
+                "audio" => {
+                    self.playing_audio.is_some()
+                        && self
+                            .audio
+                            .get(index)
+                            .and_then(|file| self.file_in(AUDIO_DIR, file))
+                            == self.playing_audio
+                }
+                _ => false,
+            })
+            .collect()
+    }
+
     /// Visible row for a real drawer index, after the current search filter.
     pub fn visible_drawer_index(&self, real: Option<usize>) -> Option<usize> {
         let real = real?;
@@ -4707,6 +4729,50 @@ impl Session {
         }
         self.go_live();
         self.slide_hidden = false;
+        true
+    }
+
+    /// The playing audio file for the operator's now-playing bar: name, time, progress and paused.
+    pub fn now_playing(&self) -> Option<(String, String, f32, bool)> {
+        let path = self.playing_audio.as_ref()?;
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let clock = |seconds: f64| {
+            let seconds = seconds.max(0.0) as u64;
+            format!("{}:{:02}", seconds / 60, seconds % 60)
+        };
+        let time = if self.audio_duration > 0.0 {
+            format!(
+                "{} / {}",
+                clock(self.audio_time),
+                clock(self.audio_duration)
+            )
+        } else {
+            clock(self.audio_time)
+        };
+        let progress = if self.audio_duration > 0.0 {
+            (self.audio_time / self.audio_duration) as f32
+        } else {
+            0.0
+        };
+        Some((name, time, progress, self.audio_paused))
+    }
+
+    /// Pause, resume or stop the playing audio from the now-playing bar.
+    pub fn audio_control(&mut self, action: &str) -> bool {
+        let Some(path) = self.playing_audio.clone() else {
+            return false;
+        };
+        let name = path.to_string_lossy().into_owned();
+        let command = match action {
+            "stop" => freeshow_remote::Command::StopAudio,
+            "toggle" if self.audio_paused => freeshow_remote::Command::Play { name },
+            "toggle" => freeshow_remote::Command::PauseAudio { name },
+            _ => return false,
+        };
+        self.ui_commands.push(command);
         true
     }
 
@@ -9953,6 +10019,36 @@ Second line"
             "For God so loved the world"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_now_playing_bar_pauses_resumes_and_stops_the_audio() {
+        let mut session = Session::empty();
+        assert!(session.now_playing().is_none());
+        assert!(!session.audio_control("toggle"));
+        session.playing_audio = Some(PathBuf::from("/tmp/Audio/prelude.mp3"));
+        session.audio_time = 65.4;
+        session.audio_duration = 130.0;
+        let (name, time, progress, paused) = session.now_playing().unwrap();
+        assert_eq!(
+            (name.as_str(), time.as_str(), paused),
+            ("prelude", "1:05 / 2:10", false)
+        );
+        assert!((progress - 0.503).abs() < 0.01);
+        assert!(session.audio_control("toggle"));
+        let pause = session.ui_commands.pop().unwrap();
+        session.apply_remote(pause);
+        assert!(session.audio_paused);
+        assert!(session.audio_control("toggle"));
+        assert!(matches!(
+            session.ui_commands.pop(),
+            Some(freeshow_remote::Command::Play { .. })
+        ));
+        assert!(session.audio_control("stop"));
+        assert!(matches!(
+            session.ui_commands.pop(),
+            Some(freeshow_remote::Command::StopAudio)
+        ));
     }
 
     #[test]
