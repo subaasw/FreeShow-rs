@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 
 use crate::live::{audience_frame, stage_frame};
 use crate::session::Session;
-use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
 
 const STILL_BUDGET_FPS: f64 = 60.0;
 const VIDEO_BUDGET_FPS: f64 = 30.0;
@@ -279,8 +278,8 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
 
     let report = json!({
         "library": root,
-        "output_width": OUTPUT_WIDTH,
-        "output_height": OUTPUT_HEIGHT,
+        "output_width": session.output_width,
+        "output_height": session.output_height,
         "open_ms": open_ms,
         "open_budget_ms": OPEN_BUDGET_MS,
         "idle_rss_mb": idle_rss_mb,
@@ -363,19 +362,19 @@ pub fn check_library(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
 
     let mut fingerprints = Vec::new();
     let first = audience_frame(&session);
-    if first.width != OUTPUT_WIDTH || first.height != OUTPUT_HEIGHT {
+    if first.width != session.output_width || first.height != session.output_height {
         return Err(format!(
-            "audience frame was {0}×{1}, expected {OUTPUT_WIDTH}×{OUTPUT_HEIGHT}",
-            first.width, first.height
+            "audience frame was {0}×{1}, expected {2}×{3}",
+            first.width, first.height, session.output_width, session.output_height
         )
         .into());
     }
     fingerprints.push(fingerprint(&first.pixels));
     let stage = stage_frame(&session);
-    if stage.width != OUTPUT_WIDTH || stage.height != OUTPUT_HEIGHT {
+    if stage.width != session.output_width || stage.height != session.output_height {
         return Err(format!(
-            "stage frame was {0}×{1}, expected {OUTPUT_WIDTH}×{OUTPUT_HEIGHT}",
-            stage.width, stage.height
+            "stage frame was {0}×{1}, expected {2}×{3}",
+            stage.width, stage.height, session.output_width, session.output_height
         )
         .into());
     }

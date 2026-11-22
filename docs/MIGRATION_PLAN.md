@@ -113,9 +113,9 @@ The operator window is Slint 1.18 (`backend-winit`, `renderer-femtovg-wgpu`). Au
 
 ## 4. Performance targets
 
-These are budgets. `--check-perf` and `scripts/bench-perf.py` measure them on a mid-size Sunday library. The compositor framebuffer is 960×540; slide layout stays 1920×1080, so still and video fps are painted at the output size from a 1080p layout (and a generated 1920×1080@30 video underlay). Cold open here is library load plus the first audience and stage frames, not a framed operator window. Compare against the Electron app on the same machine and the same library when you can.
+These are budgets. `--check-perf` and `scripts/bench-perf.py` measure them on a mid-size Sunday library. The compositor framebuffer is 1920×1080 by default, or the active output's stored bounds. Slide layout stays 1920×1080, so still and video fps are painted at the output size from a 1080p layout (and a generated 1920×1080@30 video underlay). Cold open here is library load plus the first audience and stage frames, not a framed operator window. Compare against the Electron app on the same machine and the same library when you can.
 
-On the Linux workspace box (22 Nov 2026, Asia/Katmandu), a release `freeshow --check-perf` run reported: cold open ~16 ms, idle RSS ~24 MB, stills ~200 fps, unsynced 1080p video decode+paint ~70 fps, Go/Next ~5 ms, and a 1,000-show scan ~11 ms. All of those were under budget. Remote-button latency and a framed UI cold start were not part of that headless pass.
+On the Linux workspace box (22 Nov 2026, Asia/Katmandu), a release `freeshow --check-perf` run at the default 1920×1080 framebuffer reported: cold open ~19 ms, idle RSS ~30 MB, stills ~63 fps, unsynced 1080p video decode+paint ~56 fps, Go/Next ~15 ms, and a 1,000-show scan ~11 ms. All of those were under budget. Remote-button latency and a framed UI cold start were not part of that headless pass.
 
 | Budget | Target | Why it matters |
 | --- | --- | --- |
@@ -202,6 +202,20 @@ Acceptance: the fixtures in `crates/freeshow-data/tests/fixtures` plus a documen
 - [x] A headless "real library" pass: `--check-library` writes or opens a Sunday-style library (song, welcome, project, media, scripture, stage layout), presents the song, walks the slides, fingerprints audience and stage frames, and GETs the remote and stage pages.
 
 Acceptance: a machine without a Rust toolchain can install a signed (or documented unsigned) build and run a Sunday service from an existing FreeShow library. Unsigned/ad-hoc packages are the verified CI path; notarized macOS builds still need the owner.
+
+### M7. Full parity
+
+Close the remaining gaps versus FreeShow 1.6.8 so a Sunday operator can run a service without falling back to Electron for core presentation work.
+
+- [x] Paint the compositor at the real output resolution (1920×1080 by default, or the active output's stored `bounds`) and re-measure the §4 budgets (Linux box, 22 Nov 2026: stills ~63 fps, video ~56 fps, Go/Next ~15 ms).
+- [ ] Remaining importers: MediaShout, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only shows, and project packages, each with a small fixture and tests.
+- [ ] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures.
+- [ ] Operator chrome, drawer, and output extras still listed as gaps.
+- [ ] Capture and I/O gaps.
+- [ ] Measure remote-button latency against the ≤20 ms budget.
+- Cloud providers (Canva, OnStage, Amazing Life) and AI speech-to-text come last, and only if they need no credentials; otherwise they stay documented.
+
+Acceptance: the remaining 1.6.8 presentation path works at the configured output size, the listed importers and settings keys are covered by tests, and remote Go/Next latency is measured. Credential-gated cloud and STT stay documented.
 
 ---
 

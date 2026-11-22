@@ -2,9 +2,8 @@
 """Measure the plan §4 performance budgets with `freeshow --check-perf`.
 
 Builds a release binary when needed, runs the headless checker, writes JSON,
-and exits 1 if a budget is missed. The compositor currently paints 960×540
-frames (the 1920×1080 figure in the plan is the slide layout, not the
-framebuffer).
+and exits 1 if a budget is missed. The compositor paints 1920×1080 by default, or the active output's stored
+bounds. Slide layout stays 1920×1080.
 """
 import argparse
 import json

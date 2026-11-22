@@ -144,6 +144,7 @@ pub struct StageContext<'a> {
     pub twelve_hour: bool,
 }
 
+#[allow(dead_code)]
 pub fn paint_stage(
     slides: &[StageSlide],
     index: Option<usize>,
@@ -151,6 +152,29 @@ pub fn paint_stage(
     clock: &str,
     timer: &str,
     context: &StageContext,
+) -> freeshow_output::Frame {
+    paint_stage_at(
+        slides,
+        index,
+        layout,
+        clock,
+        timer,
+        context,
+        OUTPUT_WIDTH,
+        OUTPUT_HEIGHT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paint_stage_at(
+    slides: &[StageSlide],
+    index: Option<usize>,
+    layout: &StageLayout,
+    clock: &str,
+    timer: &str,
+    context: &StageContext,
+    output_width: u32,
+    output_height: u32,
 ) -> freeshow_output::Frame {
     let background = parse_color(&layout.background).unwrap_or(Rgba {
         r: 0x12,
@@ -313,8 +337,8 @@ pub fn paint_stage(
         })
         .collect();
     render_styled(&StyledSlide {
-        output_width: OUTPUT_WIDTH,
-        output_height: OUTPUT_HEIGHT,
+        output_width,
+        output_height,
         source_width: SOURCE_WIDTH,
         source_height: SOURCE_HEIGHT,
         background,

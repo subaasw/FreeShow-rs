@@ -478,17 +478,36 @@ pub fn parse_color(value: &str) -> Option<Rgba> {
 pub fn render_styled(slide: &StyledSlide) -> crate::Frame {
     let width = slide.output_width;
     let height = slide.output_height;
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    if slide.background.a > 0 {
-        fill(&mut pixels, width, height, slide.background);
-    }
-    for item in &slide.items {
-        draw_item(&mut pixels, slide, item);
-    }
-    crate::Frame {
+    let mut frame = crate::Frame {
         width,
         height,
-        pixels,
+        pixels: vec![0u8; (width * height * 4) as usize],
+    };
+    paint_styled(&mut frame.pixels, slide);
+    frame
+}
+
+/// Draws `slide` onto an existing framebuffer. Items are painted directly when
+/// the sizes match, so a lyric slide does not need a second full-frame `over`.
+pub fn composite_styled(base: &mut crate::Frame, slide: &StyledSlide) {
+    if base.width != slide.output_width || base.height != slide.output_height {
+        *base = over(base, &render_styled(slide));
+        return;
+    }
+    paint_styled(&mut base.pixels, slide);
+}
+
+fn paint_styled(pixels: &mut [u8], slide: &StyledSlide) {
+    if slide.background.a > 0 {
+        fill(
+            pixels,
+            slide.output_width,
+            slide.output_height,
+            slide.background,
+        );
+    }
+    for item in &slide.items {
+        draw_item(pixels, slide, item);
     }
 }
 
@@ -930,14 +949,22 @@ pub fn over(base: &crate::Frame, top: &crate::Frame) -> crate::Frame {
     let mut index = 0;
     while index + 3 < len {
         let alpha = top.pixels[index + 3];
+        if alpha == 0 {
+            index += 4;
+            while index + 3 < len && top.pixels[index + 3] == 0 {
+                index += 4;
+            }
+            continue;
+        }
         if alpha == 255 {
             pixels[index..index + 4].copy_from_slice(&top.pixels[index..index + 4]);
-        } else if alpha > 0 {
-            let cover = f32::from(alpha) / 255.0;
+        } else {
+            let cover = u16::from(alpha);
+            let remain = 255 - cover;
             for channel in 0..3 {
-                let below = f32::from(pixels[index + channel]);
-                let above = f32::from(top.pixels[index + channel]);
-                pixels[index + channel] = (above * cover + below * (1.0 - cover)).round() as u8;
+                let below = u16::from(pixels[index + channel]);
+                let above = u16::from(top.pixels[index + channel]);
+                pixels[index + channel] = ((above * cover + below * remain) / 255) as u8;
             }
             pixels[index + 3] = 255;
         }
@@ -3225,6 +3252,20 @@ fn fill_rect(
     color: Rgba,
 ) {
     let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+    if color.a == 0 || x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    if color.a == 255 {
+        let pixel = [color.r, color.g, color.b, 255];
+        for py in y0..y1 {
+            let start = ((py as u32 * frame_w + x0 as u32) * 4) as usize;
+            let end = ((py as u32 * frame_w + x1 as u32) * 4) as usize;
+            for chunk in pixels[start..end].as_chunks_mut::<4>().0 {
+                chunk.copy_from_slice(&pixel);
+            }
+        }
+        return;
+    }
     for py in y0..y1 {
         for px in x0..x1 {
             paint(pixels, frame_w, frame_h, px, py, color);

@@ -12,7 +12,9 @@ use freeshow_data::{
     VerseHit, default_stage, new_id,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
-use freeshow_output::{Fit, Raster, crop_raster, decode_image};
+use freeshow_output::{
+    Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
+};
 
 /// Linear gain from a volume action. A value above 5 is a percent. Decibels convert to gain.
 #[derive(Clone)]
@@ -88,6 +90,9 @@ pub struct Session {
     pub icecast: Option<(freeshow_core::IcecastDestination, bool)>,
     /// Settings read from the FreeShow library, not this app's own settings file.
     pub preferences: FreeShowPreferences,
+    /// Audience framebuffer size: 1920×1080, or the active output's stored bounds.
+    pub output_width: u32,
+    pub output_height: u32,
     pub audio_device_map: std::collections::BTreeMap<String, String>,
     pub shows: Vec<ShowFile>,
     pub projects: ProjectsFile,
@@ -256,6 +261,8 @@ impl Session {
             root: None,
             icecast: None,
             preferences: FreeShowPreferences::default(),
+            output_width: OUTPUT_WIDTH,
+            output_height: OUTPUT_HEIGHT,
             audio_device_map: Default::default(),
             shows: Vec::new(),
             projects: ProjectsFile::empty(),
@@ -382,10 +389,16 @@ impl Session {
             take(library.load_synced_settings(), &mut warnings).unwrap_or_else(Catalog::empty);
         let timers = named_timers(&synced);
         let (volume, audio_muted) = library.main_audio();
+        let (output_width, output_height) = preferences
+            .configured_output_size()
+            .map(|(width, height)| aligned_output_size(width, height))
+            .unwrap_or((OUTPUT_WIDTH, OUTPUT_HEIGHT));
         Self {
             root: Some(root),
             icecast: library.icecast(),
             preferences,
+            output_width,
+            output_height,
             audio_device_map: Default::default(),
             shows,
             projects,
