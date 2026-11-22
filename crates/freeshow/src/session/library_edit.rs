@@ -8,7 +8,7 @@
 
 use freeshow_data::{Library, ProjectEntry, ProjectsFile, ShowFile};
 
-use super::{Session, unique_name};
+use super::{Session, scripture_catalog, unique_name};
 use freeshow_data::new_id;
 
 /// A show file name FreeShow and every desktop OS accept: path separators and
@@ -96,6 +96,112 @@ impl Session {
         self.project_item = 0;
         self.remember_project();
         Ok(format!("Opened project “{}”", project.name))
+    }
+
+    /// Brings files dropped on the window into the library: pictures and videos
+    /// to `Media/`, audio to `Audio/`, Bibles to `Bibles/`, and anything else is
+    /// imported as songs or presentations through `Imports/`.
+    pub fn import_files(&mut self, paths: &[std::path::PathBuf]) -> Result<String, String> {
+        use freeshow_media::{MediaKind, media_kind};
+        let root = self.root.clone().ok_or("choose a library folder first")?;
+        let library = Library::open(&root);
+        let (mut songs, mut media, mut audio, mut bibles, mut skipped) = (0, 0, 0, 0, 0);
+        for path in paths {
+            if !path.is_file() {
+                skipped += 1;
+                continue;
+            }
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let (dir, counter) = match media_kind(path) {
+                MediaKind::Image | MediaKind::Video => (library.media_dir(), &mut media),
+                MediaKind::Audio => (library.audio_dir(), &mut audio),
+                MediaKind::Other
+                    if matches!(extension.as_str(), "fsb" | "usfm" | "sfm" | "usx") =>
+                {
+                    (library.bibles_dir(), &mut bibles)
+                }
+                MediaKind::Other => (library.imports_dir(), &mut songs),
+            };
+            match copy_into(path, &dir) {
+                Ok(()) => *counter += 1,
+                Err(err) => return Err(format!("could not copy {}: {err}", path.display())),
+            }
+        }
+        let mut notes = Vec::new();
+        let before = self.shows.len();
+        if songs > 0 {
+            notes = library
+                .import_show_sources()
+                .map_err(|err| err.to_string())?;
+            self.reload_import_catalog(None);
+        }
+        if bibles > 0 {
+            if let Ok(found) = library.import_scripture_sources() {
+                notes.extend(found);
+            }
+            if let Ok(list) = library.list_bibles() {
+                self.scripture = scripture_catalog(&list);
+                self.bibles = list;
+            }
+        }
+        if media > 0
+            && let Ok(mut entries) = library.list_media_entries()
+        {
+            for camera in freeshow_media::cameras() {
+                entries.push(freeshow_data::MediaEntry::camera(&camera));
+            }
+            self.media = entries;
+        }
+        if audio > 0
+            && let Ok(list) = library.list_media_files(&library.audio_dir())
+        {
+            self.audio = list;
+        }
+        for note in &notes {
+            tracing::warn!("import: {note}");
+        }
+        let shows = self.shows.len().saturating_sub(before);
+        let mut parts = Vec::new();
+        if songs > 0 {
+            parts.push(format!("{shows} show{}", if shows == 1 { "" } else { "s" }));
+        }
+        if media > 0 {
+            parts.push(format!(
+                "{media} media file{}",
+                if media == 1 { "" } else { "s" }
+            ));
+        }
+        if audio > 0 {
+            parts.push(format!(
+                "{audio} audio file{}",
+                if audio == 1 { "" } else { "s" }
+            ));
+        }
+        if bibles > 0 {
+            parts.push(format!(
+                "{bibles} Bible{}",
+                if bibles == 1 { "" } else { "s" }
+            ));
+        }
+        if parts.is_empty() {
+            return Err(if skipped > 0 {
+                "drop files, not folders".into()
+            } else {
+                "nothing to import".into()
+            });
+        }
+        let mut message = format!("Imported {}", parts.join(", "));
+        if songs > 0 && shows == 0 {
+            message = format!("{message} (no new shows; a show with that name may exist already)");
+        }
+        if !notes.is_empty() {
+            message.push_str(&format!(" · {} warning(s) in the log", notes.len()));
+        }
+        Ok(message)
     }
 
     /// Runs one operator library action and returns the status-bar message.
@@ -400,6 +506,31 @@ impl Session {
     }
 }
 
+/// Copies `path` into `dir`, keeping an existing file with the same name and contents.
+fn copy_into(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let mut target = dir.join(name);
+    let size = std::fs::metadata(path)?.len();
+    let mut number = 2;
+    while target.exists() {
+        if std::fs::metadata(&target).is_ok_and(|meta| meta.len() == size)
+            && std::fs::read(&target)? == std::fs::read(path)?
+        {
+            return Ok(());
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        target = dir.join(format!("{stem} {number}{ext}"));
+        number += 1;
+    }
+    std::fs::copy(path, &target).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +559,59 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn dropped_files_land_in_the_right_folders_and_import_once() {
+        let (dir, mut session) = library("drop");
+        let outside = dir.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let song = outside.join("Blessed Assurance.txt");
+        std::fs::write(
+            &song,
+            "Blessed assurance\nJesus is mine\n\nThis is my story",
+        )
+        .unwrap();
+        let picture = outside.join("cross.png");
+        std::fs::write(&picture, b"png").unwrap();
+        let message = session
+            .import_files(&[song.clone(), picture.clone()])
+            .unwrap();
+        assert!(
+            message.starts_with("Imported 1 show, 1 media file"),
+            "{message}"
+        );
+        assert!(
+            session
+                .shows
+                .iter()
+                .any(|show| show.name() == "Blessed Assurance")
+        );
+        assert!(dir.0.join("Media/cross.png").exists());
+        assert!(
+            dir.0
+                .join("Imports/Imported/Blessed Assurance.txt")
+                .exists()
+        );
+        // A deleted imported show does not come back on the next start.
+        session.tab = "shows".into();
+        session.show_index = session
+            .shows
+            .iter()
+            .position(|show| show.name() == "Blessed Assurance");
+        session.library_action("delete-show", "").unwrap();
+        let reopened = Session::open(dir.0.clone());
+        assert!(
+            reopened
+                .shows
+                .iter()
+                .all(|show| show.name() != "Blessed Assurance")
+        );
+        assert!(
+            session
+                .import_files(std::slice::from_ref(&outside))
+                .is_err()
+        );
     }
 
     #[test]
