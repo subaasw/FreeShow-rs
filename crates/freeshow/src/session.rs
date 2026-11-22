@@ -839,6 +839,8 @@ impl Session {
                     "Always on top".to_string()
                 },
                 "Shortcuts".to_string(),
+                "Save layout".to_string(),
+                "Window layouts".to_string(),
             ],
             _ => Vec::new(),
         }
@@ -5275,6 +5277,10 @@ mod tests {
         assert!(session.always_on_top);
         assert!(session.perform_shortcut("Ctrl+Shift+A"));
         assert!(!session.always_on_top);
+        session.tab = "functions".to_string();
+        let functions = session.drawer();
+        assert!(functions.contains(&"Save layout".to_string()));
+        assert!(functions.contains(&"Window layouts".to_string()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

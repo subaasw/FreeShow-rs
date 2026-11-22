@@ -29,7 +29,7 @@ Audited against upstream `1.6.8-beta.5` by walking `src/frontend` and `src/elect
 
 ### Operator chrome
 - First-run guide (shown until `special.guideSeen` is set; Functions → Guide or F1), focus/presenter mode (Ctrl+Shift+F hides the drawer and project list), undo/redo (Ctrl+Z / Ctrl+Y, also Functions), and a shortcut editor (Functions → Shortcuts, stored as `settings.json` `shortcuts`). Header Search filters the current drawer tab.
-- Always-on-top (default on for the audience window, Ctrl+Shift+A or Functions) and kiosk/fullscreen (F11). Named window-layout profiles, the show timeline editor, draw-on-output tools, spellcheck, and a self-updater remain.
+- Always-on-top (default on for the audience window, Ctrl+Shift+A or Functions), kiosk/fullscreen (F11), and named window-layout profiles (Functions → Save layout / Window layouts) stored in app `settings.json` and applied on open. Synced library `profiles` stay access-control accounts, not window layouts. The show timeline editor, draw-on-output tools, spellcheck, and a self-updater remain.
 
 ### Drawer and output extras
 - The effects library and live output effects/delays, the media player tab, a live-input tab beyond cameras, and audio effects. Functions → Metronome runs a click track from the stored `tempo`/`beats` and shows the beat in the footer; a stored `timecode` mode appears there too.
