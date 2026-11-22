@@ -19,8 +19,11 @@ pub struct DrawerForm {
     pub editing: bool,
 }
 
-/// Calendar rows, soonest first, as `(event id, label)`.
-pub(super) fn event_rows(catalog: &Catalog) -> (Vec<String>, Vec<String>) {
+/// Calendar rows, soonest first, as `(event id, label)`. An event that starts a show names it.
+pub(super) fn event_rows(
+    catalog: &Catalog,
+    shows: &[freeshow_data::ShowFile],
+) -> (Vec<String>, Vec<String>) {
     let mut rows: Vec<(Option<chrono::DateTime<Local>>, String, String)> = catalog
         .entries()
         .into_iter()
@@ -44,6 +47,19 @@ pub(super) fn event_rows(catalog: &Catalog) -> (Vec<String>, Vec<String>) {
                     format!("{} · {name}", when.format(&format))
                 }
                 None => name,
+            };
+            let started = event
+                .pointer("/action/data/id")
+                .and_then(Value::as_str)
+                .filter(|_| {
+                    event.pointer("/action/id").and_then(Value::as_str) == Some("start_show")
+                })
+                .and_then(|show_id| shows.iter().find(|show| show.id == show_id))
+                .map(freeshow_data::ShowFile::name)
+                .filter(|name| !name.is_empty());
+            let label = match started {
+                Some(show) => format!("{label} ▸ {show}"),
+                None => label,
             };
             Some((when, id, label))
         })
@@ -85,7 +101,7 @@ impl Session {
         {
             self.event_catalog = catalog;
         }
-        let (ids, labels) = event_rows(&self.event_catalog);
+        let (ids, labels) = event_rows(&self.event_catalog, &self.shows);
         self.event_ids = ids;
         self.events = labels;
     }

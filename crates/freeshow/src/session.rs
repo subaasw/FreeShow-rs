@@ -554,7 +554,7 @@ impl Session {
         let stage = library.load_stage_layout();
         let event_catalog =
             take(library.load_events(), &mut warnings).unwrap_or_else(Catalog::empty);
-        let (event_ids, events) = drawer_edit::event_rows(&event_catalog);
+        let (event_ids, events) = drawer_edit::event_rows(&event_catalog, &shows);
         let synced =
             take(library.load_synced_settings(), &mut warnings).unwrap_or_else(Catalog::empty);
         let timers = named_timers(&synced);

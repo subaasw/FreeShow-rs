@@ -1004,7 +1004,9 @@ export component ControlWindow inherits Window {
             }
             drawer-flick := Flickable {
                 // A wrapping grid, placed by hand so row sizes never feed back into the width.
-                property <int> columns: max(1, floor((self.width - 8px) / 224px));
+                // Dated events and headlines get wider cells so their text is not cut short.
+                property <length> min-cell: root.active-tab == "calendar" || root.active-tab == "rss" ? 448px : 224px;
+                property <int> columns: max(1, floor((self.width - 8px) / self.min-cell));
                 property <length> cell-width: (self.width - 8px) / self.columns;
                 property <length> cell-height: root.drawer-rows.length > 0 && root.drawer-rows[0].show-thumb ? 52px : 38px;
                 content-width: self.width;
