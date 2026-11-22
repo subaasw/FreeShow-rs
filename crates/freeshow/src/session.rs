@@ -128,6 +128,8 @@ pub struct Session {
     pub media_index: Option<usize>,
     pub audio_index: Option<usize>,
     pub underlay: Option<Raster>,
+    /// Path the current still underlay was decoded from, if any.
+    underlay_from: Option<PathBuf>,
     pub background_fit: Fit,
     pub background_flip_x: bool,
     pub background_flip_y: bool,
@@ -301,6 +303,7 @@ impl Session {
             media_index: None,
             audio_index: None,
             underlay: None,
+            underlay_from: None,
             background_fit: Fit::Contain,
             background_flip_x: false,
             background_flip_y: false,
@@ -443,6 +446,7 @@ impl Session {
             media_index: None,
             audio_index: None,
             underlay: None,
+            underlay_from: None,
             background_fit: Fit::Contain,
             background_flip_x: false,
             background_flip_y: false,
@@ -965,11 +969,21 @@ impl Session {
         }
     }
 
+    pub fn replace_underlay(&mut self, raster: Option<Raster>) {
+        self.underlay = raster;
+        self.underlay_from = None;
+    }
+
+    fn set_still_underlay(&mut self, path: PathBuf, raster: Option<Raster>) {
+        self.underlay_from = raster.is_some().then_some(path);
+        self.underlay = raster;
+    }
+
     pub fn clear_output(&mut self) {
         if self.preferences.out_locked() {
             return;
         }
-        self.underlay = None;
+        self.replace_underlay(None);
         self.reset_background_look();
         self.playing_audio = None;
         self.audio_paused = false;
@@ -1150,7 +1164,7 @@ impl Session {
         };
         self.media_index = Some(index);
         if let Some(camera) = entry.name.strip_prefix("Camera: ") {
-            self.underlay = None;
+            self.replace_underlay(None);
             self.reset_background_look();
             self.background_transition = true;
             return DrawerAction::PlayCamera(camera.to_string());
@@ -1162,7 +1176,7 @@ impl Session {
         match media_kind(&path) {
             MediaKind::Image => {
                 self.remember_background(&path);
-                self.underlay = self.load_still(&path);
+                self.set_still_underlay(path.clone(), self.load_still(&path));
                 self.background_transition = true;
                 self.note_media_layer(&path, MediaKind::Image);
                 DrawerAction::Present
@@ -1171,7 +1185,7 @@ impl Session {
                 self.media_finished = None;
                 self.remember_background(&path);
                 self.remember_video_playback(&path);
-                self.underlay = None;
+                self.replace_underlay(None);
                 self.note_media_layer(&path, MediaKind::Video);
                 self.background_transition = true;
                 DrawerAction::PlayVideo(path)
@@ -1249,7 +1263,7 @@ impl Session {
         match media_kind(&path) {
             MediaKind::Image => {
                 self.remember_background(&path);
-                self.underlay = self.load_still(&path);
+                self.set_still_underlay(path.clone(), self.load_still(&path));
                 self.blanked = false;
                 self.background_transition = true;
                 self.pending_play = None;
@@ -1260,7 +1274,7 @@ impl Session {
                 self.media_finished = None;
                 self.remember_background(&path);
                 self.remember_video_playback(&path);
-                self.underlay = None;
+                self.replace_underlay(None);
                 self.blanked = false;
                 self.note_media_layer(&path, MediaKind::Video);
                 self.background_transition = true;
@@ -1379,7 +1393,7 @@ impl Session {
             self.media_loop = loops;
             self.media_muted = muted;
         }
-        self.underlay = None;
+        self.replace_underlay(None);
         self.blanked = false;
         self.background_path = Some(path.to_path_buf());
         self.background_transition = true;
@@ -1650,7 +1664,7 @@ impl Session {
                 match backdrop {
                     SlideBackdrop::Unchanged => {}
                     SlideBackdrop::Clear => {
-                        self.underlay = None;
+                        self.replace_underlay(None);
                         self.reset_background_look();
                         self.slide_hidden = false;
                         self.background_transition = true;
@@ -1665,13 +1679,14 @@ impl Session {
                             });
                             let foreground = foreground || file_foreground;
                             if self.background_path.as_ref() == Some(&path)
+                                && self.underlay_from.as_ref() == Some(&path)
                                 && self.underlay.is_some()
                             {
                                 self.slide_hidden = foreground;
                                 self.background_transition = false;
                             } else {
                                 self.remember_background(&path);
-                                self.underlay = self.load_still(&path);
+                                self.set_still_underlay(path.clone(), self.load_still(&path));
                                 if self.underlay.is_some() {
                                     self.background_path = Some(path);
                                     self.background_transition = true;

@@ -249,7 +249,7 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
         let deadline = Instant::now() + Duration::from_secs(4);
         while session.underlay.is_none() && Instant::now() < deadline {
             if let Some(raster) = player.next_frame_wait(pull) {
-                session.underlay = Some(raster);
+                session.replace_underlay(Some(raster));
             }
         }
         let video_started = Instant::now();
@@ -257,7 +257,7 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
         let run_for = Duration::from_millis(1500);
         while video_started.elapsed() < run_for {
             if let Some(raster) = player.next_frame_wait(pull) {
-                session.underlay = Some(raster);
+                session.replace_underlay(Some(raster));
                 let _ = audience_frame(&session);
                 video_frames += 1;
             } else if player.is_finished() {

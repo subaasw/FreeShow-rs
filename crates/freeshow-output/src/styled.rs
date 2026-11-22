@@ -2919,47 +2919,87 @@ fn blit(
     let inset_right = (w as f32 * crop.right / 100.0).round() as i32;
     let inset_top = (h as f32 * crop.top / 100.0).round() as i32;
     let inset_bottom = (h as f32 * crop.bottom / 100.0).round() as i32;
-    for dy in 0..h {
-        if dy < inset_top || dy >= h - inset_bottom {
+    let vis_x0 = x + inset_left.max(0);
+    let vis_y0 = y + inset_top.max(0);
+    let vis_x1 = x + w - inset_right.max(0);
+    let vis_y1 = y + h - inset_bottom.max(0);
+    if fit != Fit::Tile && image.width == 1 && image.height == 1 && image.rgba.len() >= 4 {
+        let color = Rgba {
+            r: image.rgba[0],
+            g: image.rgba[1],
+            b: image.rgba[2],
+            a: image.rgba[3],
+        };
+        let fill_x0 = vis_x0.max(x + ox);
+        let fill_y0 = vis_y0.max(y + oy);
+        let fill_x1 = vis_x1.min(x + ox + draw_w);
+        let fill_y1 = vis_y1.min(y + oy + draw_h);
+        fill_rect(
+            pixels,
+            frame_w,
+            frame_h,
+            fill_x0,
+            fill_y0,
+            fill_x1 - fill_x0,
+            fill_y1 - fill_y0,
+            color,
+        );
+        return;
+    }
+    for dy in inset_top.max(0)..(h - inset_bottom.max(0)) {
+        let dest_y = y + dy;
+        if dest_y < 0 || dest_y >= frame_h as i32 {
             continue;
         }
-        for dx in 0..w {
-            if dx < inset_left || dx >= w - inset_right {
+        let local_y = if fit == Fit::Tile {
+            dy.rem_euclid(draw_h)
+        } else {
+            dy - oy
+        };
+        if local_y < 0 || local_y >= draw_h {
+            continue;
+        }
+        let mut sy = (local_y as u32 * image.height) / draw_h as u32;
+        if flip_y {
+            sy = image.height - 1 - sy;
+        }
+        let src_row = (sy * image.width) * 4;
+        let dest_row = (dest_y as u32 * frame_w) * 4;
+        for dx in inset_left.max(0)..(w - inset_right.max(0)) {
+            let dest_x = x + dx;
+            if dest_x < 0 || dest_x >= frame_w as i32 {
                 continue;
             }
-            let (local_x, local_y) = if fit == Fit::Tile {
-                (dx.rem_euclid(draw_w), dy.rem_euclid(draw_h))
+            let local_x = if fit == Fit::Tile {
+                dx.rem_euclid(draw_w)
             } else {
-                (dx - ox, dy - oy)
+                dx - ox
             };
-            if local_x < 0 || local_y < 0 || local_x >= draw_w || local_y >= draw_h {
+            if local_x < 0 || local_x >= draw_w {
                 continue;
             }
             let mut sx = (local_x as u32 * image.width) / draw_w as u32;
-            let mut sy = (local_y as u32 * image.height) / draw_h as u32;
             if flip_x {
                 sx = image.width - 1 - sx;
             }
-            if flip_y {
-                sy = image.height - 1 - sy;
-            }
-            let src = ((sy * image.width + sx) * 4) as usize;
+            let src = (src_row + sx * 4) as usize;
             if src + 3 >= image.rgba.len() {
                 continue;
             }
-            paint(
-                pixels,
-                frame_w,
-                frame_h,
-                x + dx,
-                y + dy,
-                Rgba {
-                    r: image.rgba[src],
-                    g: image.rgba[src + 1],
-                    b: image.rgba[src + 2],
-                    a: image.rgba[src + 3],
-                },
-            );
+            let dst = (dest_row + dest_x as u32 * 4) as usize;
+            let alpha = image.rgba[src + 3];
+            if alpha == 255 {
+                pixels[dst..dst + 4].copy_from_slice(&image.rgba[src..src + 4]);
+            } else if alpha > 0 {
+                let cover = u16::from(alpha);
+                let remain = 255 - cover;
+                for channel in 0..3 {
+                    let below = u16::from(pixels[dst + channel]);
+                    let above = u16::from(image.rgba[src + channel]);
+                    pixels[dst + channel] = ((above * cover + below * remain) / 255) as u8;
+                }
+                pixels[dst + 3] = 255;
+            }
         }
     }
 }
@@ -3840,6 +3880,27 @@ mod tests {
         assert_eq!(contained.pixel(0, 3), crate::Rgba::BLACK);
         assert!(blurred.pixel(0, 3).r > 20);
         assert!(blurred.pixel(0, 1).r > 180);
+    }
+
+    #[test]
+    fn one_pixel_contain_fills_the_centered_square() {
+        let image = Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        };
+        let frame = placed_image(&image, 8, 4, Fit::Contain, false, false, "", "", 6.0, 0.3);
+        assert_eq!(frame.pixel(0, 0), crate::Rgba::BLACK);
+        assert_eq!(
+            frame.pixel(4, 1),
+            crate::Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+        assert_eq!(frame.pixel(7, 0), crate::Rgba::BLACK);
     }
 
     #[test]

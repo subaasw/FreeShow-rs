@@ -7,10 +7,11 @@ use crate::session::Session;
 use freeshow_data::ShowFile;
 use freeshow_output::{
     Blend, Fit, Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH,
-    StyledItem, StyledLine, StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, crossfade,
-    decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
-    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, over,
-    parse_color, placed_image, render_styled, scale_frames, slide_frames, slide_way, spin_frames,
+    StyledItem, StyledLine, StyledSlide, TextRun, blend_mode, blur_frames, clear_frame,
+    composite_styled, crossfade, decode_image, ease_progress, filter_blur, filter_brightness,
+    filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity,
+    filter_saturate, filter_sepia, parse_color, placed_image, render_styled, scale_frames,
+    slide_frames, slide_way, spin_frames,
 };
 
 /// One step of a slide or media transition. `t` is the raw progress from 0 to 1.
@@ -75,24 +76,27 @@ pub fn audience_frame(session: &Session) -> Frame {
     } else {
         clear_frame(session.output_width, session.output_height)
     };
-    frame = paint_overlays(frame, session, true);
+    paint_overlays(&mut frame, session, true);
     if !session.blanked && !session.slide_hidden {
-        let slide = if session.tab == "scripture" {
-            lines_frame_at(
-                &session.output_lines(),
-                true,
-                session.output_width,
-                session.output_height,
-            )
-        } else {
-            show_frame(session, session.slide_index)
-        };
-        frame = over(&frame, &slide);
+        if session.tab == "scripture" {
+            composite_styled(
+                &mut frame,
+                &lines_slide_at(
+                    &session.output_lines(),
+                    true,
+                    session.output_width,
+                    session.output_height,
+                ),
+            );
+        } else if let Some(slide) = show_styled(session, session.slide_index) {
+            composite_styled(&mut frame, &slide);
+        }
     }
-    paint_overlays(frame, session, false)
+    paint_overlays(&mut frame, session, false);
+    frame
 }
 
-fn paint_overlays(mut frame: Frame, session: &Session, under_slide: bool) -> Frame {
+fn paint_overlays(frame: &mut Frame, session: &Session, under_slide: bool) {
     for id in &session.active_overlays {
         let Some(overlay) = session.overlay_catalog.get(id) else {
             continue;
@@ -122,17 +126,18 @@ fn paint_overlays(mut frame: Frame, session: &Session, under_slide: bool) -> Fra
                     .collect()
             })
             .unwrap_or_default();
-        let layer = render_styled(&StyledSlide {
-            output_width: session.output_width,
-            output_height: session.output_height,
-            source_width: SOURCE_WIDTH,
-            source_height: SOURCE_HEIGHT,
-            background: Rgba::TRANSPARENT,
-            items,
-        });
-        frame = over(&frame, &layer);
+        composite_styled(
+            frame,
+            &StyledSlide {
+                output_width: session.output_width,
+                output_height: session.output_height,
+                source_width: SOURCE_WIDTH,
+                source_height: SOURCE_HEIGHT,
+                background: Rgba::TRANSPARENT,
+                items,
+            },
+        );
     }
-    frame
 }
 
 pub fn stage_frame(session: &Session) -> Frame {
@@ -284,14 +289,12 @@ fn local_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-fn show_frame(session: &Session, index: Option<usize>) -> Frame {
-    let Some(index) = index else {
-        return clear_frame(session.output_width, session.output_height);
-    };
-    let Some(show) = session.show_index.and_then(|slot| session.shows.get(slot)) else {
-        return clear_frame(session.output_width, session.output_height);
-    };
-    frame_for_slide_at(
+fn show_styled(session: &Session, index: Option<usize>) -> Option<StyledSlide> {
+    let index = index?;
+    let show = session
+        .show_index
+        .and_then(|slot| session.shows.get(slot))?;
+    styled_slide_at(
         show,
         index,
         session.root.as_deref(),
@@ -303,6 +306,14 @@ fn show_frame(session: &Session, index: Option<usize>) -> Frame {
         session.output_width,
         session.output_height,
     )
+}
+
+#[allow(dead_code)]
+fn show_frame(session: &Session, index: Option<usize>) -> Frame {
+    match show_styled(session, index) {
+        Some(slide) => render_styled(&slide),
+        None => clear_frame(session.output_width, session.output_height),
+    }
 }
 
 #[allow(dead_code)]
@@ -344,20 +355,44 @@ pub fn frame_for_slide_at(
     output_width: u32,
     output_height: u32,
 ) -> Frame {
-    let Some(slide_id) = show
+    match styled_slide_at(
+        show,
+        index,
+        root,
+        over_media,
+        reveal,
+        clicks_shown,
+        page,
+        variables,
+        output_width,
+        output_height,
+    ) {
+        Some(slide) => render_styled(&slide),
+        None => clear_frame(output_width, output_height),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn styled_slide_at(
+    show: &ShowFile,
+    index: usize,
+    root: Option<&Path>,
+    over_media: bool,
+    reveal: Option<u32>,
+    clicks_shown: bool,
+    page: Option<(usize, usize)>,
+    variables: &[(String, String)],
+    output_width: u32,
+    output_height: u32,
+) -> Option<StyledSlide> {
+    let slide_id = show
         .ordered_slides()
         .get(index)
-        .map(|slide| slide.id.clone())
-    else {
-        return clear_frame(output_width, output_height);
-    };
-    let Some(slide) = show
+        .map(|slide| slide.id.clone())?;
+    let slide = show
         .show
         .get("slides")
-        .and_then(|slides| slides.get(&slide_id))
-    else {
-        return clear_frame(output_width, output_height);
-    };
+        .and_then(|slides| slides.get(&slide_id))?;
     let background = slide
         .pointer("/settings/color")
         .and_then(|value| value.as_str())
@@ -389,7 +424,7 @@ pub fn frame_for_slide_at(
                 .collect()
         })
         .unwrap_or_default();
-    render_styled(&StyledSlide {
+    Some(StyledSlide {
         output_width,
         output_height,
         source_width,
@@ -732,27 +767,27 @@ pub(crate) fn resolve_media(root: Option<&Path>, src: &str) -> Option<PathBuf> {
     joined.is_file().then_some(joined)
 }
 
-fn lines_frame_at(
+fn lines_slide_at(
     lines: &[String],
     over_media: bool,
     output_width: u32,
     output_height: u32,
-) -> Frame {
+) -> StyledSlide {
     if lines.is_empty() {
-        return if over_media {
-            render_styled(&StyledSlide {
-                output_width,
-                output_height,
-                source_width: SOURCE_WIDTH,
-                source_height: SOURCE_HEIGHT,
-                background: Rgba::TRANSPARENT,
-                items: Vec::new(),
-            })
-        } else {
-            clear_frame(output_width, output_height)
+        return StyledSlide {
+            output_width,
+            output_height,
+            source_width: SOURCE_WIDTH,
+            source_height: SOURCE_HEIGHT,
+            background: if over_media {
+                Rgba::TRANSPARENT
+            } else {
+                Rgba::BLACK
+            },
+            items: Vec::new(),
         };
     }
-    render_styled(&StyledSlide {
+    StyledSlide {
         output_width,
         output_height,
         source_width: SOURCE_WIDTH,
@@ -799,7 +834,7 @@ fn lines_frame_at(
             blend: Blend::Normal,
             crop: freeshow_output::Crop::default(),
         }],
-    })
+    }
 }
 
 #[cfg(test)]
@@ -879,11 +914,11 @@ mod tests {
         let box_spec = &mut session.stage.items[0];
         box_spec.style = "left:0px;top:0px;width:320px;height:180px;".into();
         box_spec.include_media = true;
-        session.underlay = Some(Raster {
+        session.replace_underlay(Some(Raster {
             width: 16,
             height: 9,
             rgba: [255, 0, 0, 255].repeat(144),
-        });
+        }));
         let frame = stage_frame(&session);
         assert_eq!(frame.pixel(80, 45), parse_color("#ff0000").unwrap());
         assert_ne!(frame.pixel(400, 200), parse_color("#ff0000").unwrap());
@@ -1015,11 +1050,11 @@ mod tests {
         session.shows.push(show);
         session.show_index = Some(0);
         session.slide_index = Some(0);
-        session.underlay = Some(Raster {
+        session.replace_underlay(Some(Raster {
             width: 4,
             height: 4,
             rgba: [255, 0, 0, 255].repeat(16),
-        });
+        }));
         let covered = audience_frame(&session);
         assert!(
             covered
@@ -1067,11 +1102,11 @@ mod tests {
         session.stage = library.load_stage_layout();
         session.blanked = false;
         session.slide_hidden = true;
-        session.underlay = Some(Raster {
+        session.replace_underlay(Some(Raster {
             width: 16,
             height: 9,
             rgba: [255, 0, 0, 255].repeat(16 * 9),
-        });
+        }));
 
         let stage = stage_frame(&session);
         let picture = parse_color("#f00").unwrap();
