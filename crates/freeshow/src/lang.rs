@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 /// Drawer tab id, full label, and compact label for `labelsDisabled`.
-pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'static str); 8] {
+pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'static str); 9] {
     match language
         .unwrap_or("en")
         .replace('_', "-")
@@ -11,6 +11,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
         "es" => [
             ("shows", "Canciones", "C"),
             ("media", "Medios", "M"),
+            ("player", "Reproductor", "P"),
             ("audio", "Audio", "A"),
             ("overlays", "Superposiciones", "S"),
             ("templates", "Plantillas", "P"),
@@ -21,6 +22,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
         "de" => [
             ("shows", "Lieder", "L"),
             ("media", "Medien", "M"),
+            ("player", "Player", "P"),
             ("audio", "Audio", "A"),
             ("overlays", "Overlays", "O"),
             ("templates", "Vorlagen", "V"),
@@ -31,6 +33,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
         "fr" | "fr-fr" => [
             ("shows", "Chants", "C"),
             ("media", "Médias", "M"),
+            ("player", "Lecteur", "P"),
             ("audio", "Audio", "A"),
             ("overlays", "Superpositions", "S"),
             ("templates", "Modèles", "T"),
@@ -41,6 +44,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
         "nb" | "nn" | "no" => [
             ("shows", "Sanger", "S"),
             ("media", "Media", "M"),
+            ("player", "Spiller", "P"),
             ("audio", "Lyd", "L"),
             ("overlays", "Overlegg", "O"),
             ("templates", "Maler", "T"),
@@ -51,6 +55,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
         _ => [
             ("shows", "Shows", "S"),
             ("media", "Media", "M"),
+            ("player", "Player", "P"),
             ("audio", "Audio", "A"),
             ("overlays", "Overlays", "O"),
             ("templates", "Templates", "T"),
@@ -77,7 +82,7 @@ mod tests {
         ] {
             let tabs = drawer_tabs(lang);
             assert_eq!(tabs[0].0, "shows");
-            assert_eq!(tabs[7].0, "functions");
+            assert_eq!(tabs[8].0, "functions");
             assert!(!tabs[0].1.is_empty());
         }
         assert_eq!(drawer_tabs(Some("nb"))[0].1, "Sanger");

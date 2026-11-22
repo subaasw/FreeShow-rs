@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -40,6 +41,9 @@ pub fn import_shows(
     }
     if IMAGE_EXTS.iter().any(|item| *item == ext) {
         return Ok(Some(vec![image_show(file_name, bytes, source, media)?]));
+    }
+    if ext == "pdf" || bytes.starts_with(b"%PDF") {
+        return Ok(Some(vec![pdf_show(file_name, bytes, source, media)?]));
     }
     let text = String::from_utf8_lossy(bytes).replace('\u{feff}', "");
     let trimmed = text.trim();
@@ -789,6 +793,157 @@ fn image_show(
     Ok(images_to_show(&name, &[(name.clone(), path)]))
 }
 
+fn pdf_show(
+    file_name: &str,
+    bytes: &[u8],
+    source: Option<&Path>,
+    media: Option<&Path>,
+) -> Result<ShowFile, DataError> {
+    let name = file_stem_str(file_name);
+    let pages = render_pdf_pages(file_name, bytes, source, media)?;
+    if pages.is_empty() {
+        return Err(DataError::Scripture(format!(
+            "{file_name} did not contain pages"
+        )));
+    }
+    let rendered = pages.iter().any(|(_, path)| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+    });
+    let mut show = if rendered {
+        images_to_show(&name, &pages)
+    } else {
+        pdf_text_show(&name, pages.len())
+    };
+    show.show["origin"] = json!("pdf");
+    Ok(show)
+}
+
+fn render_pdf_pages(
+    file_name: &str,
+    bytes: &[u8],
+    source: Option<&Path>,
+    media: Option<&Path>,
+) -> Result<Vec<(String, PathBuf)>, DataError> {
+    let Some(media_dir) = media else {
+        return Ok(pdf_placeholder_pages(file_name, bytes));
+    };
+    fs::create_dir_all(media_dir)?;
+    let pdf_path = if let Some(path) = source.filter(|path| path.is_file()) {
+        path.to_path_buf()
+    } else {
+        let dest = media_dir.join(
+            Path::new(file_name)
+                .file_name()
+                .unwrap_or_else(|| "import.pdf".as_ref()),
+        );
+        if !dest.exists() {
+            fs::write(&dest, bytes)?;
+        }
+        dest
+    };
+    let prefix = media_dir.join(format!("{}-page", file_stem_str(file_name)));
+    let rendered = Command::new("pdftoppm")
+        .args(["-png", "-r", "72"])
+        .arg(&pdf_path)
+        .arg(&prefix)
+        .output();
+    if rendered
+        .as_ref()
+        .is_ok_and(|output| output.status.success())
+    {
+        let mut pages = Vec::new();
+        let stem = prefix
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "page".to_string());
+        if let Ok(entries) = fs::read_dir(media_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if name.starts_with(&stem) && name.ends_with(".png") {
+                    pages.push((file_stem_str(name), path));
+                }
+            }
+        }
+        pages.sort_by(|left, right| left.1.file_name().cmp(&right.1.file_name()));
+        if !pages.is_empty() {
+            return Ok(pages);
+        }
+    }
+    Ok(pdf_placeholder_pages(file_name, bytes))
+}
+
+fn pdf_placeholder_pages(file_name: &str, bytes: &[u8]) -> Vec<(String, PathBuf)> {
+    (1..=pdf_page_count(bytes))
+        .map(|index| (format!("Page {index}"), PathBuf::from(file_name)))
+        .collect()
+}
+
+fn pdf_page_count(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    if let Some(count) = pdf_pages_count(&text) {
+        return count.max(1);
+    }
+    let pages = text.matches("/Type /Page").count();
+    let trees = text.matches("/Type /Pages").count();
+    pages.saturating_sub(trees).max(1)
+}
+
+fn pdf_pages_count(text: &str) -> Option<usize> {
+    let mut search = text;
+    while let Some(start) = search.find("/Type /Pages") {
+        let window = &search[start..start.saturating_add(400).min(search.len())];
+        if let Some(pos) = window.find("/Count") {
+            let rest = window[pos + 6..].trim_start();
+            let number: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            if let Ok(count) = number.parse::<usize>()
+                && count > 0
+            {
+                return Some(count);
+            }
+        }
+        search = &search[start + 12..];
+    }
+    None
+}
+
+fn pdf_text_show(name: &str, pages: usize) -> ShowFile {
+    let mut slides = serde_json::Map::new();
+    let mut order = Vec::new();
+    for index in 0..pages.max(1) {
+        let slide_id = format!("s{}", index + 1);
+        let text = format!("Page {}", index + 1);
+        slides.insert(
+            slide_id.clone(),
+            json!({
+                "group": "",
+                "color": null,
+                "settings": {},
+                "notes": "",
+                "items": [{
+                    "style": super::ITEM_STYLE,
+                    "lines": [{"align": "", "text": [{"value": text, "style": "font-size: 80px;"}]}]
+                }]
+            }),
+        );
+        order.push(json!({"id": slide_id}));
+    }
+    let document = json!({
+        "name": name,
+        "origin": "pdf",
+        "settings": {"activeLayout": "main", "template": null},
+        "slides": slides,
+        "layouts": {"main": {"name": "Default", "notes": "", "slides": order}},
+        "media": {}
+    });
+    ShowFile::parse(&json!([name, document]).to_string()).expect("pdf show is valid JSON")
+}
+
 fn image_zip(
     file_name: &str,
     bytes: &[u8],
@@ -1365,6 +1520,34 @@ Amazing love, how can it be</Contents></Item></Easyslides>"#;
         let bytes = fs::read(&path).unwrap();
         let _ = fs::remove_file(&path);
         bytes
+    }
+
+    #[test]
+    fn a_pdf_imports_as_one_slide_per_page() {
+        let root = std::env::temp_dir().join(format!("freeshow-pdf-{}", crate::new_id()));
+        fs::create_dir_all(root.join("Shows")).unwrap();
+        fs::create_dir_all(root.join("Media")).unwrap();
+        let bytes = two_page_pdf();
+        let shows = import_shows("notes.pdf", &bytes, None, Some(&root.join("Media")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(shows.len(), 1);
+        let show = &shows[0];
+        assert_eq!(show.show["origin"], "pdf");
+        assert_eq!(show.ordered_slides().len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn two_page_pdf() -> Vec<u8> {
+        br#"%PDF-1.1
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj
+4 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj
+trailer<</Root 1 0 R>>
+%%EOF
+"#
+        .to_vec()
     }
 
     fn tiny_png() -> Vec<u8> {

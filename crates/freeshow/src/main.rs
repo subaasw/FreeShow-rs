@@ -287,6 +287,10 @@ slint::slint! {
         in-out property <string> layout-text: "";
         in-out property <bool> show-variables: false;
         in-out property <string> variable-text: "";
+        callback save-timeline(string);
+        callback play-timeline();
+        in-out property <bool> show-timeline: false;
+        in-out property <string> timeline-text: "";
         callback hotkey(string, bool, bool, bool);
         callback set-search(string);
         callback select-tab(string);
@@ -322,6 +326,7 @@ slint::slint! {
         in-out property <[DrawerTab]> tabs: [
             { id: "shows", label: "Shows", short: "S" },
             { id: "media", label: "Media", short: "M" },
+            { id: "player", label: "Player", short: "P" },
             { id: "audio", label: "Audio", short: "A" },
             { id: "overlays", label: "Overlays", short: "O" },
             { id: "templates", label: "Templates", short: "T" },
@@ -733,6 +738,45 @@ slint::slint! {
                             text-color: root.text-color;
                             accent-text: root.text-color;
                             clicked => { root.show-variables = false; }
+                        }
+                    }
+                }
+            }
+            if root.show-timeline: Rectangle {
+                height: 180px;
+                background: root.primary;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    TextEdit {
+                        text <=> root.timeline-text;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        HeaderButton {
+                            label: "Save";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.save-timeline(root.timeline-text); }
+                        }
+                        HeaderButton {
+                            label: "Play";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.play-timeline(); }
+                        }
+                        HeaderButton {
+                            label: "Close";
+                            accent: root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.show-timeline = false; }
                         }
                     }
                 }
@@ -2129,15 +2173,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 };
                 let mut current = session.borrow_mut();
-                if !current.metronome_on {
-                    return;
+                let now = std::time::Instant::now();
+                let timeline = current.tick_timeline(now);
+                if current.metronome_on {
+                    current.update_metronome(now);
                 }
-                let before = current.metronome_beat;
-                current.update_metronome(std::time::Instant::now());
-                if current.metronome_beat != before {
+                if timeline || current.metronome_on {
                     let status = current.chrome_status();
                     drop(current);
-                    ui.set_chrome_status(status.into());
+                    if timeline {
+                        refresh(&ui, &session.borrow());
+                    } else {
+                        ui.set_chrome_status(status.into());
+                    }
                 }
             },
         );
@@ -2296,6 +2344,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.borrow_mut().save_variables(&text);
             if let Some(ui) = ui.upgrade() {
                 ui.set_show_variables(false);
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_save_timeline(move |text| {
+            session.borrow_mut().save_timeline(&text);
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_play_timeline(move || {
+            let mut current = session.borrow_mut();
+            if current.timeline_cues.is_empty()
+                && let Some(ui) = ui.upgrade()
+            {
+                current.save_timeline(&ui.get_timeline_text());
+            }
+            let _ = current.start_timeline();
+            drop(current);
+            if let Some(ui) = ui.upgrade() {
+                ui.set_show_timeline(false);
                 refresh(&ui, &session.borrow());
             }
         });
@@ -2733,6 +2811,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     30 => current.clear_drawing(),
                     31 => {
                         let _ = current.toggle_first_interaction();
+                    }
+                    32 => {
+                        if current.timeline_playing {
+                            current.stop_timeline();
+                        } else if let Some(ui) = ui.upgrade() {
+                            let open = !ui.get_show_timeline();
+                            ui.set_show_timeline(open);
+                            if open {
+                                ui.set_timeline_text(current.timeline_text().into());
+                            }
+                        }
+                    }
+                    33 => {
+                        let _ = current.toggle_effects();
                     }
                     _ => {}
                 }
