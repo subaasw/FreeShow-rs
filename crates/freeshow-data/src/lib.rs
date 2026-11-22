@@ -2813,20 +2813,37 @@ impl ShowFile {
     /// Loop and mute default to on. The video type is only set when the file stores one.
     pub fn media_flags(&self, path: &str) -> Option<(bool, bool, Option<String>)> {
         let media = self.show.get("media")?.as_object()?;
-        for value in media.values() {
-            if value.get("path").and_then(Value::as_str) != Some(path) {
-                continue;
-            }
-            let loops = value.get("loop").and_then(Value::as_bool) != Some(false);
-            let muted = value.get("muted").and_then(Value::as_bool) != Some(false);
-            let video_type = value
-                .get("videoType")
-                .and_then(Value::as_str)
-                .filter(|kind| !kind.is_empty())
-                .map(str::to_string);
-            return Some((loops, muted, video_type));
-        }
-        None
+        media
+            .values()
+            .find(|value| value["path"].as_str() == Some(path))
+            .map(Self::media_entry_flags)
+    }
+
+    /// Prefers this slide's own media entry when the same path is used in both layers.
+    pub fn backdrop_media_flags_at(
+        &self,
+        index: usize,
+        path: &str,
+    ) -> Option<(bool, bool, Option<String>)> {
+        self.layout_node_at(index)
+            .and_then(|node| {
+                node["background"]
+                    .as_str()
+                    .and_then(|id| self.show["media"].get(id))
+            })
+            .filter(|entry| entry["path"].as_str() == Some(path))
+            .map(Self::media_entry_flags)
+            .or_else(|| self.media_flags(path))
+    }
+
+    fn media_entry_flags(value: &Value) -> (bool, bool, Option<String>) {
+        let loops = value["loop"] != false;
+        let muted = value["muted"] != false;
+        let video_type = value["videoType"]
+            .as_str()
+            .filter(|kind| !kind.is_empty())
+            .map(str::to_string);
+        (loops, muted, video_type)
     }
 
     fn media_picture(&self, id: &str) -> Option<(String, bool, bool)> {

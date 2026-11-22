@@ -125,6 +125,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 timeline slide cues play at their recorded times in the imported arrangement.
 - [x] ProPresenter 7 global clear-audio and clear-background actions fire at their recorded timeline times.
 - [x] ProPresenter 7 timeline background image and video cues play independently of slide selection, with video loop and retrigger settings.
+- [x] ProPresenter 7 foreground pictures and videos import as foreground slide actions or timed timeline cues and clear when the next slide is triggered.
 - [x] ProPresenter 7 timeline soundtracks use linked or bundled audio and follow timeline playback and looping.
 - [x] ProPresenter 7 timeline looping follows the imported duration and survives edits to the arrangement timeline.
 - [ ] Other ProPresenter 7 graphics, remaining RTF controls, and other timeline tracks and cue actions.
