@@ -86,7 +86,7 @@ main fader still controls the main channel.
 
 Acceptance: a `stage.json` made by FreeShow renders all of its boxes without
 falling back to the four built-in types. QR boxes render from their saved
-payload and colors. Live video, camera, web, and chart boxes render a labeled
+payload and colors. Current Output boxes mirror the active audience picture, including live media. Standalone live video, camera, web, and chart boxes render a labeled
 placeholder until the compositor grows those sources.
 
 ### M5. Installers and packaging

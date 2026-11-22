@@ -1682,7 +1682,7 @@ impl Session {
     }
 
     /// Id and name of the audience output this show is playing on.
-    fn audience(&self) -> (String, String) {
+    pub(crate) fn audience(&self) -> (String, String) {
         self.root
             .as_deref()
             .map(|root| Library::open(root).audience_output())
