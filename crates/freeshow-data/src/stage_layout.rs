@@ -286,6 +286,72 @@ pub fn parse_stage(text: &str) -> Result<StageLayout, ()> {
     layout_from(layout)
 }
 
+pub fn write_stage_layout(path: &std::path::Path, layout: &StageLayout) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serialize_stage(layout))
+}
+
+pub fn serialize_stage(layout: &StageLayout) -> String {
+    let mut items = serde_json::Map::new();
+    let mut order = Vec::new();
+    for (index, item) in layout.items.iter().enumerate() {
+        let id = if item.id.is_empty() {
+            format!("{}{}", kind_name(item.kind), index + 1)
+        } else {
+            item.id.clone()
+        };
+        order.push(Value::String(id.clone()));
+        let mut object = serde_json::Map::new();
+        object.insert("type".into(), Value::String(kind_name(item.kind).into()));
+        object.insert("style".into(), Value::String(item.style.clone()));
+        if !item.align.is_empty() {
+            object.insert("align".into(), Value::String(item.align.clone()));
+        }
+        if item.offset != 0 {
+            object.insert("offset".into(), Value::from(item.offset));
+        }
+        if let Some(count) = item.line_count {
+            object.insert("lineCount".into(), Value::from(count as u64));
+        }
+        if !item.label.is_empty() {
+            object.insert("label".into(), Value::String(item.label.clone()));
+        }
+        items.insert(id, Value::Object(object));
+    }
+    let mut settings = serde_json::Map::new();
+    settings.insert("color".into(), Value::String(layout.background.clone()));
+    let mut root_layout = serde_json::Map::new();
+    root_layout.insert("name".into(), Value::String(layout.name.clone()));
+    root_layout.insert("disabled".into(), Value::Bool(false));
+    root_layout.insert("settings".into(), Value::Object(settings));
+    root_layout.insert("itemOrder".into(), Value::Array(order));
+    root_layout.insert("items".into(), Value::Object(items));
+    let mut file = serde_json::Map::new();
+    file.insert("default".into(), Value::Object(root_layout));
+    serde_json::to_string_pretty(&Value::Object(file)).unwrap_or_else(|_| "{}".into())
+}
+
+fn kind_name(kind: StageItemKind) -> &'static str {
+    match kind {
+        StageItemKind::Slide => "slide_text",
+        StageItemKind::Notes => "slide_notes",
+        StageItemKind::Clock => "clock",
+        StageItemKind::Timer => "timer",
+        StageItemKind::Text => "text",
+        StageItemKind::Variable => "variable",
+        StageItemKind::SlideTracker => "slide_tracker",
+        StageItemKind::Media => "media",
+        StageItemKind::Camera => "camera",
+        StageItemKind::CurrentOutput => "current_output",
+        StageItemKind::QrCode => "qr_code",
+        StageItemKind::Web => "web",
+        StageItemKind::Chart => "chart",
+        StageItemKind::Custom => "custom",
+    }
+}
+
 /// The layout stored under this id, including one marked disabled.
 pub fn stage_by_id(text: &str, id: &str) -> Option<StageLayout> {
     let value: Value = serde_json::from_str(text).ok()?;
@@ -571,6 +637,22 @@ fn legacy_kind(id: &str) -> StageItemKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn write_stage_layout_round_trips() {
+        let dir = std::env::temp_dir().join(format!("freeshow-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stage.json");
+        let mut layout = default_stage();
+        layout.name = "Sunday Stage".into();
+        layout.items[0].id = "slide#0".into();
+        write_stage_layout(&path, &layout).unwrap();
+        let loaded = load_stage_file(&path);
+        assert_eq!(loaded.name, "Sunday Stage");
+        assert!(!loaded.items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
