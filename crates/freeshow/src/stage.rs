@@ -49,6 +49,10 @@ pub fn paint_stage(
                 item.src
                     .as_deref()
                     .and_then(|src| crate::live::load_image(context.root, src))
+            } else if item.kind == StageItemKind::QrCode {
+                item.qr.as_ref().and_then(|qr| {
+                    freeshow_output::qr_image(&qr.text, &qr.color, &qr.background)
+                })
             } else {
                 None
             };
@@ -79,7 +83,11 @@ pub fn paint_stage(
                     })
                     .collect(),
                 image,
-                fit: Fit::Fill,
+                fit: if item.kind == StageItemKind::QrCode {
+                    Fit::Contain
+                } else {
+                    Fit::Fill
+                },
                 line_bg: None,
                 line_gap: 0.0,
                 line_radius: 0.0,
@@ -143,7 +151,7 @@ fn lines_for(
             .map(|value| vec![value])
             .unwrap_or_default(),
         StageItemKind::SlideTracker => tracker_text(slides, index),
-        StageItemKind::Media => Vec::new(),
+        StageItemKind::Media | StageItemKind::QrCode => Vec::new(),
         StageItemKind::Custom => vec![if item.label.is_empty() {
             item.id.clone()
         } else {
@@ -292,6 +300,7 @@ mod tests {
             variable_id: None,
             timer_id: None,
             src: None,
+            qr: None,
             clock: StageClockOptions::default(),
         }
     }

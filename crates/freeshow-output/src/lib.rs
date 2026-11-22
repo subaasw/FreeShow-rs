@@ -7,6 +7,7 @@
 mod styled;
 mod text;
 
+pub use styled::qr_image;
 pub use styled::{
     Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine, StyledSlide, TextRun,
     blend_mode, blur_frames, clear_frame, crossfade, decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, crop_raster, image_frame, over, parse_color, parse_style, placed_image,
