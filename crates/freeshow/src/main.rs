@@ -703,21 +703,21 @@ fn fade_into(
         }
         return;
     }
-    let steps = (motion.duration_ms / 40).clamp(1, 250) as u16;
-    let step = Rc::new(std::cell::Cell::new(0u16));
+    // Progress follows the clock, so a slow machine drops frames instead of stretching the fade.
+    let duration = std::time::Duration::from_millis(motion.duration_ms.clamp(1, 10_000));
+    let started = std::time::Instant::now();
     let timer_cb = Rc::clone(&timer);
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(40),
         move || {
-            let next = step.get().saturating_add(1);
-            step.set(next);
-            let frame = motion_frame(&from, &to, &motion, f32::from(next) / f32::from(steps));
+            let progress = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+            let frame = motion_frame(&from, &to, &motion, progress);
             submit_network(picture, &frame);
             for slot in &slots {
                 slot.publish(frame.clone());
             }
-            if next >= steps {
+            if progress >= 1.0 {
                 timer_cb.stop();
             }
         },
