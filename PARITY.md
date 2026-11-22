@@ -211,7 +211,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{linux,windows,macos,release}.yml`; packaged AppRun/exe/app run `--check-perf` |
+| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{linux,windows,macos,release}.yml`; packaged AppRun/exe/app run `--check-perf`. All three native jobs passed for `e075bea`. [Release run](https://github.com/subaasw/FreeShow-rs/actions/runs/45023447856) |
 | Crash-safe autosave | done | 0.5 | Library autosave setting is honored |
 | `--check-perf` and `--check-library` budgets | done | 0.4 | Also `--check-service` for a Sunday import/present/REST/Companion/stage path; CI runs `--check-perf` on each packaged runner |
 | Apple Developer ID signing and notarization | not-yet | 0.3 | Needs Apple credentials; CI stays unsigned/ad-hoc |
