@@ -4777,32 +4777,22 @@ impl Library {
     }
 
     /// Editor text of stored variables as `name=value` lines.
+    /// One `name=value` line per stored variable, without the lowercase id aliases.
     pub fn variable_editor_text(&self) -> String {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut lines = Vec::new();
-        for (key, value) in self.variables() {
-            let name = variable_name_id(&key);
-            if name.is_empty() || !seen.insert(name.clone()) {
-                continue;
-            }
-            // Prefer the human name when this key is the raw id of a named variable.
-            let label = self.variable_label(&key).unwrap_or(name);
-            lines.push(format!("{label}={value}"));
-        }
-        lines.join("\n")
-    }
-
-    fn variable_label(&self, key: &str) -> Option<String> {
-        let json = self.synced_json()?;
-        let map = json.get("variables")?.as_object()?;
-        if let Some(name) = map
-            .get(key)
-            .and_then(|variable| variable.get("name"))
-            .and_then(Value::as_str)
-        {
-            return Some(name.to_string());
-        }
-        None
+        let Some(json) = self.synced_json() else {
+            return String::new();
+        };
+        let Some(map) = json.get("variables").and_then(Value::as_object) else {
+            return String::new();
+        };
+        map.values()
+            .filter_map(|variable| {
+                let name = variable.get("name").and_then(Value::as_str)?.trim();
+                (!variable_name_id(name).is_empty())
+                    .then(|| format!("{name}={}", variable_text(variable)))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Creates or updates variables from `name=value` editor lines.
@@ -6885,6 +6875,23 @@ mod tests {
         assert_eq!(slides[0].group.as_deref(), Some("Chorus"));
         assert_eq!(slides[0].lines, vec!["My chains are gone".to_string()]);
         assert_eq!(slides[1].lines, vec!["Plain verse".to_string()]);
+    }
+
+    #[test]
+    fn the_variable_editor_lists_each_variable_once_by_its_name() {
+        let root = std::env::temp_dir().join(format!("fs-var-editor-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(CONFIG_DIR)).unwrap();
+        fs::write(
+            root.join(CONFIG_DIR).join(SYNCED_SETTINGS_FILE),
+            r#"{"variables":{"v1":{"name":"Speaker","type":"text","text":"Pastor Ram"}}}"#,
+        )
+        .unwrap();
+        let library = Library::open(&root);
+        assert_eq!(library.variable_editor_text(), "Speaker=Pastor Ram");
+        assert!(library.save_variables_text("Speaker=Sita"));
+        assert_eq!(library.variable_editor_text(), "Speaker=Sita");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
