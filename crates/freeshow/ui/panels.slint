@@ -38,6 +38,7 @@ export struct SettingsData {
     style-blur-amount: int,
     style-blur-opacity: int,
     style-lines: int,
+    output-names: [string],
 }
 
 export struct InspectorData {
@@ -225,22 +226,6 @@ export component SettingsPanel inherits Rectangle {
                         }
                     }
                     Row {
-                        SettingLabel {
-                            text: root.data.output-name == "" ? "Output window" : "Output · " + root.data.output-name;
-                            text-color: root.text-color;
-                        }
-                        Switch {
-                            text: "Always on top";
-                            checked: root.data.output-always-on-top;
-                            toggled => { root.apply("outputAlwaysOnTop", Fmt.flag(self.checked)); }
-                        }
-                        Switch {
-                            text: "Kiosk (fullscreen)";
-                            checked: root.data.output-kiosk;
-                            toggled => { root.apply("outputKiosk", Fmt.flag(self.checked)); }
-                        }
-                    }
-                    Row {
                         SettingLabel { text: "Slides"; text-color: root.text-color; }
                         Switch {
                             text: "Full group colors";
@@ -306,6 +291,78 @@ export component SettingsPanel inherits Rectangle {
                         Text {
                             colspan: 2;
                             text: "Durations are in milliseconds. A show or slide with its own transition keeps it.";
+                            color: root.text-color;
+                            opacity: 0.6;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                }
+            }
+            Tab {
+                title: "Outputs";
+                VerticalLayout {
+                alignment: start;
+                GridLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Row {
+                        SettingLabel { text: "Output"; text-color: root.text-color; }
+                        ValueCombo {
+                            model: root.data.output-names;
+                            value: root.data.output-name;
+                            selected(value) => { root.apply("outputPick", value); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button {
+                                text: "New output";
+                                clicked => { root.apply("outputNew", ""); }
+                            }
+                            Button {
+                                text: "Delete output";
+                                enabled: root.data.output-names.length > 1;
+                                clicked => { root.apply("outputDelete", ""); }
+                            }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Name"; text-color: root.text-color; }
+                        LineEdit {
+                            colspan: 2;
+                            text: root.data.output-name;
+                            placeholder-text: "Primary";
+                            accepted(value) => { root.apply("outputName", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Style"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 2;
+                            model: root.data.style-names;
+                            value: root.data.style-name;
+                            selected(value) => { root.apply("outputStyle", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Window"; text-color: root.text-color; }
+                        Switch {
+                            text: "Always on top";
+                            checked: root.data.output-always-on-top;
+                            toggled => { root.apply("outputAlwaysOnTop", Fmt.flag(self.checked)); }
+                        }
+                        Switch {
+                            text: "Kiosk (fullscreen)";
+                            checked: root.data.output-kiosk;
+                            toggled => { root.apply("outputKiosk", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    Row {
+                        Rectangle {}
+                        Text {
+                            colspan: 2;
+                            text: "The output window plays the output picked here, with its style and window options. Screen in the header moves it to another monitor. Stage displays are set up in Stage edit.";
                             color: root.text-color;
                             opacity: 0.6;
                             font-size: 12px;

@@ -482,6 +482,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         style_blur_amount: settings.style_blur_amount,
         style_blur_opacity: settings.style_blur_opacity,
         style_lines: settings.style_lines,
+        output_names: strings(&settings.output_names),
     });
     ui.set_theme_names(strings(&settings.themes));
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
