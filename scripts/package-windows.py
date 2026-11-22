@@ -18,14 +18,21 @@ from package_media import serve_sample
 ROOT = Path(__file__).resolve().parent.parent
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
-avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png curl
+avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png soup curl
 autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc wasapi2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 OPTIONAL_PLUGINS = "shout2 mediafoundation directshow ksvideo directsound wasapi".split()
 SAMPLE = ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4"
 
 
 def run(*args, **kwargs):
-    return subprocess.run([str(arg) for arg in args], check=True, text=True, **kwargs)
+    try:
+        return subprocess.run([str(arg) for arg in args], check=True, text=True, **kwargs)
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, flush=True)
+        if error.stderr:
+            print(error.stderr, file=sys.stderr, flush=True)
+        raise
 
 
 def output(*args):
@@ -156,7 +163,8 @@ def verify(installer, sdk):
         sdk.rename(hidden)
         try:
             env = {key: value for key, value in os.environ.items()
-                   if not key.upper().startswith(("GST_", "GSTREAMER_", "FREESHOW_"))}
+                   if not key.upper().startswith(("GST_", "GSTREAMER_", "FREESHOW_"))
+                   and not key.upper().endswith("_PROXY")}
             env.update(PATH=str(Path(os.environ["SystemRoot"]) / "System32"),
                        LOCALAPPDATA=str(profile), APPDATA=str(profile), USERPROFILE=str(profile))
             app = installed / "freeshow.exe"
@@ -168,7 +176,8 @@ def verify(installer, sdk):
             assert json.loads(runtime.stdout)["missing"] == [], runtime.stdout
             assert json.loads(decode.stdout.splitlines()[-1])["decoded_video"], decode.stdout
             assert json.loads(remote.stdout.splitlines()[-1])["decoded_video"], remote.stdout
-            assert "next_ms" in json.loads(perf.stdout), perf.stdout
+            performance = json.loads(perf.stdout)
+            assert "next_ms" in performance, perf.stdout
             assert list(profile.rglob("registry-*.bin")), "bundled runtime did not create a cold registry"
         finally:
             hidden.rename(sdk)
@@ -176,7 +185,8 @@ def verify(installer, sdk):
         assert not app.exists() and not shortcut.exists()
         assert sentinel.read_text(encoding="utf-8") == "keep this library file"
     return {"installed_in_relocated_unicode_path": True, "sdk_hidden": True,
-            "cold_registry": True, "h264_decoded": True, "http_video_decoded": True, "uninstall_kept_library": True}
+            "cold_registry": True, "h264_decoded": True, "http_video_decoded": True,
+            "uninstall_kept_library": True, "performance": performance}
 
 
 def main():
