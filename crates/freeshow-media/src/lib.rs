@@ -8,7 +8,7 @@ mod audio;
 mod dsp;
 mod runtime;
 mod stream;
-pub use runtime::{RuntimeStatus, check_runtime};
+pub use runtime::{RuntimeStatus, check_runtime, write_benchmark_video};
 mod network;
 mod video;
 pub use freeshow_core::NetworkRoute;
