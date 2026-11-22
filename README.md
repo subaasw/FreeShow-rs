@@ -156,4 +156,4 @@ Settings and the log are stored in the app config directory:
 - `crates/freeshow-obs` — OBS WebSocket 5 scene, stream, and record control. The show runs when OBS is closed
 - `crates/freeshow-ai` — slide rewrite through a local Ollama model. The show runs when no model is configured
 
-See `PARITY.md` for what is still missing compared with FreeShow 1.6.8.
+See `PARITY.md` for what is still missing compared with FreeShow 1.6.8. See `docs/MIGRATION_PLAN.md` for the crate layout, UI-stack decision, and the remaining milestones.
