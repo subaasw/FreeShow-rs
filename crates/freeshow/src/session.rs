@@ -163,6 +163,9 @@ pub struct Session {
     pub projects: ProjectsFile,
     pub project_id: Option<String>,
     pub project_item: usize,
+    /// True once the operator picked `project_item` in the project list (or it was opened
+    /// from there); a show opened from the library leaves the project list unselected.
+    pub project_picked: bool,
     folder_paths: Vec<PathBuf>,
     folder_index: usize,
     pub tab: String,
@@ -398,6 +401,7 @@ impl Session {
             projects: ProjectsFile::empty(),
             project_id: None,
             project_item: 0,
+            project_picked: false,
             folder_paths: Vec::new(),
             folder_index: 0,
             tab: "shows".to_string(),
@@ -580,6 +584,7 @@ impl Session {
             projects,
             project_id,
             project_item: 0,
+            project_picked: false,
             folder_paths: Vec::new(),
             folder_index: 0,
             tab: "shows".to_string(),
@@ -1252,13 +1257,11 @@ impl Session {
                     self.hold_program();
                     let changed = self.show_index != Some(index);
                     self.show_index = Some(index);
-                    self.slide_index = self.current_show().and_then(|show| {
-                        if show.ordered_slides().is_empty() {
-                            None
-                        } else {
-                            Some(0)
-                        }
-                    });
+                    // Opening a show picks no slide; the first Next or a click presents one.
+                    if changed {
+                        self.slide_index = None;
+                    }
+                    self.project_picked = false;
                     if changed {
                         self.load_timeline();
                     }
@@ -4277,6 +4280,10 @@ impl Session {
             freeshow_remote::Command::SetShow(index) => {
                 self.tab = "shows".to_string();
                 self.select_drawer(index);
+                if self.slide_index.is_none() {
+                    self.slide_index = self.first_slide();
+                    self.apply_slide_background();
+                }
                 self.go_live();
             }
             freeshow_remote::Command::SetSlide(index) => {
@@ -4503,6 +4510,10 @@ impl Session {
         let Some(project_id) = self.project_id.clone() else {
             return false;
         };
+        if self.highlighted_project_item().is_none() {
+            self.notice = "Click the project item to move first".to_string();
+            return false;
+        }
         if !self.projects.reorder(&project_id, self.project_item, delta) {
             return false;
         }
@@ -4534,7 +4545,11 @@ impl Session {
         self.shows.insert(pos, show);
         self.tab = "shows".to_string();
         self.hold_program();
+        // The insert shifted the list, so the open show's index no longer names it.
+        self.show_index = None;
         self.select_drawer(pos);
+        // A new show opens into editing on its first slide.
+        self.slide_index = self.first_slide();
         if let Some(project_id) = self.project_id.clone()
             && self.projects.append_show(&project_id, &id)
         {
@@ -4579,7 +4594,11 @@ impl Session {
         self.shows.insert(pos, show);
         self.tab = "shows".to_string();
         self.hold_program();
+        // The insert shifted the list, so the open show's index no longer names it.
+        self.show_index = None;
         self.select_drawer(pos);
+        // A new show opens into editing on its first slide.
+        self.slide_index = self.first_slide();
         if let Some(project_id) = self.project_id.clone()
             && self.projects.append_show(&project_id, id)
         {
@@ -4666,6 +4685,7 @@ impl Session {
         }
         self.project_id = Some(id);
         self.project_item = 0;
+        self.project_picked = false;
         self.remember_project();
         true
     }
@@ -4682,12 +4702,16 @@ impl Session {
         }
         // The new item is the one the operator is looking at.
         self.project_item = self.project_labels().len().saturating_sub(1);
+        self.project_picked = true;
         self.save_projects()
     }
 
     /// The project row to highlight: the picked item, unless the operator has since opened
     /// a different show from the library.
     pub fn highlighted_project_item(&self) -> Option<usize> {
+        if !self.project_picked {
+            return None;
+        }
         let item = self
             .current_project()?
             .shows
@@ -5094,6 +5118,19 @@ impl Session {
             self.reveal_count += 1;
             return true;
         }
+        if self.slide_index.is_none() && self.current_show().is_some() {
+            let Some(first) = self.first_slide() else {
+                return self.open_next_project_show();
+            };
+            self.go_live();
+            self.slide_hidden = false;
+            self.slide_index = Some(first);
+            self.reveal_count = 0;
+            self.click_revealed = false;
+            self.line_index = 0;
+            self.apply_slide_background();
+            return true;
+        }
         let (output_id, output_name) = self.audience();
         let restart = self.current_show().and_then(|show| {
             let index = self.slide_index.unwrap_or(0);
@@ -5123,6 +5160,24 @@ impl Session {
             return self.slide_index == Some(next);
         }
         self.open_next_project_show()
+    }
+
+    /// The slide Next presents first in the open show: the first one this output shows.
+    pub fn first_slide(&self) -> Option<usize> {
+        let show = self.current_show()?;
+        let (output_id, output_name) = self.audience();
+        show.first_output(&output_id, &output_name)
+            .or_else(|| show.first_enabled_slide())
+            .or_else(|| (!show.ordered_slides().is_empty()).then_some(0))
+    }
+
+    /// Picks the first slide when none is, so editing has something to edit.
+    pub fn pick_first_slide(&mut self) -> bool {
+        if self.slide_index.is_some() || self.tab != "shows" {
+            return false;
+        }
+        self.slide_index = self.first_slide();
+        self.slide_index.is_some()
     }
 
     fn open_next_project_show(&mut self) -> bool {
@@ -5197,6 +5252,7 @@ impl Session {
         };
         if opened {
             self.project_item = index;
+            self.project_picked = true;
         }
         opened
     }
@@ -7773,6 +7829,8 @@ Second line"
         assert_eq!(session.lyrics(), "Hello");
         let mut again = Session::open(root.clone());
         again.select_drawer(0);
+        assert_eq!(again.lyrics(), "", "opening a show picks no slide");
+        assert!(again.pick_first_slide());
         assert_eq!(again.lyrics(), "Hello");
         assert_eq!(again.current_show().unwrap().item_count("s1"), 1);
         let style = again

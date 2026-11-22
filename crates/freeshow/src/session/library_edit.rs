@@ -107,6 +107,7 @@ impl Session {
         }
         self.project_id = Some(project.id);
         self.project_item = 0;
+        self.project_picked = false;
         self.remember_project();
         Ok(format!("Opened project “{}”", project.name))
     }
@@ -238,6 +239,7 @@ impl Session {
             .and_then(|project| project.shows.get(index).cloned())
             .ok_or("that project item no longer exists")?;
         self.project_item = index;
+        self.project_picked = true;
         let label = self
             .project_labels()
             .get(index)
@@ -256,7 +258,8 @@ impl Session {
                 self.tab = "shows".to_string();
                 if self.show_index != Some(show) {
                     self.show_index = Some(show);
-                    self.slide_index = self.shows[show].first_enabled_slide().or(Some(0));
+                    // Opening a project show picks no slide until it is presented.
+                    self.slide_index = None;
                     self.item_index = 0;
                     self.load_timeline();
                 }
@@ -639,6 +642,7 @@ impl Session {
             .first()
             .map(|project| project.id.clone());
         self.project_item = 0;
+        self.project_picked = false;
         self.remember_project();
         Ok(format!("Deleted project “{name}”"))
     }
@@ -661,6 +665,7 @@ impl Session {
         }
         let len = self.project_labels().len();
         self.project_item = index.min(len.saturating_sub(1));
+        self.project_picked = false;
         Ok(format!("Removed “{label}” from the project"))
     }
 }
@@ -802,11 +807,14 @@ mod tests {
         assert_eq!(session.pick_project_item(0), Ok(ProjectPick::Opened));
         assert_eq!(session.tab, "shows");
         assert_eq!(session.show_name(), "Untitled");
-        assert_eq!(session.slide_index, Some(0));
+        assert_eq!(session.slide_index, None, "no slide looks picked yet");
         assert!(
             session.program_content.borrow().is_none(),
             "nothing went live"
         );
+        // The first Next presents the first slide, not the second.
+        assert!(session.advance_show());
+        assert_eq!(session.slide_index, Some(0));
         assert!(session.pick_project_item(5).is_err());
     }
 
@@ -938,6 +946,28 @@ mod tests {
         assert_eq!(session.highlighted_project_item(), Some(2));
         session.library_action("remove-project-item", "").unwrap();
         assert_eq!(session.project_labels(), ["Untitled", "Untitled 2"]);
+    }
+
+    #[test]
+    fn a_show_opened_from_the_library_leaves_the_project_unselected() {
+        let (_dir, mut session) = library("library-open");
+        assert!(session.create_project());
+        assert!(session.create_show());
+        assert!(session.create_show());
+        let first = session
+            .shows
+            .iter()
+            .position(|show| show.name() == "Untitled")
+            .unwrap();
+        session.tab = "shows".into();
+        let _ = session.select_drawer(first);
+        assert_eq!(session.highlighted_project_item(), None);
+        assert!(!session.move_project(1), "nothing picked to move");
+        assert_eq!(session.project_labels(), ["Untitled", "Untitled 2"]);
+        session.pick_project_item(0).unwrap();
+        assert!(session.move_project(1));
+        assert_eq!(session.project_labels(), ["Untitled 2", "Untitled"]);
+        assert_eq!(session.highlighted_project_item(), Some(1));
     }
 
     #[test]

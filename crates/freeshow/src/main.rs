@@ -2723,7 +2723,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_edit_mode_changed(move || {
-            if ui.upgrade().is_some_and(|ui| ui.get_edit_mode()) {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            if ui.get_edit_mode() {
+                if session.borrow_mut().pick_first_slide() {
+                    refresh(&ui, &session.borrow());
+                }
                 publish(&edit_slot, edit_frame(&session.borrow()));
             }
         });
@@ -2880,6 +2886,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let session_rc = Rc::clone(&session);
             let mut session = session.borrow_mut();
             if session.tab == "shows" {
+                // Go with no slide picked presents the first one, as Next does.
+                if session.slide_index.is_none() {
+                    session.slide_index = session.first_slide();
+                }
                 session.save_lyrics(text.as_str());
                 // Run the slide's own background and cues, as a click would.
                 if let Some(index) = session.slide_index {
