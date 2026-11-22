@@ -826,6 +826,11 @@ export component ControlWindow inherits Window {
                     : root.active-tab == "media" ? "Drag pictures and videos onto this window to add them to the media library."
                     : root.active-tab == "audio" ? "Drag audio files onto this window to add them."
                     : root.active-tab == "scripture" ? "Drag a Bible file (.fsb or USFM) onto this window to add it."
+                    : root.active-tab == "overlays" ? "No overlays yet. Open a show, click Edit, pick a slide and press Save as overlay. Click an overlay here to show or hide it over the output."
+                    : root.active-tab == "templates" ? "No templates yet. Open a show, click Edit, pick a styled slide and press Save as template. Click a template here to restyle the open show."
+                    : root.active-tab == "calendar" ? "No events yet. Events saved in a FreeShow library (events.json) appear here and run at their set time."
+                    : root.active-tab == "player" ? "No player videos yet. YouTube, Vimeo and stream links saved in a FreeShow library appear here."
+                    : root.active-tab == "rss" ? "No headlines yet. Headlines appear here once the library has an RSS feed address (rssUrl in its settings)."
                     : "";
             }
             if root.drawer-rows.length == 0 && root.search-query != "": Text {
