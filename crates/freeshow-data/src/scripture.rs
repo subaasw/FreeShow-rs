@@ -666,23 +666,35 @@ fn book_value(number: u64, name: &str, abbr: &str, chapters: Vec<Value>) -> Valu
     book
 }
 
+/// Reads "John 3:16", "John 3:16-18", "John 3.16", "John 3 16" and a whole chapter, "John 3".
 fn parse_reference(query: &str) -> Option<(String, u64, u64, u64)> {
     let mut parts = query.split_whitespace().collect::<Vec<_>>();
     if parts.len() < 2 {
         return None;
     }
-    let chapter_verse = parts.pop()?;
-    let (chapter, verses) = chapter_verse.split_once(':')?;
-    let chapter = chapter.parse().ok()?;
-    let (start, end) = if let Some((start, end)) = verses.split_once('-') {
-        (start.parse().ok()?, end.parse().ok()?)
-    } else {
-        let start = verses.parse().ok()?;
-        (start, start)
+    let verses = |text: &str| -> Option<(u64, u64)> {
+        let text = text.trim_end_matches('-');
+        if let Some((start, end)) = text.split_once('-') {
+            let (start, end) = (start.parse().ok()?, end.parse().ok()?);
+            (end >= start).then_some((start, end))
+        } else {
+            let start = text.parse().ok()?;
+            Some((start, start))
+        }
     };
-    if end < start {
-        return None;
-    }
+    let last = parts.pop()?;
+    let (chapter, start, end) = if let Some((chapter, rest)) = last.split_once([':', '.']) {
+        let (start, end) = verses(rest)?;
+        (chapter.parse().ok()?, start, end)
+    } else if parts.len() >= 2
+        && let Some(chapter) = parts.last().and_then(|part| part.parse::<u64>().ok())
+        && let Some((start, end)) = verses(last)
+    {
+        parts.pop();
+        (chapter, start, end)
+    } else {
+        (last.parse().ok()?, 1, u64::MAX)
+    };
     Some((parts.join(" "), chapter, start, end))
 }
 
@@ -912,6 +924,32 @@ const USFM: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn references_read_the_ways_operators_type_them() {
+        let max = u64::MAX;
+        for (query, expected) in [
+            ("John 3:16", ("John", 3, 16, 16)),
+            ("John 3:16-18", ("John", 3, 16, 18)),
+            ("John 3.16", ("John", 3, 16, 16)),
+            ("John 3 16", ("John", 3, 16, 16)),
+            ("John 3 16-18", ("John", 3, 16, 18)),
+            ("John 3", ("John", 3, 1, max)),
+            ("1 John 1:9", ("1 John", 1, 9, 9)),
+            ("1 John 1", ("1 John", 1, 1, max)),
+            ("Song of Solomon 2:4", ("Song of Solomon", 2, 4, 4)),
+        ] {
+            let (book, chapter, start, end) = expected;
+            assert_eq!(
+                parse_reference(query),
+                Some((book.to_string(), chapter, start, end)),
+                "{query}"
+            );
+        }
+        assert_eq!(parse_reference("John"), None);
+        assert_eq!(parse_reference("John 3:18-16"), None);
+        assert_eq!(parse_reference("grace alone"), None);
+    }
 
     #[test]
     fn zefania_osis_and_usfm_become_searchable_bibles() {
