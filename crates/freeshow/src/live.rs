@@ -491,8 +491,45 @@ pub fn stage_frame(session: &Session) -> Frame {
             };
             (id, name, image)
         });
-    let (slides, index) = if session.tab == "scripture" {
-        let lines = session.output_lines();
+    // While the operator browses or edits, the stage follows what the audience sees, not the selection.
+    let held = if session.program_held {
+        Some(session.program_content.borrow().clone())
+    } else {
+        None
+    };
+    let held_slide = match &held {
+        Some(Some(ProgramContent::Slide {
+            show_id,
+            index,
+            reveal,
+            clicks,
+            page,
+            ..
+        })) => session
+            .shows
+            .iter()
+            .position(|show| &show.id == show_id)
+            .map(|slot| (Some(slot), Some(*index), *reveal, *clicks, *page)),
+        _ => None,
+    };
+    let scripture_lines = match &held {
+        Some(Some(ProgramContent::Scripture(lines))) => Some(lines.clone()),
+        Some(_) => None,
+        None => (session.tab == "scripture").then(|| session.output_lines()),
+    };
+    let (show_slot, current_index, reveal, clicks, page) = held_slide.unwrap_or((
+        session.show_index,
+        if matches!(held, Some(None)) {
+            None
+        } else {
+            session.slide_index
+        },
+        session.reveal_count,
+        session.click_revealed,
+        session.style_page(),
+    ));
+    let showing_show = scripture_lines.is_none();
+    let (slides, index) = if let Some(lines) = scripture_lines {
         let index = if lines.is_empty() { None } else { Some(0) };
         (
             vec![crate::stage::StageSlide {
@@ -502,12 +539,7 @@ pub fn stage_frame(session: &Session) -> Frame {
             index,
         )
     } else {
-        let page = session.style_page();
-        let reveal = session.reveal_count;
-        let clicks = session.click_revealed;
-        let current_index = session.slide_index;
-        let slides = session
-            .show_index
+        let slides = show_slot
             .and_then(|slot| session.shows.get(slot))
             .map(|show| {
                 show.ordered_slides()
@@ -530,13 +562,13 @@ pub fn stage_frame(session: &Session) -> Frame {
                     .collect()
             })
             .unwrap_or_default();
-        (slides, session.slide_index)
+        (slides, current_index)
     };
     let root = session.root.as_deref();
     let mut still_backgrounds = std::collections::HashMap::new();
-    if session.tab != "scripture"
+    if showing_show
         && let Some(index) = index
-        && let Some(show) = session.show_index.and_then(|slot| session.shows.get(slot))
+        && let Some(show) = show_slot.and_then(|slot| session.shows.get(slot))
     {
         for item in &session.stage.items {
             if item.kind != freeshow_data::StageItemKind::Slide
@@ -1978,9 +2010,14 @@ mod tests {
             session.shows.iter().position(|show| show.id == id).unwrap()
         };
         session.tab = "shows".into();
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == freeshow_data::StageItemKind::Slide && item.offset == 0);
         session.select_drawer(position(&session, "a"));
         session.select_slide(0);
         let live = audience_frame(&session);
+        let live_stage = stage_frame(&session);
         assert!(live.pixels.chunks(4).any(|pixel| pixel[0] > 200));
 
         session.switch_tab("media");
@@ -1991,6 +2028,11 @@ mod tests {
             audience_frame(&session).pixels,
             live.pixels,
             "still the live slide"
+        );
+        assert_eq!(
+            stage_frame(&session).pixels,
+            live_stage.pixels,
+            "the stage follows the output, not the browsed show"
         );
 
         assert!(session.perform_shortcut("Right"));
