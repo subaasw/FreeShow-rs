@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FreeShow stage</title>
+  <link rel="icon" href="data:,">
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -30,6 +31,14 @@
     }
     #next, #notes { margin: 8px 0 0; color: #aaaaaa; white-space: pre-wrap; }
     #next { font-size: clamp(1.2rem, 3vw, 2.2rem); }
+    #status {
+      position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+      margin: 0; padding: 6px 14px; border-radius: 999px;
+      background: #000000c0; color: #f0f0ff; font-size: 15px;
+      transition: opacity 0.6s; pointer-events: none;
+    }
+    #status.gone { opacity: 0; }
+    body.preview #status { display: block; }
   </style>
 </head>
 <body>
@@ -38,6 +47,7 @@
   <p id="lines"></p>
   <p id="next"></p>
   <p id="notes"></p>
+  <p id="status">Tap for full screen</p>
   <script>
     let passwordAttempts = 0;
     let frameUrl;
@@ -106,13 +116,36 @@
       document.getElementById("notes").textContent = state.notes || "";
     }
 
+    const status = document.getElementById("status");
+    let failures = 0;
+    let hintTimer = setTimeout(() => status.classList.add("gone"), 4000);
+    function showStatus(text, sticky) {
+      status.textContent = text;
+      status.classList.remove("gone");
+      clearTimeout(hintTimer);
+      if (!sticky) hintTimer = setTimeout(() => status.classList.add("gone"), 3000);
+    }
+    // A tablet on a music stand is easier to read without browser bars.
+    document.addEventListener("click", () => {
+      const root = document.documentElement;
+      if (!document.fullscreenElement && root.requestFullscreen) {
+        root.requestFullscreen().catch(() => {});
+      } else if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
+
     paintClock();
     setInterval(paintClock, 1000);
     async function poll() {
       try {
         await refresh();
+        if (failures >= 3) showStatus("Connected", false);
+        failures = 0;
       } catch {
-        // Keep the last frame through a transient network interruption.
+        // Keep the last frame through a transient network interruption, but say so if it lasts.
+        failures += 1;
+        if (failures === 3) showStatus("Lost the connection to FreeShow, retrying…", true);
       } finally {
         setTimeout(poll, 500);
       }
