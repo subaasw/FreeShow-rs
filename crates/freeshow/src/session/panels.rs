@@ -37,7 +37,15 @@ pub struct SettingsForm {
     pub output_name: String,
     pub output_always_on_top: bool,
     pub output_kiosk: bool,
+    /// The library-wide slide text and media transitions: kind and milliseconds.
+    pub text_transition: String,
+    pub text_duration: i32,
+    pub media_transition: String,
+    pub media_duration: i32,
 }
+
+/// Transition kinds the output can draw, in the order Settings lists them.
+pub const TRANSITION_KINDS: [&str; 6] = ["none", "fade", "blur", "scale", "slide", "spin"];
 
 /// The selected slide item as the Inspector shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +172,10 @@ impl Session {
                 .unwrap_or_default(),
             output_always_on_top: self.output_window_flags().0,
             output_kiosk: self.output_window_flags().1,
+            text_transition: self.library_transition(false).kind,
+            text_duration: self.library_transition(false).duration_ms as i32,
+            media_transition: self.library_transition(true).kind,
+            media_duration: self.library_transition(true).duration_ms as i32,
         }
     }
 
@@ -205,6 +217,29 @@ impl Session {
                 vec!["ports", "stage"],
                 json!(parse_int(value, 1024, 65535)?),
             ),
+            "textTransition" | "mediaTransition" | "textDuration" | "mediaDuration" => {
+                let media = key.starts_with("media");
+                let mut motion = self.library_transition(media);
+                if key.ends_with("Duration") {
+                    motion.duration_ms = parse_int(value, 0, 10_000)? as u64;
+                } else if TRANSITION_KINDS.contains(&value) {
+                    motion.kind = value.to_string();
+                } else {
+                    return Err(format!("transition must be one of {TRANSITION_KINDS:?}"));
+                }
+                let root = self.root.clone().ok_or("choose a library folder first")?;
+                let slot = if media { "media" } else { "text" };
+                return if freeshow_data::Library::open(&root).set_transition(
+                    slot,
+                    &motion.kind,
+                    motion.duration_ms,
+                    &motion.easing,
+                ) {
+                    Ok(())
+                } else {
+                    Err("could not write settings.json".into())
+                };
+            }
             "outputAlwaysOnTop" | "outputKiosk" => {
                 let id = match self.preferences.active_output() {
                     Some(output) => output.id.clone(),
@@ -498,6 +533,34 @@ mod tests {
         .unwrap();
         assert_eq!(saved["unknownKey"]["keep"], 1);
         assert_eq!(saved["ports"]["stage"], 5600);
+    }
+
+    #[test]
+    fn slide_and_media_transitions_are_set_from_settings() {
+        let (dir, mut session) = library("transitions");
+        let form = session.settings_form();
+        assert_eq!(
+            (form.text_transition.as_str(), form.text_duration),
+            ("fade", 500)
+        );
+        assert_eq!(
+            (form.media_transition.as_str(), form.media_duration),
+            ("fade", 800)
+        );
+        session.apply_setting("textTransition", "none").unwrap();
+        session.apply_setting("mediaDuration", "1200").unwrap();
+        assert!(session.apply_setting("textTransition", "wobble").is_err());
+        assert!(session.apply_setting("textDuration", "-5").is_err());
+        let form = session.settings_form();
+        assert_eq!(form.text_transition, "none");
+        assert_eq!(form.media_duration, 1200);
+        assert_eq!(session.output_motion().0.kind, "none");
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["transitionData"]["media"]["duration"], 1200);
+        assert_eq!(saved["unknownKey"]["keep"], 1);
     }
 
     #[test]
