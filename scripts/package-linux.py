@@ -26,7 +26,15 @@ libXi.so.6 libXext.so.6 libwayland-client.so.0 libwayland-cursor.so.0 libwayland
 
 
 def run(*args, **kwargs):
-    return subprocess.run([str(arg) for arg in args], check=True, text=True, **kwargs)
+    try:
+        return subprocess.run([str(arg) for arg in args], check=True, text=True, **kwargs)
+    except subprocess.CalledProcessError as error:
+        # Captured launcher diagnostics must reach CI logs when verification fails.
+        if error.stdout:
+            print(error.stdout, flush=True)
+        if error.stderr:
+            print(error.stderr, flush=True)
+        raise
 
 
 def output(*args):
