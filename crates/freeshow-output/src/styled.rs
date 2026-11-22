@@ -3830,6 +3830,23 @@ mod tests {
         assert_eq!(frame.pixel(50, 90).a, 193);
     }
 
+    #[test]
+    fn concave_star_fill_leaves_the_gap_between_points() {
+        let mut slide = style_slide(
+            "left:0px;top:0px;width:100px;height:100px;background-color:#ff000080;--shape-fill-polygon:0.5 0,0.6 0.4,1 0.4,0.7 0.65,0.8 1,0.5 0.75,0.2 1,0.3 0.65,0 0.4,0.4 0.4;",
+        );
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = Rgba::TRANSPARENT;
+        let frame = render_styled(&slide);
+        let color = parse_color("#ff000080").unwrap();
+        assert_eq!(frame.pixel(26, 91), color);
+        assert_eq!(frame.pixel(73, 91), color);
+        assert_eq!(frame.pixel(50, 91), Rgba::TRANSPARENT);
+    }
+
     fn sample() -> StyledSlide {
         StyledSlide {
             output_width: 960,

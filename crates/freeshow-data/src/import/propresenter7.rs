@@ -3,6 +3,8 @@
 mod wire;
 
 use std::collections::{HashMap, HashSet};
+use std::f64::consts::TAU;
+use std::fmt::Write;
 
 use prost::Message;
 use serde_json::{Map, Value, json};
@@ -564,14 +566,28 @@ fn box_fill(element: &wire::Element) -> Option<String> {
     let shape = element.path.as_ref()?.shape.as_ref()?;
     let geometry = match shape.kind() {
         wire::ShapeType::Rectangle
-        | wire::ShapeType::Star
-        | wire::ShapeType::Polygon
         | wire::ShapeType::Custom
         | wire::ShapeType::RightArrow
         | wire::ShapeType::DoubleArrow => String::new(),
         wire::ShapeType::IsoscelesTriangle => "--shape-fill-polygon:0.5 0,1 1,0 1;".to_owned(),
         wire::ShapeType::RightTriangle => "--shape-fill-polygon:0 0,1 1,0 1;".to_owned(),
         wire::ShapeType::Rhombus => "--shape-fill-polygon:0.5 0,1 0.5,0.5 1,0 0.5;".to_owned(),
+        wire::ShapeType::Polygon => shape
+            .polygon
+            .as_ref()
+            .filter(|polygon| (3..=128).contains(&polygon.number_sides))
+            .map(|polygon| regular_outline(polygon.number_sides, None))
+            .unwrap_or_default(),
+        wire::ShapeType::Star => shape
+            .star
+            .as_ref()
+            .filter(|star| {
+                (3..=64).contains(&star.number_points)
+                    && (0.0..=1.0).contains(&star.inner_radius)
+                    && star.inner_radius > 0.0
+            })
+            .map(|star| regular_outline(star.number_points * 2, Some(star.inner_radius)))
+            .unwrap_or_default(),
         wire::ShapeType::Ellipse => "border-radius:50%;".to_string(),
         wire::ShapeType::RoundedRectangle => {
             let size = element.bounds.as_ref().and_then(|rect| rect.size.as_ref());
@@ -595,6 +611,42 @@ fn box_fill(element: &wire::Element) -> Option<String> {
         wire::ShapeType::Unknown => return None,
     };
     Some(format!("{background}{geometry}"))
+}
+
+fn regular_outline(vertices: u32, inner_radius: Option<f64>) -> String {
+    let outline: Vec<_> = (0..vertices)
+        .map(|index| {
+            let angle = TAU * f64::from(index) / f64::from(vertices);
+            let radius = if index % 2 == 1 {
+                inner_radius.unwrap_or(1.0)
+            } else {
+                1.0
+            };
+            let (sin, cos) = angle.sin_cos();
+            [radius * sin, -radius * cos]
+        })
+        .collect();
+    let min = outline
+        .iter()
+        .fold([f64::INFINITY; 2], |[left, top], &[x, y]| {
+            [left.min(x), top.min(y)]
+        });
+    let max = outline
+        .iter()
+        .fold([f64::NEG_INFINITY; 2], |[right, bottom], &[x, y]| {
+            [right.max(x), bottom.max(y)]
+        });
+    let mut css = "--shape-fill-polygon:".to_owned();
+    for (index, [x, y]) in outline.into_iter().enumerate() {
+        if index != 0 {
+            css.push(',');
+        }
+        let x = (x - min[0]) / (max[0] - min[0]);
+        let y = (y - min[1]) / (max[1] - min[1]);
+        let _ = write!(css, "{x:.6} {y:.6}");
+    }
+    css.push(';');
+    css
 }
 
 fn gradient_fill(gradient: &wire::Gradient) -> Option<String> {
@@ -627,7 +679,6 @@ fn gradient_fill(gradient: &wire::Gradient) -> Option<String> {
         wire::GradientType::Radial => "radial-gradient(circle at center".to_owned(),
         _ => return None,
     };
-    use std::fmt::Write;
     let mut css = format!("background:{start}");
     for (color, position) in stops {
         let _ = write!(css, ", {} {}%", css_color(color), position * 100.0);
@@ -934,7 +985,7 @@ mod tests {
                 path: Some(wire::Path {
                     shape: Some(wire::Shape {
                         kind,
-                        rounded_rectangle: None,
+                        ..Default::default()
                     }),
                 }),
                 fill: Some(wire::Fill {
@@ -972,6 +1023,32 @@ mod tests {
             });
             item
         };
+        let mut polygon = shape(wire::ShapeType::Polygon as i32, true, false);
+        polygon
+            .element
+            .as_mut()
+            .unwrap()
+            .path
+            .as_mut()
+            .unwrap()
+            .shape
+            .as_mut()
+            .unwrap()
+            .polygon = Some(wire::Polygon { number_sides: 6 });
+        let mut star = shape(wire::ShapeType::Star as i32, true, false);
+        star.element
+            .as_mut()
+            .unwrap()
+            .path
+            .as_mut()
+            .unwrap()
+            .shape
+            .as_mut()
+            .unwrap()
+            .star = Some(wire::Star {
+            number_points: 4,
+            inner_radius: 0.35,
+        });
         elements.insert(0, shape(1, true, false));
         elements.extend([
             shape(2, true, false),
@@ -983,13 +1060,15 @@ mod tests {
             shape(5, true, false),
             gradient_shape(3, wire::GradientType::Linear as i32),
             gradient_shape(2, wire::GradientType::Radial as i32),
+            polygon,
+            star,
         ]);
 
         let show = crate::import::import_show("Shapes.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
         let items = show.show["slides"][&verse.id]["items"].as_array().unwrap();
         let style = "left:160px;top:90px;width:320px;height:180px;background-color:#ff000080;";
-        assert_eq!(items.len(), 10);
+        assert_eq!(items.len(), 12);
         assert_eq!(items[0], json!({"type":"shape","style":style,"lines":[]}));
         assert!(
             !items[1]["lines"][0]["text"][0]["value"]
@@ -1000,7 +1079,7 @@ mod tests {
         assert_eq!(items[3]["style"], format!("{style}border-radius:50%;"));
         assert_eq!(items[4], json!({"type":"shape","style":style,"lines":[]}));
         for (item, points) in
-            items[5..]
+            items[5..8]
                 .iter()
                 .zip(["0.5 0,1 1,0 1", "0 0,1 1,0 1", "0.5 0,1 0.5,0.5 1,0 0.5"])
         {
@@ -1020,6 +1099,18 @@ mod tests {
             items[9]["style"],
             format!(
                 "{bounds}background:radial-gradient(circle at center, #ff000080 25%, #0000ff00 100%);border-radius:50%;"
+            )
+        );
+        assert_eq!(
+            items[10]["style"],
+            format!(
+                "{style}--shape-fill-polygon:0.500000 0.000000,1.000000 0.250000,1.000000 0.750000,0.500000 1.000000,0.000000 0.750000,0.000000 0.250000;"
+            )
+        );
+        assert_eq!(
+            items[11]["style"],
+            format!(
+                "{style}--shape-fill-polygon:0.500000 0.000000,0.623744 0.376256,1.000000 0.500000,0.623744 0.623744,0.500000 1.000000,0.376256 0.623744,0.000000 0.500000,0.376256 0.376256;"
             )
         );
     }
@@ -1135,6 +1226,7 @@ mod tests {
                     shape: Some(wire::Shape {
                         kind: wire::ShapeType::RoundedRectangle as i32,
                         rounded_rectangle: Some(wire::RoundedRectangle { roundness: 0.5 }),
+                        ..Default::default()
                     }),
                 }),
                 fill: Some(wire::Fill {

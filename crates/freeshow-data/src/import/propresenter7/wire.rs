@@ -284,12 +284,30 @@ pub(super) struct Shape {
     pub kind: i32,
     #[prost(message, optional, tag = "2")]
     pub rounded_rectangle: Option<RoundedRectangle>,
+    #[prost(message, optional, tag = "3")]
+    pub polygon: Option<Polygon>,
+    #[prost(message, optional, tag = "4")]
+    pub star: Option<Star>,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct RoundedRectangle {
     #[prost(double, tag = "1")]
     pub roundness: f64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Polygon {
+    #[prost(uint32, tag = "1")]
+    pub number_sides: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Star {
+    #[prost(double, tag = "1")]
+    pub inner_radius: f64,
+    #[prost(uint32, tag = "2")]
+    pub number_points: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
