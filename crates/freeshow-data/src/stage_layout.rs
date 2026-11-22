@@ -752,7 +752,7 @@ fn legacy_kind(id: &str) -> StageItemKind {
         StageItemKind::Timer
     } else if id.contains("variable") {
         StageItemKind::Variable
-    } else if id.contains("slide") || id.contains("text") {
+    } else if id.contains("slide") || id.contains("text") || id.contains("next") {
         StageItemKind::Slide
     } else {
         StageItemKind::Custom

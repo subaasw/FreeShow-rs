@@ -284,7 +284,8 @@ pub fn paint_stage_at(
                     _ => None,
                 }
             };
-            if image.is_some() && !output_preview {
+            // A slide box with "include media" shows the background under its text, as in FreeShow.
+            if image.is_some() && !output_preview && item.kind != StageItemKind::Slide {
                 lines.clear();
             } else if image.is_none() && item.kind == StageItemKind::Media {
                 lines = vec![media_label(item)];
@@ -741,6 +742,48 @@ mod tests {
         let context = StageContext::default();
         let frame = paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00", &context);
         assert!(frame.pixels.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn a_slide_box_with_media_keeps_its_text_over_the_background() {
+        let green = Raster {
+            width: 2,
+            height: 2,
+            rgba: [0, 255, 0, 255].repeat(4),
+        };
+        let mut item = spec(StageItemKind::Slide);
+        item.include_media = true;
+        item.style =
+            "left:0px;top:0px;width:1920px;height:1080px;font-size:120px;color:#ffffff;".into();
+        let layout = StageLayout {
+            name: "Media".into(),
+            background: "#000000".into(),
+            items: vec![item],
+        };
+        let context = StageContext {
+            current_background: Some((&green, Fit::Cover, false, false)),
+            ..StageContext::default()
+        };
+        let paint = |text: &str| {
+            let slides = vec![StageSlide {
+                text_boxes: vec![vec![text.to_string()]],
+                notes: String::new(),
+            }];
+            paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00", &context)
+        };
+        let blank = paint("");
+        let lyric = paint("Amazing grace");
+        assert_ne!(
+            blank.pixels, lyric.pixels,
+            "the lyric is painted on the background"
+        );
+        assert!(
+            lyric
+                .pixels
+                .chunks(4)
+                .any(|px| px[0] > 200 && px[1] > 200 && px[2] > 200),
+            "white text shows"
+        );
     }
 
     #[test]
