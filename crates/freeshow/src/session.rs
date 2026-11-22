@@ -5182,16 +5182,16 @@ mod tests {
                 }
             ]);
             assert_eq!(
-                show.stage_lines(0, true, 0, false, None),
-                Vec::<String>::new()
+                show.stage_text_boxes(0, true, 0, false, None),
+                vec![Vec::<String>::new()]
             );
             assert_eq!(
-                show.stage_lines(0, true, 1, false, None),
-                vec!["One".to_string()]
+                show.stage_text_boxes(0, true, 1, false, None),
+                vec![vec!["One".to_string()]]
             );
             assert_eq!(
-                show.stage_lines(1, false, 0, false, None),
-                vec!["Visible".to_string()]
+                show.stage_text_boxes(1, false, 0, false, None),
+                vec![vec![], vec!["Visible".to_string()]]
             );
         }
         assert!(session.present_show_id(&show_id));

@@ -21,7 +21,7 @@ cargo run -p freeshow -- --show ~/Documents/FreeShow/Shows/Some\ Song.show
 
 `scripts/present-sample.sh` builds a one-song library and opens the first slide on the output window.
 
-Audience slides and the native stage window render saved FreeShow QR boxes with their configured payload and colors. The code stays square in a rectangular box. A Current Output box previews the active audience picture on the native stage and its browser view, with the saved output name when requested.
+Audience slides and the native stage window render saved FreeShow QR boxes with their configured payload and colors. The code stays square in a rectangular box. A Current Output box previews the active audience picture on the native stage and its browser view, with the saved output name when requested. Stage text boxes honor saved text-box numbers, item order, and stage bindings for multilingual slides.
 
 Put song sources in the library `Imports/` folder before opening the library. ProPresenter 4–6 XML (`.pro4`, `.pro5`, `.pro6`) and `.proBundle` archives import lyrics, group children, disabled slides, notes, and slide backgrounds. Bundled media is copied into `Media/` and the saved shows point there; existing files are kept, and matching media is reused on repeat imports. Missing or ambiguous bundle media produces an import warning instead of linking to another file. ProPresenter 7 `.pro` files and bundles retain cue groups, the selected arrangement, slide notes, backgrounds, and separate text boxes with saved bounds and box-level typography. Mixed styling within an RTF box, graphic elements, timelines, and unsupported cue actions remain incomplete. Bundles are limited to 10,000 entries, 16 MiB per presentation, 512 MiB per media file, and 2 GiB uncompressed in total.
 

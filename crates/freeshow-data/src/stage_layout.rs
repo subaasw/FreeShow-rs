@@ -82,6 +82,9 @@ pub struct StageItemSpec {
     pub align: String,
     pub offset: i64,
     pub line_count: Option<usize>,
+    /// The saved one-based box number as a zero-based index.
+    pub text_box: Option<usize>,
+    pub invert_items: bool,
     /// Explicit display name for a box; empty when the layout has none.
     pub label: String,
     /// Static lines for a `text` item.
@@ -242,6 +245,12 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .get("lineCount")
                 .and_then(Value::as_u64)
                 .map(|count| count as usize),
+            text_box: item_value
+                .get("itemNumber")
+                .and_then(Value::as_u64)
+                .and_then(|number| number.checked_sub(1))
+                .and_then(|index| usize::try_from(index).ok()),
+            invert_items: item_value.get("invertItems") == Some(&Value::Bool(true)),
             label,
             lines: if kind == StageItemKind::Text {
                 text_lines(item_value)
@@ -302,6 +311,8 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         align: String::new(),
         offset,
         line_count,
+        text_box: None,
+        invert_items: false,
         label: String::new(),
         lines: Vec::new(),
         variable_id: None,
@@ -390,7 +401,7 @@ mod tests {
     #[test]
     fn parses_freeshow_stage_layout_and_falls_back() {
         let layout = parse_stage(
-            r##"{"default":{"name":"Main","disabled":false,"settings":{"color":"#101010"},"itemOrder":["textNext","textCurrent","notes","caption","var","timer","media","web"],"items":{"textCurrent":{"type":"slide_text","style":"left:1px;"},"textNext":{"type":"slide_text","slideOffset":1,"lineCount":2,"style":"left:2px;"},"notes":{"type":"slide_notes","style":"left:3px;"},"caption":{"type":"text","label":"Welcome","style":"left:4px;","lines":[{"align":"","text":[{"value":"Hello "},{"value":"world"}]}]},"var":{"type":"variable","variable":{"id":"v1"},"style":"left:5px;"},"timer":{"type":"timer","timer":{"id":"sermon"},"style":"left:6px;"},"media":{"type":"media","src":"Media/bg.png","style":"left:7px;"},"web":{"type":"web","style":"left:8px;"},"hidden":{"type":"clock","enabled":false,"style":""}}}}"##,
+            r##"{"default":{"name":"Main","disabled":false,"settings":{"color":"#101010"},"itemOrder":["textNext","textCurrent","notes","caption","var","timer","media","web"],"items":{"textCurrent":{"type":"slide_text","style":"left:1px;"},"textNext":{"type":"slide_text","slideOffset":1,"lineCount":2,"itemNumber":2,"invertItems":true,"style":"left:2px;"},"notes":{"type":"slide_notes","style":"left:3px;"},"caption":{"type":"text","label":"Welcome","style":"left:4px;","lines":[{"align":"","text":[{"value":"Hello "},{"value":"world"}]}]},"var":{"type":"variable","variable":{"id":"v1"},"style":"left:5px;"},"timer":{"type":"timer","timer":{"id":"sermon"},"style":"left:6px;"},"media":{"type":"media","src":"Media/bg.png","style":"left:7px;"},"web":{"type":"web","style":"left:8px;"},"hidden":{"type":"clock","enabled":false,"style":""}}}}"##,
         )
         .unwrap();
         assert_eq!(layout.name, "Main");
@@ -398,6 +409,8 @@ mod tests {
         assert_eq!(layout.items[0].kind, StageItemKind::Slide);
         assert_eq!(layout.items[0].offset, 1);
         assert_eq!(layout.items[0].line_count, Some(2));
+        assert_eq!(layout.items[0].text_box, Some(1));
+        assert!(layout.items[0].invert_items);
         assert_eq!(layout.items[2].kind, StageItemKind::Notes);
         assert_eq!(layout.items[3].kind, StageItemKind::Text);
         assert_eq!(layout.items[3].label, "Welcome");

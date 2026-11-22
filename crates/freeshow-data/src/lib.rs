@@ -1734,16 +1734,16 @@ impl ShowFile {
         any.then_some(most)
     }
 
-    /// Lyric lines the stage should show. The current slide follows the audience reveal.
-    /// Another slide hides click-reveal and line-reveal text.
-    pub fn stage_lines(
+    /// The slide's stage-eligible text boxes in storage order.
+    /// Empty groups retain their box number until a reveal makes the text visible.
+    pub fn stage_text_boxes(
         &self,
         index: usize,
         current: bool,
         reveal: u32,
         clicks_shown: bool,
         page: Option<(usize, usize)>,
-    ) -> Vec<String> {
+    ) -> Vec<Vec<String>> {
         let steps = self.layout_steps();
         let Some((slide_id, _)) = steps.get(index) else {
             return Vec::new();
@@ -1755,19 +1755,32 @@ impl ShowFile {
         else {
             return Vec::new();
         };
-        let mut lines = Vec::new();
+        let mut boxes = Vec::new();
         for item in items {
-            let click = item.get("clickReveal").and_then(Value::as_bool) == Some(true);
-            let line_reveal = item.get("lineReveal").and_then(Value::as_bool) == Some(true);
-            if click && !(current && clicks_shown) {
+            if item
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| !kind.is_empty() && kind != "text")
+                || item
+                    .get("bindings")
+                    .and_then(Value::as_array)
+                    .is_some_and(|bindings| {
+                        !bindings.is_empty()
+                            && !bindings.iter().any(|target| target.as_str() == Some("stage"))
+                    })
+            {
                 continue;
             }
-            if line_reveal && !current {
+            let click = item.get("clickReveal").and_then(Value::as_bool) == Some(true);
+            let line_reveal = item.get("lineReveal").and_then(Value::as_bool) == Some(true);
+            boxes.push(Vec::new());
+            if (click && !(current && clicks_shown)) || (line_reveal && !current) {
                 continue;
             }
             let Some(item_lines) = item.get("lines").and_then(Value::as_array) else {
                 continue;
             };
+            let lines = boxes.last_mut().unwrap();
             for (line_index, line) in item_lines.iter().enumerate() {
                 if line_reveal && current && line_index >= reveal as usize {
                     continue;
@@ -1782,7 +1795,7 @@ impl ShowFile {
                 lines.push(line_value(line));
             }
         }
-        lines
+        boxes
     }
 
     /// This slide is marked as the end, so the next step returns to the start.
