@@ -4611,6 +4611,25 @@ impl Library {
     /// Named values from `settings_synced.json`. Each value is returned under
     /// its raw store id and under its lower-case name with spaces as
     /// underscores, so both FreeShow tokens and stage items can find it.
+    /// Variables an operator can pick, as `(id, name)` in FreeShow's order of ids.
+    pub fn variable_names(&self) -> Vec<(String, String)> {
+        let Ok(text) = fs::read_to_string(self.synced_settings_path()) else {
+            return Vec::new();
+        };
+        let Ok(json) = serde_json::from_str::<Value>(&text) else {
+            return Vec::new();
+        };
+        let Some(map) = json.get("variables").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        map.iter()
+            .filter_map(|(id, variable)| {
+                let name = variable.get("name").and_then(Value::as_str)?.trim();
+                (!name.is_empty()).then(|| (id.clone(), name.to_string()))
+            })
+            .collect()
+    }
+
     pub fn variables(&self) -> Vec<(String, String)> {
         let Ok(text) = fs::read_to_string(self.synced_settings_path()) else {
             return Vec::new();

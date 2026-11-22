@@ -6368,6 +6368,7 @@ impl Session {
             "text" => freeshow_data::StageItemKind::Text,
             "media" => freeshow_data::StageItemKind::Media,
             "tracker" => freeshow_data::StageItemKind::SlideTracker,
+            "variable" => freeshow_data::StageItemKind::Variable,
             _ => freeshow_data::StageItemKind::Slide,
         };
         self.stage.items.push(freeshow_data::StageItemSpec {

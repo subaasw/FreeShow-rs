@@ -650,6 +650,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             fit: row.fit.into(),
             tracker_type: row.tracker_type.into(),
             tracker_accent: row.tracker_accent.into(),
+            variable: row.variable.into(),
         })
         .collect();
     ui.set_stage_rows(Rc::new(slint::VecModel::from(rows)).into());
@@ -667,6 +668,14 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     }
     ui.set_stage_timer_ids(strings(&timer_ids));
     ui.set_stage_timer_names(strings(&timer_names));
+    let mut variable_ids = vec![String::new()];
+    let mut variable_names = vec!["Pick a variable".to_string()];
+    for (id, name) in session.variable_choices() {
+        variable_ids.push(id);
+        variable_names.push(name);
+    }
+    ui.set_stage_variable_ids(strings(&variable_ids));
+    ui.set_stage_variable_names(strings(&variable_names));
 }
 
 /// Closing an output or stage window with its title-bar button hides it and

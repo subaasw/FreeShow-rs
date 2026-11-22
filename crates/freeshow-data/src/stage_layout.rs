@@ -481,6 +481,18 @@ fn merge_item_options(
         }
         target["id"] = id.clone();
     }
+    if let Some(id) = modeled
+        .get("variable")
+        .and_then(|variable| variable.get("id"))
+    {
+        let target = item
+            .entry("variable")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !target.is_object() {
+            *target = Value::Object(serde_json::Map::new());
+        }
+        target["id"] = id.clone();
+    }
     for key in ["src", "fit"] {
         if let Some(value) = modeled.get(key) {
             item.insert(key.into(), value.clone());
@@ -533,6 +545,9 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
         }
         if let Some(timer) = &item.timer_id {
             object.insert("timer".into(), serde_json::json!({ "id": timer }));
+        }
+        if let (StageItemKind::Variable, Some(variable)) = (item.kind, &item.variable_id) {
+            object.insert("variable".into(), serde_json::json!({ "id": variable }));
         }
         if let Some(src) = &item.src {
             object.insert("src".into(), Value::String(src.clone()));
