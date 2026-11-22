@@ -1037,6 +1037,32 @@ mod tests {
     }
 
     #[test]
+    fn a_dragged_project_item_lands_where_it_is_dropped() {
+        let (_dir, mut session) = library("library-drag");
+        assert!(session.create_project());
+        assert!(session.create_show());
+        assert!(session.create_show());
+        assert!(session.create_show());
+        assert_eq!(
+            session.project_labels(),
+            ["Untitled", "Untitled 2", "Untitled 3"]
+        );
+        session.pick_project_item(0).unwrap();
+        assert!(session.drop_project_item(2, 0));
+        assert_eq!(
+            session.project_labels(),
+            ["Untitled 3", "Untitled", "Untitled 2"]
+        );
+        assert_eq!(
+            session.highlighted_project_item(),
+            Some(1),
+            "the picked item keeps its highlight"
+        );
+        assert!(!session.drop_project_item(1, 1));
+        assert!(!session.drop_project_item(0, 9));
+    }
+
+    #[test]
     fn the_picked_project_reopens_next_time() {
         let (dir, mut session) = library("picker");
         assert!(session.create_project());

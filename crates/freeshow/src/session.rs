@@ -4602,6 +4602,32 @@ impl Session {
         self.save_projects()
     }
 
+    /// Moves the project item at `from` to `to`, as when it is dragged in the project list.
+    pub fn drop_project_item(&mut self, from: usize, to: usize) -> bool {
+        let Some(project_id) = self.project_id.clone() else {
+            return false;
+        };
+        if from == to
+            || !self
+                .projects
+                .reorder(&project_id, from, to as isize - from as isize)
+        {
+            return false;
+        }
+        // The picked item keeps its highlight wherever it now sits.
+        let picked = self.project_item;
+        self.project_item = if picked == from {
+            to
+        } else if from < picked && picked <= to {
+            picked - 1
+        } else if to <= picked && picked < from {
+            picked + 1
+        } else {
+            picked
+        };
+        self.save_projects()
+    }
+
     pub fn create_show(&mut self) -> bool {
         let Some(root) = self.root.clone() else {
             return false;
