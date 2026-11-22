@@ -1900,7 +1900,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let next_slide = Rc::new(slint::Timer::default());
     let last_output = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
     let last_stage = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
-    if session.slide_index.is_some() {
+    {
+        // Even an empty output starts in the style's background colour.
         let audience = audience_frame(&session);
         let stage = stage_frame(&session);
         *last_output.borrow_mut() = audience.clone();
@@ -2402,7 +2403,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         current.clear_output();
                         stop_video(&video_timer, &video_player);
                         *audio_out.borrow_mut() = None;
-                        let blank = clear_frame(output_width, output_height);
+                        let blank = audience_frame(&current);
                         next_slide.stop();
                         output_fade.stop();
                         stage_fade.stop();
