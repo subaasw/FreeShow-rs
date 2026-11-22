@@ -75,8 +75,9 @@ the show or reveals lyrics until the password is accepted.
 - [x] Route individual hardware channels for audio files and video.
 - [x] Feed the existing NDI and RTMP senders from saved stereo network routes.
 - [x] Icecast stereo audio on the saved mixer node with operator and slide controls.
-- [ ] Remaining network transports (OMT, WebRTC), NDI groups, and
-      multiple independent network pictures.
+- [x] Separate audience and stage pictures over NDI and WebRTC/WHIP.
+- [ ] Verify OMT with its runtime installed, add NDI groups, and support
+      multiple independent audience pictures.
 - [x] Keep the main volume and mute controls working for paths through Main.
 - [x] Remote channel list, per-channel volume, and independent mute.
 
@@ -92,7 +93,7 @@ main fader still controls the main channel.
 
 Acceptance: a `stage.json` made by FreeShow renders all of its boxes without
 falling back to the four built-in types. QR boxes render from their saved
-payload and colors. Current Output boxes mirror the active audience picture, including live media. Local stage videos play silently, and slide-text boxes can mirror audience backgrounds. Standalone live video, camera, web, and chart boxes render a labeled placeholder until the compositor grows those sources.
+payload and colors. Current Output boxes mirror the active audience picture, including live media. Local stage videos play silently, and slide-text boxes can mirror audience backgrounds. The native stage also supports camera sources, website previews, and chart boxes.
 
 ### M5. Installers and packaging
 
@@ -115,13 +116,14 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [ ] Other ProPresenter 7 graphics, remaining RTF controls, and timeline/action parity.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.
 - [x] ChurchApps service-plan lesson feeds and add-ons with downloadable media.
-- [ ] Stream-only lesson media without a direct downloadable URL.
+- [x] Import stream-only lesson media by URL and resolve YouTube or Vimeo for playback when `yt-dlp` is installed.
 - [x] Background lesson downloads with progress and cancellation.
 - [x] ProPresenter bundle backgrounds land in `Media/` and stay linked.
 - [x] PowerPoint embedded slide, layout, and master backgrounds.
 - [x] Solid PowerPoint theme fills and slide-level color-map overrides.
 - [x] PowerPoint solid-fill tint, shade, and luminance transforms.
-- [ ] Other PowerPoint color transforms, gradients, linked or tiled media, and backgrounds from other import formats.
+- [x] PowerPoint linear and centered circular gradients, linked backgrounds, and tiled media.
+- [ ] PowerPoint alpha and gamma color transforms, custom gradient geometry, and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
 their original backgrounds.

@@ -107,7 +107,7 @@ impl Color {
     }
 }
 
-/// A resolved slide fill: a solid hex or a CSS linear-gradient.
+/// A resolved solid color or CSS gradient.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ResolvedFill {
     Color(String),
@@ -116,8 +116,8 @@ pub(super) enum ResolvedFill {
 
 #[derive(Clone)]
 pub(super) struct GradientFill {
-    /// CSS degrees: 0 is upward, 90 is to the right.
-    pub angle: f64,
+    /// CSS angle for a linear fill. A path fill uses a centered circle.
+    pub linear_angle: Option<f64>,
     /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
     pub stops: Vec<(f64, Color)>,
 }
@@ -150,7 +150,11 @@ impl GradientFill {
             return None;
         }
         stops.sort_by(|left, right| left.0.total_cmp(&right.0));
-        Some(Self { angle, stops })
+        let linear_angle = child(fill, "path").is_none().then_some(angle);
+        Some(Self {
+            linear_angle,
+            stops,
+        })
     }
 
     pub(super) fn resolve(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<ResolvedFill> {
@@ -158,20 +162,19 @@ impl GradientFill {
         for (pos, color) in &self.stops {
             resolved.push((*pos, color.hex_in(&scheme)?));
         }
-        Some(css_gradient(self.angle, &resolved))
-    }
-}
-
-pub(super) fn css_gradient(angle: f64, stops: &[(f64, String)]) -> ResolvedFill {
-    let first = stops[0].1.clone();
-    let body = stops
-        .iter()
-        .map(|(pos, color)| format!("{color} {}%", (pos * 100.0).round()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    ResolvedFill::Gradient {
-        css: format!("linear-gradient({}deg, {body})", angle.round()),
-        first,
+        let body = resolved
+            .iter()
+            .map(|(pos, color)| format!("{color} {}%", (pos * 100.0).round()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let css = match self.linear_angle {
+            Some(angle) => format!("linear-gradient({}deg, {body})", angle.round()),
+            None => format!("radial-gradient(circle at center, {body})"),
+        };
+        Some(ResolvedFill::Gradient {
+            css,
+            first: resolved[0].1.clone(),
+        })
     }
 }
 
