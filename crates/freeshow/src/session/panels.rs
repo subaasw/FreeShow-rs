@@ -53,6 +53,8 @@ pub struct SettingsForm {
     pub style_blur_amount: i32,
     pub style_blur_opacity: i32,
     pub style_lines: i32,
+    /// Audience outputs by name; `output_name` is the one the output window shows.
+    pub output_names: Vec<String>,
 }
 
 /// How a style fits background pictures and videos (Settings → Styles).
@@ -87,6 +89,10 @@ pub fn setting_label(key: &str) -> &str {
         "styleFit" => "media fit",
         "styleBlurAmount" | "styleBlurOpacity" => "blur",
         "styleLines" => "max lines",
+        "outputPick" => "active output",
+        "outputNew" => "new output",
+        "outputDelete" => "output removal",
+        "outputName" => "output name",
         other => other,
     }
 }
@@ -242,13 +248,18 @@ impl Session {
                         output.name.clone()
                     }
                 })
-                .unwrap_or_default(),
+                .unwrap_or_else(|| "Primary".into()),
             output_always_on_top: self.output_window_flags().0,
             output_kiosk: self.output_window_flags().1,
             text_transition: self.library_transition(false).kind,
             text_duration: self.library_transition(false).duration_ms as i32,
             media_transition: self.library_transition(true).kind,
             media_duration: self.library_transition(true).duration_ms as i32,
+            output_names: self
+                .audience_outputs()
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect(),
             ..self.style_form()
         }
     }
@@ -450,6 +461,9 @@ impl Session {
             | "styleFit" | "styleBlurAmount" | "styleBlurOpacity" | "styleLines" => {
                 return self.apply_style_setting(key, value);
             }
+            "outputPick" | "outputNew" | "outputDelete" | "outputName" => {
+                return self.apply_output_setting(key, value);
+            }
             "theme" => {
                 let Some(theme) = self
                     .settings_form()
@@ -479,6 +493,134 @@ impl Session {
         } else {
             Err("could not write settings.json".into())
         }
+    }
+
+    /// Audience outputs (not stage displays) as `(id, shown name)`.
+    fn audience_outputs(&self) -> Vec<(String, String)> {
+        let outputs: Vec<(String, String)> = self
+            .preferences
+            .outputs
+            .iter()
+            .filter(|output| !output.stage)
+            .map(|output| {
+                let name = if output.name.trim().is_empty() {
+                    output.id.clone()
+                } else {
+                    output.name.trim().to_string()
+                };
+                (output.id.clone(), name)
+            })
+            .collect();
+        if outputs.is_empty() {
+            // A library that never stored an output plays FreeShow's default "Primary" one.
+            vec![("default".into(), "Primary".into())]
+        } else {
+            outputs
+        }
+    }
+
+    /// Picks, adds, removes or renames the audience output the output window plays.
+    fn apply_output_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        use serde_json::json;
+        let outputs = self.audience_outputs();
+        let active = match self.preferences.active_output() {
+            Some(output) => output.id.clone(),
+            None => self.add_default_output()?,
+        };
+        let wrote = match key {
+            "outputPick" => {
+                let (id, _) = outputs
+                    .iter()
+                    .find(|(_, name)| name == value)
+                    .ok_or_else(|| format!("no output named {value:?}"))?
+                    .clone();
+                self.patch_settings(|settings| {
+                    if let Some(all) = settings.get_mut("outputs").and_then(|o| o.as_object_mut()) {
+                        for (key, output) in all.iter_mut() {
+                            let is_stage = output
+                                .get("stageOutput")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|layout| !layout.is_empty());
+                            if !is_stage && let Some(output) = output.as_object_mut() {
+                                output.insert("active".into(), json!(*key == id));
+                            }
+                        }
+                    }
+                })
+            }
+            "outputNew" => {
+                let taken: Vec<String> = self
+                    .preferences
+                    .outputs
+                    .iter()
+                    .map(|output| output.id.clone())
+                    .collect();
+                let id = (2..)
+                    .map(|n| format!("output{n}"))
+                    .find(|id| !taken.contains(id))
+                    .ok_or("could not name the output")?;
+                let name = format!("Output {}", outputs.len().max(1) + 1);
+                self.patch_settings(|settings| {
+                    if let Some(all) = settings.get_mut("outputs").and_then(|o| o.as_object_mut()) {
+                        for output in all.values_mut() {
+                            if let Some(output) = output.as_object_mut()
+                                && output.get("stageOutput").is_none()
+                            {
+                                output.insert("active".into(), json!(false));
+                            }
+                        }
+                        all.insert(
+                            id.clone(),
+                            json!({
+                                "enabled": true,
+                                "active": true,
+                                "name": name,
+                                "color": "#F0008C",
+                                "style": "default",
+                                "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+                                "alwaysOnTop": true,
+                            }),
+                        );
+                    }
+                })
+            }
+            "outputDelete" => {
+                if outputs.len() < 2 {
+                    return Err("FreeShow needs at least one output".into());
+                }
+                let next = outputs
+                    .iter()
+                    .find(|(id, _)| *id != active)
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default();
+                self.patch_settings(|settings| {
+                    if let Some(all) = settings.get_mut("outputs").and_then(|o| o.as_object_mut()) {
+                        all.remove(&active);
+                        if let Some(output) = all.get_mut(&next).and_then(|o| o.as_object_mut()) {
+                            output.insert("active".into(), json!(true));
+                        }
+                    }
+                })
+            }
+            "outputName" => {
+                if value.is_empty() || value.chars().count() > 60 {
+                    return Err("an output name is 1–60 characters".into());
+                }
+                return self.patch_output(&active, "name", json!(value));
+            }
+            other => return Err(format!("unknown setting {other:?}")),
+        };
+        if !wrote {
+            return Err("could not write settings.json".into());
+        }
+        self.refresh_style_look();
+        if let Some(path) = self.background_path.clone() {
+            self.remember_background(&path);
+        }
+        if !self.blanked {
+            self.live_edited = true;
+        }
+        Ok(())
     }
 
     /// Always-on-top and kiosk for the audience output window, from its stored output.
@@ -731,6 +873,54 @@ mod tests {
         .unwrap();
         assert_eq!(saved["unknownKey"]["keep"], 1);
         assert_eq!(saved["ports"]["stage"], 5600);
+    }
+
+    #[test]
+    fn styles_and_outputs_are_edited_from_settings() {
+        let (_dir, mut session) = library("styles-outputs");
+        let form = session.settings_form();
+        assert_eq!(form.style_names, vec!["Primary".to_string()]);
+        assert_eq!(form.output_names, vec!["Primary".to_string()]);
+        session.apply_setting("styleBackground", "#00b140").unwrap();
+        assert!(session.style_background.is_some());
+        assert!(
+            session
+                .apply_setting("styleBackground", "greenish")
+                .is_err()
+        );
+        assert!(session.apply_setting("styleDelete", "").is_err());
+        session.apply_setting("styleNew", "").unwrap();
+        session.apply_setting("styleName", "Night").unwrap();
+        session.apply_setting("styleFit", "blur").unwrap();
+        session.apply_setting("styleLines", "3").unwrap();
+        assert!(session.apply_setting("styleFit", "stretch").is_err());
+        let form = session.settings_form();
+        assert_eq!(form.style_name, "Night");
+        assert_eq!(form.style_fit, "blur");
+        assert_eq!(form.style_lines, 3);
+        assert!(
+            session.style_background.is_none(),
+            "a new style starts black"
+        );
+        session.apply_setting("outputStyle", "Primary").unwrap();
+        assert!(session.style_background.is_some());
+
+        session.apply_setting("outputNew", "").unwrap();
+        session.apply_setting("outputName", "Lobby").unwrap();
+        let form = session.settings_form();
+        assert_eq!(
+            form.output_names,
+            vec!["Primary".to_string(), "Lobby".to_string()]
+        );
+        assert_eq!(form.output_name, "Lobby");
+        session.apply_setting("outputPick", "Primary").unwrap();
+        assert_eq!(session.settings_form().output_name, "Primary");
+        session.apply_setting("outputDelete", "").unwrap();
+        assert_eq!(
+            session.settings_form().output_names,
+            vec!["Lobby".to_string()]
+        );
+        assert!(session.apply_setting("outputDelete", "").is_err());
     }
 
     #[test]

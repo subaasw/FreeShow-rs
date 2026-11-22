@@ -123,6 +123,8 @@ pub struct OutputPreference {
     /// FreeShow defaults this to on for audience windows.
     pub always_on_top: bool,
     pub kiosk: bool,
+    /// A stage display (`stageOutput` names a layout) rather than an audience window.
+    pub stage: bool,
 }
 
 /// A named output scene from `settings_synced.json`.
@@ -5635,6 +5637,10 @@ fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
                 .filter(|value| *value > 0),
             always_on_top: output.get("alwaysOnTop").and_then(Value::as_bool) != Some(false),
             kiosk: output.get("kiosk").and_then(Value::as_bool) == Some(true),
+            stage: output
+                .get("stageOutput")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty()),
         })
         .collect()
 }
@@ -7543,6 +7549,7 @@ mod tests {
                     height: None,
                     always_on_top: true,
                     kiosk: false,
+                    stage: false,
                 },
                 OutputPreference {
                     id: "stage".into(),
@@ -7554,6 +7561,7 @@ mod tests {
                     height: None,
                     always_on_top: true,
                     kiosk: false,
+                    stage: false,
                 },
             ]
         );
