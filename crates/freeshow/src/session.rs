@@ -136,6 +136,8 @@ pub enum PendingPlay {
 pub enum DrawerAction {
     None,
     Present,
+    /// Repaint the output as it is (an overlay or template changed) without going live.
+    Refresh,
     PlayAudio(PathBuf),
     PlayVideo(PathBuf),
     PlayCamera(String),
@@ -251,6 +253,8 @@ pub struct Session {
     media_finished: Option<(String, bool)>,
     /// The show moved because media ended, so the output windows need a new frame.
     pub refresh_output: bool,
+    /// The operator is looking at another show, slide or tab; the output keeps what is live.
+    pub program_held: bool,
     /// Live commands from the operator window, run with the remote batch.
     pub ui_commands: Vec<freeshow_remote::Command>,
     pub audio_paused: bool,
@@ -461,6 +465,7 @@ impl Session {
             effect_return: None,
             media_finished: None,
             refresh_output: false,
+            program_held: false,
             ui_commands: Vec::new(),
             audio_paused: false,
             media_paused: false,
@@ -638,6 +643,7 @@ impl Session {
             effect_return: None,
             media_finished: None,
             refresh_output: false,
+            program_held: false,
             ui_commands: Vec::new(),
             audio_paused: false,
             media_paused: false,
@@ -785,7 +791,7 @@ impl Session {
             return false;
         };
         self.tab = "shows".to_string();
-        self.blanked = false;
+        self.go_live();
         self.slide_hidden = false;
         self.show_index = Some(index);
         self.reveal_count = 0;
@@ -846,7 +852,7 @@ impl Session {
             return false;
         }
         self.tab = "shows".to_string();
-        self.blanked = false;
+        self.go_live();
         self.slide_hidden = false;
         self.show_index = Some(index);
         self.slide_index = Some(slide.min(len - 1));
@@ -1206,6 +1212,7 @@ impl Session {
         match self.tab.as_str() {
             "shows" => {
                 if index < self.shows.len() {
+                    self.hold_program();
                     let changed = self.show_index != Some(index);
                     self.show_index = Some(index);
                     self.slide_index = self.current_show().and_then(|show| {
@@ -1223,6 +1230,7 @@ impl Session {
             }
             "scripture" => {
                 if index < self.bibles.len() {
+                    self.hold_program();
                     self.bible_index = Some(index);
                     self.verse_hits.clear();
                     self.verse_index = None;
@@ -1975,7 +1983,7 @@ impl Session {
             return DrawerAction::None;
         };
         if self.apply_template_id(&id) {
-            DrawerAction::Present
+            DrawerAction::Refresh
         } else {
             DrawerAction::None
         }
@@ -2010,7 +2018,7 @@ impl Session {
         } else {
             self.active_overlays.push(id);
         }
-        DrawerAction::Present
+        DrawerAction::Refresh
     }
 
     fn choose_media(&mut self, index: usize) -> DrawerAction {
@@ -2079,7 +2087,7 @@ impl Session {
         if saved {
             self.tab = "shows".to_string();
             self.show_index = Some(index);
-            self.blanked = false;
+            self.hold_program();
         }
     }
 
@@ -2433,7 +2441,7 @@ impl Session {
         if index >= len {
             return;
         }
-        self.blanked = false;
+        self.go_live();
         self.slide_hidden = false;
         self.slide_index = Some(index);
         self.reveal_count = 0;
@@ -3664,11 +3672,63 @@ impl Session {
         path.is_file().then_some(path)
     }
 
+    /// Browsing without presenting: the output keeps showing the live slide or verse.
+    pub fn hold_program(&mut self) {
+        self.program_held = true;
+    }
+
+    /// The selection becomes the program again.
+    pub fn go_live(&mut self) {
+        self.blanked = false;
+        self.program_held = false;
+    }
+
+    /// A drawer tab change from the operator, which never changes the output.
+    pub fn switch_tab(&mut self, tab: &str) {
+        if self.tab != tab {
+            self.hold_program();
+            self.tab = tab.to_string();
+        }
+    }
+
+    /// Before stepping, the open show and slide jump back to what is live, as FreeShow steps the output.
+    fn resume_program(&mut self) {
+        if !self.program_held {
+            return;
+        }
+        let live = match self.program_content.borrow().as_ref() {
+            Some(crate::live::ProgramContent::Slide { show_id, index, .. }) => {
+                Some((show_id.clone(), *index))
+            }
+            Some(crate::live::ProgramContent::Scripture(lines)) => {
+                let verse = self
+                    .verse_index
+                    .and_then(|index| self.verse_hits.get(index));
+                if verse.is_some_and(|hit| lines.first() == Some(&hit.reference)) {
+                    self.tab = "scripture".to_string();
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some((show_id, index)) = live
+            && let Some(show) = self.shows.iter().position(|show| show.id == show_id)
+        {
+            if self.show_index != Some(show) {
+                self.show_index = Some(show);
+                self.load_timeline();
+            }
+            self.tab = "shows".to_string();
+            self.slide_index = Some(index);
+        }
+        self.program_held = false;
+    }
+
     pub fn select_slide(&mut self, index: usize) {
         if self.preferences.out_locked() {
             return;
         }
-        self.blanked = false;
+        self.go_live();
         self.slide_hidden = false;
         if self.tab == "scripture" {
             if index < self.verse_hits.len() {
@@ -3690,6 +3750,7 @@ impl Session {
 
     /// Picks the slide to edit without changing anything on the output.
     pub fn select_slide_for_edit(&mut self, index: usize) {
+        self.hold_program();
         if self.tab != "scripture"
             && self
                 .current_show()
@@ -4109,8 +4170,8 @@ impl Session {
         match command {
             freeshow_remote::Command::SetShow(index) => {
                 self.tab = "shows".to_string();
-                self.blanked = false;
                 self.select_drawer(index);
+                self.go_live();
             }
             freeshow_remote::Command::SetSlide(index) => {
                 self.tab = "shows".to_string();
@@ -4238,7 +4299,7 @@ impl Session {
             }
             freeshow_remote::Command::PresentVerse { reference, text } => {
                 self.tab = "scripture".to_string();
-                self.blanked = false;
+                self.go_live();
                 self.slide_hidden = false;
                 self.verse_hits = vec![VerseHit { reference, text }];
                 self.verse_index = Some(0);
@@ -4290,7 +4351,7 @@ impl Session {
                     .any(|show| show.id == show_id && show.active_layout() == layout_id)
                 {
                     self.slide_index = Some(0);
-                    self.blanked = false;
+                    self.go_live();
                     self.slide_hidden = false;
                 }
             }
@@ -4308,7 +4369,7 @@ impl Session {
     }
 
     pub fn step_slide(&mut self, delta: isize) {
-        self.blanked = false;
+        self.go_live();
         self.slide_hidden = false;
         let len = self
             .current_show()
@@ -4366,7 +4427,7 @@ impl Session {
             .unwrap_or(self.shows.len());
         self.shows.insert(pos, show);
         self.tab = "shows".to_string();
-        self.blanked = false;
+        self.hold_program();
         self.select_drawer(pos);
         if let Some(project_id) = self.project_id.clone()
             && self.projects.append_show(&project_id, &id)
@@ -4411,7 +4472,7 @@ impl Session {
             .unwrap_or(self.shows.len());
         self.shows.insert(pos, show);
         self.tab = "shows".to_string();
-        self.blanked = false;
+        self.hold_program();
         self.select_drawer(pos);
         if let Some(project_id) = self.project_id.clone()
             && self.projects.append_show(&project_id, id)
@@ -4426,7 +4487,7 @@ impl Session {
             return false;
         };
         self.tab = "shows".to_string();
-        self.blanked = false;
+        self.hold_program();
         self.slide_hidden = false;
         self.show_index = Some(index);
         let saved = {
@@ -4475,7 +4536,7 @@ impl Session {
         };
         if saved {
             self.slide_index = Some(index);
-            self.blanked = false;
+            self.hold_program();
             self.slide_hidden = false;
             self.commit_edit(snap);
         }
@@ -4644,12 +4705,13 @@ impl Session {
         } else {
             self.verse_index = Some(target as usize);
         }
-        self.blanked = false;
+        self.go_live();
         self.slide_hidden = false;
         true
     }
 
     pub fn search(&mut self, query: &str) {
+        self.hold_program();
         let index = self.bible_index.unwrap_or(0);
         let Some(bible) = self.bibles.get(index) else {
             self.verse_hits.clear();
@@ -4818,6 +4880,7 @@ impl Session {
         if self.preferences.out_locked() {
             return false;
         }
+        self.resume_program();
         if self.tab == "scripture" {
             return self.step_verse(1);
         }
@@ -4867,7 +4930,7 @@ impl Session {
         });
         if let Some(first) = restart {
             if self.slide_index != Some(first) {
-                self.blanked = false;
+                self.go_live();
                 self.slide_hidden = false;
                 self.slide_index = Some(first);
                 self.reveal_count = 0;
@@ -5075,6 +5138,7 @@ impl Session {
         if self.preferences.out_locked() {
             return false;
         }
+        self.resume_program();
         if self.tab == "scripture" {
             return self.step_verse(-1);
         }
@@ -5674,7 +5738,7 @@ impl Session {
             _ => false,
         };
         if live {
-            self.blanked = false;
+            self.go_live();
             self.refresh_output = true;
             return true;
         }

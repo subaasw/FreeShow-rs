@@ -58,6 +58,7 @@ impl OpeningFade {
 }
 
 /// The content layer of the last audience frame, independent of the cue being run.
+#[derive(Clone)]
 pub(crate) enum ProgramContent {
     Scripture(Vec<String>),
     Slide {
@@ -155,6 +156,48 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
         return;
     }
     let (width, height) = (session.output_width, session.output_height);
+    if session.program_held {
+        // The operator is browsing: repaint what is live, with any edits made to it since.
+        match program.clone() {
+            Some(ProgramContent::Scripture(lines)) => {
+                composite_styled(frame, &lines_slide_at(&lines, true, width, height));
+            }
+            Some(ProgramContent::Slide {
+                show_id,
+                slide_id,
+                reveal,
+                clicks,
+                page,
+                ..
+            }) => {
+                let live = session
+                    .shows
+                    .iter()
+                    .find(|show| show.id == show_id)
+                    .and_then(|show| show.show.get("slides")?.get(&slide_id));
+                if let Some(slide) = live {
+                    composite_styled(
+                        frame,
+                        &styled_slide(
+                            slide,
+                            session.root.as_deref(),
+                            true,
+                            Some(reveal),
+                            clicks,
+                            page,
+                            &session_variables(session),
+                            width,
+                            height,
+                        ),
+                    );
+                } else {
+                    *program = None;
+                }
+            }
+            None => {}
+        }
+        return;
+    }
     if session.tab == "scripture" {
         let lines = session.output_lines();
         composite_styled(frame, &lines_slide_at(&lines, true, width, height));
@@ -1907,5 +1950,39 @@ mod tests {
         session.clear_output();
         assert_eq!(audience_frame(&session).pixel(0, 0), Rgba::BLACK);
         assert_ne!(stage_frame(&session).pixels, stage.pixels);
+    }
+
+    #[test]
+    fn browsing_another_show_keeps_the_live_slide_on_the_output() {
+        let root = std::env::temp_dir().join(format!("freeshow-rust-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with("a", "Alpha song", "Alpha\n\nBeta"));
+        assert!(session.create_show_with("b", "Bravo song", "Gamma"));
+        let position = |session: &Session, id: &str| {
+            session.shows.iter().position(|show| show.id == id).unwrap()
+        };
+        session.tab = "shows".into();
+        session.select_drawer(position(&session, "a"));
+        session.select_slide(0);
+        let live = audience_frame(&session);
+        assert!(live.pixels.chunks(4).any(|pixel| pixel[0] > 200));
+
+        session.switch_tab("media");
+        session.switch_tab("shows");
+        session.select_drawer(position(&session, "b"));
+        assert!(session.program_held);
+        assert_eq!(
+            audience_frame(&session).pixels,
+            live.pixels,
+            "still the live slide"
+        );
+
+        assert!(session.perform_shortcut("Right"));
+        assert_eq!(session.show_index, Some(position(&session, "a")));
+        assert_eq!(session.slide_index, Some(1));
+        assert!(!session.program_held);
+        assert_ne!(audience_frame(&session).pixels, live.pixels);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

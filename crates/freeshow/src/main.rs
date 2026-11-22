@@ -1791,7 +1791,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = control.as_weak();
     let session_for_tab = Rc::clone(&session);
     control.on_select_tab(move |tab| {
-        session_for_tab.borrow_mut().tab = tab.to_string();
+        session_for_tab.borrow_mut().switch_tab(tab.as_str());
         if let Some(ui) = ui.upgrade() {
             refresh(&ui, &session_for_tab.borrow());
         }
@@ -2582,9 +2582,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(err) => tracing::error!("could not open camera: {err}"),
                     }
                 }
-                DrawerAction::Present => {
-                    session.borrow_mut().blanked = false;
-                    stop_video(&video_timer, &video_player);
+                kind @ (DrawerAction::Present | DrawerAction::Refresh) => {
+                    if matches!(kind, DrawerAction::Present) {
+                        session.borrow_mut().blanked = false;
+                        stop_video(&video_timer, &video_player);
+                    }
                     let audience = audience_frame(&session.borrow());
                     let stage = stage_frame(&session.borrow());
                     let (motion, background) = session.borrow_mut().output_motion();
@@ -2806,7 +2808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session.select_slide(index);
                 }
             }
-            session.blanked = false;
+            session.go_live();
             let audience = audience_frame(&session);
             let stage = stage_frame(&session);
             let (motion, background) = session.output_motion();
