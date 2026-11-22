@@ -248,14 +248,14 @@ export component ControlWindow inherits Window {
                     accent: root.show-settings ? root.accent : root.primary-lighter;
                     text-color: root.text-color;
                     accent-text: root.show-settings ? root.accent-text : root.text-color;
-                    clicked => { root.show-settings = !root.show-settings; root.show-stage-editor = false; }
+                    clicked => { root.show-settings = !root.show-settings; root.show-stage-editor = false; window-keys.focus(); }
                 }
                 HeaderButton {
                     label: root.show-labels ? "Stage edit" : "SE";
                     accent: root.show-stage-editor ? root.accent : root.primary-lighter;
                     text-color: root.text-color;
                     accent-text: root.show-stage-editor ? root.accent-text : root.text-color;
-                    clicked => { root.show-stage-editor = !root.show-stage-editor; root.show-settings = false; }
+                    clicked => { root.show-stage-editor = !root.show-stage-editor; root.show-settings = false; window-keys.focus(); }
                 }
                 if root.update-label != "": HeaderButton {
                     label: root.update-label;
@@ -1127,7 +1127,7 @@ export component ControlWindow inherits Window {
             text-color: root.text-color;
             close-fill: root.primary-lighter;
             apply(key, value) => { root.apply-setting(key, value); }
-            close => { root.show-settings = false; }
+            close => { root.show-settings = false; window-keys.focus(); }
         }
         if root.show-stage-editor && !root.show-settings: StageEditorPanel {
             x: 0;
@@ -1154,7 +1154,7 @@ export component ControlWindow inherits Window {
             set(id, key, value) => { root.stage-set(id, key, value); }
             add(kind) => { root.stage-add(kind); }
             remove(id) => { root.stage-remove(id); }
-            close => { root.show-stage-editor = false; }
+            close => { root.show-stage-editor = false; window-keys.focus(); }
         }
     }
 }
