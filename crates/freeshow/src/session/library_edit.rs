@@ -106,6 +106,7 @@ impl Session {
         let root = self.root.clone().ok_or("choose a library folder first")?;
         let library = Library::open(&root);
         let (mut songs, mut media, mut audio, mut bibles, mut skipped) = (0, 0, 0, 0, 0);
+        let mut copy_errors = Vec::new();
         for path in paths {
             if !path.is_file() {
                 skipped += 1;
@@ -128,7 +129,7 @@ impl Session {
             };
             match copy_into(path, &dir) {
                 Ok(()) => *counter += 1,
-                Err(err) => return Err(format!("could not copy {}: {err}", path.display())),
+                Err(err) => copy_errors.push(format!("could not copy {}: {err}", path.display())),
             }
         }
         let mut notes = Vec::new();
@@ -164,6 +165,9 @@ impl Session {
         for note in &notes {
             tracing::warn!("import: {note}");
         }
+        for error in &copy_errors {
+            tracing::warn!("import: {error}");
+        }
         let shows = self.shows.len().saturating_sub(before);
         let mut parts = Vec::new();
         if songs > 0 {
@@ -188,6 +192,9 @@ impl Session {
             ));
         }
         if parts.is_empty() {
+            if let Some(error) = copy_errors.into_iter().next() {
+                return Err(error);
+            }
             return Err(if skipped > 0 {
                 "drop files, not folders".into()
             } else {
@@ -200,6 +207,12 @@ impl Session {
         }
         if !notes.is_empty() {
             message.push_str(&format!(" · {} warning(s) in the log", notes.len()));
+        }
+        if !copy_errors.is_empty() {
+            message.push_str(&format!(
+                " · {} file(s) could not be copied",
+                copy_errors.len()
+            ));
         }
         Ok(message)
     }
@@ -559,6 +572,24 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn dropped_files_import_the_rest_when_one_destination_is_unwritable() {
+        let (dir, mut session) = library("drop-partial");
+        let outside = dir.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // A file at the Audio path prevents directory creation on every platform.
+        std::fs::write(dir.0.join("Audio"), b"obstruction").unwrap();
+        let audio = outside.join("service.wav");
+        let song = outside.join("Welcome.txt");
+        std::fs::write(&audio, b"audio").unwrap();
+        std::fs::write(&song, "Welcome to the service").unwrap();
+
+        let result = session.import_files(&[audio, song]).unwrap();
+        assert!(result.contains("1 show"), "{result}");
+        assert!(result.contains("1 file(s) could not be copied"), "{result}");
+        assert!(session.shows.iter().any(|show| show.name() == "Welcome"));
     }
 
     #[test]
