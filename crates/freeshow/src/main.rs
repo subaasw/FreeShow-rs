@@ -2160,6 +2160,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(path) => tracing::info!("exported show text to {}", path.display()),
                         Err(err) => tracing::warn!("show text was not exported: {err}"),
                     },
+                    15 => match current.export_current_show_pdf() {
+                        Ok(path) => tracing::info!("exported show PDF to {}", path.display()),
+                        Err(err) => tracing::warn!("show PDF was not exported: {err}"),
+                    },
+                    16 => match current.export_current_project_package() {
+                        Ok(path) => {
+                            tracing::info!("exported project package to {}", path.display())
+                        }
+                        Err(err) => tracing::warn!("project package was not exported: {err}"),
+                    },
+                    17 => {
+                        let frame = audience_frame(&current);
+                        match current.export_screenshot(&frame) {
+                            Ok(path) => tracing::info!("saved screenshot to {}", path.display()),
+                            Err(err) => tracing::warn!("screenshot was not saved: {err}"),
+                        }
+                    }
                     _ => {}
                 }
                 if let Some(ui) = ui.upgrade() {

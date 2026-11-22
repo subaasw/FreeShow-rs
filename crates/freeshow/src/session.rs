@@ -730,6 +730,9 @@ impl Session {
                 }
                 .to_string(),
                 "Export text".to_string(),
+                "Export PDF".to_string(),
+                "Export package".to_string(),
+                "Screenshot".to_string(),
             ],
             _ => Vec::new(),
         }
@@ -945,6 +948,74 @@ impl Session {
             .join(format!("{stem}.txt"));
         show.write_plain_text(&path)
             .map_err(|err| err.to_string())?;
+        Ok(path)
+    }
+
+    fn exports_dir(&self) -> Result<PathBuf, String> {
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| "no library is open".to_string())?;
+        let path = root.join(freeshow_data::EXPORTS_DIR);
+        std::fs::create_dir_all(&path).map_err(|err| err.to_string())?;
+        Ok(path)
+    }
+
+    /// Writes the open show as a lyrics PDF under the library `Exports/` folder.
+    pub fn export_current_show_pdf(&self) -> Result<PathBuf, String> {
+        let show = self
+            .current_show()
+            .ok_or_else(|| "no show is open".to_string())?;
+        let path = self
+            .exports_dir()?
+            .join(format!("{}.pdf", export_stem(&show.name())));
+        freeshow_data::write_show_pdf(show, &path).map_err(|err| err.to_string())?;
+        Ok(path)
+    }
+
+    /// Writes the open project and its shows as a `.project` zip under `Exports/`.
+    pub fn export_current_project_package(&self) -> Result<PathBuf, String> {
+        let project_id = self
+            .project_id
+            .as_deref()
+            .ok_or_else(|| "no project is open".to_string())?;
+        let project = self
+            .projects
+            .projects()
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| "no project is open".to_string())?;
+        let body = self
+            .projects
+            .project_body(project_id)
+            .ok_or_else(|| "no project is open".to_string())?;
+        let ids: std::collections::HashSet<&str> =
+            project.shows.iter().map(|item| item.id.as_str()).collect();
+        let shows: Vec<_> = self
+            .shows
+            .iter()
+            .filter(|show| ids.contains(show.id.as_str()))
+            .cloned()
+            .collect();
+        let path = self
+            .exports_dir()?
+            .join(format!("{}.project", export_stem(&project.name)));
+        freeshow_data::write_project_package(
+            &project,
+            &body,
+            &shows,
+            Some(&self.overlay_catalog),
+            &path,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(path)
+    }
+
+    /// Writes an audience frame as a PNG under `Exports/`.
+    pub fn export_screenshot(&self, frame: &freeshow_output::Frame) -> Result<PathBuf, String> {
+        let path = self.exports_dir()?.join("screenshot.png");
+        let bytes = frame.encode_png().map_err(|err| err.to_string())?;
+        std::fs::write(&path, bytes).map_err(|err| err.to_string())?;
         Ok(path)
     }
 
@@ -4739,6 +4810,34 @@ mod tests {
         assert_eq!(session.show_index, Some(1));
         session.set_search("");
         assert_eq!(session.drawer().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn operator_exports_pdf_package_and_screenshot() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-operator-export-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_project());
+        assert!(session.create_show());
+        let path = session.export_current_show_pdf().unwrap();
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("pdf"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("%PDF-1.4"));
+        let package = session.export_current_project_package().unwrap();
+        assert!(package.extension().and_then(|ext| ext.to_str()) == Some("project"));
+        let bytes = std::fs::read(&package).unwrap();
+        assert!(bytes.starts_with(b"PK"));
+        let frame = crate::live::audience_frame(&session);
+        let shot = session.export_screenshot(&frame).unwrap();
+        assert_eq!(
+            shot.file_name().and_then(|name| name.to_str()),
+            Some("screenshot.png")
+        );
+        assert!(std::fs::read(&shot).unwrap().starts_with(b"\x89PNG"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

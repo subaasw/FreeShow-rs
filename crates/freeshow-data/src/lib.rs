@@ -7,8 +7,10 @@
 //! crate does not understand yet.
 
 mod audio_routing;
+mod export;
 mod import;
 pub use audio_routing::{AudioRoute, audio_routes, network_audio_routes};
+pub use export::{write_project_package, write_show_pdf};
 mod item_edit;
 mod media_library;
 mod scripture;
