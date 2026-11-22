@@ -2686,10 +2686,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
         control.on_choose_project(move |index| {
-            session.borrow_mut().project_item = index.max(0) as usize;
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
+            let picked = session
+                .borrow_mut()
+                .pick_project_item(index.max(0) as usize);
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            ui.set_search_query("".into());
+            match picked {
+                Ok(session::ProjectPick::Opened) => {
+                    ui.set_active_tab("shows".into());
+                    ui.set_panel_title("Shows".into());
+                    refresh(&ui, &session.borrow());
+                    publish(&preview_slot, audience_frame(&session.borrow()));
+                }
+                Ok(session::ProjectPick::Drawer { tab, label, index }) => {
+                    ui.set_active_tab(tab.into());
+                    ui.set_panel_title(label.into());
+                    refresh(&ui, &session.borrow());
+                    ui.invoke_choose_drawer(index as i32);
+                }
+                Err(err) => {
+                    session.borrow_mut().notice = err;
+                    refresh(&ui, &session.borrow());
+                }
             }
         });
     }
