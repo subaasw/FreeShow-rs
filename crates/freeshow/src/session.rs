@@ -10,7 +10,7 @@ use freeshow_data::{
     AUDIO_DIR, BibleFile, Catalog, DrawStroke, EffectSpec, FreeShowPreferences, Library, MEDIA_DIR,
     MediaEntry, MixStep, OutlinedBook, PlayerVideo, ProjectsFile, ShowFile, SlideBackdrop,
     SlideJump, StageLayout, TimedCueTarget, TimelineCue, TimerStep, VerseHit, default_stage,
-    new_id, parse_timeline_text, timeline_cues_from_show, timeline_text_from,
+    new_id, parse_timeline_text, timeline_cues_from_show, timeline_for_show, timeline_text_from,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 
@@ -180,6 +180,7 @@ pub struct Session {
     pub timeline_playing: bool,
     timeline_started: Option<std::time::Instant>,
     timeline_fired: usize,
+    timeline_loop_ms: Option<u64>,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     pub(crate) program_content: std::cell::RefCell<Option<crate::live::ProgramContent>>,
@@ -396,6 +397,7 @@ impl Session {
             timeline_playing: false,
             timeline_started: None,
             timeline_fired: 0,
+            timeline_loop_ms: None,
             show_index: None,
             slide_index: None,
             program_content: Default::default(),
@@ -568,6 +570,7 @@ impl Session {
             timeline_playing: false,
             timeline_started: None,
             timeline_fired: 0,
+            timeline_loop_ms: None,
             show_index: None,
             slide_index: None,
             program_content: Default::default(),
@@ -1530,9 +1533,17 @@ impl Session {
             .current_show()
             .map(|show| timeline_cues_from_show(&show.show))
             .unwrap_or_default();
-        self.timeline_playing = false;
-        self.timeline_started = None;
-        self.timeline_fired = 0;
+        self.timeline_loop_ms = self
+            .current_show()
+            .and_then(|show| timeline_for_show(&show.show))
+            .map(|(timeline, _)| timeline)
+            .filter(|timeline| timeline["loop"] == true)
+            .and_then(|timeline| {
+                let last = self.timeline_cues.last()?.time_ms;
+                let duration = timeline["duration"].as_f64().unwrap_or(0.0);
+                Some(((duration * 1000.0).round() as u64).max(last).max(1))
+            });
+        self.stop_timeline();
     }
 
     pub fn timeline_text(&self) -> String {
@@ -1540,14 +1551,32 @@ impl Session {
     }
 
     pub fn save_timeline(&mut self, text: &str) -> bool {
-        let cues = parse_timeline_text(text);
-        self.timeline_cues = cues.clone();
+        let mut cues = parse_timeline_text(text);
         let Some(index) = self.show_index else {
-            return !cues.is_empty() || text.trim().is_empty();
+            self.stop_timeline();
+            self.timeline_loop_ms = None;
+            self.timeline_cues = cues;
+            return !self.timeline_cues.is_empty() || text.trim().is_empty();
         };
         let Some(show) = self.shows.get_mut(index) else {
             return false;
         };
+        let mut original = timeline_cues_from_show(&show.show).into_iter().peekable();
+        for cue in &mut cues {
+            while original
+                .peek()
+                .is_some_and(|saved| saved.time_ms < cue.time_ms)
+            {
+                original.next();
+            }
+            if original.peek().is_some_and(|saved| {
+                saved.time_ms == cue.time_ms && saved.kind == cue.kind && saved.data == cue.data
+            }) {
+                let saved = original.next().unwrap();
+                cue.name = saved.name;
+                cue.slide_index = saved.slide_index;
+            }
+        }
         let actions: Vec<serde_json::Value> = cues
             .iter()
             .map(|cue| {
@@ -1559,6 +1588,9 @@ impl Session {
                         data["id"] = serde_json::json!(value);
                     }
                 }
+                if let Some(index) = cue.slide_index {
+                    data["index"] = serde_json::json!(index);
+                }
                 serde_json::json!({
                     "id": cue.name,
                     "time": cue.time_ms,
@@ -1568,10 +1600,20 @@ impl Session {
                 })
             })
             .collect();
-        show.show["timeline"] = serde_json::json!({ "actions": actions, "loop": false });
+        let (mut timeline, layout) = timeline_for_show(&show.show)
+            .filter(|(timeline, _)| timeline.is_object())
+            .map(|(timeline, layout)| (timeline.clone(), layout.map(str::to_owned)))
+            .unwrap_or_else(|| (serde_json::json!({ "loop": false }), None));
+        timeline["actions"] = serde_json::json!(actions);
+        if let Some(layout) = layout {
+            show.show["layouts"][layout]["timeline"] = timeline;
+        } else {
+            show.show["timeline"] = timeline;
+        }
         if let Some(path) = show.path.clone() {
             let _ = show.save(&path);
         }
+        self.load_timeline();
         true
     }
 
@@ -1612,8 +1654,18 @@ impl Session {
             self.timeline_fired += 1;
             changed |= self.run_timeline_cue(&cue);
         }
-        if self.timeline_fired >= self.timeline_cues.len() {
-            self.stop_timeline();
+        if self.timeline_playing && self.timeline_fired >= self.timeline_cues.len() {
+            match self.timeline_loop_ms {
+                Some(period) if elapsed >= period => {
+                    // Keep the original phase and skip entirely missed repetitions.
+                    // The final cue remains visible until the next timer tick.
+                    self.timeline_started =
+                        Some(now - std::time::Duration::from_millis(elapsed % period));
+                    self.timeline_fired = 0;
+                }
+                Some(_) => {}
+                None => self.stop_timeline(),
+            }
         }
         changed
     }
@@ -6643,6 +6695,49 @@ Second line"
         assert!(session.tick_timeline(start + Duration::from_millis(1500)));
         assert_eq!(session.slide_index, Some(3));
         assert!(!session.timeline_playing);
+    }
+
+    #[test]
+    fn imported_timeline_loops_at_the_saved_duration_after_an_edit() {
+        let mut show = ShowFile::blank("loop", "Loop");
+        let chorus = show.add_slide().unwrap();
+        let mut arrangement = show.show["layouts"]["main"].clone();
+        arrangement["slides"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": chorus}));
+        arrangement["timeline"] = serde_json::json!({
+            "loop": true, "duration": 2.5, "actions": [
+                {"time": 0, "type": "slide", "data": {"index": 0}},
+                {"time": 1000, "type": "slide", "data": {"id": chorus, "index": 2}}
+            ]
+        });
+        show.show["layouts"]["arranged"] = arrangement;
+        show.show["origin"] = serde_json::json!("propresenter");
+        assert!(show.set_active_layout("arranged"));
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        assert!(session.present_show_id("loop"));
+        assert!(session.save_timeline(&session.timeline_text()));
+        let show = &session.current_show().unwrap().show;
+        assert!(show["timeline"].is_null());
+        assert_eq!(show["layouts"]["arranged"]["timeline"]["duration"], 2.5);
+        assert!(session.start_timeline());
+
+        let start = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(start));
+        assert!(session.tick_timeline(start + Duration::from_secs(1)));
+        assert_eq!(session.slide_index, Some(2));
+        assert!(!session.tick_timeline(start + Duration::from_millis(2499)));
+        assert!(session.timeline_playing);
+        assert!(!session.tick_timeline(start + Duration::from_millis(2500)));
+        assert_eq!(session.slide_index, Some(2));
+        assert!(session.tick_timeline(start + Duration::from_millis(2550)));
+        assert_eq!(session.slide_index, Some(0));
+        assert!(session.tick_timeline(start + Duration::from_millis(3500)));
+        assert_eq!(session.slide_index, Some(2));
+        session.stop_timeline();
+        assert!(!session.tick_timeline(start + Duration::from_secs(8)));
     }
 
     #[test]
