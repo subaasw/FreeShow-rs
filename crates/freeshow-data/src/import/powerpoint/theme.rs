@@ -25,7 +25,26 @@ enum ColorValue {
 enum Transform {
     Tint(f64),
     Shade(f64),
-    Lightness { scale: f64, offset: f64 },
+    Lightness {
+        scale: f64,
+        offset: f64,
+    },
+    Saturation {
+        scale: f64,
+        offset: f64,
+    },
+    Hue {
+        scale: f64,
+        offset: f64,
+    },
+    Channel {
+        index: usize,
+        scale: f64,
+        offset: f64,
+    },
+    Invert,
+    Gray,
+    Complement,
 }
 
 impl Color {
@@ -61,25 +80,8 @@ impl Color {
     }
 
     pub(super) fn add_transform(&mut self, kind: &str, value: Option<&str>) -> bool {
-        let Some(percent) = value.and_then(percentage) else {
-            return false;
-        };
-        let transform = match kind {
-            "tint" if (0.0..=1.0).contains(&percent) => Transform::Tint(percent),
-            "shade" if (0.0..=1.0).contains(&percent) => Transform::Shade(percent),
-            "lum" => Transform::Lightness {
-                scale: 0.0,
-                offset: percent,
-            },
-            "lumMod" => Transform::Lightness {
-                scale: percent,
-                offset: 0.0,
-            },
-            "lumOff" => Transform::Lightness {
-                scale: 1.0,
-                offset: percent,
-            },
-            _ => return false,
+        let Some(transform) = parse_transform(kind, value) else {
+            return true;
         };
         self.transforms.push(transform);
         true
@@ -120,20 +122,174 @@ impl Transform {
             // DrawingML tint and shade mix with white or black in linear RGB.
             Self::Tint(factor) => rgb.map(|c| to_srgb(1.0 - (1.0 - to_linear(c)) * factor)),
             Self::Shade(factor) => rgb.map(|c| to_srgb(to_linear(c) * factor)),
-            Self::Lightness { scale, offset } => {
-                let [r, g, b] = rgb;
-                let light = (r.max(g).max(b) + r.min(g).min(b)) / 2.0;
-                let changed = (light * scale + offset).clamp(0.0, 1.0);
-                let span = 1.0 - (2.0 * light - 1.0).abs();
-                if span == 0.0 {
-                    return [changed; 3];
-                }
-                // Rescale the channels around the new HSL lightness, keeping hue and saturation.
-                let ratio = (1.0 - (2.0 * changed - 1.0).abs()) / span;
-                rgb.map(|c| (changed + (c - light) * ratio).clamp(0.0, 1.0))
+            Self::Lightness { scale, offset } => adjust_lightness(rgb, scale, offset),
+            Self::Saturation { scale, offset } => {
+                let (hue, sat, light) = to_hsl(rgb);
+                from_hsl(hue, (sat * scale + offset).clamp(0.0, 1.0), light)
+            }
+            Self::Hue { scale, offset } => {
+                let (hue, sat, light) = to_hsl(rgb);
+                from_hsl((hue * scale + offset).rem_euclid(360.0), sat, light)
+            }
+            Self::Channel {
+                index,
+                scale,
+                offset,
+            } => {
+                let mut rgb = rgb;
+                rgb[index] = (rgb[index] * scale + offset).clamp(0.0, 1.0);
+                rgb
+            }
+            Self::Invert => rgb.map(|c| 1.0 - c),
+            Self::Gray => {
+                let y = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+                [y, y, y]
+            }
+            Self::Complement => {
+                let (hue, sat, light) = to_hsl(rgb);
+                from_hsl((hue + 180.0).rem_euclid(360.0), sat, light)
             }
         }
     }
+}
+
+fn parse_transform(kind: &str, value: Option<&str>) -> Option<Transform> {
+    match kind {
+        "inv" | "invClr" => Some(Transform::Invert),
+        "gray" | "grayClr" => Some(Transform::Gray),
+        "comp" => Some(Transform::Complement),
+        "alpha" | "alphaMod" | "alphaOff" | "gamma" | "invGamma" => None,
+        "tint" => percentage_opt(value)
+            .filter(|percent| (0.0..=1.0).contains(percent))
+            .map(Transform::Tint),
+        "shade" => percentage_opt(value)
+            .filter(|percent| (0.0..=1.0).contains(percent))
+            .map(Transform::Shade),
+        "lum" => percentage_opt(value).map(|percent| Transform::Lightness {
+            scale: 0.0,
+            offset: percent,
+        }),
+        "lumMod" => percentage_opt(value).map(|percent| Transform::Lightness {
+            scale: percent,
+            offset: 0.0,
+        }),
+        "lumOff" => percentage_opt(value).map(|percent| Transform::Lightness {
+            scale: 1.0,
+            offset: percent,
+        }),
+        "sat" => percentage_opt(value).map(|percent| Transform::Saturation {
+            scale: 0.0,
+            offset: percent,
+        }),
+        "satMod" => percentage_opt(value).map(|percent| Transform::Saturation {
+            scale: percent,
+            offset: 0.0,
+        }),
+        "satOff" => percentage_opt(value).map(|percent| Transform::Saturation {
+            scale: 1.0,
+            offset: percent,
+        }),
+        "hue" => hue_degrees_opt(value).map(|degrees| Transform::Hue {
+            scale: 0.0,
+            offset: degrees,
+        }),
+        "hueMod" => percentage_opt(value).map(|percent| Transform::Hue {
+            scale: percent,
+            offset: 0.0,
+        }),
+        "hueOff" => hue_degrees_opt(value).map(|degrees| Transform::Hue {
+            scale: 1.0,
+            offset: degrees,
+        }),
+        "red" | "green" | "blue" => channel(kind, 0.0, percentage_opt(value)?),
+        "redMod" | "greenMod" | "blueMod" => channel(kind, percentage_opt(value)?, 0.0),
+        "redOff" | "greenOff" | "blueOff" => channel(kind, 1.0, percentage_opt(value)?),
+        _ => None,
+    }
+}
+
+fn percentage_opt(value: Option<&str>) -> Option<f64> {
+    value.and_then(percentage)
+}
+
+fn hue_degrees_opt(value: Option<&str>) -> Option<f64> {
+    value.and_then(hue_degrees)
+}
+
+fn hue_degrees(value: &str) -> Option<f64> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let parsed = percent.parse::<f64>().ok()?;
+        return parsed.is_finite().then_some(parsed / 100.0 * 360.0);
+    }
+    let parsed = value.parse::<f64>().ok()?;
+    parsed.is_finite().then_some(parsed / 60_000.0)
+}
+
+fn channel(kind: &str, scale: f64, offset: f64) -> Option<Transform> {
+    if !scale.is_finite() || !offset.is_finite() {
+        return None;
+    }
+    let index = match kind {
+        "red" | "redMod" | "redOff" => 0,
+        "green" | "greenMod" | "greenOff" => 1,
+        "blue" | "blueMod" | "blueOff" => 2,
+        _ => return None,
+    };
+    Some(Transform::Channel {
+        index,
+        scale,
+        offset,
+    })
+}
+
+fn adjust_lightness(rgb: Rgb, scale: f64, offset: f64) -> Rgb {
+    let [r, g, b] = rgb;
+    let light = (r.max(g).max(b) + r.min(g).min(b)) / 2.0;
+    let changed = (light * scale + offset).clamp(0.0, 1.0);
+    let span = 1.0 - (2.0 * light - 1.0).abs();
+    if span == 0.0 {
+        return [changed; 3];
+    }
+    // Rescale the channels around the new HSL lightness, keeping hue and saturation.
+    let ratio = (1.0 - (2.0 * changed - 1.0).abs()) / span;
+    rgb.map(|c| (changed + (c - light) * ratio).clamp(0.0, 1.0))
+}
+
+fn to_hsl([r, g, b]: Rgb) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let light = (max + min) / 2.0;
+    let delta = max - min;
+    if delta == 0.0 {
+        return (0.0, 0.0, light);
+    }
+    let sat = delta / (1.0 - (2.0 * light - 1.0).abs());
+    let hue = if max == r {
+        (g - b) / delta
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    ((hue * 60.0).rem_euclid(360.0), sat.clamp(0.0, 1.0), light)
+}
+
+fn from_hsl(hue: f64, sat: f64, light: f64) -> Rgb {
+    let sat = sat.clamp(0.0, 1.0);
+    let light = light.clamp(0.0, 1.0);
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let hue = hue.rem_euclid(360.0) / 60.0;
+    let x = chroma * (1.0 - (hue % 2.0 - 1.0).abs());
+    let (r, g, b) = match hue as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let match_light = light - chroma / 2.0;
+    [r, g, b].map(|c| (c + match_light).clamp(0.0, 1.0))
 }
 
 fn to_linear(value: f64) -> f64 {
@@ -350,4 +506,32 @@ fn color_map(node: Node<'_, '_>) -> ColorMap {
     .into_iter()
     .filter_map(|role| Some((role.to_owned(), node.attribute(role)?.to_owned())))
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn color(hex: &str, transforms: &[(&str, Option<&str>)]) -> String {
+        let mut color = Color::parse("srgbClr", |_| Some(hex[1..].into())).unwrap();
+        for (kind, value) in transforms {
+            assert!(color.add_transform(kind, *value));
+        }
+        color.literal().unwrap()
+    }
+
+    #[test]
+    fn remaining_color_transforms_apply_in_document_order() {
+        assert_eq!(color("#FF0000", &[("inv", None)]), "#00FFFF");
+        assert_eq!(color("#FF0000", &[("comp", None)]), "#00FFFF");
+        assert_eq!(color("#FF0000", &[("gray", None)]), "#4C4C4C");
+        assert_eq!(color("#FF0000", &[("satMod", Some("0"))]), "#808080");
+        assert_eq!(color("#FF0000", &[("hueOff", Some("10800000"))]), "#00FFFF");
+        assert_eq!(color("#808080", &[("redOff", Some("50%"))]), "#FF8080");
+        assert_eq!(
+            color("#FF0000", &[("unknown", Some("1")), ("inv", None)]),
+            "#00FFFF"
+        );
+        assert_eq!(color("#FF0000", &[("alpha", Some("50000"))]), "#FF0000");
+    }
 }
