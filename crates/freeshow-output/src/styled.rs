@@ -46,6 +46,7 @@ pub struct BoxStyle {
     pub backdrop: String,
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
+    pptx_radial_focus: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -110,6 +111,7 @@ impl Default for BoxStyle {
             box_shadow: None,
             backdrop: String::new(),
             gradient: None,
+            pptx_radial_focus: None,
         }
     }
 }
@@ -321,6 +323,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     style.background = Some(color);
                 }
             }
+            "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
             "border-radius" => {
                 if value == "50%" {
                     style.elliptical_background = true;
@@ -3123,6 +3126,9 @@ fn fill_item_background(
             let length = (w as f32 * dx.abs() + h as f32 * dy.abs()).max(1.0);
             (dx / length, dy / length)
         });
+        let focus = style
+            .pptx_radial_focus
+            .map(|[x, y]| (x, y, 1.0 - (x * x + y * y)));
         for py in y0..y1 {
             for px in x0..x1 {
                 if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
@@ -3131,7 +3137,18 @@ fn fill_item_background(
                     let position = match linear {
                         Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
                         None => {
-                            (offset_x * offset_x + offset_y * offset_y).sqrt() / radius_to_corner
+                            if let Some((fx, fy, remaining)) = focus {
+                                // Intersect the ray from the focus through this pixel with the outer circle.
+                                let dx = offset_x / radius_to_corner - fx;
+                                let dy = offset_y / radius_to_corner - fy;
+                                let dot = dx * fx + dy * fy;
+                                let distance_squared = dx * dx + dy * dy;
+                                ((dot * dot + distance_squared * remaining).sqrt() + dot)
+                                    / remaining
+                            } else {
+                                (offset_x * offset_x + offset_y * offset_y).sqrt()
+                                    / radius_to_corner
+                            }
                         }
                     };
                     paint(
@@ -3164,6 +3181,13 @@ fn fill_item_background(
     } else {
         fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
     }
+}
+
+fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
+    let mut components = value.split_whitespace();
+    let x = components.next()?.parse::<f32>().ok()?;
+    let y = components.next()?.parse::<f32>().ok()?;
+    (components.next().is_none() && x * x + y * y < 1.0).then_some([x, y])
 }
 
 fn parse_gradient(value: &str) -> Option<Gradient> {
@@ -3527,6 +3551,19 @@ mod tests {
         let corner = frame.pixel(0, 0);
         assert!(center.r > 245 && center.b < 10, "{center:?}");
         assert!(edge.r > 120 && edge.b > 120, "{edge:?}");
+        assert!(corner.r < 10 && corner.b > 245, "{corner:?}");
+    }
+
+    #[test]
+    fn powerpoint_radial_gradient_preserves_focus_and_outer_circle() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%);--pptx-radial-focus:0.5 0;",
+        ));
+        let focus = frame.pixel(755, 269);
+        let center = frame.pixel(479, 269);
+        let corner = frame.pixel(959, 539);
+        assert!(focus.r > 245 && focus.b < 10, "{focus:?}");
+        assert!((165..=175).contains(&center.r), "{center:?}");
         assert!(corner.r < 10 && corner.b > 245, "{corner:?}");
     }
 

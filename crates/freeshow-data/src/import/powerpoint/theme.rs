@@ -128,7 +128,7 @@ impl Color {
 pub(super) enum ResolvedFill {
     Color(String),
     Gradient {
-        css: String,
+        style: String,
         first: String,
         transparent: bool,
     },
@@ -136,8 +136,10 @@ pub(super) enum ResolvedFill {
 
 #[derive(Clone)]
 pub(super) struct GradientFill {
-    /// CSS angle for a linear fill. A path fill uses a centered circle.
+    /// CSS angle for a linear fill.
     pub linear_angle: Option<f64>,
+    /// Point focus relative to the center and radius of the outer circle.
+    pub radial_focus: Option<[f64; 2]>,
     /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
     pub stops: Vec<(f64, Color)>,
 }
@@ -170,9 +172,14 @@ impl GradientFill {
             return None;
         }
         stops.sort_by(|left, right| left.0.total_cmp(&right.0));
-        let linear_angle = child(fill, "path").is_none().then_some(angle);
+        let path = child(fill, "path");
+        let radial_focus = path
+            .filter(|path| path.attribute("path") == Some("circle"))
+            .and_then(|path| child(path, "fillToRect"))
+            .and_then(|rect| radial_point(|key| rect.attribute(key).and_then(percentage)));
         Some(Self {
-            linear_angle,
+            linear_angle: path.is_none().then_some(angle),
+            radial_focus,
             stops,
         })
     }
@@ -187,19 +194,32 @@ impl GradientFill {
             .map(|(pos, color)| format!("{color} {}%", (pos * 100.0).round()))
             .collect::<Vec<_>>()
             .join(", ");
-        let css = match self.linear_angle {
-            Some(angle) => format!("linear-gradient({}deg, {body})", angle.round()),
-            None => format!("radial-gradient(circle at center, {body})"),
+        let mut style = match self.linear_angle {
+            Some(angle) => format!("background:linear-gradient({}deg, {body});", angle.round()),
+            None => format!("background:radial-gradient(circle at center, {body});"),
         };
+        if let Some([x, y]) = self.radial_focus {
+            style.push_str(&format!("--pptx-radial-focus:{x:.5} {y:.5};"));
+        }
         Some(ResolvedFill::Gradient {
-            css,
+            style,
             first: resolved[0].1.clone(),
             transparent: resolved.iter().any(|(_, color)| color.len() == 9),
         })
     }
 }
 
-fn percentage(value: &str) -> Option<f64> {
+pub(super) fn radial_point(inset: impl Fn(&str) -> Option<f64>) -> Option<[f64; 2]> {
+    let [left, top, right, bottom] = ["l", "t", "r", "b"].map(|key| inset(key).unwrap_or(0.0));
+    // shortcut: extended focus ellipses and points outside the outer circle use a centered fill until their geometry is supported.
+    if (left + right - 1.0).abs() > 1e-9 || (top + bottom - 1.0).abs() > 1e-9 {
+        return None;
+    }
+    let (x, y) = (left - right, top - bottom);
+    (x * x + y * y < 1.0 && (x != 0.0 || y != 0.0)).then_some([x, y])
+}
+
+pub(super) fn percentage(value: &str) -> Option<f64> {
     let (number, divisor) = value
         .strip_suffix('%')
         .map_or((value, 100_000.0), |value| (value, 100.0));

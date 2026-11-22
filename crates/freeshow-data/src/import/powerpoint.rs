@@ -38,7 +38,7 @@ enum Background {
     },
     Gradient(GradientFill),
     CssGradient {
-        css: String,
+        style: String,
         first: String,
         transparent: bool,
     },
@@ -207,7 +207,7 @@ pub(super) fn import(
                 }));
             }
             Some(Background::CssGradient {
-                css,
+                style,
                 first,
                 transparent,
             }) => {
@@ -219,7 +219,7 @@ pub(super) fn import(
                     0,
                     json!({
                         "type":"shape",
-                        "style":format!("left:0px;top:0px;width:1920px;height:{height}px;background:{css};"),
+                        "style":format!("left:0px;top:0px;width:1920px;height:{height}px;{style}"),
                         "lines":[]
                     }),
                 );
@@ -640,6 +640,8 @@ fn find_background(
     let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
     let mut gradient_angle = 90.0;
     let mut radial_gradient = false;
+    let mut circular_path = false;
+    let mut radial_focus = None;
     let mut gs_pos = None;
     let mut gs_color = None;
     loop {
@@ -682,7 +684,7 @@ fn find_background(
                         }
                         (Some("gsLst") | Some("gradFill"), "gs") => {
                             gs_pos = attribute(&element, "pos")
-                                .and_then(|value| theme_percentage(&value));
+                                .and_then(|value| theme::percentage(&value));
                             gs_color = None;
                         }
                         (Some("gradFill"), "lin") => {
@@ -693,7 +695,16 @@ fn find_background(
                                 gradient_angle = 90.0 - value / 60_000.0;
                             }
                         }
-                        (Some("gradFill"), "path") => radial_gradient = true,
+                        (Some("gradFill"), "path") => {
+                            radial_gradient = true;
+                            circular_path =
+                                attribute(&element, "path").as_deref() == Some("circle");
+                        }
+                        (Some("path"), "fillToRect") if circular_path => {
+                            radial_focus = theme::radial_point(|key| {
+                                attribute(&element, key).and_then(|value| theme::percentage(&value))
+                            });
+                        }
                         (Some("blipFill"), "blip") => {
                             picture = relationship_attr(&element, "embed")
                                 .or_else(|| relationship_attr(&element, "link"));
@@ -725,6 +736,7 @@ fn find_background(
         gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
         GradientFill {
             linear_angle: (!radial_gradient).then_some(gradient_angle),
+            radial_focus,
             stops: gradient_stops,
         }
     });
@@ -927,11 +939,11 @@ fn realize_background(
             match themes.resolve(archive, part, xml, style, color.as_ref())? {
                 Some(ResolvedFill::Color(color)) => Some(Background::Color(color)),
                 Some(ResolvedFill::Gradient {
-                    css,
+                    style,
                     first,
                     transparent,
                 }) => Some(Background::CssGradient {
-                    css,
+                    style,
                     first,
                     transparent,
                 }),
@@ -942,11 +954,11 @@ fn realize_background(
             match themes.resolve_gradient(archive, part, xml, &fill)? {
                 Some(ResolvedFill::Color(color)) => Some(Background::Color(color)),
                 Some(ResolvedFill::Gradient {
-                    css,
+                    style,
                     first,
                     transparent,
                 }) => Some(Background::CssGradient {
-                    css,
+                    style,
                     first,
                     transparent,
                 }),
@@ -985,14 +997,6 @@ fn apply_solid_color(slide: &mut serde_json::Value, color: &str) -> Result<(), D
         }
     }
     Ok(())
-}
-
-fn theme_percentage(value: &str) -> Option<f64> {
-    let (number, divisor) = value
-        .strip_suffix('%')
-        .map_or((value, 100_000.0), |value| (value, 100.0));
-    let parsed = number.parse::<f64>().ok()?;
-    parsed.is_finite().then(|| parsed / divisor)
 }
 
 fn remote_media_url(target: &str) -> Option<String> {
@@ -1205,7 +1209,7 @@ mod tests {
                         <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
                         <a:gs pos="100000"><a:srgbClr val="0000FF"><a:alpha val="0"/></a:srgbClr></a:gs>
                     </a:gsLst>
-                    <a:path path="circle"/>
+                    <a:path path="circle"><a:fillToRect l="75000" t="50%" r="25000" b="50%"/></a:path>
                 </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Radial</a:t></a:r></a:p></p:cSld></p:sld>"#,
             ),
             ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
@@ -1232,7 +1236,7 @@ mod tests {
                                     <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
                                     <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                                 </a:gsLst>
-                                <a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>
+                                <a:path path="circle"><a:fillToRect l="25000" t="75000" r="75000" b="25000"/></a:path>
                             </a:gradFill>
                         </a:bgFillStyleLst>
                     </a:fmtScheme>
@@ -1270,6 +1274,18 @@ mod tests {
                 .contains("radial-gradient(circle at center, #FF0000 0%, #0000FF00 100%)")
         );
         assert_eq!(show.show["slides"]["s3"]["settings"]["color"], "#00000000");
+        assert!(
+            second["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("--pptx-radial-focus:-0.50000 0.50000;")
+        );
+        assert!(
+            show.show["slides"]["s3"]["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("--pptx-radial-focus:0.50000 0.00000;")
+        );
     }
 
     #[test]
