@@ -401,7 +401,7 @@ export component ControlWindow inherits Window {
                                 width: slides-flick.card-width;
                                 height: slides-flick.card-height;
                                 label: slide.label;
-                                number: slide.index + 1;
+                                number: root.active-tab == "scripture" ? 0 : slide.index + 1;
                                 thumb: slide.thumb;
                                 has-thumb: slide.has-thumb;
                                 active: root.selected-slide == slide.index;
@@ -413,7 +413,7 @@ export component ControlWindow inherits Window {
                                 full-color: root.full-colors;
                                 group-color: slide.group-color;
                                 group-text: slide.group-text;
-                                clicked => { root.choose-slide(slide.index); }
+                                clicked => { window-keys.focus(); root.choose-slide(slide.index); }
                             }
                         }
                         if root.editing: HorizontalLayout {
@@ -582,6 +582,7 @@ export component ControlWindow inherits Window {
                             text-color: root.text-color;
                             accent-text: root.accent-text;
                             clicked => {
+                                window-keys.focus();
                                 root.selected-project = index;
                                 root.choose-project(index);
                             }
@@ -787,7 +788,7 @@ export component ControlWindow inherits Window {
                         accent: root.accent;
                         text-color: root.text-color;
                         accent-text: root.accent-text;
-                        clicked => { root.choose-drawer(index); }
+                        clicked => { window-keys.focus(); root.choose-drawer(index); }
                     }
                 }
             }
