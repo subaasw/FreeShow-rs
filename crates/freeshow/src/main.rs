@@ -66,6 +66,9 @@ fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     style.set_hover(color_rgba(palette.hover));
     style.set_focus_fill(color_rgba(palette.focus));
     style.set_chrome_radius(theme.border_radius);
+    // Text size and font apply at once, not only after a restart.
+    style.set_font_scale(theme.font_scale);
+    ui.set_theme_font_family(theme.font_family.clone().into());
 }
 
 const SLIDE_THUMB_WIDTH: u32 = 320;
@@ -1792,10 +1795,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     apply_theme(&control, &theme);
-    control.set_theme_font_family(theme.font_family.into());
-    control
-        .global::<OperatorStyle>()
-        .set_font_scale(theme.font_scale);
     let data_label = settings
         .data_path
         .as_ref()

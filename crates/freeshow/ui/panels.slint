@@ -165,13 +165,26 @@ export global ComboIndex {
     pure callback find([string], string) -> int;
 }
 
+/// A spin box that shows `shown` and follows it when the data changes, even after the
+/// operator typed into it (which would otherwise cut the binding).
+component ValueSpin inherits SpinBox {
+    in property <int> shown;
+    value: self.shown;
+    changed shown => { self.value = self.shown; }
+}
+
 /// A combo box that shows `value` and follows it when the data changes, even after the
 /// operator picked a row or the model was replaced (which resets std ComboBox to row 0).
 component ValueCombo inherits ComboBox {
     in property <string> value;
     current-index: ComboIndex.find(self.model, self.value);
-    changed value => { self.current-index = ComboIndex.find(self.model, self.value); }
-    changed model => { self.current-index = ComboIndex.find(self.model, self.value); }
+    changed value => { self.follow(); }
+    changed model => { self.follow(); }
+    // Setting the index alone can leave the shown text on the old row, so set both.
+    function follow() {
+        self.current-index = ComboIndex.find(self.model, self.value);
+        self.current-value = self.current-index >= 0 ? self.model[self.current-index] : self.value;
+    }
 }
 
 global Fmt {
@@ -286,11 +299,11 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Split lines"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             colspan: 2;
                             minimum: 0;
                             maximum: 20;
-                            value: root.data.split-lines;
+                            shown: root.data.split-lines;
                             edited(value) => { root.apply("splitLines", value); }
                         }
                     }
@@ -301,11 +314,11 @@ export component SettingsPanel inherits Rectangle {
                             value: root.data.text-transition;
                             selected(value) => { root.apply("textTransition", value); }
                         }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 0;
                             maximum: 10000;
                             step-size: 100;
-                            value: root.data.text-duration;
+                            shown: root.data.text-duration;
                             edited(value) => { root.apply("textDuration", value); }
                         }
                     }
@@ -316,11 +329,11 @@ export component SettingsPanel inherits Rectangle {
                             value: root.data.media-transition;
                             selected(value) => { root.apply("mediaTransition", value); }
                         }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 0;
                             maximum: 10000;
                             step-size: 100;
-                            value: root.data.media-duration;
+                            shown: root.data.media-duration;
                             edited(value) => { root.apply("mediaDuration", value); }
                         }
                     }
@@ -390,20 +403,20 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Text size %"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 50;
                             maximum: 200;
                             step-size: 5;
-                            value: root.data.theme-font-size;
+                            shown: root.data.theme-font-size;
                             edited(value) => { root.apply("themeFontSize", value); }
                         }
                         HorizontalLayout {
                             spacing: 6px;
                             SettingLabel { text: "Corners px"; text-color: root.text-color; }
-                            SpinBox {
+                            ValueSpin {
                                 minimum: 0;
                                 maximum: 24;
-                                value: root.data.theme-radius;
+                                shown: root.data.theme-radius;
                                 edited(value) => { root.apply("themeRadius", value); }
                             }
                         }
@@ -572,29 +585,29 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Blur"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             enabled: root.data.style-fit == "blur";
                             minimum: 0;
                             maximum: 100;
-                            value: root.data.style-blur-amount;
+                            shown: root.data.style-blur-amount;
                             edited(value) => { root.apply("styleBlurAmount", value); }
                         }
-                        SpinBox {
+                        ValueSpin {
                             enabled: root.data.style-fit == "blur";
                             minimum: 1;
                             maximum: 100;
                             step-size: 5;
-                            value: root.data.style-blur-opacity;
+                            shown: root.data.style-blur-opacity;
                             edited(value) => { root.apply("styleBlurOpacity", value); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Max lines"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             colspan: 2;
                             minimum: 0;
                             maximum: 20;
-                            value: root.data.style-lines;
+                            shown: root.data.style-lines;
                             edited(value) => { root.apply("styleLines", value); }
                         }
                     }
@@ -630,28 +643,28 @@ export component SettingsPanel inherits Rectangle {
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Remote port"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 1024;
                             maximum: 65535;
-                            value: root.data.remote-port;
+                            shown: root.data.remote-port;
                             edited(value) => { root.apply("remotePort", value); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Stage port"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 1024;
                             maximum: 65535;
-                            value: root.data.stage-port;
+                            shown: root.data.stage-port;
                             edited(value) => { root.apply("stagePort", value); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Connections"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 0;
                             maximum: 10000;
-                            value: root.data.max-connections;
+                            shown: root.data.max-connections;
                             edited(value) => { root.apply("maxConnections", value); }
                         }
                     }
@@ -713,12 +726,12 @@ export component InspectorPanel inherits VerticalLayout {
             placeholder-text: "Font family";
             accepted(value) => { root.set("font-family", value); }
         }
-        SpinBox {
+        ValueSpin {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
             minimum: 12;
             maximum: 400;
-            value: root.data.font-px;
+            shown: root.data.font-px;
             edited(value) => { root.set("font-size", value); }
         }
     }
@@ -767,34 +780,34 @@ export component InspectorPanel inherits VerticalLayout {
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "X"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.x; edited(value) => { root.set("left", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.x; edited(value) => { root.set("left", value); } }
         FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.y; edited(value) => { root.set("top", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.y; edited(value) => { root.set("top", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Width"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.w; edited(value) => { root.set("width", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.w; edited(value) => { root.set("width", value); } }
         FieldLabel { text: "Height"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.h; edited(value) => { root.set("height", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.h; edited(value) => { root.set("height", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 2000; value: root.data.radius; edited(value) => { root.set("border-radius", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 2000; shown: root.data.radius; edited(value) => { root.set("border-radius", value); } }
         FieldLabel { text: "Line %"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.line-height; edited(value) => { root.set("line-height", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.line-height; edited(value) => { root.set("line-height", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Spacing"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -300; maximum: 100; value: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -300; maximum: 100; shown: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
         Rectangle { horizontal-stretch: 1; }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Outline"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; value: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; shown: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
         LineEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
@@ -806,7 +819,7 @@ export component InspectorPanel inherits VerticalLayout {
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Shadow"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; value: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; shown: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
         LineEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
@@ -818,42 +831,42 @@ export component InspectorPanel inherits VerticalLayout {
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Shadow X"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; value: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
         FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; value: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Blur"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; value: root.data.blur; edited(value) => { root.set("blur", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.blur; edited(value) => { root.set("blur", value); } }
         FieldLabel { text: "Gray %"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; value: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Bright %"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.brightness; edited(value) => { root.set("brightness", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.brightness; edited(value) => { root.set("brightness", value); } }
         FieldLabel { text: "Contr %"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.contrast; edited(value) => { root.set("contrast", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.contrast; edited(value) => { root.set("contrast", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Satur %"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.saturate; edited(value) => { root.set("saturate", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.saturate; edited(value) => { root.set("saturate", value); } }
         FieldLabel { text: "Hue °"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 360; step-size: 5; value: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 360; step-size: 5; shown: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Sepia %"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; value: root.data.sepia; edited(value) => { root.set("sepia", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.sepia; edited(value) => { root.set("sepia", value); } }
         FieldLabel { text: "Invert %"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; value: root.data.invert; edited(value) => { root.set("invert", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.invert; edited(value) => { root.set("invert", value); } }
     }
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Opacity"; text-color: root.text-color; min-width: 48px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; value: root.data.opacity; edited(value) => { root.set("opacity", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.opacity; edited(value) => { root.set("opacity", value); } }
         FieldLabel { text: "Blend"; text-color: root.text-color; min-width: 32px; }
         ValueCombo {
             horizontal-stretch: 1;
@@ -874,7 +887,7 @@ export component InspectorPanel inherits VerticalLayout {
             selected(value) => { root.set("slide-transition", value); }
         }
         FieldLabel { text: "ms"; text-color: root.text-color; min-width: 32px; }
-        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 10000; step-size: 100; value: root.data.slide-transition-ms; edited(value) => { root.set("slide-transition-ms", value); } }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 10000; step-size: 100; shown: root.data.slide-transition-ms; edited(value) => { root.set("slide-transition-ms", value); } }
     }
 }
 
@@ -974,19 +987,19 @@ export component StageEditorPanel inherits Rectangle {
                     spacing: 8px;
                     Row {
                         FieldLabel { text: "Left"; text-color: root.text-color; }
-                        SpinBox { minimum: -8000; maximum: 8000; value: root.current.x; edited(value) => { root.set(root.current.id, "left", value); } }
+                        ValueSpin { minimum: -8000; maximum: 8000; shown: root.current.x; edited(value) => { root.set(root.current.id, "left", value); } }
                         FieldLabel { text: "Top"; text-color: root.text-color; }
-                        SpinBox { minimum: -8000; maximum: 8000; value: root.current.y; edited(value) => { root.set(root.current.id, "top", value); } }
+                        ValueSpin { minimum: -8000; maximum: 8000; shown: root.current.y; edited(value) => { root.set(root.current.id, "top", value); } }
                     }
                     Row {
                         FieldLabel { text: "Width"; text-color: root.text-color; }
-                        SpinBox { minimum: 1; maximum: 8000; value: root.current.w; edited(value) => { root.set(root.current.id, "width", value); } }
+                        ValueSpin { minimum: 1; maximum: 8000; shown: root.current.w; edited(value) => { root.set(root.current.id, "width", value); } }
                         FieldLabel { text: "Height"; text-color: root.text-color; }
-                        SpinBox { minimum: 1; maximum: 8000; value: root.current.h; edited(value) => { root.set(root.current.id, "height", value); } }
+                        ValueSpin { minimum: 1; maximum: 8000; shown: root.current.h; edited(value) => { root.set(root.current.id, "height", value); } }
                     }
                     Row {
                         FieldLabel { text: "Font size"; text-color: root.text-color; }
-                        SpinBox { minimum: 8; maximum: 800; value: root.current.font-px; edited(value) => { root.set(root.current.id, "font-size", value); } }
+                        ValueSpin { minimum: 8; maximum: 800; shown: root.current.font-px; edited(value) => { root.set(root.current.id, "font-size", value); } }
                         FieldLabel { text: "Color"; text-color: root.text-color; }
                         LineEdit {
                             text: root.current.color;
@@ -1010,10 +1023,10 @@ export component StageEditorPanel inherits Rectangle {
                             selected(value) => { root.set(root.current.id, "offset", self.current-index); }
                         }
                         FieldLabel { text: "Max lines"; text-color: root.text-color; }
-                        SpinBox {
+                        ValueSpin {
                             minimum: 0;
                             maximum: 99;
-                            value: root.current.line-count;
+                            shown: root.current.line-count;
                             edited(value) => { root.set(root.current.id, "line-count", value); }
                         }
                     }
