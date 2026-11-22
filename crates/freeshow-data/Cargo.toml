@@ -8,6 +8,7 @@ publish.workspace = true
 description = "Read and write a FreeShow data folder"
 
 [dependencies]
+encoding_rs = "0.8"
 freeshow-core = { path = "../freeshow-core" }
 percent-encoding = "2"
 prost = "0.14"

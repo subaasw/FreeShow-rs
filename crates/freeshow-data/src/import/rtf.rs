@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use encoding_rs::Encoding;
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -33,6 +34,7 @@ struct State {
     format: Format,
     align: Option<&'static str>,
     unicode_fallback: usize,
+    encoding: &'static Encoding,
 }
 
 impl Default for State {
@@ -42,6 +44,7 @@ impl Default for State {
             format: Format::default(),
             align: None,
             unicode_fallback: 1,
+            encoding: encoding_rs::WINDOWS_1252,
         }
     }
 }
@@ -172,6 +175,7 @@ struct Reader {
     line: Line,
     fonts: HashMap<i32, String>,
     font_name: Vec<u16>,
+    font_encodings: HashMap<i32, &'static Encoding>,
     colors: Vec<Option<[u8; 3]>>,
     color: [Option<u8>; 3],
     default_font: Option<i32>,
@@ -236,6 +240,54 @@ impl Reader {
         }
     }
 
+    fn hex_run(&mut self, chars: &[char], index: &mut usize) {
+        let mut bytes = Vec::new();
+        while let Some(byte) = hex_byte(chars, *index) {
+            *index += 3;
+            if self.fallback == 0 {
+                bytes.push(byte);
+            } else {
+                self.fallback -= 1;
+            }
+            if chars.get(*index) != Some(&'\\') || hex_byte(chars, *index + 1).is_none() {
+                break;
+            }
+            *index += 1;
+        }
+        if bytes.is_empty() {
+            return;
+        }
+        let encoding = self
+            .state
+            .format
+            .font
+            .or(self.default_font)
+            .and_then(|font| self.font_encodings.get(&font).copied())
+            .unwrap_or(self.state.encoding);
+        // A double-byte encoding may write its ASCII-range trail byte literally.
+        if let Some(&trail) = chars.get(*index)
+            && ('@'..='~').contains(&trail)
+            && !matches!(trail, '\\' | '{' | '}')
+            && encoding
+                .decode_without_bom_handling_and_without_replacement(&bytes)
+                .is_none()
+        {
+            bytes.push(trail as u8);
+            if encoding
+                .decode_without_bom_handling_and_without_replacement(&bytes)
+                .is_some()
+            {
+                *index += 1;
+            } else {
+                bytes.pop();
+            }
+        }
+        let (decoded, _) = encoding.decode_without_bom_handling(&bytes);
+        for unit in decoded.encode_utf16() {
+            self.emit(unit);
+        }
+    }
+
     fn control(&mut self, word: &str, number: Option<i32>) {
         use Destination::*;
 
@@ -246,6 +298,12 @@ impl Reader {
                 self.state.destination = Ignore;
             }
             "uc" => self.state.unicode_fallback = number.unwrap_or(1).clamp(0, 16) as usize,
+            "ansicpg" if self.state.destination == Body => {
+                if let Some(encoding) = number.and_then(code_page) {
+                    self.state.encoding = encoding;
+                }
+            }
+            "mac" if self.state.destination == Body => self.state.encoding = encoding_rs::MACINTOSH,
             "u" if self.state.destination != Ignore => {
                 if let Some(code) = number {
                     self.emit(code as u16);
@@ -257,6 +315,23 @@ impl Reader {
             "f" if self.state.destination == FontTable => {
                 self.state.format.font = number;
                 self.font_name.clear();
+            }
+            "fcharset" | "cpg" if self.state.destination == FontTable => {
+                let code = if word == "fcharset" {
+                    number.and_then(charset_code_page)
+                } else {
+                    number
+                };
+                if let (Some(font), Some(encoding)) =
+                    (self.state.format.font, code.and_then(code_page))
+                {
+                    let entry = self.font_encodings.entry(font);
+                    if word == "cpg" {
+                        entry.insert_entry(encoding);
+                    } else {
+                        entry.or_insert(encoding);
+                    }
+                }
             }
             "red" | "green" | "blue" if self.state.destination == ColorTable => {
                 let index = match word {
@@ -333,6 +408,10 @@ pub(super) fn decode(text: &str) -> Document {
                 let Some(&next) = chars.get(index) else {
                     break;
                 };
+                if next == '\'' && hex_byte(&chars, index).is_some() {
+                    reader.hex_run(&chars, &mut index);
+                    continue;
+                }
                 if !next.is_ascii_alphabetic() {
                     index += 1;
                     let literal = match next {
@@ -343,11 +422,6 @@ pub(super) fn decode(text: &str) -> Document {
                         '\\' | '{' | '}' => Some(next),
                         '~' => Some('\u{a0}'),
                         '_' => Some('\u{2011}'),
-                        '\'' if index + 2 <= chars.len() => {
-                            let hex: String = chars[index..index + 2].iter().collect();
-                            index += 2;
-                            u8::from_str_radix(&hex, 16).ok().map(ansi)
-                        }
                         _ => None,
                     };
                     if let Some(ch) = literal {
@@ -395,23 +469,81 @@ pub(super) fn decode(text: &str) -> Document {
     }
 }
 
-// RTF's default ANSI code page is Windows-1252.
-fn ansi(byte: u8) -> char {
-    const C1: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
-        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
-        'ž', 'Ÿ',
-    ];
-    if (0x80..0xa0).contains(&byte) {
-        C1[(byte - 0x80) as usize]
-    } else {
-        char::from(byte)
-    }
+fn hex_byte(chars: &[char], index: usize) -> Option<u8> {
+    let ['\'', high, low] = chars.get(index..index + 3)? else {
+        return None;
+    };
+    Some((high.to_digit(16)? * 16 + low.to_digit(16)?) as u8)
+}
+
+fn code_page(code: i32) -> Option<&'static Encoding> {
+    use encoding_rs::*;
+    Some(match code {
+        866 => IBM866,
+        874 => WINDOWS_874,
+        932 => SHIFT_JIS,
+        936 | 20936 => GBK,
+        949 => EUC_KR,
+        950 => BIG5,
+        1250 => WINDOWS_1250,
+        1251 => WINDOWS_1251,
+        1252 => WINDOWS_1252,
+        1253 => WINDOWS_1253,
+        1254 => WINDOWS_1254,
+        1255 => WINDOWS_1255,
+        1256 => WINDOWS_1256,
+        1257 => WINDOWS_1257,
+        1258 => WINDOWS_1258,
+        10000 => MACINTOSH,
+        54936 => GB18030,
+        65001 => UTF_8,
+        _ => return None,
+    })
+}
+
+fn charset_code_page(charset: i32) -> Option<i32> {
+    Some(match charset {
+        77 => 10000,
+        128 => 932,
+        129 => 949,
+        134 => 936,
+        136 => 950,
+        161 => 1253,
+        162 => 1254,
+        163 => 1258,
+        177 => 1255,
+        178 => 1256,
+        186 => 1257,
+        204 => 1251,
+        222 => 874,
+        238 => 1250,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::decode;
+
+    #[test]
+    fn escaped_bytes_use_the_document_or_font_code_page() {
+        let cyrillic = decode(r"{\rtf1\ansi\ansicpg1251 \'cf\'f0\'e8\'e2\'e5\'f2}");
+        assert_eq!(cyrillic.plain_text(), "Привет");
+        let mixed = decode(
+            r"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0 Arial;}{\f1\fcharset128 MS Gothic;}}\f0 Caf\'e9 {\f1\'93\'fa\'96\'7b\'83A} \'80}",
+        );
+        assert_eq!(mixed.plain_text(), "Café 日本ア €");
+        assert_eq!(
+            mixed.styled_lines("", false, false)[0]["text"][1]["style"],
+            "font-family:MS Gothic;"
+        );
+    }
+
+    #[test]
+    fn unicode_fallback_counts_escaped_bytes_before_decoding() {
+        let japanese = decode(r"{\rtf1\ansicpg932\uc2\u26085\'93\'fa\'96\'7b}");
+        assert_eq!(japanese.plain_text(), "日本");
+    }
 
     #[test]
     fn caps_and_character_spacing_follow_rtf_group_scope() {
