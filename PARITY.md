@@ -120,7 +120,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| Item styles, backgrounds, media, transitions, clear | done | 3 | Shapes, text, and images retain alpha through transparent output layers. The compositor renders stored rotation for ordinary slide items and clips oversized items to the visible output |
+| Item styles, backgrounds, media, transitions, clear | done | 3 | Shapes, text, and images retain alpha through transparent output layers. The compositor renders stored rotation and blend modes and clips oversized items to the visible output |
 | Watermark, output variables, scenes, interactions | done | 2 | `activeScenes` and synced keys |
 | Draw-on-output | done | 1 | Stored `drawSettings` |
 | Live effects library | done | 1 | `effectsLibrary` washes/particles |

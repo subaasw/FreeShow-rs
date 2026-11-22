@@ -1099,7 +1099,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     {
         return;
     }
-    draw_item_content(pixels, slide, item, &style, bounds, opacity);
+    draw_item_content(pixels, slide, item, &style, bounds, opacity, item.blend);
 }
 
 fn draw_rotated_item(
@@ -1111,8 +1111,8 @@ fn draw_rotated_item(
     opacity: f32,
 ) -> bool {
     let text::Clip { x, y, w, h } = *bounds;
-    // shortcut: keep backdrop-dependent items on the direct path until rotation supports sampling the underlying slide.
-    if !style.backdrop.trim().is_empty() || item.blend != Blend::Normal {
+    // shortcut: keep backdrop filters on the direct path until rotation can sample and filter the underlying slide.
+    if !style.backdrop.trim().is_empty() {
         return false;
     }
     let scale_x = if slide.source_width > 0.0 {
@@ -1198,6 +1198,7 @@ fn draw_rotated_item(
             h,
         },
         1.0,
+        Blend::Normal,
     );
     for py in y0..y1 {
         for px in x0..x1 {
@@ -1206,19 +1207,23 @@ fn draw_rotated_item(
                 continue;
             }
             let source = ((sy - sy0) as usize * width as usize + (sx - sx0) as usize) * 4;
-            paint(
-                pixels,
-                slide.output_width,
-                slide.output_height,
-                px,
-                py,
-                Rgba {
-                    r: layer[source],
-                    g: layer[source + 1],
-                    b: layer[source + 2],
-                    a: (f32::from(layer[source + 3]) * opacity).round() as u8,
-                },
-            );
+            let alpha = (f32::from(layer[source + 3]) * opacity).round() as u8;
+            if alpha == 0 {
+                continue;
+            }
+            let dest = (py as usize * slide.output_width as usize + px as usize) * 4;
+            let mut color = [layer[source], layer[source + 1], layer[source + 2], alpha];
+            let backdrop = &mut pixels[dest..dest + 4];
+            if item.blend != Blend::Normal && backdrop[3] != 0 {
+                let mixed = blend_rgb(item.blend, &color, backdrop);
+                let coverage = u16::from(backdrop[3]);
+                for (channel, mixed) in color.iter_mut().zip(mixed) {
+                    *channel = ((u16::from(mixed) * coverage
+                        + u16::from(*channel) * (255 - coverage))
+                        / 255) as u8;
+                }
+            }
+            source_over(backdrop, &color);
         }
     }
     true
@@ -1231,6 +1236,7 @@ fn draw_item_content(
     style: &BoxStyle,
     bounds: text::Clip,
     opacity: f32,
+    blend: Blend,
 ) {
     let text::Clip { x, y, w, h } = bounds;
     let radius = if style.elliptical_background {
@@ -1272,7 +1278,6 @@ fn draw_item_content(
     let saturate = item.saturate.clamp(0.0, 10.0);
     let hue = item.hue_rotate;
     let blur = output_spacing(item.blur, slide).clamp(0.0, 24.0);
-    let blend = item.blend;
     let color_filter = opacity < 0.999
         || grayscale > 0.001
         || invert > 0.001
@@ -1649,10 +1654,6 @@ fn apply_blend(
 ) {
     let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
     let row_bytes = ((x1 - x0) * 4) as usize;
-    let separable = !matches!(
-        mode,
-        Blend::Hue | Blend::Saturation | Blend::Color | Blend::Luminosity
-    );
     for (row_index, row) in (y0..y1).enumerate() {
         for col in 0..(x1 - x0) {
             let dst = ((row * frame_w as i32 + x0 + col) * 4) as usize;
@@ -1660,20 +1661,24 @@ fn apply_blend(
             if pixels[dst..dst + 4] == before[src..src + 4] {
                 continue;
             }
-            if separable {
-                for channel in 0..3 {
-                    pixels[dst + channel] =
-                        blend_byte(mode, pixels[dst + channel], before[src + channel]);
-                }
-            } else {
-                let mixed = blend_hsl(
-                    mode,
-                    [pixels[dst], pixels[dst + 1], pixels[dst + 2]],
-                    [before[src], before[src + 1], before[src + 2]],
-                );
-                pixels[dst..dst + 3].copy_from_slice(&mixed);
-            }
+            let mixed = blend_rgb(mode, &pixels[dst..dst + 3], &before[src..src + 3]);
+            pixels[dst..dst + 3].copy_from_slice(&mixed);
         }
+    }
+}
+
+fn blend_rgb(mode: Blend, source: &[u8], backdrop: &[u8]) -> [u8; 3] {
+    if matches!(
+        mode,
+        Blend::Hue | Blend::Saturation | Blend::Color | Blend::Luminosity
+    ) {
+        blend_hsl(
+            mode,
+            [source[0], source[1], source[2]],
+            [backdrop[0], backdrop[1], backdrop[2]],
+        )
+    } else {
+        std::array::from_fn(|channel| blend_byte(mode, source[channel], backdrop[channel]))
     }
 }
 
@@ -3842,6 +3847,29 @@ mod tests {
         assert_eq!(frame.pixel(50, 10), parse_color("#FF0000").unwrap());
         assert_eq!(frame.pixel(50, 90), parse_color("#0000FF").unwrap());
         assert_eq!(frame.pixel(20, 60), Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn rotated_blend_samples_the_backdrop_at_the_new_position() {
+        let mut slide = style_slide(
+            "left:20px;top:40px;width:60px;height:20px;background-color:#FF0000;transform:rotate(90deg);",
+        );
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.items[0].blend = Blend::Multiply;
+        slide.items[0].opacity = 0.5;
+        for (background, expected) in [
+            ("#808080", "#803F3F"),
+            ("#80808080", "#AA2A2AC0"),
+            ("#00000000", "#FF000080"),
+        ] {
+            slide.background = parse_color(background).unwrap();
+            let frame = render_styled(&slide);
+            assert_eq!(frame.pixel(50, 75), parse_color(expected).unwrap());
+            assert_eq!(frame.pixel(75, 50), slide.background);
+        }
     }
 
     #[test]
