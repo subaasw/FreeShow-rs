@@ -9,10 +9,12 @@
 mod audio_routing;
 mod import;
 pub use audio_routing::{AudioRoute, audio_routes, network_audio_routes};
+mod item_edit;
 mod media_library;
 mod scripture;
 mod stage_layout;
 
+pub use item_edit::ItemTypography;
 pub use media_library::{
     MediaEntry, MediaEntryKind, image_dimensions, media_duration, media_entry_kind,
 };
@@ -2585,7 +2587,7 @@ impl ShowFile {
     }
 }
 
-fn adjust_box(style: &str, dx: i32, dy: i32, dw: i32, dh: i32) -> String {
+pub(crate) fn adjust_box(style: &str, dx: i32, dy: i32, dw: i32, dh: i32) -> String {
     let mut left = 50;
     let mut top = 88;
     let mut width = 1820;

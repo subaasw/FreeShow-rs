@@ -98,6 +98,8 @@ pub struct Session {
     pub tab: String,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
+    /// The selected text box on the current slide.
+    pub item_index: usize,
     pub templates: Vec<String>,
     pub template_catalog: Catalog,
     pub overlays: Vec<String>,
@@ -203,6 +205,7 @@ impl Session {
             tab: "shows".to_string(),
             show_index: None,
             slide_index: None,
+            item_index: 0,
             templates: Vec::new(),
             template_catalog: Catalog::empty(),
             overlays: Vec::new(),
@@ -332,6 +335,7 @@ impl Session {
             tab: "shows".to_string(),
             show_index: None,
             slide_index: None,
+            item_index: 0,
             templates,
             template_catalog,
             overlays,
@@ -726,7 +730,8 @@ impl Session {
         else {
             return String::new();
         };
-        show.plain_text(&slide.id)
+        show.item_text(&slide.id, self.current_item(&show))
+            .unwrap_or_else(|| show.plain_text(&slide.id))
     }
 
     pub fn select_drawer(&mut self, index: usize) -> DrawerAction {
@@ -2255,7 +2260,10 @@ impl Session {
         else {
             return false;
         };
-        if !show.set_plain_text(&slide_id, text) {
+        let item = self
+            .item_index
+            .min(show.item_count(&slide_id).saturating_sub(1));
+        if !show.set_item_text(&slide_id, item, text) {
             return false;
         }
         let Some(path) = show.path.clone() else {
@@ -2320,13 +2328,171 @@ impl Session {
         else {
             return false;
         };
-        if !show.nudge_item_box(&slide_id, dx, dy, dw, dh) {
+        let item = self
+            .item_index
+            .min(show.item_count(&slide_id).saturating_sub(1));
+        if !show.nudge_item_at(&slide_id, item, dx, dy, dw, dh) {
             return false;
         }
         let Some(path) = show.path.clone() else {
             return true;
         };
         show.save(&path).is_ok()
+    }
+
+    fn current_item(&self, show: &freeshow_data::ShowFile) -> usize {
+        let Some(slide_index) = self.slide_index else {
+            return 0;
+        };
+        let count = show
+            .ordered_slides()
+            .get(slide_index)
+            .map(|slide| show.item_count(&slide.id))
+            .unwrap_or(0);
+        if count == 0 {
+            0
+        } else {
+            self.item_index.min(count - 1)
+        }
+    }
+
+    pub fn item_label(&self) -> String {
+        let Some(show) = self.current_show() else {
+            return "Box 1 of 1".to_string();
+        };
+        let count = self
+            .slide_index
+            .and_then(|index| {
+                show.ordered_slides()
+                    .get(index)
+                    .map(|slide| slide.id.clone())
+            })
+            .map(|id| show.item_count(&id))
+            .unwrap_or(0)
+            .max(1);
+        format!("Box {} of {count}", self.current_item(show) + 1)
+    }
+
+    pub fn item_typography(&self) -> freeshow_data::ItemTypography {
+        let Some(show) = self.current_show() else {
+            return freeshow_data::ItemTypography {
+                font_px: 100,
+                family: String::new(),
+                bold: false,
+            };
+        };
+        let Some(slide_id) = self.slide_index.and_then(|index| {
+            show.ordered_slides()
+                .get(index)
+                .map(|slide| slide.id.clone())
+        }) else {
+            return show.item_typography("", 0);
+        };
+        show.item_typography(&slide_id, self.current_item(show))
+    }
+
+    fn edit_current_item(
+        &mut self,
+        edit: impl FnOnce(&mut freeshow_data::ShowFile, &str, usize) -> bool,
+    ) -> bool {
+        if self.tab != "shows" {
+            return false;
+        }
+        let Some(slide_index) = self.slide_index else {
+            return false;
+        };
+        let Some(show_index) = self.show_index else {
+            return false;
+        };
+        let item_index = self.item_index;
+        let Some(show) = self.shows.get_mut(show_index) else {
+            return false;
+        };
+        let Some(slide_id) = show
+            .ordered_slides()
+            .get(slide_index)
+            .map(|slide| slide.id.clone())
+        else {
+            return false;
+        };
+        let item = item_index.min(show.item_count(&slide_id).saturating_sub(1));
+        if !edit(show, &slide_id, item) {
+            return false;
+        }
+        let Some(path) = show.path.clone() else {
+            return true;
+        };
+        show.save(&path).is_ok()
+    }
+
+    pub fn select_item(&mut self, index: usize) -> bool {
+        let Some(show) = self.current_show() else {
+            return false;
+        };
+        let count = self
+            .slide_index
+            .and_then(|slide| {
+                show.ordered_slides()
+                    .get(slide)
+                    .map(|slide| slide.id.clone())
+            })
+            .map(|id| show.item_count(&id))
+            .unwrap_or(0);
+        if count == 0 || index >= count {
+            return false;
+        }
+        self.item_index = index;
+        true
+    }
+
+    pub fn prev_item(&mut self) -> bool {
+        let index = self.item_index;
+        self.select_item(index.saturating_sub(1))
+    }
+
+    pub fn next_item(&mut self) -> bool {
+        self.select_item(self.item_index + 1)
+    }
+
+    pub fn add_item_box(&mut self) -> bool {
+        let added =
+            self.edit_current_item(|show, slide_id, _| show.add_item_box(slide_id).is_some());
+        if added && let Some(show) = self.current_show() {
+            if let Some(id) = self.slide_index.and_then(|index| {
+                show.ordered_slides()
+                    .get(index)
+                    .map(|slide| slide.id.clone())
+            }) {
+                self.item_index = show.item_count(&id).saturating_sub(1);
+            }
+        }
+        added
+    }
+
+    pub fn remove_item_box(&mut self) -> bool {
+        let index = self.item_index;
+        let removed =
+            self.edit_current_item(|show, slide_id, _| show.remove_item_box(slide_id, index));
+        if removed {
+            self.item_index = index.saturating_sub(1);
+        }
+        removed
+    }
+
+    pub fn adjust_font(&mut self, delta: i32) -> bool {
+        self.edit_current_item(|show, slide_id, item| {
+            show.adjust_item_font_size(slide_id, item, delta)
+        })
+    }
+
+    pub fn toggle_bold(&mut self) -> bool {
+        self.edit_current_item(|show, slide_id, item| show.toggle_item_bold(slide_id, item))
+    }
+
+    pub fn set_font_family(&mut self, family: &str) -> bool {
+        self.edit_current_item(|show, slide_id, item| {
+            show.set_item_font_family(slide_id, item, family)
+        })
     }
 
     pub fn output_lines(&self) -> Vec<String> {
@@ -4115,6 +4281,46 @@ mod tests {
             muted.slide_labels(),
             vec!["Verse: first".to_string(), "Verse: second".to_string()]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lyric_boxes_can_be_selected_styled_and_removed() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-lyric-boxes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Hello"));
+        assert!(session.add_item_box());
+        assert_eq!(session.item_label(), "Box 2 of 2");
+        assert!(session.save_lyrics("Caption"));
+        assert!(session.adjust_font(20));
+        assert!(session.toggle_bold());
+        assert!(session.set_font_family("Georgia"));
+        let typography = session.item_typography();
+        assert_eq!(typography.font_px, 120);
+        assert!(typography.bold);
+        assert_eq!(typography.family, "Georgia");
+        assert!(session.select_item(0));
+        assert_eq!(session.lyrics(), "Hello");
+        assert!(session.select_item(1));
+        assert_eq!(session.lyrics(), "Caption");
+        assert!(session.remove_item_box());
+        assert_eq!(session.item_label(), "Box 1 of 1");
+        assert_eq!(session.lyrics(), "Hello");
+        let mut again = Session::open(root.clone());
+        again.select_drawer(0);
+        assert_eq!(again.lyrics(), "Hello");
+        assert_eq!(again.current_show().unwrap().item_count("s1"), 1);
+        let style = again
+            .current_show()
+            .unwrap()
+            .show
+            .pointer("/slides/s1/items/0/lines/0/text/0/style")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        assert!(!style.contains("Georgia"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
