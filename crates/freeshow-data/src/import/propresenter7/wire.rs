@@ -132,10 +132,43 @@ pub(super) struct SlideElement {
 pub(super) struct Element {
     #[prost(message, optional, tag = "3")]
     pub bounds: Option<Rect>,
+    #[prost(double, tag = "4")]
+    pub rotation: f64,
+    #[prost(message, optional, tag = "8")]
+    pub path: Option<Path>,
+    #[prost(message, optional, tag = "9")]
+    pub fill: Option<Fill>,
     #[prost(message, optional, tag = "13")]
     pub text: Option<Text>,
     #[prost(bool, tag = "16")]
     pub hidden: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Path {
+    #[prost(message, optional, tag = "3")]
+    pub shape: Option<Shape>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Shape {
+    #[prost(enumeration = "ShapeType", tag = "1")]
+    pub kind: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+pub(super) enum ShapeType {
+    Unknown = 0,
+    Rectangle = 1,
+    Ellipse = 2,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Fill {
+    #[prost(message, optional, tag = "1")]
+    pub color: Option<Color>,
+    #[prost(bool, tag = "4")]
+    pub enabled: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
