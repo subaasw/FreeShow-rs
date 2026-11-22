@@ -200,19 +200,55 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
             })
             .collect::<Vec<_>>()
     } else {
+        let catalog = match session.tab.as_str() {
+            "overlays" => Some(&session.overlay_catalog),
+            "templates" => Some(&session.template_catalog),
+            _ => None,
+        };
         session
             .drawer()
             .into_iter()
             .zip(session.drawer_on())
-            .map(|(name, on)| DrawerRowData {
-                name: name.into(),
-                thumb: slint::Image::default(),
-                show_thumb: false,
-                on,
+            .map(|(name, on)| {
+                let entry = catalog.and_then(|catalog| {
+                    catalog
+                        .id_named(&name)
+                        .and_then(|id| catalog.get(&id).cloned())
+                });
+                DrawerRowData {
+                    thumb: entry
+                        .as_ref()
+                        .map(|entry| catalog_thumb(session, entry))
+                        .unwrap_or_default(),
+                    show_thumb: catalog.is_some(),
+                    name: name.into(),
+                    on,
+                }
             })
             .collect()
     };
     slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+/// Overlay and template thumbnails, kept until their saved look changes.
+fn catalog_thumb(session: &Session, entry: &serde_json::Value) -> slint::Image {
+    thread_local! {
+        static CATALOG_THUMBS: RefCell<std::collections::HashMap<String, slint::Image>> =
+            RefCell::new(std::collections::HashMap::new());
+    }
+    let key = entry.to_string();
+    if let Some(image) = CATALOG_THUMBS.with(|thumbs| thumbs.borrow().get(&key).cloned()) {
+        return image;
+    }
+    let image = present::frame_image(&live::catalog_thumbnail(session, entry, 128, 72));
+    CATALOG_THUMBS.with(|thumbs| {
+        let mut thumbs = thumbs.borrow_mut();
+        if thumbs.len() > 256 {
+            thumbs.clear();
+        }
+        thumbs.insert(key, image.clone());
+    });
+    image
 }
 
 const THUMB_WIDTH: u32 = 56;
