@@ -7944,6 +7944,18 @@ Second line"
         session.inspector_set("opacity", "60").unwrap();
         session.inspector_set("blend", "screen").unwrap();
         assert!(session.inspector_set("blend", "glow").is_err());
+        session.inspector_set("slide-transition", "spin").unwrap();
+        session.inspector_set("slide-transition-ms", "900").unwrap();
+        let form = session.inspector_form();
+        assert_eq!(
+            (form.slide_transition.as_str(), form.slide_transition_ms),
+            ("spin", 900)
+        );
+        assert!(session.inspector_set("slide-transition", "warp").is_err());
+        session
+            .inspector_set("slide-transition", "default")
+            .unwrap();
+        assert_eq!(session.inspector_form().slide_transition, "default");
         assert_eq!(session.inspector_form().filters.blur, 3);
         let item = session.current_show().unwrap().show["slides"]["s1"]["items"][1].clone();
         assert_eq!(item["filter"], "blur(3px) grayscale(1) opacity(0.6)");

@@ -622,6 +622,8 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         hue_rotate: inspector.filters.hue_rotate,
         opacity: inspector.filters.opacity,
         blend: inspector.filters.blend.into(),
+        slide_transition: inspector.slide_transition.into(),
+        slide_transition_ms: inspector.slide_transition_ms,
     });
     ui.set_stage_layout_name(session.stage.name.clone().into());
     let rows: Vec<StageRowData> = session

@@ -1374,6 +1374,97 @@ impl ShowFile {
         read_transition(self.layout_node_at(index)?.get("transition"))
     }
 
+    /// Stores this layout position's own slide transition. An empty kind removes it so the
+    /// style transition applies again. FreeShow keeps a child's under its parent's entry.
+    pub fn set_transition_at(&mut self, index: usize, kind: &str, duration_ms: u64) -> bool {
+        let Some((position, child)) = self.layout_position(index) else {
+            return false;
+        };
+        let layout_id = self.active_layout();
+        let Some(entry) = self
+            .show
+            .pointer_mut(&format!("/layouts/{layout_id}/slides/{position}"))
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        let node = match child {
+            None => entry,
+            Some(child_id) => {
+                let children = entry
+                    .entry("children")
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if !children.is_object() {
+                    *children = Value::Object(serde_json::Map::new());
+                }
+                let Some(slot) = children.as_object_mut().map(|children| {
+                    children
+                        .entry(child_id)
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                }) else {
+                    return false;
+                };
+                if !slot.is_object() {
+                    *slot = Value::Object(serde_json::Map::new());
+                }
+                let Some(node) = slot.as_object_mut() else {
+                    return false;
+                };
+                node
+            }
+        };
+        if kind.trim().is_empty() {
+            node.remove("transition");
+        } else {
+            node.insert(
+                "transition".to_string(),
+                serde_json::json!({ "type": kind.trim(), "duration": duration_ms.min(10_000) }),
+            );
+        }
+        true
+    }
+
+    /// The layout array position holding `index`, and the child slide id when it is a child.
+    fn layout_position(&self, index: usize) -> Option<(usize, Option<String>)> {
+        let layout_id = self.active_layout();
+        let order = self
+            .show
+            .pointer(&format!("/layouts/{layout_id}/slides"))
+            .and_then(Value::as_array)?;
+        let mut cursor = 0usize;
+        for (position, entry) in order.iter().enumerate() {
+            let Some(id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if self.show.pointer(&format!("/slides/{id}")).is_none() {
+                continue;
+            }
+            if cursor == index {
+                return Some((position, None));
+            }
+            cursor += 1;
+            let children = self
+                .show
+                .pointer(&format!("/slides/{id}/children"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for child in children {
+                let Some(child_id) = child.as_str() else {
+                    continue;
+                };
+                if self.show.pointer(&format!("/slides/{child_id}")).is_none() {
+                    continue;
+                }
+                if cursor == index {
+                    return Some((position, Some(child_id.to_string())));
+                }
+                cursor += 1;
+            }
+        }
+        None
+    }
+
     /// The background transition stored on this layout position.
     pub fn media_transition_at(&self, index: usize) -> Option<TextTransition> {
         read_transition(self.layout_node_at(index)?.get("mediaTransition"))
@@ -6775,6 +6866,23 @@ mod tests {
         assert_eq!(slides[0].group.as_deref(), Some("Chorus"));
         assert_eq!(slides[0].lines, vec!["My chains are gone".to_string()]);
         assert_eq!(slides[1].lines, vec!["Plain verse".to_string()]);
+    }
+
+    #[test]
+    fn a_slide_keeps_its_own_transition_until_it_is_cleared() {
+        let mut show = ShowFile::blank("grace", "Grace");
+        assert!(show.replace_lyrics_with_split("One\n\nTwo", false, 0));
+        assert!(show.transition_at(1).is_none());
+        assert!(show.set_transition_at(1, "spin", 800));
+        let transition = show.transition_at(1).unwrap();
+        assert_eq!(
+            (transition.kind.as_str(), transition.duration_ms),
+            ("spin", 800)
+        );
+        assert!(show.transition_at(0).is_none());
+        assert!(show.set_transition_at(1, "", 0));
+        assert!(show.transition_at(1).is_none());
+        assert!(!show.set_transition_at(9, "fade", 500));
     }
 
     #[test]

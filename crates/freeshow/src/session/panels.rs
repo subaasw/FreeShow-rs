@@ -181,6 +181,9 @@ pub struct InspectorForm {
     pub typography: freeshow_data::ItemTypography,
     pub item_box: freeshow_data::ItemBox,
     pub filters: freeshow_data::ItemFilters,
+    /// The slide's own transition kind, or "default" when the style transition applies.
+    pub slide_transition: String,
+    pub slide_transition_ms: i32,
 }
 
 /// One stage item row in the Stage editor.
@@ -993,6 +996,10 @@ impl Session {
                 Some(show.item_box(&slide, self.current_item(show)))
             })
             .unwrap_or_default();
+        let own_transition = self
+            .current_show()
+            .zip(self.slide_index)
+            .and_then(|(show, index)| show.transition_at(index));
         InspectorForm {
             has_item: self.tab == "shows"
                 && self.current_show().is_some()
@@ -1001,6 +1008,10 @@ impl Session {
             typography: self.item_typography(),
             item_box,
             filters: self.item_filters(),
+            slide_transition: own_transition
+                .as_ref()
+                .map_or_else(|| "default".to_string(), |t| t.kind.clone()),
+            slide_transition_ms: own_transition.map_or(500, |t| t.duration_ms.min(10_000) as i32),
         }
     }
 
@@ -1068,6 +1079,33 @@ impl Session {
                 self.edit_current_item(|show, slide, item| {
                     show.set_item_filters(slide, item, &filters)
                 })
+            }
+            "slide-transition" | "slide-transition-ms" => {
+                let Some(index) = self.slide_index else {
+                    return Err("Pick a slide first".to_string());
+                };
+                let form = self.inspector_form();
+                let (kind, duration) = if key == "slide-transition" {
+                    if value != "default" && !TRANSITION_KINDS.contains(&value.as_str()) {
+                        return Err(format!("unknown transition {value:?}"));
+                    }
+                    (value.clone(), form.slide_transition_ms as u64)
+                } else {
+                    let ms = parse_int(&value, 0, 10_000)?;
+                    // A duration on a slide still using the style transition gives it a fade.
+                    let kind = if form.slide_transition == "default" {
+                        "fade".to_string()
+                    } else {
+                        form.slide_transition
+                    };
+                    (kind, ms as u64)
+                };
+                let kind = if kind == "default" {
+                    String::new()
+                } else {
+                    kind
+                };
+                self.edit_current_item(|show, _, _| show.set_transition_at(index, &kind, duration))
             }
             "line-height" => {
                 let percent = parse_int(&value, 0, 500)? as i32;
