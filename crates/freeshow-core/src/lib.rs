@@ -109,8 +109,8 @@ mod tests {
         let loaded = AppSettings::load(&dir.join("settings.json")).unwrap();
         assert_eq!(loaded.theme, None);
         assert_eq!(loaded.data_path, None);
-        assert!(loaded.show_output);
-        assert!(loaded.show_stage);
+        assert!(!loaded.show_output, "output stays closed on first run");
+        assert!(!loaded.show_stage);
         assert_eq!(loaded.output_screen, None);
         let _ = fs::remove_dir_all(&dir);
     }
