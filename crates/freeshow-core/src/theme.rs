@@ -19,6 +19,39 @@ impl Rgb {
     }
 }
 
+/// A theme wash such as FreeShow `hover` / `focus` (`rgb(255 255 255 / 0.05)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgba {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Rgba {
+    pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// `frac` is the CSS alpha in thousandths, so 50 is 0.05 (13/255).
+    pub const fn from_rgb_frac(r: u8, g: u8, b: u8, frac: u16) -> Self {
+        Self {
+            r,
+            g,
+            b,
+            a: ((frac as u32 * 255 + 500) / 1000) as u8,
+        }
+    }
+}
+
+const fn white_wash(frac: u16) -> Rgba {
+    Rgba::from_rgb_frac(255, 255, 255, frac)
+}
+
+const fn black_wash(frac: u16) -> Rgba {
+    Rgba::from_rgb_frac(0, 0, 0, frac)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemePalette {
     pub name: &'static str,
@@ -30,6 +63,8 @@ pub struct ThemePalette {
     pub text_invert: Rgb,
     pub secondary_text: Rgb,
     pub secondary: Rgb,
+    pub hover: Rgba,
+    pub focus: Rgba,
 }
 
 const DEFAULT: ThemePalette = ThemePalette {
@@ -42,6 +77,8 @@ const DEFAULT: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0xf0f0ff),
     secondary: Rgb::from_hex(0xf0008c),
+    hover: white_wash(50),
+    focus: white_wash(100),
 };
 
 const DARK: ThemePalette = ThemePalette {
@@ -54,6 +91,8 @@ const DARK: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0xf0f0ff),
     secondary: Rgb::from_hex(0xe64934),
+    hover: white_wash(50),
+    focus: white_wash(100),
 };
 
 const LIGHT: ThemePalette = ThemePalette {
@@ -66,6 +105,8 @@ const LIGHT: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0xf0f0ff),
     secondary_text: Rgb::from_hex(0x131313),
     secondary: Rgb::from_hex(0xf0008c),
+    hover: black_wash(50),
+    focus: black_wash(100),
 };
 
 const WHITE: ThemePalette = ThemePalette {
@@ -78,6 +119,8 @@ const WHITE: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0xffffff),
     secondary: Rgb::from_hex(0xfbe1fe),
+    hover: white_wash(50),
+    focus: white_wash(100),
 };
 
 const BLACK: ThemePalette = ThemePalette {
@@ -90,6 +133,8 @@ const BLACK: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0xffffff),
     secondary: Rgb::from_hex(0xff2e2e),
+    hover: white_wash(200),
+    focus: white_wash(300),
 };
 
 const BLUE: ThemePalette = ThemePalette {
@@ -102,6 +147,8 @@ const BLUE: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x404154),
     secondary_text: Rgb::from_hex(0xf0f6ff),
     secondary: Rgb::from_hex(0x338bff),
+    hover: white_wash(50),
+    focus: white_wash(100),
 };
 
 const SEA: ThemePalette = ThemePalette {
@@ -114,6 +161,8 @@ const SEA: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0xf0f0ff),
     secondary_text: Rgb::from_hex(0x424861),
     secondary: Rgb::from_hex(0x007db3),
+    hover: black_wash(50),
+    focus: black_wash(100),
 };
 
 const AQUA: ThemePalette = ThemePalette {
@@ -126,6 +175,8 @@ const AQUA: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0xeeeeee),
     secondary: Rgb::from_hex(0x00ffbe),
+    hover: white_wash(200),
+    focus: white_wash(300),
 };
 
 const CHARCOAL: ThemePalette = ThemePalette {
@@ -138,6 +189,8 @@ const CHARCOAL: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0x808080),
     secondary: Rgb::from_hex(0x8f8f8f),
+    hover: Rgba::from_rgb_frac(0xd0, 0xd0, 0xd0, 50),
+    focus: Rgba::from_rgb_frac(0xd0, 0xd0, 0xd0, 100),
 };
 
 const PAPYRUS: ThemePalette = ThemePalette {
@@ -150,6 +203,8 @@ const PAPYRUS: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x000242),
     secondary_text: Rgb::from_hex(0x000242),
     secondary: Rgb::from_hex(0x000361),
+    hover: Rgba::from_rgb_frac(0xea, 0xc6, 0xa4, 200),
+    focus: Rgba::from_rgb_frac(0xea, 0xc6, 0xa4, 300),
 };
 
 const TERMINAL: ThemePalette = ThemePalette {
@@ -162,6 +217,8 @@ const TERMINAL: ThemePalette = ThemePalette {
     text_invert: Rgb::from_hex(0x131313),
     secondary_text: Rgb::from_hex(0xf1f1f1),
     secondary: Rgb::from_hex(0x00ff00),
+    hover: white_wash(200),
+    focus: white_wash(300),
 };
 
 /// Every built-in theme in the order FreeShow lists them.

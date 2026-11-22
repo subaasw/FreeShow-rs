@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use freeshow_core::{Rgb, ThemePalette, theme_by_name};
+use freeshow_core::{Rgb, Rgba, ThemePalette, theme_by_name};
 use freeshow_data::FreeShowPreferences;
 use freeshow_output::parse_color;
 
@@ -8,6 +8,8 @@ pub struct OperatorTheme {
     pub palette: ThemePalette,
     pub font_family: String,
     pub font_scale: f32,
+    /// Corner radius for chrome controls, in pixels. Built-in themes use 4.
+    pub border_radius: f32,
 }
 
 pub fn operator_theme(explicit: Option<&str>, preferences: &FreeShowPreferences) -> OperatorTheme {
@@ -42,6 +44,16 @@ pub fn operator_theme(explicit: Option<&str>, preferences: &FreeShowPreferences)
             };
         }
     }
+    for (key, target) in [("hover", &mut palette.hover), ("focus", &mut palette.focus)] {
+        if let Some(color) = custom["colors"][key].as_str().and_then(parse_color) {
+            *target = Rgba {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            };
+        }
+    }
     let font_family = custom["font"]["family"].as_str().unwrap_or(family).trim();
     let font_family = if font_family == "sans-serif" {
         ""
@@ -54,11 +66,24 @@ pub fn operator_theme(explicit: Option<&str>, preferences: &FreeShowPreferences)
         .and_then(|size| size.trim().parse::<f32>().ok())
         .filter(|size| size.is_finite() && *size > 0.0)
         .unwrap_or(scale);
+    let border_radius = custom
+        .pointer("/border/radius")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_radius)
+        .unwrap_or(4.0);
     OperatorTheme {
         palette,
         font_family: font_family.into(),
         font_scale,
+        border_radius,
     }
+}
+
+fn parse_radius(value: &str) -> Option<f32> {
+    let text = value.trim();
+    let text = text.strip_suffix("px").unwrap_or(text).trim();
+    let size: f32 = text.parse().ok()?;
+    (size.is_finite() && size >= 0.0).then_some(size)
 }
 
 #[cfg(test)]
@@ -73,8 +98,10 @@ mod tests {
             themes: json!({"custom-id": {
                 "name": "Sunday",
                 "colors": {"primary": "#123456", "secondary": "rgb(10 20 30)",
-                    "text": "invalid", "primary-darker": null},
-                "font": {"family": "Georgia", "size": "1.4em"}
+                    "text": "invalid", "primary-darker": null,
+                    "hover": "rgb(255 0 0 / 0.2)", "focus": "rgba(0, 255, 0, 0.4)"},
+                "font": {"family": "Georgia", "size": "1.4em"},
+                "border": {"radius": "8px"}
             }}),
             ..Default::default()
         };
@@ -84,10 +111,30 @@ mod tests {
         assert_eq!(theme.palette.text, theme_by_name("default").text);
         assert_eq!(theme.font_family, "Georgia");
         assert_eq!(theme.font_scale, 1.4);
+        assert_eq!(theme.border_radius, 8.0);
+        assert_eq!(
+            theme.palette.hover,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 51
+            }
+        );
+        assert_eq!(
+            theme.palette.focus,
+            Rgba {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 102
+            }
+        );
         let override_theme = operator_theme(Some("sea"), &preferences);
         assert_eq!(override_theme.palette, theme_by_name("sea"));
         assert_eq!(override_theme.font_family, "Georgia");
         assert_eq!(override_theme.font_scale, 1.0);
+        assert_eq!(override_theme.border_radius, 4.0);
     }
 
     #[test]
@@ -104,5 +151,13 @@ mod tests {
         let theme = operator_theme(Some("missing"), &FreeShowPreferences::default());
         assert_eq!(theme.palette, theme_by_name("default"));
         assert_eq!(theme.font_scale, 1.0);
+        assert_eq!(theme.border_radius, 4.0);
+        let zero = FreeShowPreferences {
+            themes: json!({"default": {"border": {"radius": "0"}}}),
+            ..Default::default()
+        };
+        assert_eq!(operator_theme(None, &zero).border_radius, 0.0);
+        assert_eq!(parse_radius("12px"), Some(12.0));
+        assert_eq!(parse_radius("bad"), None);
     }
 }
