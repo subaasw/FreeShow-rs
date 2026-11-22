@@ -215,6 +215,7 @@ pub struct Session {
     pub timers: Vec<NamedTimer>,
     pub running: Option<RunningTimer>,
     pub recording: bool,
+    pub chrome: crate::operator::SessionChrome,
     pub warnings: Vec<String>,
 }
 
@@ -407,6 +408,7 @@ impl Session {
             timers: vec![NamedTimer::default_countdown()],
             running: None,
             recording: false,
+            chrome: crate::operator::SessionChrome::default(),
             warnings: Vec::new(),
         }
     }
@@ -464,6 +466,12 @@ impl Session {
         let kiosk = preferences.output_kiosk();
         let always_on_top = preferences.output_always_on_top();
         let draw_strokes = preferences.draw_strokes();
+        let chrome = crate::operator::SessionChrome {
+            profile_locked: crate::operator::profiles_from(&preferences.profiles)
+                .iter()
+                .any(|profile| profile.password.is_some()),
+            ..crate::operator::SessionChrome::default()
+        };
         let mut session = Self {
             root: Some(root),
             icecast: library.icecast(),
@@ -571,6 +579,7 @@ impl Session {
             timers,
             running: None,
             recording: false,
+            chrome,
             warnings,
         };
         session.restore_watermark();
@@ -848,6 +857,13 @@ impl Session {
         if delay > 0 {
             parts.push(format!("Delay {delay} ms"));
         }
+        if let Some(alert) = &self.chrome.update_alert {
+            parts.push(alert.clone());
+        }
+        let ticker = self.chrome.ticker();
+        if !ticker.is_empty() {
+            parts.push(ticker);
+        }
         parts.join("  ·  ")
     }
 
@@ -871,6 +887,18 @@ impl Session {
             "templates" => self.templates.clone(),
             "scripture" => self.bibles.iter().map(BibleFile::name).collect(),
             "calendar" => self.events.clone(),
+            "rss" => self
+                .chrome
+                .rss_items
+                .iter()
+                .map(|item| {
+                    if item.link.is_empty() {
+                        item.title.clone()
+                    } else {
+                        format!("{} — {}", item.title, item.link)
+                    }
+                })
+                .collect(),
             "functions" => vec![
                 "Clear".to_string(),
                 "Next".to_string(),
@@ -3436,6 +3464,8 @@ impl Session {
                 font_px: 100,
                 family: String::new(),
                 bold: false,
+                color: String::new(),
+                align: String::new(),
             };
         };
         let Some(slide_id) = self.slide_index.and_then(|index| {
@@ -5071,7 +5101,22 @@ impl Session {
     }
 
     pub fn guide_text(&self) -> String {
-        "Welcome to FreeShow\n\n1. Pick a show from the drawer.\n2. Choose a slide and press Go.\n3. Open Output for the audience and Stage for the foldback.\n\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.".to_string()
+        let mut text = String::from(
+            "Welcome to FreeShow\n\n1. Pick a show from the drawer.\n2. Choose a slide and press Go.\n3. Open Output for the audience and Stage for the foldback.\n\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
+        );
+        if let Some(alert) = self.alert_banner() {
+            text = format!("{alert}\n\n{text}");
+        }
+        if self.chrome.profile_locked {
+            text.push_str("\n\nProfile login required.");
+        }
+        text.push_str("\n\nSettings\n");
+        text.push_str(&self.settings_text());
+        text.push_str("\n\nInspector\n");
+        text.push_str(&self.inspector_text());
+        text.push_str("\n\nStage editor\n");
+        text.push_str(&self.stage_editor_text());
+        text
     }
 
     pub fn toggle_kiosk(&mut self) -> bool {
@@ -5247,6 +5292,221 @@ fn special_text(special: &serde_json::Value, keys: &[&str]) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
+}
+
+impl Session {
+    pub fn settings_text(&self) -> String {
+        crate::operator::settings_text(&self.preferences, &self.chrome)
+    }
+
+    pub fn login_profile(&mut self, id: &str, password: &str) -> bool {
+        let profiles = crate::operator::profiles_from(&self.preferences.profiles);
+        let Some(profile) = profiles
+            .iter()
+            .find(|profile| profile.id == id || profile.name.eq_ignore_ascii_case(id))
+        else {
+            return false;
+        };
+        if !profile.allows_login(password) {
+            return false;
+        }
+        self.chrome.active_profile = Some(profile.id.clone());
+        self.chrome.profile_locked = false;
+        true
+    }
+
+    pub fn logout_profile(&mut self) {
+        self.chrome.active_profile = None;
+        self.chrome.profile_locked = crate::operator::profiles_from(&self.preferences.profiles)
+            .iter()
+            .any(|profile| profile.password.is_some());
+    }
+
+    pub fn apply_update_alert(&mut self, update: &crate::update::ReleaseUpdate) {
+        crate::operator::apply_update_alert(&mut self.chrome, &self.preferences, update);
+    }
+
+    pub fn alert_banner(&self) -> Option<&str> {
+        self.chrome.update_alert.as_deref()
+    }
+
+    pub fn refresh_weather_with(
+        &mut self,
+        now: std::time::Instant,
+        fetch: impl Fn(f64, f64) -> Result<crate::feeds::WeatherReport, String>,
+    ) -> usize {
+        if !crate::operator::weather_due(
+            self.chrome.weather_fetched_at,
+            now,
+            crate::operator::weather_interval(&self.preferences),
+        ) {
+            return 0;
+        }
+        let items = self.current_weather_items();
+        let locations = crate::operator::weather_locations_from(&self.preferences.special, &items);
+        let mut refreshed = 0;
+        for (lat, lon, _) in &locations {
+            if let Ok(report) = fetch(*lat, *lon) {
+                self.chrome.store_weather(report);
+                refreshed += 1;
+            }
+        }
+        if refreshed > 0 || locations.is_empty() {
+            self.chrome.weather_fetched_at = Some(now);
+        }
+        refreshed
+    }
+
+    fn current_weather_items(&self) -> Vec<serde_json::Value> {
+        let Some(show) = self.current_show() else {
+            return Vec::new();
+        };
+        let Some(index) = self.slide_index else {
+            return Vec::new();
+        };
+        let ordered = show.ordered_slides();
+        let Some(slide) = ordered.get(index) else {
+            return Vec::new();
+        };
+        show.show
+            .pointer(&format!("/slides/{}/items", slide.id))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn refresh_rss_with(
+        &mut self,
+        now: std::time::Instant,
+        fetch: impl Fn(&str) -> Result<Vec<crate::feeds::RssItem>, String>,
+    ) -> usize {
+        if !crate::operator::weather_due(
+            self.chrome.rss_fetched_at,
+            now,
+            crate::operator::rss_interval(&self.preferences),
+        ) {
+            return 0;
+        }
+        let mut items = Vec::new();
+        for url in crate::operator::rss_urls_from(&self.preferences) {
+            if let Ok(feed) = fetch(&url) {
+                items.extend(feed);
+            }
+        }
+        let count = items.len();
+        self.chrome.rss_items = items;
+        self.chrome.rss_fetched_at = Some(now);
+        count
+    }
+
+    pub fn inspector_text(&self) -> String {
+        let Some(show) = self.current_show() else {
+            return "inspector=(no show)".into();
+        };
+        let Some(index) = self.slide_index else {
+            return "inspector=(no slide)".into();
+        };
+        let ordered = show.ordered_slides();
+        let Some(slide) = ordered.get(index) else {
+            return "inspector=(no slide)".into();
+        };
+        let typography = show.item_typography(&slide.id, self.item_index);
+        format!(
+            "item={}\nfontSize={}px\nfontFamily={}\nbold={}\ncolor={}\nalign={}\nboxes={}\nslide={}",
+            self.item_index,
+            typography.font_px,
+            typography.family,
+            typography.bold,
+            typography.color,
+            typography.align,
+            show.item_count(&slide.id),
+            slide.id
+        )
+    }
+
+    pub fn stage_editor_text(&self) -> String {
+        let mut lines = vec![format!("layout={}", self.stage.name)];
+        for item in &self.stage.items {
+            lines.push(format!(
+                "{id}: {kind:?} {style}",
+                id = item.id,
+                kind = item.kind,
+                style = item.style
+            ));
+        }
+        lines.join(
+            "
+",
+        )
+    }
+
+    pub fn set_stage_item_style(&mut self, id: &str, style: &str) -> bool {
+        let Some(item) = self.stage.items.iter_mut().find(|item| item.id == id) else {
+            return false;
+        };
+        item.style = style.to_string();
+        self.save_stage_layout()
+    }
+
+    pub fn add_stage_item(&mut self, kind: &str, style: &str) -> Option<String> {
+        let id = format!("{kind}{}", self.stage.items.len() + 1);
+        let kind = match kind {
+            "notes" => freeshow_data::StageItemKind::Notes,
+            "clock" => freeshow_data::StageItemKind::Clock,
+            "timer" => freeshow_data::StageItemKind::Timer,
+            "slide" => freeshow_data::StageItemKind::Slide,
+            other => {
+                let _ = other;
+                freeshow_data::StageItemKind::Slide
+            }
+        };
+        self.stage.items.push(freeshow_data::StageItemSpec {
+            kind,
+            id: id.clone(),
+            style: style.to_string(),
+            align: String::new(),
+            offset: 0,
+            line_count: None,
+            text_box: None,
+            invert_items: false,
+            label: String::new(),
+            lines: Vec::new(),
+            variable_id: None,
+            timer_id: None,
+            src: None,
+            device_name: None,
+            device_type: None,
+            output_source: None,
+            show_output_label: false,
+            include_media: false,
+            fit: None,
+            flip_x: false,
+            flip_y: false,
+            qr: None,
+            url: None,
+            chart: None,
+            clock: freeshow_data::StageClockOptions::default(),
+        });
+        self.save_stage_layout().then_some(id)
+    }
+
+    fn save_stage_layout(&self) -> bool {
+        let Some(root) = &self.root else {
+            return true;
+        };
+        freeshow_data::write_stage_layout(&root.join("Config").join("stage.json"), &self.stage)
+            .is_ok()
+    }
+
+    pub fn network_sources(&self) -> Vec<freeshow_ndi::NetworkSource> {
+        let mut sources = freeshow_ndi::ndi_sources();
+        for source in freeshow_ndi::omt_sources() {
+            if !sources.iter().any(|existing| existing.name == source.name) {
+                sources.push(source);
+            }
+        }
+        sources
+    }
 }
 
 fn rtmp_targets_for(id: &str, output: &serde_json::Value, auto: bool) -> Vec<RtmpTarget> {

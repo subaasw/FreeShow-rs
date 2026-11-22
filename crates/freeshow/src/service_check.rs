@@ -452,6 +452,261 @@ pub fn check_library(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+/// A Sunday service: import a FreeShow library plus a couple of formats, build
+/// a project, present audience and stage outputs, then drive Go/Next over the
+/// REST and Companion HTTP APIs.
+pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let owned: PathBuf;
+    let root = match root {
+        Some(path) => path,
+        None => {
+            owned = std::env::temp_dir().join(format!("freeshow-service-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&owned);
+            write_sample_library(&owned)?;
+            &owned
+        }
+    };
+    if !root.join("Shows").is_dir() {
+        write_sample_library(root)?;
+    }
+    let imports = root.join("Imports");
+    std::fs::create_dir_all(&imports)?;
+    let fixtures = fixture_dir();
+    copy_if_present(
+        &fixtures.join("propresenter7.pro"),
+        &imports.join("propresenter7.pro"),
+    )?;
+    std::fs::write(
+        imports.join("how-great.txt"),
+        "How Great Thou Art\n\n[Verse]\nO Lord my God, when I in awesome wonder\nConsider all the worlds Thy hands have made\n\n[Chorus]\nThen sings my soul, my Saviour God, to Thee\nHow great Thou art, how great Thou art\n",
+    )?;
+
+    let before = std::fs::read_dir(root.join("Shows"))
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    let mut session = Session::open(root.to_path_buf());
+    session.logout_profile();
+    let _ = session.login_profile("house", "secret");
+    session.apply_update_alert(&crate::update::ReleaseUpdate {
+        tag: "v0.0.0".into(),
+        version: "0.0.0".into(),
+        newer: false,
+        html_url: String::new(),
+        download_url: None,
+        checksum_url: None,
+    });
+    if let Some(id) = session.stage.items.first().map(|item| item.id.clone()) {
+        let style = session
+            .stage
+            .items
+            .first()
+            .map(|item| item.style.clone())
+            .unwrap_or_default();
+        let _ = session.set_stage_item_style(&id, &style);
+    }
+    let _ = session.add_stage_item(
+        "notes",
+        "left:25px;top:830px;width:1200px;height:140px;color:#f0f0ff;font-size:36px;",
+    );
+    let _ = session.chrome.weather_for(27.7, 85.3);
+    let imported = session.shows.len().saturating_sub(before.max(2));
+    if session.shows.len() < 3 {
+        return Err(format!(
+            "Sunday import did not add songs (shows={})",
+            session
+                .shows
+                .iter()
+                .map(ShowFile::name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
+    }
+    let names: Vec<String> = session.shows.iter().map(ShowFile::name).collect();
+    let imported_names: Vec<String> = names
+        .iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("how great")
+                || lower.contains("propresenter")
+                || lower.contains("blessed")
+                || !["amazing grace", "welcome"].contains(&lower.as_str())
+        })
+        .cloned()
+        .collect();
+    if imported_names.is_empty() {
+        return Err(format!("imported formats did not appear in the library: {names:?}").into());
+    }
+
+    if session.project_id.is_none() && !session.create_project() {
+        return Err("could not create a Sunday project".into());
+    }
+    for show in session.shows.clone() {
+        let _ = session.present_show(&show.id);
+        let _ = session.add_current_show();
+    }
+    if session.project_title().is_empty() {
+        return Err("Sunday project has no title".into());
+    }
+    if !present_song(&mut session) {
+        return Err("could not present the opening song".into());
+    }
+    session.output_width = 1920;
+    session.output_height = 1080;
+
+    let first = audience_frame(&session);
+    if first.width != 1920 || first.height != 1080 {
+        return Err(format!("audience frame was {}×{}", first.width, first.height).into());
+    }
+    let first_fp = fingerprint(&first.pixels);
+    let stage = stage_frame(&session);
+    if stage.width != 1920 || stage.height != 1080 {
+        return Err(format!("stage frame was {}×{}", stage.width, stage.height).into());
+    }
+    let stage_fp = fingerprint(&stage.pixels);
+
+    let remote = free_port()?;
+    let stage_port = free_port()?;
+    let snapshot = std::sync::Arc::new(std::sync::Mutex::new(session.to_snapshot()));
+    let (commands, command_rx) = std::sync::mpsc::channel();
+    let (frames, _) = std::sync::mpsc::sync_channel(1);
+    freeshow_remote::spawn_limited(
+        std::sync::Arc::clone(&snapshot),
+        commands,
+        None,
+        freeshow_remote::RemotePorts {
+            remote,
+            stage: stage_port,
+        },
+        frames,
+        4,
+    );
+    if !wait_http(remote)? || !wait_http(stage_port)? {
+        return Err("remote or stage page did not respond".into());
+    }
+
+    let starting_slide = session.slide_index;
+    let api = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(400))
+        .timeout_read(Duration::from_secs(2))
+        .build()
+        .post(&format!("http://127.0.0.1:{remote}/api/next"))
+        .call()
+        .map_err(|err| format!("POST /api/next: {err}"))?;
+    if api.status() != 200 {
+        return Err(format!("POST /api/next returned {}", api.status()).into());
+    }
+    let applied_api = drain_remote(&mut session, &command_rx, Duration::from_secs(2));
+    let after_api = audience_frame(&session);
+    let after_api_fp = fingerprint(&after_api.pixels);
+    if session.slide_index == starting_slide || applied_api == 0 {
+        return Err(format!(
+            "REST /api/next did not advance the slide (index={:?}, commands={applied_api})",
+            session.slide_index
+        )
+        .into());
+    }
+    if after_api_fp == first_fp {
+        return Err("audience frame did not change after REST next".into());
+    }
+    *snapshot.lock().expect("snapshot") = session.to_snapshot();
+
+    let companion = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(400))
+        .timeout_read(Duration::from_secs(2))
+        .build()
+        .post(&format!("http://127.0.0.1:{remote}/companion/next"))
+        .set("content-type", "application/json")
+        .send_string("{}")
+        .map_err(|err| format!("POST /companion/next: {err}"))?;
+    if companion.status() != 200 {
+        return Err(format!("POST /companion/next returned {}", companion.status()).into());
+    }
+    let applied_companion = drain_remote(&mut session, &command_rx, Duration::from_secs(2));
+    let after_companion = audience_frame(&session);
+    let after_companion_fp = fingerprint(&after_companion.pixels);
+    if applied_companion == 0 {
+        return Err("Companion /companion/next did not deliver a command".into());
+    }
+    let after_stage = stage_frame(&session);
+    if fingerprint(&after_stage.pixels) == stage_fp && session.slide_index == starting_slide {
+        return Err("stage display did not follow the remote advance".into());
+    }
+
+    let stage_page = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(400))
+        .timeout_read(Duration::from_secs(2))
+        .build()
+        .get(&format!("http://127.0.0.1:{stage_port}/"))
+        .call()
+        .map_err(|err| format!("GET stage: {err}"))?;
+    let stage_status = stage_page.status();
+    let stage_body = stage_page.into_string().unwrap_or_default();
+    if stage_status != 200 || stage_body.is_empty() {
+        return Err(format!("stage display returned {stage_status}").into());
+    }
+
+    let sources = session.network_sources();
+    let report = json!({
+        "library": root,
+        "shows": names,
+        "imported_shows": imported_names,
+        "imported_count": imported,
+        "project": session.project_title(),
+        "project_items": session.project_id.as_ref().and_then(|id| {
+            session
+                .projects
+                .projects()
+                .into_iter()
+                .find(|project| project.id == *id)
+                .map(|project| project.shows.len())
+        }),
+        "audience_fingerprints": [first_fp, after_api_fp, after_companion_fp],
+        "stage_fingerprint": fingerprint(&after_stage.pixels),
+        "starting_slide": starting_slide,
+        "slide_index": session.slide_index,
+        "rest_next_commands": applied_api,
+        "companion_next_commands": applied_companion,
+        "remote_url": format!("http://127.0.0.1:{remote}/"),
+        "stage_url": format!("http://127.0.0.1:{stage_port}/"),
+        "stage_ok": true,
+        "network_sources": sources.len(),
+        "inspector": session.inspector_text(),
+        "settings_has_alert_updates": session.settings_text().contains("alertUpdates"),
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn drain_remote(
+    session: &mut Session,
+    rx: &std::sync::mpsc::Receiver<freeshow_remote::Command>,
+    budget: Duration,
+) -> usize {
+    let deadline = Instant::now() + budget;
+    let mut applied = 0;
+    while Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(command) => {
+                session.apply_remote(command);
+                applied += 1;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if applied > 0 {
+                    std::thread::sleep(Duration::from_millis(20));
+                    if rx.try_recv().is_err() {
+                        break;
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    applied
+}
+
 fn free_port() -> Result<u16, Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
@@ -491,6 +746,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         write_sample_library(&root).unwrap();
         check_library(Some(&root)).unwrap();
+        check_service(Some(&root)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

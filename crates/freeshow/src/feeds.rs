@@ -73,6 +73,8 @@ pub fn weather_description(code: u32) -> String {
     text.to_string()
 }
 
+pub const OPEN_METEO: &str = "https://api.open-meteo.com";
+
 /// Fetch current weather from Open-Meteo. `base` is the API origin (tests pass a mock).
 pub fn fetch_weather(latitude: f64, longitude: f64, base: &str) -> Result<WeatherReport, String> {
     let url = format!(

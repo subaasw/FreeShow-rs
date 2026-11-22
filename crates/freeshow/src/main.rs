@@ -6,6 +6,7 @@ mod desktop;
 mod feeds;
 mod lang;
 mod live;
+mod operator;
 mod present;
 mod runtime;
 mod service_check;
@@ -13,6 +14,7 @@ mod session;
 #[cfg_attr(not(test), allow(dead_code))]
 mod spell;
 mod stage;
+mod streamdeck;
 mod theme;
 #[cfg_attr(not(test), allow(dead_code))]
 mod update;
@@ -338,6 +340,7 @@ slint::slint! {
             { id: "templates", label: "Templates", short: "T" },
             { id: "scripture", label: "Scripture", short: "B" },
             { id: "calendar", label: "Calendar", short: "C" },
+            { id: "rss", label: "RSS", short: "R" },
             { id: "functions", label: "Functions", short: "F" },
         ];
 
@@ -1980,6 +1983,7 @@ struct Launch {
     check_media: Option<PathBuf>,
     check_perf: Option<Option<PathBuf>>,
     check_library: Option<Option<PathBuf>>,
+    check_service: Option<Option<PathBuf>>,
     list_audio_devices: bool,
     list_video_audio_devices: bool,
 }
@@ -1994,6 +1998,7 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
         check_media: None,
         check_perf: None,
         check_library: None,
+        check_service: None,
         list_audio_devices: false,
         list_video_audio_devices: false,
     };
@@ -2008,6 +2013,9 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
             }
             "--check-library" => {
                 launch.check_library = Some(args.next().map(PathBuf::from));
+            }
+            "--check-service" => {
+                launch.check_service = Some(args.next().map(PathBuf::from));
             }
             "--check-media" => {
                 launch.check_media = Some(PathBuf::from(
@@ -2035,6 +2043,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(path) = launch.check_library {
         return service_check::check_library(path.as_deref());
+    }
+    if let Some(path) = launch.check_service {
+        return service_check::check_service(path.as_deref());
     }
     if launch.check_runtime || launch.check_media.is_some() {
         return runtime::check(launch.check_media.as_deref());
@@ -3416,6 +3427,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot: Arc::clone(&snapshot),
         commands: command_tx.clone(),
     });
+    let deck_commands = command_tx.clone();
+    let deck_snapshot = Arc::clone(&snapshot);
+    let _ = crate::streamdeck::start_listener(move |action| {
+        let channel = freeshow_remote::normalize_action_channel(action);
+        let Ok(mut snap) = deck_snapshot.lock() else {
+            return;
+        };
+        let (_, commands) = freeshow_remote::handle_message(
+            &mut snap,
+            &serde_json::json!({ "channel": channel, "data": null }),
+        );
+        for command in commands {
+            let _ = deck_commands.send(command);
+        }
+    });
     freeshow_midi::MidiInput::default().start(freeshow_remote::ShowBus {
         snapshot: Arc::clone(&snapshot),
         commands: command_tx,
@@ -3695,6 +3721,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(100),
         move || {
+            {
+                let mut current = clock_session.borrow_mut();
+                let now = std::time::Instant::now();
+                let _ = current.refresh_weather_with(now, |lat, lon| {
+                    crate::feeds::fetch_weather(lat, lon, crate::feeds::OPEN_METEO)
+                });
+                let _ = current.refresh_rss_with(now, crate::feeds::fetch_rss);
+            }
             let ran = clock_session.borrow_mut().run_due_actions();
             {
                 let current = clock_session.borrow();

@@ -963,16 +963,22 @@ fn weather_box_image(item: &serde_json::Value) -> Raster {
         .get("longitude")
         .and_then(|value| value.as_f64())
         .unwrap_or(0.0);
-    let temperature = weather
-        .get("temperature")
-        .or_else(|| weather.get("temp"))
-        .and_then(|value| value.as_f64())
-        .map(|c| {
-            if fahrenheit {
-                format!("{:.0}°F", c * 9.0 / 5.0 + 32.0)
-            } else {
-                format!("{:.0}°C", c)
-            }
+    let cached = crate::operator::cached_weather(lat, lon);
+    let temperature = cached
+        .as_ref()
+        .map(|report| report.temperature_label(fahrenheit))
+        .or_else(|| {
+            weather
+                .get("temperature")
+                .or_else(|| weather.get("temp"))
+                .and_then(|value| value.as_f64())
+                .map(|c| {
+                    if fahrenheit {
+                        format!("{:.0}°F", c * 9.0 / 5.0 + 32.0)
+                    } else {
+                        format!("{:.0}°C", c)
+                    }
+                })
         })
         .or_else(|| {
             weather
@@ -981,11 +987,16 @@ fn weather_box_image(item: &serde_json::Value) -> Raster {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "—".to_string());
-    let detail = weather
-        .get("description")
-        .or_else(|| weather.get("text"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
+    let detail = cached
+        .as_ref()
+        .map(|report| report.description.clone())
+        .or_else(|| {
+            weather
+                .get("description")
+                .or_else(|| weather.get("text"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let title = if lat == 0.0 && lon == 0.0 {
         "Weather".to_string()
