@@ -423,27 +423,33 @@ fn layout_timeline(
     let mut current = 0usize;
     let mut actions = Vec::new();
     for (index, cue) in cues.iter().enumerate() {
-        let Some(cue_id) = id(&cue.cue_id) else {
-            continue;
-        };
-        let Some(slide_id) = cue_slides.get(cue_id) else {
-            continue;
-        };
-        let Some(occurrences) = positions.get(slide_id.as_str()) else {
-            continue;
-        };
-        let offset = occurrences.partition_point(|index| *index < current);
-        let position = occurrences.get(offset).copied().unwrap_or(occurrences[0]);
         if !cue.trigger_time.is_finite() || cue.trigger_time < 0.0 {
             continue;
         }
-        current = position;
+        let (kind, data) = if let Some(action) = &cue.action {
+            let kind = match clear_target(action) {
+                Some(wire::ClearTarget::Audio) => "clear_audio",
+                Some(wire::ClearTarget::Background) => "clear_background",
+                _ => continue,
+            };
+            (kind, json!({}))
+        } else {
+            let Some(occurrences) = id(&cue.cue_id)
+                .and_then(|cue_id| cue_slides.get(cue_id))
+                .and_then(|slide_id| positions.get(slide_id.as_str()))
+            else {
+                continue;
+            };
+            let offset = occurrences.partition_point(|index| *index < current);
+            current = occurrences.get(offset).copied().unwrap_or(occurrences[0]);
+            ("slide", json!({"id": steps[current].0, "index": current}))
+        };
         actions.push(json!({
             "id": format!("t{}", index + 1),
             "time": (cue.trigger_time * 1000.0).round() as u64,
             "name": cue.name,
-            "type": "slide",
-            "data": { "id": slide_id, "index": position }
+            "type": kind,
+            "data": data
         }));
     }
     if actions.is_empty() {
@@ -1243,15 +1249,35 @@ mod tests {
                 ..Default::default()
             }),
         });
+        let timed_clear = |time, target, destination| wire::TimelineCue {
+            trigger_time: time,
+            name: "Recorded clear".into(),
+            action: Some(wire::Action {
+                enabled: true,
+                kind: wire::ActionType::Clear as i32,
+                clear: Some(wire::ClearAction {
+                    target: target as i32,
+                    destination,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         presentation.timeline = Some(wire::Timeline {
-            cues: vec![wire::TimelineCue {
-                trigger_time: 1.5,
-                cue_id: cue_id.clone(),
-                name: "Verse".into(),
-            }],
+            cues_v2: vec![
+                wire::TimelineCue {
+                    trigger_time: 1.5,
+                    cue_id: cue_id.clone(),
+                    name: "Verse".into(),
+                    ..Default::default()
+                },
+                timed_clear(2.0, wire::ClearTarget::Background, 0),
+                timed_clear(2.5, wire::ClearTarget::Audio, 0),
+                timed_clear(2.75, wire::ClearTarget::Audio, 1),
+            ],
             duration: 12.0,
             r#loop: true,
-            cues_v2: Vec::new(),
+            ..Default::default()
         });
         presentation.cues.push(wire::Cue {
             uuid: Some(wire::Uuid {
@@ -1292,8 +1318,17 @@ mod tests {
         assert_eq!(timeline["actions"][0]["type"], "slide");
         assert_eq!(timeline["actions"][0]["data"]["id"], "s1");
         let cues = crate::timeline_cues_from_show(&show.show);
+        assert_eq!(cues.len(), 3);
         assert_eq!(cues[0].time_ms, 1500);
         assert_eq!(cues[0].slide_index, Some(1));
+        assert_eq!(cues[1].time_ms, 2000);
+        assert_eq!(cues[1].kind, "clear_background");
+        assert_eq!(cues[2].time_ms, 2500);
+        assert_eq!(cues[2].kind, "clear_audio");
+        assert_eq!(
+            crate::timeline_text_from(&cues),
+            "1.500 slide:s1\n2.000 clear_background\n2.500 clear_audio"
+        );
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
         let text = warnings
             .iter()
