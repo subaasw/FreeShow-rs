@@ -79,7 +79,10 @@ pub fn import_sources_split(
             &bytes,
         ) {
             match community::import_project_package(&path, &bytes, shows, media) {
-                Ok(notes) => warnings.extend(notes),
+                Ok(notes) => {
+                    warnings.extend(notes);
+                    set_aside(imports, &path, &mut warnings);
+                }
                 Err(err) => warnings.push(format!("{}: {err}", path.display())),
             }
             continue;
@@ -152,11 +155,42 @@ pub fn import_sources_split(
                         ids.insert(show.id);
                     }
                 }
+                set_aside(imports, &path, &mut warnings);
             }
             Err(err) => warnings.push(format!("{}: {err}", path.display())),
         }
     }
     Ok(warnings)
+}
+
+/// Folder under `Imports/` that holds files already turned into shows, so a
+/// show the operator later renames or deletes is not imported again.
+const IMPORTED_DIR: &str = "Imported";
+
+fn set_aside(imports: &Path, path: &Path, warnings: &mut Vec<String>) {
+    let done = imports.join(IMPORTED_DIR);
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let mut target = done.join(name);
+    let mut number = 2;
+    while target.exists() {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        target = done.join(format!("{stem} {number}{ext}"));
+        number += 1;
+    }
+    if let Err(err) = fs::create_dir_all(&done).and_then(|()| fs::rename(path, &target)) {
+        warnings.push(format!(
+            "{}: imported, but could not move it to {}: {err}",
+            path.display(),
+            done.display()
+        ));
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
