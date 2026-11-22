@@ -4,9 +4,9 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 ## Score
 
-- **Feature-weighted parity: 92.4%**
-- Sub-features: **77 done / 9 partial / 12 not-yet** (98 leaves).
-- Area rows (derived from leaves): **6 done / 11 partial / 0 not-yet** (17 areas).
+- **Feature-weighted parity: 94.6%**
+- Sub-features: **83 done / 7 partial / 8 not-yet** (98 leaves).
+- Area rows (derived from leaves): **8 done / 9 partial / 0 not-yet** (17 areas).
 - Scoring: each leaf has a weight (Sunday-operator impact). `done` scores 1, `partial` scores 1/2, `not-yet` scores 0. The percentage is `100 × Σ(weight × score) / Σ(weight)`. Credential-gated work is included as `not-yet` so the number stays honest about 1.6.8.
 
 ## Areas
@@ -18,17 +18,17 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Output and stage windows | partial | 92% | 5 done, 2 partial |
 | Theme colors | done | 100% | 3 done |
 | Settings file and logging | done | 100% | 1 done |
-| Shows, projects, templates, overlays, scripture storage | partial | 89% | 4 done, 1 partial, 1 not-yet |
-| Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions | partial | 92% | 8 done, 1 not-yet |
+| Shows, projects, templates, overlays, scripture storage | done | 100% | 6 done |
+| Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions | done | 100% | 9 done |
 | Slide editing, project order, go to slide | partial | 93% | 4 done, 1 partial |
-| Audience compositor | partial | 90% | 5 done, 2 partial |
+| Audience compositor | partial | 94% | 6 done, 1 partial |
 | Preview matches output | done | 100% | 1 done |
 | Images, video, audio, cameras | partial | 92% | 6 done, 1 not-yet |
 | Scripture import and search | done | 100% | 1 done |
 | Stage layouts | partial | 95% | 3 done, 1 partial |
 | Show importers | partial | 94% | 2 done, 1 not-yet |
 | Remote and stage web servers | done | 100% | 4 done |
-| MIDI, OSC, NDI, timecode, recording, Planning Center, ChurchApps, cloud, OBS, AI | partial | 79% | 16 done, 1 partial, 7 not-yet |
+| MIDI, OSC, NDI, timecode, recording, Planning Center, ChurchApps, cloud, OBS, AI | partial | 84% | 18 done, 1 partial, 5 not-yet |
 | Installers and crash-safe autosave | partial | 85% | 3 done, 1 not-yet |
 
 ## Sub-features
@@ -53,7 +53,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Drawer height, always-on-top, kiosk | done | 0.6 | Bottom drawer height and window flags |
 | Named window-layout profiles | done | 0.7 | Stored placements for operator/output/stage |
 | Header Search and panel widths | done | 0.5 | `resized` left/right widths |
-| Full Electron settings/editor suite | partial | 1.5 | Not every 1.6.8 settings pane or inspector field is cloned |
+| Full Electron settings/editor suite | partial | 1.5 | Text settings/inspector/stage-editor panes and `alertUpdates` chrome are in; not every 1.6.8 GUI control is cloned |
 
 ### Output and stage windows
 
@@ -89,8 +89,8 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Load `.fsb` Bibles | done | 1 | Scripture tab and search |
 | Save lyric edits and project order | done | 2 | Writes the same files Electron uses |
 | Export text of the open show | done | 0.8 | `Exports/` in the text-importer shape |
-| Access-control `profiles` | partial | 0.7 | Synced accounts are stored, not a full login UI |
-| Alert-update chrome | not-yet | 0.5 | `alertUpdates` is stored but not shown |
+| Access-control `profiles` | done | 0.7 | Password profiles lock the session until `login_profile`; listed in the settings pane |
+| Alert-update chrome | done | 0.5 | Banner in the footer and guide when a newer GitHub Release is known |
 
 ### Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions
 
@@ -104,7 +104,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Player tab | done | 0.8 | Stored `playerVideos` |
 | Functions: Clear/Next/Previous/Timer/Record/Export/Screenshot | done | 1 | PDF, package, and PNG exports included |
 | Functions: Planning Center, ChurchApps, Backup, Restore, OBS, AI, Icecast | done | 0.8 | No-credential paths only |
-| RSS ticker/drawer | not-yet | 0.6 | Parse/fetch helpers exist; no operator RSS list yet |
+| RSS ticker/drawer | done | 0.6 | Tenth drawer tab plus a footer ticker; auto-refresh from `special.rssUrl` / `rssFeeds` |
 
 ### Slide editing, project order, go to slide
 
@@ -114,7 +114,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space |
 | Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
 | Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
-| Every Electron inspector control | partial | 1 | Common typography and box moves; not every 1.6.8 inspector field |
+| Every Electron inspector control | partial | 1 | Typography now includes color and align plus an inspector text pane; not every 1.6.8 field |
 
 ### Audience compositor
 
@@ -125,7 +125,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Draw-on-output | done | 1 | Stored `drawSettings` |
 | Live effects library | done | 1 | `effectsLibrary` washes/particles |
 | HTML / web / website boxes | done | 1 | URL preview or stripped HTML snippet |
-| Weather boxes | partial | 0.8 | Card from stored values; Open-Meteo fetch is implemented but not auto-refreshed on a timer |
+| Weather boxes | done | 0.8 | Cached Open-Meteo reports auto-refresh (default 600s) and paint into weather boxes |
 | Item box-shadow, pixel radius, backdrop-filter | partial | 1.2 | Called out from M3; some typography extras still differ from Electron |
 
 ### Preview matches output
@@ -159,7 +159,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Load and paint stage layouts | done | 2 | Includes next-slide, notes, clock, timer |
 | Stage cameras, web, and chart boxes | done | 1.5 |  |
 | Stage as a second NDI/WebRTC picture | done | 1 |  |
-| Every Electron stage-item editor pane | partial | 0.5 | Layouts paint; not every stage editor field is cloned |
+| Every Electron stage-item editor pane | partial | 0.5 | Text stage editor can add items, edit styles, and save `Config/stage.json`; not every field is cloned |
 
 ### Show importers
 
@@ -185,7 +185,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | MIDI and OSC input | done | 0.6 |  |
 | Timecode (MTC/LTC) | done | 0.4 |  |
 | NDI send, including stage and groups | done | 0.8 | One sender per (group, stage); source name `{name} [{group}]` |
-| NDI/OMT receive | done | 0.6 | Soft-fails when the GStreamer plugin is missing |
+| NDI/OMT receive | done | 0.6 | DeviceMonitor plus `FREESHOW_NDI_SOURCES` / `FREESHOW_OMT_SOURCES`; empty when the plugin is missing |
 | OMT broadcast | partial | 0.3 | Configured, but the runtime is not bundled |
 | WebRTC/WHIP send | done | 0.5 |  |
 | Auto-started RTMP | done | 0.5 | From `rtmpData` destinations or `special.autoRtmp`, plus `FREESHOW_RTMP` |
@@ -198,9 +198,9 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | OBS WebSocket 5 | done | 0.4 | Also reads library `obsData` |
 | Functions → AI via Ollama | done | 0.3 | When `FREESHOW_AI` is set |
 | GitHub Releases update check | done | 0.3 | Public API, no credentials; compares to `CARGO_PKG_VERSION` |
-| Download and install a GitHub Release | not-yet | 0.2 | Check only; the running binary is not replaced |
+| Download and install a GitHub Release | done | 0.2 | Download, SHA-256 sidecar, swap, relaunch, and rollback; refuses install without a checksum |
 | Spellcheck | done | 0.3 | Embedded word list plus an optional system dictionary |
-| Stream Deck USB HID | not-yet | 0.2 | Companion/HTTP+WS is the supported path |
+| Stream Deck USB HID | done | 0.2 | Pure-Rust Linux hidraw behind feature `hid` (default off); other OS lists stay empty; no C hidapi |
 | Canva / OnStage / Amazing Life providers | not-yet | 0.3 | Credential-gated |
 | Google Drive library sync | not-yet | 0.3 | Beyond folder/URL backup; needs an account |
 | ChurchApps cloud sync beyond import | not-yet | 0.2 | Needs an account |
@@ -211,28 +211,24 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{linux,windows,release}.yml` |
+| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{linux,windows,macos,release}.yml`; packaged AppRun/exe/app run `--check-perf` |
 | Crash-safe autosave | done | 0.5 | Library autosave setting is honored |
-| `--check-perf` and `--check-library` budgets | done | 0.4 | Including remote-button latency ≤16 ms |
+| `--check-perf` and `--check-library` budgets | done | 0.4 | Also `--check-service` for a Sunday import/present/REST/Companion/stage path; CI runs `--check-perf` on each packaged runner |
 | Apple Developer ID signing and notarization | not-yet | 0.3 | Needs Apple credentials; CI stays unsigned/ad-hoc |
 
 ## Remaining
 
-M7 is **not** complete. The lists below are the honest leftovers after groups 4 and 5 and the output-delay / audio-DSP / YouTube-Vimeo pass.
+M7 is **not** complete. The lists below are the honest leftovers after the no-credential close-out (update install, weather timer, RSS drawer, NDI/OMT discovery, Stream Deck HID, settings/inspector/stage-editor text panes, `alertUpdates` chrome, profile login, and CI `--check-perf` on packaged Linux/Windows/macOS artifacts). `--check-service` covers a Sunday import/present/REST/Companion/stage path.
 
 ### No-credential leftovers
 
-- Apply a GitHub Release (download and replace the running binary). The public Releases check is in.
-- Auto-refresh weather boxes from Open-Meteo on a timer (parse, fetch, and stored-value cards are in).
-- An operator RSS drawer or ticker (parse/fetch helpers are in).
-- OMT broadcast, which still needs the unbundled Open Media Transport runtime.
-- NDI/OMT source discovery lists (receive-by-name works when the GStreamer plugin is present; this box has no `ndisrc`).
-- Stream Deck USB HID (Companion/HTTP+WS on the remote port is the supported path).
+- OMT broadcast, which still needs the unbundled Open Media Transport runtime (receive/discovery soft-fail when the plugin is absent; the runtime is not bundled).
 - Native MediaShout `.mdb` (not a viable pure-Rust path; XML/SSC/JSON dumps import).
 - Embedded live PowerPoint playback (import already works).
 - A bundled local speech-to-text model (Functions → AI already rewrites a slide through Ollama when `FREESHOW_AI` is set).
-- A full clone of every Electron settings/inspector/stage-editor pane, `alertUpdates` chrome, and access-control profile login UI.
-- Measuring the same `--check-perf` budgets on packaged Windows and macOS apps (Linux release budgets already run here).
+- A full visual clone of every Electron settings, inspector, and stage-editor control (text panes, typography color/align, and `stage.json` save are in).
+- Pixel-perfect Electron window chrome, and every output-window always-on-top / kiosk flag.
+- Item box-shadow, pixel radius, and backdrop-filter typography extras called out from M3.
 
 ### Credential-gated leftovers
 
@@ -246,9 +242,9 @@ M7 is **not** complete. The lists below are the honest leftovers after groups 4 
 
 ### Settings stored but not fully used in chrome
 
-- Used in the operator UI or import path: `splitLines`, `customFonts`, `resized` panel widths, header Search, `fullColors`, `slidesOptions` columns/mode, `drawer` height, `shortcuts`, `special.guideSeen` / `special.focusMode` / `special.watermark` / `special.outputDelayMs` (real frame buffer, default 0), `activeScenes`, synced `scenes` / `interactions` / `drawSettings` / `playerVideos`, output variables, `effectsLibrary` live effects, `audioEffects` (gain plus the PCM DSP chain), and `timeline` zoom plus show-timeline cues.
-- Still stored but not fully used in chrome: `alertUpdates`, `cloudSyncData`, `driveData`, `contentProviderData`, and `ai`. `metronome` and `timecode` drive the footer; `obsData` is used for OBS when `FREESHOW_OBS` is unset. Synced `profiles` remain stored access-control accounts.
+- Used in the operator UI or import path: `splitLines`, `customFonts`, `resized` panel widths, header Search, `fullColors`, `slidesOptions` columns/mode, `drawer` height, `shortcuts`, `special.guideSeen` / `special.focusMode` / `special.watermark` / `special.outputDelayMs` (real frame buffer, default 0), `activeScenes`, synced `scenes` / `interactions` / `drawSettings` / `playerVideos`, output variables, `effectsLibrary` live effects, `audioEffects` (gain plus the PCM DSP chain), `timeline` zoom plus show-timeline cues, `alertUpdates` banner, and synced `profiles` login.
+- Still stored but not fully used in chrome: `cloudSyncData`, `driveData`, `contentProviderData`, and `ai`. `metronome` and `timecode` drive the footer; `obsData` is used for OBS when `FREESHOW_OBS` is unset.
 
 ### Packaging
 
-- Public-distribution Developer ID signing and notarization stay documented and unsigned/ad-hoc in CI, because they need Apple credentials. The locked three-platform installer workflows already exist in `.github/workflows/{linux,windows,release}.yml`. `--check-perf` and `--check-library` measure the plan budgets, including remote-button latency (handle `API:next_slide`, apply it, and paint the audience frame) against a ≤16 ms budget. The compositor paints at 1920×1080 by default, or the active output's stored `bounds` (width is snapped to a multiple of 64 for wgpu row alignment). Slide layout stays 1920×1080.
+- Public-distribution Developer ID signing and notarization stay documented and unsigned/ad-hoc in CI, because they need Apple credentials. The locked three-platform installer workflows live in `.github/workflows/{linux,windows,macos,release}.yml`. Each package job builds an unsigned artifact and runs `--check-perf` on the packaged AppRun, Windows exe, or macOS app. `--check-library` and `--check-service` cover library presentation and a Sunday import/present/REST/Companion/stage path. The compositor paints at 1920×1080 by default, or the active output's stored `bounds` (width is snapped to a multiple of 64 for wgpu row alignment). Slide layout stays 1920×1080.
