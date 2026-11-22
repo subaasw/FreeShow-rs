@@ -376,6 +376,8 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_live_slide(session.live_slide_index().map_or(-1, |index| index as i32));
     ui.set_full_colors(session.preferences.full_colors());
     ui.set_project_names(strings(&session.project_labels()));
+    ui.set_project_kinds(strings(&session.project_kinds()));
+    ui.set_live_project(session.live_project_item().map_or(-1, |item| item as i32));
     ui.set_project_title(session.project_title().into());
     let lyrics = session.lyrics();
     if ui.get_lyrics().as_str() != lyrics {

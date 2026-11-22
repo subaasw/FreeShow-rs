@@ -1228,6 +1228,50 @@ impl Session {
             .collect()
     }
 
+    /// The tag each project row shows: empty for a song, `Section` for a header row, else the
+    /// media kind ("Video", "Image" and so on).
+    pub fn project_kinds(&self) -> Vec<String> {
+        let Some(project) = self.current_project() else {
+            return Vec::new();
+        };
+        project
+            .shows
+            .iter()
+            .map(|item| match item.kind.as_str() {
+                "show" | "" => String::new(),
+                "section" => "Section".to_string(),
+                "pdf" => "PDF".to_string(),
+                "ppt" => "PowerPoint".to_string(),
+                other => {
+                    let mut chars = other.chars();
+                    chars.next().map_or_else(String::new, |first| {
+                        first.to_uppercase().chain(chars).collect()
+                    })
+                }
+            })
+            .collect()
+    }
+
+    /// The project row whose song is on the output now: the picked row when it is that song,
+    /// else its first row.
+    pub fn live_project_item(&self) -> Option<usize> {
+        if self.blanked || self.slide_hidden {
+            return None;
+        }
+        let live_show = match self.program_content.borrow().as_ref() {
+            Some(crate::live::ProgramContent::Slide { show_id, .. }) => show_id.clone(),
+            _ => return None,
+        };
+        let project = self.current_project()?;
+        let is_live = |item: &freeshow_data::ProjectShowRef| {
+            matches!(item.kind.as_str(), "show" | "") && item.id == live_show
+        };
+        if project.shows.get(self.project_item).is_some_and(is_live) {
+            return Some(self.project_item);
+        }
+        project.shows.iter().position(is_live)
+    }
+
     pub fn group(&self) -> String {
         if self.tab != "shows" {
             return String::new();
@@ -10308,6 +10352,40 @@ Second line"
             assert!(session.perform_shortcut("Left"));
         }
         assert_eq!(session.output_lines()[0], "John 3:15");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_rows_name_their_kind_and_mark_the_song_on_air() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-project-kinds-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Config")).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_project());
+        assert!(session.create_show_with("song1", "Call to worship", "Come\n\nSing"));
+        let project_id = session.project_id.clone().unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("Config/projects.json")).unwrap(),
+        )
+        .unwrap();
+        let rows = json["projects"][&project_id]["shows"]
+            .as_array_mut()
+            .unwrap();
+        rows.insert(
+            0,
+            serde_json::json!({ "id": "s", "type": "section", "name": "Worship" }),
+        );
+        rows.push(serde_json::json!({ "id": "/a/b.mp4", "type": "video", "name": "b.mp4" }));
+        std::fs::write(root.join("Config/projects.json"), json.to_string()).unwrap();
+        let mut session = Session::open(root.clone());
+        assert_eq!(session.project_kinds(), vec!["Section", "", "Video"]);
+        assert_eq!(session.live_project_item(), None);
+        assert!(session.open_project_item(1, Some(0)));
+        let _ = crate::live::audience_frame(&session);
+        assert_eq!(session.live_project_item(), Some(1));
         let _ = std::fs::remove_dir_all(&root);
     }
 

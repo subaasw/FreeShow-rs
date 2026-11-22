@@ -50,6 +50,10 @@ export component ControlWindow inherits Window {
     in-out property <int> slides-columns: 1;
     in-out property <bool> full-colors: false;
     in-out property <[string]> project-names;
+    // Per project row: "" for a song, "Section" for a header, else the media kind shown as a tag.
+    in-out property <[string]> project-kinds;
+    // The project row whose show or media is on the output now, or -1.
+    in-out property <int> live-project: -1;
     in-out property <string> project-title: "Project";
     in-out property <string> lyrics: "";
     in-out property <string> group: "";
@@ -567,7 +571,7 @@ export component ControlWindow inherits Window {
                 VerticalLayout {
                     padding: 12px;
                     spacing: 8px;
-                    alignment: start;
+                    alignment: stretch;
                     if root.project-names.length == 0 && root.project-title == "Project": Text {
                         text: root.project-title;
                         color: root.text-color;
@@ -614,19 +618,56 @@ export component ControlWindow inherits Window {
                         color: root.text-color;
                         font-size: 14px * OperatorStyle.font-scale;
                     }
-                    if root.project-names.length > 0: VerticalLayout {
-                        spacing: 0;
-                        alignment: start;
-                        for item[index] in root.project-names: ListRow {
-                            label: item;
-                            active: root.selected-project == index;
-                            accent: root.accent;
-                            text-color: root.text-color;
-                            accent-text: root.accent-text;
-                            clicked => {
-                                window-keys.focus();
-                                root.selected-project = index;
-                                root.choose-project(index);
+                    if root.project-names.length > 0: project-flick := Flickable {
+                        // Long services scroll instead of running off the panel.
+                        vertical-stretch: 1;
+                        min-height: min(root.project-names.length * 36px, 108px);
+                        content-height: root.project-names.length * 36px;
+                        for item[index] in root.project-names: Rectangle {
+                            y: index * 36px;
+                            height: 36px;
+                            width: project-flick.width;
+                            if root.project-kinds[index] == "Section": Rectangle {
+                                background: root.selected-project == index ? root.accent : transparent;
+                                border-radius: OperatorStyle.chrome-radius;
+                                Text {
+                                    x: 8px;
+                                    width: parent.width - 16px;
+                                    text: item;
+                                    color: root.selected-project == index ? root.accent-text : root.text-color;
+                                    opacity: root.selected-project == index ? 1 : 0.65;
+                                    font-size: 12px * OperatorStyle.font-scale;
+                                    font-weight: 700;
+                                    vertical-alignment: bottom;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    y: parent.height - 3px;
+                                    height: 1px;
+                                    background: root.text-color;
+                                    opacity: 0.25;
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        window-keys.focus();
+                                        root.selected-project = index;
+                                        root.choose-project(index);
+                                    }
+                                }
+                            }
+                            if root.project-kinds[index] != "Section": ListRow {
+                                label: item;
+                                tag: root.project-kinds[index];
+                                active: root.selected-project == index;
+                                on: root.live-project == index;
+                                accent: root.accent;
+                                text-color: root.text-color;
+                                accent-text: root.accent-text;
+                                clicked => {
+                                    window-keys.focus();
+                                    root.selected-project = index;
+                                    root.choose-project(index);
+                                }
                             }
                         }
                     }

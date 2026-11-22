@@ -128,6 +128,8 @@ export component HeaderButton inherits Rectangle {
 
 export component ListRow inherits Rectangle {
     in property <string> label;
+    // A short dim note at the right edge, such as a project row's media kind.
+    in property <string> tag;
     in property <bool> active;
     in property <image> thumb;
     in property <bool> show-thumb;
@@ -148,7 +150,6 @@ export component ListRow inherits Rectangle {
         padding-left: 8px;
         padding-right: 8px;
         spacing: 8px;
-        alignment: center;
         if root.show-thumb: Image {
             source: root.thumb;
             width: 56px;
@@ -162,6 +163,13 @@ export component ListRow inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
+        }
+        if root.tag != "": Text {
+            text: root.tag;
+            color: root.active ? root.accent-text : root.text-color;
+            opacity: 0.6;
+            font-size: 11px * OperatorStyle.font-scale;
+            vertical-alignment: center;
         }
     }
     if root.on && !root.active: Rectangle {
