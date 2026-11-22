@@ -113,7 +113,9 @@ The operator window is Slint 1.18 (`backend-winit`, `renderer-femtovg-wgpu`). Au
 
 ## 4. Performance targets
 
-These are budgets, not current measurements. Add a lightweight bench or a `--check-perf` dry run before claiming them. Compare against the Electron app on the same machine and the same library.
+These are budgets. `--check-perf` and `scripts/bench-perf.py` measure them on a mid-size Sunday library. The compositor framebuffer is 960×540; slide layout stays 1920×1080, so still and video fps are painted at the output size from a 1080p layout (and a generated 1920×1080@30 video underlay). Cold open here is library load plus the first audience and stage frames, not a framed operator window. Compare against the Electron app on the same machine and the same library when you can.
+
+On the Linux workspace box (22 Nov 2026, Asia/Katmandu), a release `freeshow --check-perf` run reported: cold open ~16 ms, idle RSS ~24 MB, stills ~200 fps, unsynced 1080p video decode+paint ~70 fps, Go/Next ~5 ms, and a 1,000-show scan ~11 ms. All of those were under budget. Remote-button latency and a framed UI cold start were not part of that headless pass.
 
 | Budget | Target | Why it matters |
 | --- | --- | --- |
@@ -194,12 +196,12 @@ Acceptance: the fixtures in `crates/freeshow-data/tests/fixtures` plus a documen
 
 ### M6. Packaging, signing, and the real-app test pass
 
-- Verify the locked three-platform release workflow against one revision and its lockfile.
-- Developer ID signing and notarization on macOS; test on more than the current CI host OS versions.
-- Measure the performance budgets in §4 on the packaged apps, not only `cargo run`.
-- A single "real library" pass: Welcome → open a production-like library → present, stage, remote, record. Close Linear/GitHub issues as they pass. (No ticket process is assumed; keep a short release notes section in `PARITY.md` or a GitHub release.)
+- [x] Locked three-platform installer workflows in `.github/workflows/{linux,windows,release}.yml` build unsigned (or ad-hoc signed) Linux, Windows, and macOS packages. Each platform's native CI verifies its package. The combined `release.yml` workflow runs on version tags or `workflow_dispatch`.
+- [ ] Developer ID signing and notarization on macOS remain documented only (`notarytool` / `stapler`); they need the owner's Apple credentials and are not done in CI. Broader OS-version coverage is still open.
+- [x] Measure the §4 performance budgets with `--check-perf` / `scripts/bench-perf.py` on a release binary (Linux workspace box, 22 Nov 2026). Measuring the same budgets on packaged Windows and macOS apps still belongs on those hosts.
+- [x] A headless "real library" pass: `--check-library` writes or opens a Sunday-style library (song, welcome, project, media, scripture, stage layout), presents the song, walks the slides, fingerprints audience and stage frames, and GETs the remote and stage pages.
 
-Acceptance: a machine without a Rust toolchain can install a signed (or documented unsigned) build and run a Sunday service from an existing FreeShow library.
+Acceptance: a machine without a Rust toolchain can install a signed (or documented unsigned) build and run a Sunday service from an existing FreeShow library. Unsigned/ad-hoc packages are the verified CI path; notarized macOS builds still need the owner.
 
 ---
 

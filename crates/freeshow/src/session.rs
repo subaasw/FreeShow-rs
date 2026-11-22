@@ -838,6 +838,19 @@ impl Session {
         self.audio_duration = 0.0;
     }
 
+    /// Selects the first show and first slide and applies that slide.
+    pub fn open_first_show(&mut self) -> bool {
+        let Some(id) = self.shows.first().map(|show| show.id.clone()) else {
+            return false;
+        };
+        self.open_show_at(&id, 0)
+    }
+
+    /// Selects a show by id and presents its first slide.
+    pub fn present_show(&mut self, id: &str) -> bool {
+        self.open_show_at(id, 0)
+    }
+
     /// Writes the open show as plain text under the library `Exports/` folder.
     pub fn export_current_show_text(&self) -> Result<PathBuf, String> {
         let root = self
