@@ -85,6 +85,43 @@ pub fn suggestions(word: &str, limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// True when a real dictionary was loaded. The embedded list alone is only a few hundred
+/// words and would flag almost every line, so the editor stays quiet without one.
+pub fn available() -> bool {
+    dictionary().len() > 5_000
+}
+
+/// One-line spelling note for the lyrics editor: up to `max` words with a suggestion each.
+pub fn report(text: &str, max: usize) -> String {
+    if !available() {
+        return String::new();
+    }
+    summarize(&misspelled(text), max, |word| {
+        suggestions(word, 1).into_iter().next()
+    })
+}
+
+fn summarize(words: &[String], max: usize, suggest: impl Fn(&str) -> Option<String>) -> String {
+    if words.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<String> = words
+        .iter()
+        .take(max)
+        .map(|word| match suggest(word) {
+            Some(fix) => format!("{word} → {fix}"),
+            None => word.clone(),
+        })
+        .collect();
+    let more = words.len().saturating_sub(max);
+    let tail = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    format!("Spelling: {}{tail}", shown.join(", "))
+}
+
 fn edit_distance(left: &str, right: &str) -> u32 {
     let left: Vec<u8> = left.bytes().collect();
     let right: Vec<u8> = right.bytes().collect();
@@ -121,5 +158,13 @@ mod tests {
         assert!(!bad.iter().any(|word| word == "Welcome"));
         let hints = suggestions("slied", 5);
         assert!(hints.iter().any(|word| word == "slide"), "{hints:?}");
+    }
+
+    #[test]
+    fn the_spelling_note_lists_a_few_words_with_fixes() {
+        let words = vec!["teh".to_string(), "graec".to_string(), "zzq".to_string()];
+        let note = summarize(&words, 2, |word| (word == "teh").then(|| "the".to_string()));
+        assert_eq!(note, "Spelling: teh → the, graec (+1 more)");
+        assert_eq!(summarize(&[], 3, |_| None), "");
     }
 }

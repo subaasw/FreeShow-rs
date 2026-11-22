@@ -84,6 +84,10 @@ export component ControlWindow inherits Window {
     in property <[string]> autosave-choices;
     in property <string> settings-status;
     callback apply-setting(string, string);
+    in property <string> update-label: "";
+    callback get-update();
+    in-out property <string> spelling: "";
+    callback lyrics-edited(string);
     in property <InspectorData> inspector-data;
     callback inspector-set(string, string);
     in-out property <bool> show-stage-editor: false;
@@ -199,6 +203,13 @@ export component ControlWindow inherits Window {
                     text-color: root.text-color;
                     accent-text: root.show-stage-editor ? root.accent-text : root.text-color;
                     clicked => { root.show-stage-editor = !root.show-stage-editor; root.show-settings = false; }
+                }
+                if root.update-label != "": HeaderButton {
+                    label: root.update-label;
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.get-update(); }
                 }
                 HeaderButton {
                     label: root.screen-label;
@@ -379,6 +390,14 @@ export component ControlWindow inherits Window {
                             text <=> root.lyrics;
                             min-height: 160px;
                             vertical-stretch: 1;
+                            wrap: word-wrap;
+                            edited(text) => { root.lyrics-edited(text); }
+                        }
+                        if root.spelling != "": Text {
+                            text: root.spelling;
+                            color: root.text-color;
+                            opacity: 0.75;
+                            font-size: 12px;
                             wrap: word-wrap;
                         }
                     }

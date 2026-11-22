@@ -5,7 +5,6 @@
 use std::io::Read;
 use std::time::Duration;
 
-#[allow(dead_code)]
 const DEFAULT_REPO: &str = "subaasw/FreeShow-rs";
 const USER_AGENT: &str = "FreeShow-rs";
 
@@ -44,7 +43,6 @@ pub fn check_latest(repo: &str, current: &str, api_base: &str) -> Result<Release
     parse_release(&body, current)
 }
 
-#[allow(dead_code)]
 pub fn check_default() -> Result<ReleaseUpdate, String> {
     check_latest(
         DEFAULT_REPO,
@@ -234,13 +232,6 @@ pub fn verify_checksum(bytes: &[u8], expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Result of writing a verified payload over a binary, with a rollback copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstallResult {
-    pub target: std::path::PathBuf,
-    pub backup: std::path::PathBuf,
-}
-
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     let response = ureq::get(url)
         .set("User-Agent", USER_AGENT)
@@ -262,123 +253,70 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Download `update`, verify its checksum, and swap it over `target`.
-pub fn install_update(
+/// Download `update`'s installer for this platform into `dir` after checking its SHA-256
+/// sidecar. Releases ship archives and installers, not bare binaries, so nothing is swapped
+/// in place: the verified file is handed to the OS with [`reveal`].
+pub fn download_update(
     update: &ReleaseUpdate,
-    target: &std::path::Path,
-) -> Result<InstallResult, String> {
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let url = update
         .download_url
         .as_deref()
         .ok_or_else(|| "release has no download for this platform".to_string())?;
+    let checksum_url = update
+        .checksum_url
+        .as_deref()
+        .ok_or_else(|| "release has no checksum sidecar; refusing to download".to_string())?;
+    let name = url
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty() && !name.contains(['\\', ':']) && *name != "..")
+        .ok_or_else(|| "download URL has no file name".to_string())?;
     let bytes = http_get_bytes(url)?;
-    if let Some(checksum_url) = update.checksum_url.as_deref() {
-        let text =
-            String::from_utf8(http_get_bytes(checksum_url)?).map_err(|err| err.to_string())?;
-        let name = url.rsplit('/').next().unwrap_or("freeshow");
-        let expected = parse_checksum_file(&text, name)
-            .ok_or_else(|| "checksum file did not contain a SHA-256 digest".to_string())?;
-        verify_checksum(&bytes, &expected)?;
+    let text = String::from_utf8(http_get_bytes(checksum_url)?).map_err(|err| err.to_string())?;
+    let expected = parse_checksum_file(&text, name)
+        .ok_or_else(|| "checksum file did not contain a SHA-256 digest".to_string())?;
+    verify_checksum(&bytes, &expected)?;
+    std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    let target = dir.join(name);
+    let partial = dir.join(format!("{name}.part"));
+    std::fs::write(&partial, &bytes).map_err(|err| err.to_string())?;
+    std::fs::rename(&partial, &target).map_err(|err| {
+        let _ = std::fs::remove_file(&partial);
+        err.to_string()
+    })?;
+    Ok(target)
+}
+
+/// Where downloaded updates go: the user's Downloads folder, else the temp dir.
+pub fn download_dir() -> std::path::PathBuf {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    home.map(|home| std::path::PathBuf::from(home).join("Downloads"))
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Hand a downloaded update to the OS: open the disk image on macOS, show the installer in
+/// Explorer on Windows, open the folder on Linux. The operator finishes the install.
+pub fn reveal(path: &std::path::Path) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    } else if cfg!(windows) {
+        let mut command = std::process::Command::new("explorer");
+        command.arg(format!("/select,{}", path.display()));
+        command
     } else {
-        return Err("release has no checksum sidecar; refusing to install".into());
-    }
-    swap_bytes(target, &bytes)
-}
-
-/// Replace `target` with `bytes`, keeping a `.bak` copy for [`rollback`].
-pub fn swap_bytes(target: &std::path::Path, bytes: &[u8]) -> Result<InstallResult, String> {
-    if bytes.is_empty() {
-        return Err("update payload is empty".into());
-    }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    let staging = target.with_file_name({
-        let mut name = target
-            .file_name()
-            .map(|name| name.to_os_string())
-            .unwrap_or_else(|| "freeshow".into());
-        name.push(".new");
-        name
-    });
-    let backup = target.with_file_name({
-        let mut name = target
-            .file_name()
-            .map(|name| name.to_os_string())
-            .unwrap_or_else(|| "freeshow".into());
-        name.push(".bak");
-        name
-    });
-    std::fs::write(&staging, bytes).map_err(|err| err.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&staging)
-            .map_err(|err| err.to_string())?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&staging, perms).map_err(|err| err.to_string())?;
-    }
-    if target.exists() {
-        std::fs::rename(target, &backup).map_err(|err| {
-            let _ = std::fs::remove_file(&staging);
-            format!("could not back up the current binary: {err}")
-        })?;
-    } else if backup.exists() {
-        let _ = std::fs::remove_file(&backup);
-    }
-    if let Err(err) = std::fs::rename(&staging, target) {
-        let _ = rollback(target, &backup);
-        let _ = std::fs::remove_file(&staging);
-        return Err(format!("could not install the new binary: {err}"));
-    }
-    Ok(InstallResult {
-        target: target.to_path_buf(),
-        backup,
-    })
-}
-
-/// Restore the backup written by [`swap_bytes`].
-pub fn rollback(target: &std::path::Path, backup: &std::path::Path) -> Result<(), String> {
-    if !backup.exists() {
-        return Err("backup is missing".into());
-    }
-    if target.exists() {
-        let failed = target.with_file_name({
-            let mut name = target
-                .file_name()
-                .map(|name| name.to_os_string())
-                .unwrap_or_else(|| "freeshow".into());
-            name.push(".failed");
-            name
-        });
-        let _ = std::fs::rename(target, &failed);
-    }
-    std::fs::rename(backup, target).map_err(|err| err.to_string())
-}
-
-/// Start `path` with `args` and detach it from this process.
-pub fn relaunch(path: &std::path::Path, args: &[String]) -> Result<u32, String> {
-    let child = std::process::Command::new(path)
-        .args(args)
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path.parent().unwrap_or(path));
+        command
+    };
+    command
         .spawn()
-        .map_err(|err| format!("could not relaunch {}: {err}", path.display()))?;
-    Ok(child.id())
-}
-
-/// Install from a verified payload, then start the new binary.
-#[allow(dead_code)]
-pub fn install_and_relaunch(
-    update: &ReleaseUpdate,
-    target: &std::path::Path,
-    args: &[String],
-) -> Result<InstallResult, String> {
-    let installed = install_update(update, target)?;
-    if let Err(err) = relaunch(&installed.target, args) {
-        let _ = rollback(&installed.target, &installed.backup);
-        return Err(err);
-    }
-    Ok(installed)
+        .map(|_| ())
+        .map_err(|err| format!("could not open {}: {err}", path.display()))
 }
 
 #[cfg(test)]
@@ -456,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_files_and_a_failed_swap_roll_back() {
+    fn checksum_files_are_parsed_and_verified() {
         let payload = b"freeshow-update-payload";
         let digest = sha256_hex(payload);
         assert_eq!(
@@ -469,23 +407,10 @@ mod tests {
         );
         assert!(verify_checksum(payload, &digest).is_ok());
         assert!(verify_checksum(payload, &"00".repeat(32)).is_err());
-
-        let root =
-            std::env::temp_dir().join(format!("freeshow-update-swap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let target = root.join("freeshow");
-        std::fs::write(&target, b"old-binary").unwrap();
-        let installed = swap_bytes(&target, payload).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), payload);
-        assert_eq!(std::fs::read(&installed.backup).unwrap(), b"old-binary");
-        rollback(&target, &installed.backup).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"old-binary");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn install_update_verifies_the_sidecar_and_refuses_a_bad_hash() {
+    fn download_update_verifies_the_sidecar_and_refuses_a_bad_hash() {
         let payload = b"hello-freeshow";
         let digest = sha256_hex(payload);
         let sidecar_bytes = format!("{digest}  freeshow-linux\n").into_bytes();
@@ -546,8 +471,6 @@ mod tests {
             std::env::temp_dir().join(format!("freeshow-update-http-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let target = root.join("freeshow");
-        std::fs::write(&target, b"previous").unwrap();
         let ok = ReleaseUpdate {
             tag: "v0.2.0".into(),
             version: "0.2.0".into(),
@@ -556,9 +479,10 @@ mod tests {
             download_url: Some(format!("{base}/freeshow-linux")),
             checksum_url: Some(format!("{base}/freeshow-linux.sha256")),
         };
-        let installed = install_update(&ok, &target).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"hello-freeshow");
-        assert_eq!(std::fs::read(&installed.backup).unwrap(), b"previous");
+        let saved = download_update(&ok, &root).unwrap();
+        assert_eq!(saved, root.join("freeshow-linux"));
+        assert_eq!(std::fs::read(&saved).unwrap(), b"hello-freeshow");
+        std::fs::remove_file(&saved).unwrap();
 
         let bad = ReleaseUpdate {
             tag: "v0.3.0".into(),
@@ -568,54 +492,13 @@ mod tests {
             download_url: Some(format!("{base}/freeshow-linux")),
             checksum_url: Some(format!("{base}/bad.sha256")),
         };
-        assert!(install_update(&bad, &target).is_err());
-        assert_eq!(std::fs::read(&target).unwrap(), b"hello-freeshow");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn relaunch_starts_the_new_binary() {
-        let root = std::env::temp_dir().join(format!("freeshow-relaunch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let marker = root.join("started");
-        #[cfg(unix)]
-        let pid = {
-            use std::os::unix::fs::PermissionsExt;
-            let script = root.join("relaunch.sh");
-            std::fs::write(&script, "#!/bin/sh\nprintf ok > \"$1\"\n").unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-            relaunch(&script, &[marker.to_string_lossy().into_owned()]).unwrap()
+        assert!(download_update(&bad, &root).is_err());
+        assert!(!root.join("freeshow-linux").exists());
+        let unsigned = ReleaseUpdate {
+            checksum_url: None,
+            ..ok.clone()
         };
-        #[cfg(windows)]
-        let pid = {
-            let copy = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-                .join(r"System32\robocopy.exe");
-            let source = root.join("source folder");
-            std::fs::create_dir(&source).unwrap();
-            std::fs::write(source.join("started"), "ok").unwrap();
-            relaunch(
-                &copy,
-                &[
-                    source.to_string_lossy().into_owned(),
-                    root.to_string_lossy().into_owned(),
-                    "started".into(),
-                    "/R:0".into(),
-                    "/W:0".into(),
-                ],
-            )
-            .unwrap()
-        };
-        assert!(pid > 0);
-        let deadline = std::time::Instant::now() + Duration::from_secs(8);
-        while std::time::Instant::now() < deadline {
-            if std::fs::read_to_string(&marker).ok().as_deref() == Some("ok") {
-                let _ = std::fs::remove_dir_all(&root);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert!(download_update(&unsigned, &root).is_err());
         let _ = std::fs::remove_dir_all(&root);
-        panic!("relaunched process did not write the marker");
     }
 }
