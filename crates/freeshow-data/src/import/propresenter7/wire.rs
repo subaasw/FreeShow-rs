@@ -312,8 +312,35 @@ pub(super) enum ShapeType {
 pub(super) struct Fill {
     #[prost(message, optional, tag = "1")]
     pub color: Option<Color>,
+    #[prost(message, optional, tag = "2")]
+    pub gradient: Option<Gradient>,
     #[prost(bool, tag = "4")]
     pub enabled: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Gradient {
+    #[prost(enumeration = "GradientType", tag = "1")]
+    pub kind: i32,
+    #[prost(double, tag = "2")]
+    pub angle: f64,
+    #[prost(message, repeated, tag = "4")]
+    pub stops: Vec<ColorStop>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+pub(super) enum GradientType {
+    Linear = 0,
+    Radial = 1,
+    Angle = 2,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct ColorStop {
+    #[prost(message, optional, tag = "1")]
+    pub color: Option<Color>,
+    #[prost(double, tag = "2")]
+    pub position: f64,
 }
 
 #[derive(Clone, PartialEq, Message)]
