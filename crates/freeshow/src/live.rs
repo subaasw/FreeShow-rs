@@ -516,10 +516,18 @@ pub fn stage_frame(session: &Session) -> Frame {
         Some(Some(ProgramContent::Scripture(lines))) => Some(lines.clone()),
         Some(_) => None,
         None => (session.tab == "scripture").then(|| session.output_lines()),
-    };
+    }
+    .map(|lines| {
+        if session.blanked || session.slide_hidden {
+            Vec::new()
+        } else {
+            lines
+        }
+    });
     let (show_slot, current_index, reveal, clicks, page) = held_slide.unwrap_or((
         session.show_index,
-        if matches!(held, Some(None)) {
+        // Nothing is on the output, as after Clear or a foreground video.
+        if matches!(held, Some(None)) || session.blanked || session.slide_hidden {
             None
         } else {
             session.slide_index
@@ -1997,6 +2005,27 @@ mod tests {
         session.clear_output();
         assert_eq!(audience_frame(&session).pixel(0, 0), Rgba::BLACK);
         assert_ne!(stage_frame(&session).pixels, stage.pixels);
+    }
+
+    #[test]
+    fn hidden_slide_text_leaves_the_stage_too() {
+        let mut show = ShowFile::blank("hide", "Hide");
+        let first = show.ordered_slides()[0].id.clone();
+        show.show["slides"][&first]["items"] = serde_json::json!([
+            {"type":"text","lines":[{"text":[{"value":"On screen"}]}]}
+        ]);
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        session.show_index = Some(0);
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == freeshow_data::StageItemKind::Slide && item.offset == 0);
+        let empty = stage_frame(&session);
+        session.select_slide(0);
+        assert_ne!(stage_frame(&session).pixels, empty.pixels);
+        session.slide_hidden = true;
+        assert_eq!(stage_frame(&session).pixels, empty.pixels);
     }
 
     #[test]
