@@ -165,6 +165,14 @@ export global ComboIndex {
     pure callback find([string], string) -> int;
 }
 
+/// A line edit that shows `shown` and follows it when the data changes, even after the
+/// operator typed into it (typing would otherwise cut the binding).
+export component ValueEdit inherits LineEdit {
+    in property <string> shown;
+    text: self.shown;
+    changed shown => { self.text = self.shown; }
+}
+
 /// A spin box that shows `shown` and follows it when the data changes, even after the
 /// operator typed into it (which would otherwise cut the binding).
 component ValueSpin inherits SpinBox {
@@ -223,8 +231,8 @@ export component SettingsPanel inherits Rectangle {
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Language"; text-color: root.text-color; }
-                        LineEdit {
-                            text: root.data.language;
+                        ValueEdit {
+                            shown: root.data.language;
                             placeholder-text: "en";
                             accepted(value) => { root.apply("language", value); }
                         }
@@ -380,8 +388,8 @@ export component SettingsPanel inherits Rectangle {
                     }
                     for row in root.data.theme-colors: Row {
                         SettingLabel { text: row.label; text-color: root.text-color; }
-                        LineEdit {
-                            text: row.hex;
+                        ValueEdit {
+                            shown: row.hex;
                             accepted(value) => { root.apply("themeColor." + row.key, value); }
                         }
                         Rectangle {
@@ -394,9 +402,9 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Font"; text-color: root.text-color; }
-                        LineEdit {
+                        ValueEdit {
                             colspan: 2;
-                            text: root.data.theme-font;
+                            shown: root.data.theme-font;
                             placeholder-text: "System font";
                             accepted(value) => { root.apply("themeFont", value); }
                         }
@@ -464,9 +472,9 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Name"; text-color: root.text-color; }
-                        LineEdit {
+                        ValueEdit {
                             colspan: 2;
-                            text: root.data.output-name;
+                            shown: root.data.output-name;
                             placeholder-text: "Primary";
                             accepted(value) => { root.apply("outputName", value); }
                         }
@@ -536,16 +544,16 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Name"; text-color: root.text-color; }
-                        LineEdit {
+                        ValueEdit {
                             colspan: 2;
-                            text: root.data.style-name;
+                            shown: root.data.style-name;
                             accepted(value) => { root.apply("styleName", value); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Background"; text-color: root.text-color; }
-                        LineEdit {
-                            text: root.data.style-background;
+                        ValueEdit {
+                            shown: root.data.style-background;
                             placeholder-text: "#000000 (black)";
                             accepted(value) => { root.apply("styleBackground", value); }
                         }
@@ -719,10 +727,10 @@ export component InspectorPanel inherits VerticalLayout {
     spacing: 6px;
     HorizontalLayout {
         spacing: 6px;
-        LineEdit {
+        ValueEdit {
             horizontal-stretch: 2;
             enabled: root.data.has-item;
-            text: root.data.family;
+            shown: root.data.family;
             placeholder-text: "Font family";
             accepted(value) => { root.set("font-family", value); }
         }
@@ -761,18 +769,18 @@ export component InspectorPanel inherits VerticalLayout {
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Color"; text-color: root.text-color; min-width: 48px; }
-        LineEdit {
+        ValueEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
-            text: root.data.color;
+            shown: root.data.color;
             placeholder-text: "#FFFFFF";
             accepted(value) => { root.set("color", value); }
         }
         FieldLabel { text: "Fill"; text-color: root.text-color; min-width: 32px; }
-        LineEdit {
+        ValueEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
-            text: root.data.background;
+            shown: root.data.background;
             placeholder-text: "none";
             accepted(value) => { root.set("background-color", value); }
         }
@@ -808,10 +816,10 @@ export component InspectorPanel inherits VerticalLayout {
         spacing: 6px;
         FieldLabel { text: "Outline"; text-color: root.text-color; min-width: 48px; }
         ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; shown: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
-        LineEdit {
+        ValueEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
-            text: root.data.outline-color;
+            shown: root.data.outline-color;
             placeholder-text: "#000000";
             accepted(value) => { root.set("outline-color", value); }
         }
@@ -820,10 +828,10 @@ export component InspectorPanel inherits VerticalLayout {
         spacing: 6px;
         FieldLabel { text: "Shadow"; text-color: root.text-color; min-width: 48px; }
         ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; shown: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
-        LineEdit {
+        ValueEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
-            text: root.data.shadow-color;
+            shown: root.data.shadow-color;
             placeholder-text: "#000000";
             accepted(value) => { root.set("shadow-color", value); }
         }
@@ -1001,8 +1009,8 @@ export component StageEditorPanel inherits Rectangle {
                         FieldLabel { text: "Font size"; text-color: root.text-color; }
                         ValueSpin { minimum: 8; maximum: 800; shown: root.current.font-px; edited(value) => { root.set(root.current.id, "font-size", value); } }
                         FieldLabel { text: "Color"; text-color: root.text-color; }
-                        LineEdit {
-                            text: root.current.color;
+                        ValueEdit {
+                            shown: root.current.color;
                             placeholder-text: "#FFFFFF";
                             accepted(value) => { root.set(root.current.id, "color", value); }
                         }
@@ -1074,10 +1082,10 @@ export component StageEditorPanel inherits Rectangle {
                     }
                     if root.current.kind == "media": Row {
                         FieldLabel { text: "File"; text-color: root.text-color; }
-                        LineEdit {
+                        ValueEdit {
                             colspan: 3;
                             placeholder-text: "Picture or video path, then Enter";
-                            text: root.current.src;
+                            shown: root.current.src;
                             accepted(value) => { root.set(root.current.id, "src", value); }
                         }
                     }
@@ -1097,9 +1105,9 @@ export component StageEditorPanel inherits Rectangle {
                             selected(value) => { root.set(root.current.id, "tracker-type", self.current-index == 1 ? "bar" : "number"); }
                         }
                         FieldLabel { text: "Bar color"; text-color: root.text-color; }
-                        LineEdit {
+                        ValueEdit {
                             placeholder-text: "Theme accent";
-                            text: root.current.tracker-accent;
+                            shown: root.current.tracker-accent;
                             accepted(value) => { root.set(root.current.id, "tracker-accent", value); }
                         }
                     }
