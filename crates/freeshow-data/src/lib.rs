@@ -47,7 +47,7 @@ impl Default for TextTransition {
 /// The parts of FreeShow's library `settings.json` this app understands.
 ///
 /// Missing or malformed values stay `None`; callers keep their own defaults.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FreeShowPreferences {
     /// Theme key, for example `default`, `dark`, or `blue`.
     pub theme: Option<String>,
@@ -72,6 +72,34 @@ pub struct FreeShowPreferences {
     pub max_connections: Option<u32>,
     /// Audience outputs stored in `settings.json`, in file order.
     pub outputs: Vec<OutputPreference>,
+    /// `outLocked`: when true, the operator cannot change what is on the output.
+    pub out_locked: Option<bool>,
+    /// `splitLines`: max lyric lines per imported slide, or 0 to leave lines as they are.
+    pub split_lines: Option<u32>,
+    pub full_colors: Option<bool>,
+    pub alert_updates: Option<bool>,
+    pub custom_fonts: Value,
+    /// `lockedOverlays`: map of output id to overlay ids that stay on that output.
+    pub locked_overlays: Value,
+    pub active_scenes: Value,
+    pub resized: Value,
+    pub slides_options: Value,
+    pub drawer: Value,
+    pub metronome: Value,
+    pub audio_effects: Value,
+    pub effects_library: Value,
+    pub timeline: Value,
+    pub timecode: Value,
+    pub cloud_sync_data: Value,
+    pub drive_data: Value,
+    pub content_provider_data: Value,
+    pub obs_data: Value,
+    pub ai: Value,
+    /// From `settings_synced.json`.
+    pub draw_settings: Value,
+    pub profiles: Value,
+    pub scenes: Value,
+    pub interactions: Value,
 }
 
 /// One output from FreeShow's library `settings.json`.
@@ -128,6 +156,36 @@ impl FreeShowPreferences {
 
     pub fn max_connections(&self) -> u32 {
         self.max_connections.unwrap_or(10)
+    }
+
+    /// The output is locked unless this is stored as true.
+    pub fn out_locked(&self) -> bool {
+        self.out_locked.unwrap_or(false)
+    }
+
+    /// 0 means imported text is not split into fixed-size pages.
+    pub fn split_lines(&self) -> u32 {
+        self.split_lines.unwrap_or(0)
+    }
+
+    pub fn full_colors(&self) -> bool {
+        self.full_colors.unwrap_or(false)
+    }
+
+    /// FreeShow alerts the operator about updates unless this is stored as false.
+    pub fn alert_updates(&self) -> bool {
+        self.alert_updates.unwrap_or(true)
+    }
+
+    /// Overlay ids locked onto `output_id`, falling back to the `default` output list.
+    pub fn locked_overlay_ids(&self, output_id: &str) -> Vec<String> {
+        locked_overlay_ids(&self.locked_overlays, output_id)
+    }
+
+    pub fn overlay_is_locked(&self, output_id: &str, overlay_id: &str) -> bool {
+        self.locked_overlay_ids(output_id)
+            .iter()
+            .any(|id| id == overlay_id)
     }
 
     /// Pixel size of the active (or first enabled) output, when `bounds` were stored.
@@ -3798,6 +3856,10 @@ impl Library {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         };
+        let synced: Value = fs::read_to_string(self.synced_settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
         FreeShowPreferences {
             theme,
             themes: fs::read_to_string(self.root.join(CONFIG_DIR).join("themes.json"))
@@ -3827,6 +3889,33 @@ impl Library {
                 .and_then(|value| u32::try_from(value).ok())
                 .filter(|value| *value <= 10_000),
             outputs: output_preferences(&json),
+            out_locked: flag("outLocked"),
+            split_lines: json
+                .get("splitLines")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
+            full_colors: flag("fullColors"),
+            alert_updates: flag("alertUpdates"),
+            custom_fonts: stored_value(&json, "customFonts"),
+            locked_overlays: stored_value(&json, "lockedOverlays"),
+            active_scenes: stored_value(&json, "activeScenes"),
+            resized: stored_value(&json, "resized"),
+            slides_options: stored_value(&json, "slidesOptions"),
+            drawer: stored_value(&json, "drawer"),
+            metronome: stored_value(&json, "metronome"),
+            audio_effects: stored_value(&json, "audioEffects"),
+            effects_library: stored_value(&json, "effectsLibrary"),
+            timeline: stored_value(&json, "timeline"),
+            timecode: stored_value(&json, "timecode"),
+            cloud_sync_data: stored_value(&json, "cloudSyncData"),
+            drive_data: stored_value(&json, "driveData"),
+            content_provider_data: stored_value(&json, "contentProviderData"),
+            obs_data: stored_value(&json, "obsData"),
+            ai: stored_value(&json, "ai"),
+            draw_settings: stored_value(&synced, "drawSettings"),
+            profiles: stored_value(&synced, "profiles"),
+            scenes: stored_value(&synced, "scenes"),
+            interactions: stored_value(&synced, "interactions"),
         }
     }
 
@@ -4751,6 +4840,48 @@ fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
                 .and_then(|value| u32::try_from(value).ok())
                 .filter(|value| *value > 0),
         })
+        .collect()
+}
+
+fn stored_value(json: &Value, name: &str) -> Value {
+    json.get(name)
+        .cloned()
+        .filter(|value| !value.is_null())
+        .unwrap_or(Value::Null)
+}
+
+fn locked_overlay_ids(locked: &Value, output_id: &str) -> Vec<String> {
+    if let Some(list) = locked.as_array() {
+        return string_ids(list);
+    }
+    let Some(map) = locked.as_object() else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for key in [output_id, "default"] {
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(Value::Array(list)) = map.get(key) {
+            for id in string_ids(list) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if key == output_id && !ids.is_empty() {
+            return ids;
+        }
+    }
+    ids
+}
+
+fn string_ids(list: &[Value]) -> Vec<String> {
+    list.iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
         .collect()
 }
 
@@ -5971,6 +6102,134 @@ mod tests {
         fs::write(library.settings_path(), r#"{"autosave":"never"}"#).unwrap();
         assert_eq!(library.preferences().autosave.as_deref(), Some("never"));
         assert_eq!(library.preferences().autosave_interval(), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn library_preferences_read_remaining_settings_keys() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-remaining-settings-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(CONFIG_DIR)).unwrap();
+        let library = Library::open(&root);
+        fs::write(
+            library.settings_path(),
+            r#"{
+                "outLocked": true,
+                "splitLines": 4,
+                "fullColors": true,
+                "alertUpdates": false,
+                "customFonts": [{"name": "Display", "path": "fonts/Display.ttf"}],
+                "lockedOverlays": {"default": ["logo", "lower"]},
+                "activeScenes": {"default": ["warm"]},
+                "resized": {"drawer": 320},
+                "slidesOptions": {"columns": 4, "mode": "grid"},
+                "drawer": {"height": 220},
+                "metronome": {"bpm": 80},
+                "audioEffects": {"main": {"reverb": 0.2}},
+                "effectsLibrary": [{"path": "fx/glow.json", "name": "Glow"}],
+                "timeline": {"zoom": 1.5},
+                "timecode": {"enabled": true},
+                "cloudSyncData": {"enabled": false},
+                "driveData": {"method": "disable"},
+                "contentProviderData": {"planningcenter": {"churchId": "c1"}},
+                "obsData": {"enabled": true, "port": 4455},
+                "ai": {"language": "en"}
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            library.synced_settings_path(),
+            r#"{"drawSettings":{"color":"yellow"},"profiles":{"house":{"name":"House"}},"scenes":{"warm":{"name":"Warm"}},"interactions":{"go":{"action":"next"}}}"#,
+        )
+        .unwrap();
+        let preferences = library.preferences();
+        assert!(preferences.out_locked());
+        assert_eq!(preferences.split_lines(), 4);
+        assert!(preferences.full_colors());
+        assert!(!preferences.alert_updates());
+        assert_eq!(
+            preferences.locked_overlay_ids("default"),
+            vec!["logo".to_string(), "lower".to_string()]
+        );
+        assert!(preferences.overlay_is_locked("default", "logo"));
+        assert_eq!(
+            preferences.custom_fonts,
+            serde_json::json!([{"name": "Display", "path": "fonts/Display.ttf"}])
+        );
+        assert_eq!(
+            preferences.active_scenes,
+            serde_json::json!({"default": ["warm"]})
+        );
+        assert_eq!(preferences.resized, serde_json::json!({"drawer": 320}));
+        assert_eq!(
+            preferences.slides_options,
+            serde_json::json!({"columns": 4, "mode": "grid"})
+        );
+        assert_eq!(preferences.drawer, serde_json::json!({"height": 220}));
+        assert_eq!(preferences.metronome, serde_json::json!({"bpm": 80}));
+        assert_eq!(
+            preferences.audio_effects,
+            serde_json::json!({"main": {"reverb": 0.2}})
+        );
+        assert_eq!(
+            preferences.effects_library,
+            serde_json::json!([{"path": "fx/glow.json", "name": "Glow"}])
+        );
+        assert_eq!(preferences.timeline, serde_json::json!({"zoom": 1.5}));
+        assert_eq!(preferences.timecode, serde_json::json!({"enabled": true}));
+        assert_eq!(
+            preferences.cloud_sync_data,
+            serde_json::json!({"enabled": false})
+        );
+        assert_eq!(
+            preferences.drive_data,
+            serde_json::json!({"method": "disable"})
+        );
+        assert_eq!(
+            preferences.content_provider_data,
+            serde_json::json!({"planningcenter": {"churchId": "c1"}})
+        );
+        assert_eq!(
+            preferences.obs_data,
+            serde_json::json!({"enabled": true, "port": 4455})
+        );
+        assert_eq!(preferences.ai, serde_json::json!({"language": "en"}));
+        assert_eq!(
+            preferences.draw_settings,
+            serde_json::json!({"color": "yellow"})
+        );
+        assert_eq!(
+            preferences.profiles,
+            serde_json::json!({"house": {"name": "House"}})
+        );
+        assert_eq!(
+            preferences.scenes,
+            serde_json::json!({"warm": {"name": "Warm"}})
+        );
+        assert_eq!(
+            preferences.interactions,
+            serde_json::json!({"go": {"action": "next"}})
+        );
+        let defaults = FreeShowPreferences::default();
+        assert!(!defaults.out_locked());
+        assert_eq!(defaults.split_lines(), 0);
+        assert!(!defaults.full_colors());
+        assert!(defaults.alert_updates());
+        assert!(defaults.locked_overlay_ids("default").is_empty());
+        fs::write(
+            library.settings_path(),
+            r#"{"outLocked":"yes","splitLines":-1,"alertUpdates":"no"}"#,
+        )
+        .unwrap();
+        fs::write(library.synced_settings_path(), "not json").unwrap();
+        let ignored = library.preferences();
+        assert!(!ignored.out_locked());
+        assert_eq!(ignored.split_lines(), 0);
+        assert!(ignored.alert_updates());
+        assert_eq!(ignored.draw_settings, Value::Null);
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -68,7 +68,7 @@ Dependency direction stays downward: `freeshow` → integrations / `remote` / `m
 
 Show files are a JSON array `[id, show]`, which is what FreeShow writes. `freeshow-data` keeps unknown fields in the `serde_json::Value` so a save does not drop data this crate does not yet understand. That rule is load-bearing and must not be "cleaned up" into fully typed structs that drop unknown keys.
 
-Library folders use the same names as Electron: `Shows/`, `Config/` (`projects.json`, `templates.json`, `overlays.json`, `events.json`, `stage.json`, `settings_synced.json`, `themes.json`), `Bibles/`, `Media/`, `Audio/`, `Imports/`, `Backups/`. The app also reads a subset of the library `settings.json` (theme, remote password, ports, transitions, audio routing). The rest of that file is still unread; new settings work should extend `FreeShowPreferences` field-by-field with tests against fixtures copied from upstream.
+Library folders use the same names as Electron: `Shows/`, `Config/` (`projects.json`, `templates.json`, `overlays.json`, `events.json`, `stage.json`, `settings_synced.json`, `themes.json`), `Bibles/`, `Media/`, `Audio/`, `Imports/`, `Backups/`. The app reads the library `settings.json` keys listed in `PARITY.md` (theme, remote password, ports, transitions, audio routing, operator flags, outputs, and the remaining stored objects including synced `drawSettings`, `profiles`, `scenes`, and `interactions`). New settings work should keep extending `FreeShowPreferences` field-by-field with tests against fixtures.
 
 ### 1.3 Build and quality baseline
 
@@ -209,7 +209,7 @@ Close the remaining gaps versus FreeShow 1.6.8 so a Sunday operator can run a se
 
 - [x] Paint the compositor at the real output resolution (1920×1080 by default, or the active output's stored `bounds`) and re-measure the §4 budgets (Linux box, 22 Nov 2026: stills ~63 fps, video ~56 fps, Go/Next ~15 ms).
 - [x] Remaining importers: MediaShout, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only shows, and project packages, each with a small fixture and tests. Native MediaShout `.mdb` and Canva presentations stay out (Canva needs an account).
-- [ ] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures.
+- [x] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures. `outLocked` and `lockedOverlays` also take effect; drawer and similar chrome still use the stored objects in later M7 work.
 - [ ] Operator chrome, drawer, and output extras still listed as gaps.
 - [ ] Capture and I/O gaps.
 - [ ] Measure remote-button latency against the ≤20 ms budget.

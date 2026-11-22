@@ -393,6 +393,7 @@ impl Session {
             .configured_output_size()
             .map(|(width, height)| aligned_output_size(width, height))
             .unwrap_or((OUTPUT_WIDTH, OUTPUT_HEIGHT));
+        let active_overlays = preferences.locked_overlay_ids(&library.audience_output().0);
         Self {
             root: Some(root),
             icecast: library.icecast(),
@@ -414,7 +415,7 @@ impl Session {
             template_catalog,
             overlays,
             overlay_catalog,
-            active_overlays: Vec::new(),
+            active_overlays,
             bibles,
             scripture,
             media,
@@ -841,6 +842,9 @@ impl Session {
     }
 
     pub fn clear_output(&mut self) {
+        if self.preferences.out_locked() {
+            return;
+        }
         self.underlay = None;
         self.reset_background_look();
         self.playing_audio = None;
@@ -849,6 +853,26 @@ impl Session {
         self.video_duration = 0.0;
         self.audio_time = 0.0;
         self.audio_duration = 0.0;
+    }
+
+    fn output_id(&self) -> String {
+        self.audience().0
+    }
+
+    fn locked_overlay_ids(&self) -> Vec<String> {
+        self.preferences.locked_overlay_ids(&self.output_id())
+    }
+
+    fn overlay_is_locked(&self, id: &str) -> bool {
+        self.preferences.overlay_is_locked(&self.output_id(), id)
+    }
+
+    fn restore_locked_overlays(&mut self) {
+        for id in self.locked_overlay_ids() {
+            if !self.active_overlays.iter().any(|active| active == &id) {
+                self.active_overlays.push(id);
+            }
+        }
     }
 
     /// Selects the first show and first slide and applies that slide.
@@ -919,7 +943,9 @@ impl Session {
             return DrawerAction::None;
         };
         if let Some(pos) = self.active_overlays.iter().position(|active| active == &id) {
-            self.active_overlays.remove(pos);
+            if !self.overlay_is_locked(&id) {
+                self.active_overlays.remove(pos);
+            }
         } else {
             self.active_overlays.push(id);
         }
@@ -1753,8 +1779,11 @@ impl Session {
             })
             .unwrap_or_default();
         for id in ids {
-            self.active_overlays.retain(|active| active != &id);
+            if !self.overlay_is_locked(&id) {
+                self.active_overlays.retain(|active| active != &id);
+            }
         }
+        self.restore_locked_overlays();
     }
 
     /// Stores the transition this slide names so the next frame uses it.
@@ -1875,6 +1904,7 @@ impl Session {
             .unwrap_or((false, Vec::new()));
         if clear {
             self.active_overlays.clear();
+            self.restore_locked_overlays();
         }
         for id in ids {
             if self.overlay_catalog.get(&id).is_some()
@@ -1883,6 +1913,7 @@ impl Session {
                 self.active_overlays.push(id);
             }
         }
+        self.restore_locked_overlays();
     }
 
     /// Stops the playing audio when this slide asks for that.
@@ -2378,6 +2409,9 @@ impl Session {
     }
 
     pub fn select_slide(&mut self, index: usize) {
+        if self.preferences.out_locked() {
+            return;
+        }
         self.blanked = false;
         self.slide_hidden = false;
         if self.tab == "scripture" {
@@ -2840,8 +2874,12 @@ impl Session {
                 let _ = self.open_project_item(index, slide);
             }
             freeshow_remote::Command::Clear => {
+                if self.preferences.out_locked() {
+                    return;
+                }
                 self.blanked = true;
                 self.active_overlays.clear();
+                self.restore_locked_overlays();
                 self.clear_output();
             }
             freeshow_remote::Command::ShowOverlay { id } => {
@@ -2852,10 +2890,17 @@ impl Session {
                 }
             }
             freeshow_remote::Command::ClearOverlay { id } => {
+                if self.preferences.out_locked() || self.overlay_is_locked(&id) {
+                    return;
+                }
                 self.active_overlays.retain(|active| active != &id);
             }
             freeshow_remote::Command::ClearOverlays => {
+                if self.preferences.out_locked() {
+                    return;
+                }
                 self.active_overlays.clear();
+                self.restore_locked_overlays();
             }
             freeshow_remote::Command::Play { name } => {
                 let _ = self.play_named(&name);
@@ -3394,6 +3439,9 @@ impl Session {
 
     /// The next slide in this song, the next picture in a folder, or the next project item.
     pub fn advance_show(&mut self) -> bool {
+        if self.preferences.out_locked() {
+            return false;
+        }
         if self.step_folder(1) {
             return true;
         }
@@ -3644,6 +3692,9 @@ impl Session {
 
     /// The previous slide in this song, the previous picture in a folder, or the previous project item.
     pub fn retreat_show(&mut self) -> bool {
+        if self.preferences.out_locked() {
+            return false;
+        }
         if self.step_folder(-1) {
             return true;
         }
@@ -4859,6 +4910,53 @@ mod tests {
         assert_eq!(session.active_overlays, vec!["logo".to_string()]);
         session.select_slide(1);
         assert!(session.active_overlays.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn locked_overlays_stay_on_and_out_locked_blocks_output() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-locked-settings-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{
+                "lockedOverlays": {"default": ["logo"]},
+                "outputs": {"default": {"enabled": true, "active": true, "name": "Main"}}
+            }"#,
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        session.overlay_catalog = Catalog::parse(r#"{"logo":{"name":"Logo"}}"#).unwrap();
+        assert_eq!(session.active_overlays, vec!["logo".to_string()]);
+        assert!(session.create_project());
+        assert!(session.create_show());
+        let show_id = session.current_show().unwrap().id.clone();
+        {
+            let show_index = session.show_index.unwrap();
+            let show = &mut session.shows[show_index];
+            assert!(show.add_slide().is_some());
+        }
+        assert!(session.present_show_id(&show_id));
+        assert_eq!(session.slide_index, Some(0));
+        assert_eq!(session.active_overlays, vec!["logo".to_string()]);
+        session.preferences.out_locked = Some(true);
+        session.video_time = 9.0;
+        session.clear_output();
+        assert_eq!(session.video_time, 9.0);
+        assert!(!session.advance_show());
+        assert_eq!(session.slide_index, Some(0));
+        assert!(!session.retreat_show());
+        session.select_slide(1);
+        assert_eq!(session.slide_index, Some(0));
+        session.apply_remote(freeshow_remote::Command::ClearOverlays);
+        assert_eq!(session.active_overlays, vec!["logo".to_string()]);
+        session.preferences.out_locked = Some(false);
+        session.apply_remote(freeshow_remote::Command::ClearOverlays);
+        assert_eq!(session.active_overlays, vec!["logo".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
