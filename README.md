@@ -81,7 +81,7 @@ On a native Mac, the script also creates `FreeShow Rust.app` and a compressed `.
 
 The bundle includes this project's source archive, GPL license, DejaVu license, and available third-party license files/Homebrew source recipes. Source files must be tracked and the working tree must match the Git index; use a clean checkout for release builds. The imported FreeShow icon is credited in `ICON-SOURCE.txt`.
 
-Packaging relocates the app into a path with spaces, cold-scans its plugins with an empty home/cache, and decodes an H.264 sample without opening windows. Where `sandbox-exec` is available, these checks deny reads from Homebrew and Rust toolchain directories. The DMG is verified, mounted read-only, and checked again. Results go into `macos-verification.json`. The default signature is ad-hoc for development; public-distribution signing and notarization are not performed automatically. To sign with your own identity, use the packaging helper after building:
+Packaging relocates the app into a path with spaces, cold-scans its plugins with an empty home/cache, and decodes an H.264 sample without opening windows. Where `sandbox-exec` is available, these checks deny reads from Homebrew and Rust toolchain directories. The DMG is verified, mounted read-only, and checked again. Results go into `macos-verification.json`. Native macOS 26 CI verified the Apple Silicon app and mounted disk image. The default signature is ad-hoc for development; public-distribution signing and notarization are not performed automatically. To sign with your own identity, use the packaging helper after building:
 
 ```sh
 python3 scripts/package-macos.py --binary target/release/freeshow --output dist/macos --identity "Developer ID Application: Your Name (TEAMID)" --dmg
