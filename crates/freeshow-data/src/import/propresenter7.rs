@@ -17,12 +17,25 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     let document = wire::Presentation::decode(bytes).map_err(invalid)?;
     let mut cues = HashMap::new();
     let mut cue_order = Vec::new();
+    let mut import_warnings = Vec::new();
     for cue in &document.cues {
         let Some(id) = id(&cue.uuid) else { continue };
-        let action = cue
-            .actions
-            .iter()
-            .find_map(|action| action.slide.as_ref()?.presentation.as_ref());
+        let unsupported = unsupported_actions(cue);
+        if !unsupported.is_empty() {
+            let name = if cue.name.trim().is_empty() {
+                id
+            } else {
+                cue.name.as_str()
+            };
+            import_warnings.push(format!(
+                "Cue '{name}' has unsupported actions ({})",
+                unsupported.join(", ")
+            ));
+        }
+        let action = cue.actions.iter().find_map(|action| {
+            action_carries_slide(action)?;
+            action.slide.as_ref()?.presentation.as_ref()
+        });
         if action.is_none() && background(cue).is_none() {
             continue;
         }
@@ -37,6 +50,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
 
     let mut slides = Map::new();
     let mut media = Map::new();
+    let mut cue_slides = HashMap::new();
     let mut groups = HashMap::new();
     let mut in_group = HashSet::new();
     let mut default_order = Vec::new();
@@ -51,7 +65,14 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
                 continue;
             }
             let group = if members.is_empty() { info } else { None };
-            members.push(add_slide(cue, action, group, &mut slides, &mut media));
+            members.push(add_slide(
+                cue,
+                action,
+                group,
+                &mut slides,
+                &mut media,
+                &mut cue_slides,
+            ));
         }
         let Some(mut parent) = members.first().cloned() else {
             continue;
@@ -80,7 +101,14 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     for cue_id in cue_order {
         if !in_group.contains(cue_id) {
             let (cue, action) = cues[cue_id];
-            default_order.push(add_slide(cue, action, None, &mut slides, &mut media));
+            default_order.push(add_slide(
+                cue,
+                action,
+                None,
+                &mut slides,
+                &mut media,
+                &mut cue_slides,
+            ));
         }
     }
 
@@ -144,6 +172,27 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     show.show["slides"] = Value::Object(slides);
     show.show["media"] = Value::Object(media);
     show.show["layouts"] = Value::Object(layouts);
+    let layout_key = show.show["settings"]["activeLayout"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            show.show["layouts"]
+                .as_object()
+                .and_then(|layouts| layouts.keys().next())
+                .cloned()
+        });
+    if let Some(key) = layout_key
+        && let Some(timeline) = layout_timeline(
+            document.timeline.as_ref(),
+            &show.show["layouts"][&key],
+            &cue_slides,
+        )
+    {
+        show.show["layouts"][key]["timeline"] = timeline;
+    }
+    if !import_warnings.is_empty() {
+        show.show["settings"]["importWarnings"] = json!(import_warnings);
+    }
     if let Some(ccli) = document.ccli {
         show.show["meta"] =
             json!({"author": ccli.author, "title": ccli.title, "publisher": ccli.publisher});
@@ -188,8 +237,12 @@ fn add_slide(
     group: Option<&wire::Group>,
     slides: &mut Map<String, Value>,
     media: &mut Map<String, Value>,
+    cue_slides: &mut HashMap<String, String>,
 ) -> Value {
     let slide_id = format!("s{}", slides.len() + 1);
+    if let Some(cue_id) = id(&cue.uuid) {
+        cue_slides.insert(cue_id.to_owned(), slide_id.clone());
+    }
     let mut node = json!({"id": slide_id, "disabled": !cue.enabled});
     if cue.enabled
         && cue.completion_target() == wire::CompletionTarget::Next
@@ -242,8 +295,124 @@ fn add_slide(
     node
 }
 
+fn action_carries_slide(action: &wire::Action) -> Option<()> {
+    match action.kind() {
+        wire::ActionType::PresentationSlide | wire::ActionType::Unknown => Some(()),
+        _ => None,
+    }
+    .filter(|_| action.slide.is_some())
+}
+
+fn action_carries_media(action: &wire::Action) -> Option<()> {
+    match action.kind() {
+        wire::ActionType::Media
+        | wire::ActionType::ForegroundMedia
+        | wire::ActionType::BackgroundMedia
+        | wire::ActionType::Unknown => Some(()),
+        _ => None,
+    }
+    .filter(|_| action.media.is_some())
+}
+
+fn unsupported_actions(cue: &wire::Cue) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    for action in &cue.actions {
+        if action_carries_slide(action).is_some() || action_carries_media(action).is_some() {
+            continue;
+        }
+        match action.kind() {
+            wire::ActionType::Unknown => {}
+            kind => {
+                let label = kind.label();
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+        }
+    }
+    labels
+}
+
+fn layout_timeline(
+    timeline: Option<&wire::Timeline>,
+    layout: &Value,
+    cue_slides: &HashMap<String, String>,
+) -> Option<Value> {
+    let timeline = timeline?;
+    let cues = if !timeline.cues_v2.is_empty() {
+        &timeline.cues_v2
+    } else {
+        &timeline.cues
+    };
+    if cues.is_empty() {
+        return None;
+    }
+    let mut slide_index = Vec::new();
+    let order = layout.get("slides")?.as_array()?;
+    for node in order {
+        let id = node.get("id")?.as_str()?;
+        slide_index.push(id.to_owned());
+        if let Some(array) = node.get("children").and_then(Value::as_array) {
+            for child in array {
+                if let Some(child_id) = child
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| child.get("id").and_then(Value::as_str).map(str::to_owned))
+                {
+                    slide_index.push(child_id);
+                }
+            }
+        } else if let Some(map) = node.get("children").and_then(Value::as_object) {
+            slide_index.extend(map.keys().cloned());
+        }
+    }
+    let mut current = 0usize;
+    let mut actions = Vec::new();
+    for (index, cue) in cues.iter().enumerate() {
+        let Some(cue_id) = id(&cue.cue_id) else {
+            continue;
+        };
+        let Some(slide_id) = cue_slides.get(cue_id) else {
+            continue;
+        };
+        let found = slide_index
+            .iter()
+            .enumerate()
+            .find(|(i, id)| *i >= current && *id == slide_id)
+            .or_else(|| {
+                slide_index
+                    .iter()
+                    .enumerate()
+                    .find(|(_, id)| *id == slide_id)
+            });
+        let position = found.map(|(i, _)| i);
+        if let Some(i) = position {
+            current = i;
+        }
+        actions.push(json!({
+            "id": format!("t{}", index + 1),
+            "time": (cue.trigger_time * 1000.0).round(),
+            "name": cue.name,
+            "type": "slide",
+            "data": { "id": slide_id, "index": position }
+        }));
+    }
+    if actions.is_empty() {
+        return None;
+    }
+    let mut value = json!({"actions": actions});
+    if timeline.r#loop {
+        value["loop"] = json!(true);
+    }
+    if timeline.duration > 0.0 {
+        value["duration"] = json!(timeline.duration);
+    }
+    Some(value)
+}
+
 fn background(cue: &wire::Cue) -> Option<(&wire::MediaAction, &str)> {
     cue.actions.iter().find_map(|action| {
+        action_carries_media(action)?;
         let media = action.media.as_ref().filter(|media| media.layer == 0)?;
         let url = media.element.as_ref()?.url.as_ref()?;
         let path = if url.absolute.is_empty() {
@@ -305,24 +474,53 @@ fn box_geometry(element: &wire::Element) -> Option<String> {
     let rect = element.bounds.as_ref()?;
     let (x, y) = rect.origin.as_ref().map_or((0.0, 0.0), |p| (p.x, p.y));
     let size = rect.size.as_ref().filter(|size| valid_size(size))?;
-    (x.is_finite() && y.is_finite()).then(|| {
-        format!(
-            "left:{x}px;top:{y}px;width:{}px;height:{}px;",
-            size.width, size.height
-        )
-    })
+    let mut style = format!(
+        "left:{x}px;top:{y}px;width:{}px;height:{}px;",
+        size.width, size.height
+    );
+    if element.rotation.is_finite() && element.rotation != 0.0 {
+        style.push_str(&format!("transform:rotate({}deg);", element.rotation));
+    }
+    (x.is_finite() && y.is_finite()).then_some(style)
 }
 
 fn box_fill(element: &wire::Element) -> Option<String> {
     let fill = element.fill.as_ref().filter(|fill| fill.enabled)?;
     let color = fill.color.as_ref()?;
-    if element.rotation != 0.0 || color.alpha <= 0.0 {
+    if color.alpha <= 0.0 {
         return None;
     }
     let shape = element.path.as_ref()?.shape.as_ref()?;
     let radius = match shape.kind() {
-        wire::ShapeType::Rectangle => "",
-        wire::ShapeType::Ellipse => "border-radius:50%;",
+        wire::ShapeType::Rectangle
+        | wire::ShapeType::IsoscelesTriangle
+        | wire::ShapeType::RightTriangle
+        | wire::ShapeType::Rhombus
+        | wire::ShapeType::Star
+        | wire::ShapeType::Polygon
+        | wire::ShapeType::Custom
+        | wire::ShapeType::RightArrow
+        | wire::ShapeType::DoubleArrow => String::new(),
+        wire::ShapeType::Ellipse => "border-radius:50%;".to_string(),
+        wire::ShapeType::RoundedRectangle => {
+            let size = element.bounds.as_ref().and_then(|rect| rect.size.as_ref());
+            let shortest = size
+                .map(|size| size.width.min(size.height))
+                .unwrap_or(0.0)
+                .max(0.0);
+            let roundness = shape
+                .rounded_rectangle
+                .as_ref()
+                .map(|item| item.roundness)
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.25);
+            let radius = if (0.0..=1.0).contains(&roundness) {
+                roundness * shortest * 0.5
+            } else {
+                roundness
+            };
+            format!("border-radius:{}px;", radius.round())
+        }
         wire::ShapeType::Unknown => return None,
     };
     Some(format!("background-color:{};{radius}", css_color(color)))
@@ -509,7 +707,10 @@ mod tests {
                     }),
                 }),
                 path: Some(wire::Path {
-                    shape: Some(wire::Shape { kind }),
+                    shape: Some(wire::Shape {
+                        kind,
+                        rounded_rectangle: None,
+                    }),
                 }),
                 fill: Some(wire::Fill {
                     enabled,
@@ -535,7 +736,7 @@ mod tests {
         let verse = &show.ordered_slides()[1];
         let items = show.show["slides"][&verse.id]["items"].as_array().unwrap();
         let style = "left:160px;top:90px;width:320px;height:180px;background-color:#ff000080;";
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 5);
         assert_eq!(items[0], json!({"type":"shape","style":style,"lines":[]}));
         assert!(
             !items[1]["lines"][0]["text"][0]["value"]
@@ -544,6 +745,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(items[3]["style"], format!("{style}border-radius:50%;"));
+        assert_eq!(items[4], json!({"type":"shape","style":style,"lines":[]}));
     }
 
     #[test]
@@ -589,6 +791,114 @@ mod tests {
         assert_eq!(
             rows[1]["text"][0]["style"],
             "font-family:Arial;font-size:24px;text-decoration:none;"
+        );
+    }
+
+    #[test]
+    fn imports_rotation_rounded_rectangles_timelines_and_warns_on_unsupported_cues() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let cue_id = presentation.cues[0].uuid.clone();
+        let slide = presentation.cues[0].actions[0]
+            .slide
+            .as_mut()
+            .unwrap()
+            .presentation
+            .as_mut()
+            .unwrap()
+            .slide
+            .as_mut()
+            .unwrap();
+        slide.elements.push(wire::SlideElement {
+            element: Some(wire::Element {
+                bounds: Some(wire::Rect {
+                    origin: Some(wire::Point { x: 10.0, y: 20.0 }),
+                    size: Some(wire::Size {
+                        width: 200.0,
+                        height: 100.0,
+                    }),
+                }),
+                rotation: 15.0,
+                path: Some(wire::Path {
+                    shape: Some(wire::Shape {
+                        kind: wire::ShapeType::RoundedRectangle as i32,
+                        rounded_rectangle: Some(wire::RoundedRectangle { roundness: 0.5 }),
+                    }),
+                }),
+                fill: Some(wire::Fill {
+                    enabled: true,
+                    color: Some(wire::Color {
+                        red: 0.0,
+                        green: 0.0,
+                        blue: 1.0,
+                        alpha: 1.0,
+                    }),
+                }),
+                hidden: false,
+                ..Default::default()
+            }),
+        });
+        presentation.timeline = Some(wire::Timeline {
+            cues: vec![wire::TimelineCue {
+                trigger_time: 1.5,
+                cue_id: cue_id.clone(),
+                name: "Verse".into(),
+            }],
+            duration: 12.0,
+            r#loop: true,
+            cues_v2: Vec::new(),
+        });
+        presentation.cues.push(wire::Cue {
+            uuid: Some(wire::Uuid {
+                value: "timer-only".into(),
+            }),
+            name: "Clock".into(),
+            enabled: true,
+            actions: vec![wire::Action {
+                kind: wire::ActionType::Timer as i32,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        // A supported slide that also has a macro should stay in the show and warn.
+        presentation.cues[0].actions.push(wire::Action {
+            kind: wire::ActionType::Macro as i32,
+            ..Default::default()
+        });
+        let show =
+            crate::import::import_show("Features.pro", &presentation.encode_to_vec()).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        let rounded = items
+            .iter()
+            .find(|item| {
+                item["style"]
+                    .as_str()
+                    .is_some_and(|style| style.contains("transform:rotate(15deg)"))
+            })
+            .unwrap();
+        let style = rounded["style"].as_str().unwrap();
+        assert!(style.contains("border-radius:25px;"), "{style}");
+        assert!(style.contains("background-color:#0000ff"));
+        let layout_id = show.show["settings"]["activeLayout"].as_str().unwrap();
+        let timeline = &show.show["layouts"][layout_id]["timeline"];
+        assert_eq!(timeline["loop"], true);
+        assert_eq!(timeline["duration"], 12.0);
+        assert_eq!(timeline["actions"][0]["time"], 1500.0);
+        assert_eq!(timeline["actions"][0]["type"], "slide");
+        assert_eq!(timeline["actions"][0]["data"]["id"], "s1");
+        let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
+        let text = warnings
+            .iter()
+            .filter_map(|warning| warning.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("unsupported actions"), "{text}");
+        assert!(text.contains("timer") || text.contains("macro"), "{text}");
+        assert!(
+            show.ordered_slides()
+                .iter()
+                .all(|slide| slide.group.as_deref() != Some("Clock")),
+            "timer-only cues must not become slides"
         );
     }
 }

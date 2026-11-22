@@ -89,6 +89,17 @@ pub fn import_sources(
                 .unwrap_or("song");
             propresenter7::decode(name, &bytes).map(|mut show| {
                 propresenter7::resolve_standalone_media(&mut show, &path);
+                if let Some(extra) = show
+                    .show
+                    .pointer("/settings/importWarnings")
+                    .and_then(|value| value.as_array())
+                {
+                    for warning in extra {
+                        if let Some(warning) = warning.as_str() {
+                            warnings.push(format!("{}: {warning}", path.display()));
+                        }
+                    }
+                }
                 vec![show]
             })
         } else {
