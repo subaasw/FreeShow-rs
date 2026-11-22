@@ -124,6 +124,21 @@ fn paint_overlays(mut frame: Frame, session: &Session, under_slide: bool) -> Fra
 pub fn stage_frame(session: &Session) -> Frame {
     let variables = session_variables(session);
     let timers = session.timer_labels();
+    let audience = session
+        .stage
+        .items
+        .iter()
+        .any(|item| item.kind == freeshow_data::StageItemKind::CurrentOutput)
+        .then(|| {
+            let (id, name) = session.audience();
+            let frame = audience_frame(session);
+            let image = Raster {
+                width: frame.width,
+                height: frame.height,
+                rgba: frame.pixels,
+            };
+            (id, name, image)
+        });
     let (slides, index) = if session.tab == "scripture" {
         let lines = session.output_lines();
         let index = if lines.is_empty() { None } else { Some(0) };
@@ -174,6 +189,9 @@ pub fn stage_frame(session: &Session) -> Frame {
             timers: &timers,
             variables: &variables,
             root: session.root.as_deref(),
+            audience: audience
+                .as_ref()
+                .map(|(id, name, image)| (id.as_str(), name.as_str(), image)),
         },
     )
 }
@@ -728,6 +746,49 @@ mod tests {
                 .any(|pixel| pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40),
             "the picture stays when the song is hidden"
         );
+    }
+
+    #[test]
+    fn current_output_boxes_preview_the_audience_and_honor_the_saved_source() {
+        let temporary = std::env::temp_dir().join(freeshow_data::new_id());
+        std::fs::create_dir_all(&temporary).unwrap();
+        let library = freeshow_data::Library::open(&temporary);
+        std::fs::write(
+            library.settings_path(),
+            r#"{"outputs":{"screen":{"name":"Room","active":true}}}"#,
+        )
+        .unwrap();
+        let stage_path = library.stage_path();
+        std::fs::create_dir_all(stage_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            stage_path,
+            r##"{"stage":{"settings":{"color":"#222"},"items":{
+                "current_output":{"style":"left:0px;top:0px;width:320px;height:180px;"},
+                "named":{"type":"current_output","style":"left:320px;top:0px;width:320px;height:180px;",
+                    "currentOutput":{"source":"screen","showLabel":true}},
+                "other":{"type":"current_output","style":"left:640px;top:0px;width:320px;height:180px;",
+                    "currentOutput":{"source":"aux"}}
+            }}}"##,
+        )
+        .unwrap();
+        let mut session = Session::empty();
+        session.root = Some(temporary.clone());
+        session.stage = library.load_stage_layout();
+        session.blanked = false;
+        session.slide_hidden = true;
+        session.underlay = Some(Raster {
+            width: 16,
+            height: 9,
+            rgba: [255, 0, 0, 255].repeat(16 * 9),
+        });
+
+        let stage = stage_frame(&session);
+        let picture = parse_color("#f00").unwrap();
+        assert_eq!(stage.pixel(80, 50), picture);
+        assert_eq!(stage.pixel(240, 50), picture);
+        assert_eq!(stage.pixel(400, 50), parse_color("#222").unwrap());
+        assert!((70..90).any(|y| (160..320).any(|x| stage.pixel(x, y).g > 200)));
+        std::fs::remove_dir_all(temporary).unwrap();
     }
 
     #[test]

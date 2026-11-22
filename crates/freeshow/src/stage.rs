@@ -6,7 +6,7 @@ use freeshow_data::{
     StageClockOptions, StageItemKind, StageItemSpec, StageLayout, fill_variables,
 };
 use freeshow_output::{
-    Blend, Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
+    Blend, Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
     StyledLine, StyledSlide, TextRun, parse_color, render_styled,
 };
 
@@ -24,6 +24,8 @@ pub struct StageContext<'a> {
     pub variables: &'a [(String, String)],
     /// Library root, used to load media boxes.
     pub root: Option<&'a Path>,
+    /// The active audience output id, saved name, and composited picture.
+    pub audience: Option<(&'a str, &'a str, &'a Raster)>,
 }
 
 pub fn paint_stage(
@@ -45,7 +47,21 @@ pub fn paint_stage(
         .iter()
         .filter_map(|item| {
             let mut lines = lines_for(item, slides, index, clock, timer, context);
-            let image = if item.kind == StageItemKind::Media {
+            let output_preview = item.kind == StageItemKind::CurrentOutput;
+            let image = if output_preview {
+                let (id, name, image) = context.audience?;
+                if item
+                    .output_source
+                    .as_deref()
+                    .is_some_and(|source| source != id)
+                {
+                    return None;
+                }
+                if item.show_output_label && !name.is_empty() {
+                    lines.push(name.to_owned());
+                }
+                Some(image.clone())
+            } else if item.kind == StageItemKind::Media {
                 item.src
                     .as_deref()
                     .and_then(|src| crate::live::load_image(context.root, src))
@@ -56,7 +72,7 @@ pub fn paint_stage(
             } else {
                 None
             };
-            if image.is_some() {
+            if image.is_some() && !output_preview {
                 lines.clear();
             } else if item.kind == StageItemKind::Media {
                 lines = vec![media_label(item)];
@@ -66,29 +82,46 @@ pub fn paint_stage(
             }
             Some(StyledItem {
                 style: item.style.clone(),
-                align: item.align.clone(),
+                align: if output_preview {
+                    "align-items:end".into()
+                } else {
+                    item.align.clone()
+                },
                 lines: lines
                     .into_iter()
                     .map(|line| StyledLine {
-                        align: String::new(),
+                        align: if output_preview {
+                            "center".into()
+                        } else {
+                            String::new()
+                        },
                         line_bar: true,
                         wrapped: false,
                         shift_y: 0,
                         runs: vec![TextRun {
                             text: line,
-                            style: String::new(),
+                            style: if output_preview {
+                                "font-size:28px;color:#ffffff;".into()
+                            } else {
+                                String::new()
+                            },
                             place_on: None,
                             paint: true,
                         }],
                     })
                     .collect(),
                 image,
-                fit: if item.kind == StageItemKind::QrCode {
+                fit: if output_preview || item.kind == StageItemKind::QrCode {
                     Fit::Contain
                 } else {
                     Fit::Fill
                 },
-                line_bg: None,
+                line_bg: output_preview.then_some(Rgba {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 160,
+                }),
                 line_gap: 0.0,
                 line_radius: 0.0,
                 flip_x: false,
@@ -151,7 +184,7 @@ fn lines_for(
             .map(|value| vec![value])
             .unwrap_or_default(),
         StageItemKind::SlideTracker => tracker_text(slides, index),
-        StageItemKind::Media | StageItemKind::QrCode => Vec::new(),
+        StageItemKind::Media | StageItemKind::QrCode | StageItemKind::CurrentOutput => Vec::new(),
         StageItemKind::Custom => vec![if item.label.is_empty() {
             item.id.clone()
         } else {
@@ -300,6 +333,8 @@ mod tests {
             variable_id: None,
             timer_id: None,
             src: None,
+            output_source: None,
+            show_output_label: false,
             qr: None,
             clock: StageClockOptions::default(),
         }
@@ -350,7 +385,7 @@ mod tests {
         let context = StageContext {
             timers: &timers,
             variables: &variables,
-            root: None,
+            ..StageContext::default()
         };
 
         let mut text = spec(StageItemKind::Text);

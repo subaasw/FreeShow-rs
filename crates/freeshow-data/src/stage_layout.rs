@@ -22,6 +22,7 @@ pub enum StageItemKind {
     SlideTracker,
     /// A still image from the library.
     Media,
+    CurrentOutput,
     QrCode,
     /// A FreeShow item this app does not draw yet, shown as its label.
     Custom,
@@ -91,6 +92,8 @@ pub struct StageItemSpec {
     pub timer_id: Option<String>,
     /// Media path for a `media` item.
     pub src: Option<String>,
+    pub output_source: Option<String>,
+    pub show_output_label: bool,
     pub qr: Option<QrItem>,
     pub clock: StageClockOptions,
 }
@@ -252,6 +255,13 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .and_then(Value::as_str)
                 .filter(|src| !src.is_empty())
                 .map(str::to_string),
+            output_source: item_value
+                .pointer("/currentOutput/source")
+                .and_then(Value::as_str)
+                .filter(|source| !source.is_empty())
+                .map(str::to_string),
+            show_output_label: item_value.pointer("/currentOutput/showLabel")
+                == Some(&Value::Bool(true)),
             qr: QrItem::parse(item_value),
             clock: StageClockOptions {
                 seconds: item_value
@@ -297,6 +307,8 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         variable_id: None,
         timer_id: None,
         src: None,
+        output_source: None,
+        show_output_label: false,
         qr: None,
         clock: StageClockOptions::default(),
     }
@@ -343,6 +355,7 @@ fn kind_of(id: &str, item: &Value) -> StageItemKind {
         "variable" => StageItemKind::Variable,
         "slide_tracker" => StageItemKind::SlideTracker,
         "media" => StageItemKind::Media,
+        "current_output" => StageItemKind::CurrentOutput,
         "qr_code" => StageItemKind::QrCode,
         "" => legacy_kind(&id),
         _ => StageItemKind::Custom,
@@ -351,7 +364,9 @@ fn kind_of(id: &str, item: &Value) -> StageItemKind {
 
 /// Layouts older than FreeShow 1.4 stored the item type in the id.
 fn legacy_kind(id: &str) -> StageItemKind {
-    if id.contains("tracker") {
+    if id.contains("current_output") {
+        StageItemKind::CurrentOutput
+    } else if id.contains("tracker") {
         StageItemKind::SlideTracker
     } else if id.contains("notes") {
         StageItemKind::Notes
