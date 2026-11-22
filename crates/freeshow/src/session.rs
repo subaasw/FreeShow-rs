@@ -3483,6 +3483,18 @@ impl Session {
         if !self.resume_after_effect(path, audio) {
             self.advance_playlist(path, audio);
         }
+        let restarted = [&self.pending_play, &self.pending_also]
+            .iter()
+            .any(|play| matches!(play, Some(PendingPlay::Audio(_))));
+        if audio
+            && !restarted
+            && self
+                .playing_audio
+                .as_ref()
+                .is_some_and(|playing| playing.to_string_lossy() == path)
+        {
+            self.stop_audio();
+        }
         let waits = self
             .current_show()
             .and_then(|show| {
@@ -8435,10 +8447,13 @@ Second line"
         }
         assert!(session.present_show_id(&show_id));
         assert_eq!(session.slide_index, Some(0));
+        session.take_plays();
         assert!(!session.finish_media("/chapel/other.mp3", true));
         assert_eq!(session.slide_index, Some(0));
         assert!(session.finish_media("/chapel/bed.mp3", true));
         assert_eq!(session.slide_index, Some(1));
+        assert!(session.playing_audio.is_none());
+        assert!(session.now_playing().is_none());
         assert!(!session.finish_media("/chapel/bed.mp3", true));
         assert_eq!(session.slide_index, Some(1));
         let _ = std::fs::remove_dir_all(&root);
