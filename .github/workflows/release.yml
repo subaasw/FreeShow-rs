@@ -5,7 +5,7 @@ on:
   push:
     tags: ['v*']
     branches: [main]
-    paths: ['.github/workflows/release.yml', 'crates/freeshow-record/**']
+    paths: ['.github/workflows/release.yml', 'crates/freeshow-media/**', 'crates/freeshow-record/**']
 
 permissions:
   contents: read
@@ -50,7 +50,7 @@ jobs:
         run: bash scripts/ci-run.sh cargo test --locked --workspace --no-run
       - name: Run native workspace tests
         timeout-minutes: 12
-        run: bash scripts/ci-run.sh cargo test --locked --workspace
+        run: bash scripts/ci-run.sh cargo test --locked --workspace --no-fail-fast
       - name: Build and verify the macOS disk image
         run: bash scripts/ci-run.sh scripts/package.sh
       - name: Upload disk image, checksum and verification report

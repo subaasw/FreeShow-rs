@@ -63,8 +63,9 @@ mod gst_player {
         }
 
         fn from_camera_source(source: gst::Element) -> Result<Self, MediaError> {
+            // Camera frames are read into CPU pixels without a graphics context.
             let pipeline = gst::parse::launch(&format!(
-                "decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=false",
+                "decodebin name=dec force-sw-decoders=true ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=false",
                 rgba_caps()
             ))
             .map_err(video_error)?
@@ -734,9 +735,9 @@ mod gst_player {
             gst::init().unwrap();
             for compressed in [false, true] {
                 let description = if compressed {
-                    "videotestsrc num-buffers=1 pattern=red ! video/x-raw,format=I420 ! jpegenc"
+                    "videotestsrc is-live=true pattern=red ! video/x-raw,format=I420 ! jpegenc"
                 } else {
-                    "videotestsrc num-buffers=1 pattern=red"
+                    "videotestsrc is-live=true pattern=red"
                 };
                 let source = gst::parse::bin_from_description(description, true)
                     .unwrap()
@@ -764,7 +765,8 @@ mod gst_player {
                     }
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "camera produced no frame"
+                        "camera produced no frame (compressed={compressed}): {:?}",
+                        player.pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error])
                     );
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }

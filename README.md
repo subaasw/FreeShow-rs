@@ -6,7 +6,7 @@ GPL-3.0-only.
 
 ## Run
 
-Install Rust 1.92 or newer and GStreamer 1.x (macOS: `brew install gstreamer`). On Apple Silicon, point pkg-config at Homebrew before building: `export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"`. Video and cameras use GStreamer. Camera selection opens the device returned by native discovery rather than guessing its device index. A disconnected camera reports an error; raw and JPEG camera feeds share the video decoder. Physical-camera testing remains pending. Audio uses the system output device. Then from this directory:
+Install Rust 1.92 or newer and GStreamer 1.x (macOS: `brew install gstreamer`). On Apple Silicon, point pkg-config at Homebrew before building: `export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"`. Video and cameras use GStreamer. Camera selection opens the device returned by native discovery rather than guessing its device index. Compressed camera feeds use a software decoder to produce CPU-readable frames. A disconnected camera reports an error; raw and JPEG camera feeds share the video decoder. Physical-camera testing remains pending. Audio uses the system output device. Then from this directory:
 
 ```sh
 cargo run -p freeshow
