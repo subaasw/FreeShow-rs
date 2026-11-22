@@ -598,6 +598,7 @@ export component ControlWindow inherits Window {
                     if root.project-title != "Project" || root.project-names.length > 0: HorizontalLayout {
                         spacing: 6px;
                         BoxButton { label: "Remove item"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("remove-project-item", ""); } }
+                        BoxButton { label: "Section"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("add-section", ""); } }
                         BoxButton {
                             label: root.confirm-project-delete ? "Confirm" : "Delete project";
                             accent: root.confirm-project-delete ? #c0392b : root.primary-lighter;
@@ -612,6 +613,11 @@ export component ControlWindow inherits Window {
                                 }
                             }
                         }
+                    }
+                    if root.selected-project >= 0 && root.selected-project < root.project-kinds.length && root.project-kinds[root.selected-project] == "Section": LineEdit {
+                        text: root.project-names[root.selected-project];
+                        placeholder-text: "Section name";
+                        accepted(value) => { root.library-action("rename-section", value); }
                     }
                     if root.project-names.length == 0: Text {
                         text: "No project open";

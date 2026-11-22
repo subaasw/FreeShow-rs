@@ -3013,6 +3013,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     refresh(&ui, &session.borrow());
                     publish(&edit_slot, edit_frame(&session.borrow()));
                 }
+                Ok(session::ProjectPick::Section) => {
+                    refresh(&ui, &session.borrow());
+                }
                 Ok(session::ProjectPick::Drawer { tab, label, index }) => {
                     ui.set_active_tab(tab.into());
                     ui.set_panel_title(label.into());

@@ -3797,6 +3797,35 @@ impl ProjectsFile {
         true
     }
 
+    /// Inserts a section header at `index` (clamped to the end of the project).
+    pub fn insert_section(&mut self, project_id: &str, index: usize, id: &str, name: &str) -> bool {
+        let Some(shows) = self.project_shows_mut(project_id) else {
+            return false;
+        };
+        let index = index.min(shows.len());
+        shows.insert(
+            index,
+            serde_json::json!({ "id": id, "type": "section", "name": name, "notes": "" }),
+        );
+        true
+    }
+
+    /// Renames the section header at `index`. Other rows are left alone.
+    pub fn rename_section(&mut self, project_id: &str, index: usize, name: &str) -> bool {
+        let Some(row) = self
+            .project_shows_mut(project_id)
+            .and_then(|shows| shows.get_mut(index))
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        if row.get("type").and_then(Value::as_str) != Some("section") {
+            return false;
+        }
+        row.insert("name".to_string(), Value::String(name.to_string()));
+        true
+    }
+
     pub fn clear_shows(&mut self, project_id: &str) -> bool {
         let Some(shows) = self.project_shows_mut(project_id) else {
             return false;

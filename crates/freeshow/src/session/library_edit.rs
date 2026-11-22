@@ -49,6 +49,8 @@ pub enum ProjectPick {
         label: &'static str,
         index: usize,
     },
+    /// A section header is picked so it can be moved, renamed or removed.
+    Section,
 }
 
 /// Projects newest first, the order the project picker lists them.
@@ -303,8 +305,49 @@ impl Session {
                     index,
                 })
             }
+            "section" => Ok(ProjectPick::Section),
             other => Err(format!("open this {other} item from its drawer tab")),
         }
+    }
+
+    /// Adds a section header below the picked project row, or at the end, and picks it.
+    fn add_project_section(&mut self, name: &str) -> Result<String, String> {
+        let id = self.project_id.clone().ok_or("open a project first")?;
+        let name = name.trim();
+        let name = if name.is_empty() { "Section" } else { name };
+        let index = self
+            .highlighted_project_item()
+            .map_or(self.project_labels().len(), |item| item + 1);
+        if !self.projects.insert_section(&id, index, &new_id(), name) {
+            return Err("could not add the section".into());
+        }
+        if !self.save_projects() {
+            return Err("could not save projects.json".into());
+        }
+        self.project_item = index;
+        self.project_picked = true;
+        Ok(format!(
+            "Added section “{name}”; type a new name under the project buttons"
+        ))
+    }
+
+    /// Renames the picked section header.
+    fn rename_project_section(&mut self, name: &str) -> Result<String, String> {
+        let id = self.project_id.clone().ok_or("open a project first")?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a section name cannot be empty".into());
+        }
+        let index = self
+            .highlighted_project_item()
+            .ok_or("click the section to rename first")?;
+        if !self.projects.rename_section(&id, index, name) {
+            return Err("only a section header can be renamed here".into());
+        }
+        if !self.save_projects() {
+            return Err("could not save projects.json".into());
+        }
+        Ok(format!("Renamed section to “{name}”"))
     }
 
     /// Runs one operator library action and returns the status-bar message.
@@ -334,6 +377,8 @@ impl Session {
             "rename-project" => self.rename_project(arg),
             "delete-project" => self.delete_current_project(),
             "remove-project-item" => self.remove_project_item(),
+            "add-section" => self.add_project_section(arg),
+            "rename-section" => self.rename_project_section(arg),
             "new-drawer-entry" => self.new_drawer_entry(),
             "save-event" => self.save_event(arg),
             "delete-event" => self.delete_event(),
@@ -901,6 +946,27 @@ mod tests {
         let id = reloaded.overlay_catalog.id_named("Welcome").unwrap();
         let text = reloaded.overlay_catalog.get(&id).unwrap().to_string();
         assert!(text.contains("Welcome home"), "{text}");
+    }
+
+    #[test]
+    fn a_project_section_can_be_added_picked_and_renamed() {
+        let (dir, mut session) = library("sections");
+        assert!(session.create_project());
+        assert!(session.create_show());
+        assert!(session.create_show());
+        session.pick_project_item(0).unwrap();
+        session.library_action("add-section", "").unwrap();
+        assert_eq!(session.project_kinds(), ["", "Section", ""]);
+        assert_eq!(session.highlighted_project_item(), Some(1));
+        session
+            .library_action("rename-section", " Sermon ")
+            .unwrap();
+        assert!(session.library_action("rename-section", "  ").is_err());
+        let mut reloaded = Session::open(dir.0.clone());
+        assert_eq!(reloaded.project_labels()[1], "Sermon");
+        assert_eq!(reloaded.pick_project_item(1), Ok(ProjectPick::Section));
+        reloaded.pick_project_item(0).unwrap();
+        assert!(reloaded.library_action("rename-section", "Oops").is_err());
     }
 
     #[test]
