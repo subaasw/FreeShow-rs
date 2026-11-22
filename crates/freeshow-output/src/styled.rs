@@ -23,6 +23,7 @@ pub struct BoxStyle {
     pub height: f32,
     pub color: Rgba,
     pub background: Option<Rgba>,
+    pub elliptical_background: bool,
     pub font_px: f32,
     pub align: Align,
     pub font_family: String,
@@ -64,6 +65,7 @@ impl Default for BoxStyle {
             height: 904.0,
             color: Rgba::WHITE,
             background: None,
+            elliptical_background: false,
             font_px: 100.0,
             align: Align::Center,
             font_family: String::new(),
@@ -277,6 +279,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     style.background = Some(color);
                 }
             }
+            "border-radius" => style.elliptical_background = value == "50%",
             "text-align" => style.align = parse_align(value),
             "font-family" => style.font_family = font_family(value),
             "font-weight" => style.bold = value.trim() == "bold" || value.trim() == "700",
@@ -974,16 +977,24 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     let before = (color_filter || blur >= 0.5 || blend != Blend::Normal)
         .then(|| copy_rect(pixels, slide.output_width, slide.output_height, x, y, w, h));
     if let Some(background) = style.background {
-        fill_rect(
-            pixels,
-            slide.output_width,
-            slide.output_height,
-            x,
-            y,
-            w,
-            h,
-            background,
-        );
+        let frame_w = slide.output_width;
+        let frame_h = slide.output_height;
+        if style.elliptical_background {
+            let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+            for py in y0..y1 {
+                let dy = (py - y) as f32 + 0.5;
+                let dy = 2.0 * dy / h as f32 - 1.0;
+                for px in x0..x1 {
+                    let dx = (px - x) as f32 + 0.5;
+                    let dx = 2.0 * dx / w as f32 - 1.0;
+                    if dx * dx + dy * dy <= 1.0 {
+                        paint(pixels, frame_w, frame_h, px, py, background);
+                    }
+                }
+            }
+        } else {
+            fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
+        }
     }
     if let Some(image) = &item.image {
         blit(
@@ -1624,8 +1635,8 @@ fn blend_rect(
 fn clipped_rect(frame_w: u32, frame_h: u32, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
     let x0 = x.max(0);
     let y0 = y.max(0);
-    let x1 = (x + w).min(frame_w as i32).max(x0);
-    let y1 = (y + h).min(frame_h as i32).max(y0);
+    let x1 = x.saturating_add(w).min(frame_w as i32).max(x0);
+    let y1 = y.saturating_add(h).min(frame_h as i32).max(y0);
     (x0, y0, x1, y1)
 }
 
@@ -2440,9 +2451,10 @@ fn fill_rect(
     h: i32,
     color: Rgba,
 ) {
-    for dy in 0..h {
-        for dx in 0..w {
-            paint(pixels, frame_w, frame_h, x + dx, y + dy, color);
+    let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            paint(pixels, frame_w, frame_h, px, py, color);
         }
     }
 }
@@ -2509,6 +2521,20 @@ fn alpha_byte(number: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solid_ellipse_preserves_background_in_corners_and_obeys_bounds() {
+        let mut slide = sample();
+        slide.items[0].lines.clear();
+        slide.items[0].style =
+            "left:-40px;top:20px;width:160px;height:80px;background-color:#ff000080;border-radius:50%;"
+                .into();
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(52, 11), Rgba::BLACK);
+        assert_eq!(frame.pixel(60, 30), Rgba::BLACK);
+        assert_eq!(frame.pixel(0, 30), parse_color("#800000").unwrap());
+        assert_eq!(frame.pixel(40, 30), parse_color("#800000").unwrap());
+    }
 
     fn sample() -> StyledSlide {
         StyledSlide {

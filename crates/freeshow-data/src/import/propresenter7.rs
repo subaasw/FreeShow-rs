@@ -182,7 +182,7 @@ fn add_slide(
             slide
                 .elements
                 .iter()
-                .filter_map(|item| text_item(item.element.as_ref()?)),
+                .filter_map(|item| slide_item(item.element.as_ref()?)),
         );
     }
     if let Some((media_action, path)) = background(cue) {
@@ -249,8 +249,52 @@ pub(super) fn resolve_standalone_media(show: &mut ShowFile, source: &std::path::
     }
 }
 
-fn text_item(element: &wire::Element) -> Option<Value> {
-    let text = element.text.as_ref().filter(|_| !element.hidden)?;
+fn slide_item(element: &wire::Element) -> Option<Value> {
+    if element.hidden {
+        return None;
+    }
+    let geometry = box_geometry(element);
+    let fill = geometry.as_ref().and_then(|_| box_fill(element));
+    let mut style = geometry.unwrap_or_else(|| ITEM_STYLE.to_owned());
+    if let Some(fill) = &fill {
+        style.push_str(fill);
+    }
+    if let Some(text) = &element.text
+        && let Some(item) = text_item(text, &mut style)
+    {
+        return Some(item);
+    }
+    fill.map(|_| json!({"type":"shape","style":style,"lines":[]}))
+}
+
+fn box_geometry(element: &wire::Element) -> Option<String> {
+    let rect = element.bounds.as_ref()?;
+    let (x, y) = rect.origin.as_ref().map_or((0.0, 0.0), |p| (p.x, p.y));
+    let size = rect.size.as_ref().filter(|size| valid_size(size))?;
+    (x.is_finite() && y.is_finite()).then(|| {
+        format!(
+            "left:{x}px;top:{y}px;width:{}px;height:{}px;",
+            size.width, size.height
+        )
+    })
+}
+
+fn box_fill(element: &wire::Element) -> Option<String> {
+    let fill = element.fill.as_ref().filter(|fill| fill.enabled)?;
+    let color = fill.color.as_ref()?;
+    if element.rotation != 0.0 || color.alpha <= 0.0 {
+        return None;
+    }
+    let shape = element.path.as_ref()?.shape.as_ref()?;
+    let radius = match shape.kind() {
+        wire::ShapeType::Rectangle => "",
+        wire::ShapeType::Ellipse => "border-radius:50%;",
+        wire::ShapeType::Unknown => return None,
+    };
+    Some(format!("background-color:{};{radius}", css_color(color)))
+}
+
+fn text_item(text: &wire::Text, style: &mut String) -> Option<Value> {
     let content = String::from_utf8_lossy(&text.rtf);
     let rich = content
         .trim_start()
@@ -262,21 +306,6 @@ fn text_item(element: &wire::Element) -> Option<Value> {
     ) {
         return None;
     }
-    let mut style = element
-        .bounds
-        .as_ref()
-        .and_then(|rect| {
-            let position = rect.origin.as_ref();
-            let (x, y) = position.map_or((0.0, 0.0), |p| (p.x, p.y));
-            let size = rect.size.as_ref().filter(|size| valid_size(size))?;
-            (x.is_finite() && y.is_finite()).then(|| {
-                format!(
-                    "left:{x}px;top:{y}px;width:{}px;height:{}px;",
-                    size.width, size.height
-                )
-            })
-        })
-        .unwrap_or_else(|| ITEM_STYLE.to_owned());
     let vertical = match text.vertical {
         0 => "flex-start",
         2 => "flex-end",
@@ -386,6 +415,68 @@ fn invalid(error: impl std::fmt::Display) -> DataError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_visible_solid_shapes_in_slide_element_order() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let elements = &mut presentation.cues[0].actions[0]
+            .slide
+            .as_mut()
+            .unwrap()
+            .presentation
+            .as_mut()
+            .unwrap()
+            .slide
+            .as_mut()
+            .unwrap()
+            .elements;
+        let shape = |kind, enabled, hidden| wire::SlideElement {
+            element: Some(wire::Element {
+                bounds: Some(wire::Rect {
+                    origin: Some(wire::Point { x: 160.0, y: 90.0 }),
+                    size: Some(wire::Size {
+                        width: 320.0,
+                        height: 180.0,
+                    }),
+                }),
+                path: Some(wire::Path {
+                    shape: Some(wire::Shape { kind }),
+                }),
+                fill: Some(wire::Fill {
+                    enabled,
+                    color: Some(wire::Color {
+                        red: 1.0,
+                        alpha: 0.5,
+                        ..Default::default()
+                    }),
+                }),
+                hidden,
+                ..Default::default()
+            }),
+        };
+        elements.insert(0, shape(1, true, false));
+        elements.extend([
+            shape(2, true, false),
+            shape(1, false, false),
+            shape(1, true, true),
+            shape(6, true, false),
+        ]);
+
+        let show = crate::import::import_show("Shapes.pro", &presentation.encode_to_vec()).unwrap();
+        let verse = &show.ordered_slides()[1];
+        let items = show.show["slides"][&verse.id]["items"].as_array().unwrap();
+        let style = "left:160px;top:90px;width:320px;height:180px;background-color:#ff000080;";
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0], json!({"type":"shape","style":style,"lines":[]}));
+        assert!(
+            !items[1]["lines"][0]["text"][0]["value"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(items[3]["style"], format!("{style}border-radius:50%;"));
+    }
 
     #[test]
     fn imports_mixed_rtf_runs_into_the_existing_propresenter_text_box() {
