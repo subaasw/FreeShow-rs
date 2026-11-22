@@ -240,6 +240,8 @@ pub struct Session {
     pub background_blur_opacity: f32,
     /// Background colour of the active output style; black when the style names none.
     pub style_background: Option<freeshow_output::Rgba>,
+    /// The template the active output style restyles every slide with on the output.
+    pub style_template: Option<String>,
     /// The next output change is a background image, so it uses the media transition.
     pub background_transition: bool,
     /// Path of the picture currently behind the slide, when one is showing.
@@ -469,6 +471,7 @@ impl Session {
             background_blur_px: 6.0,
             background_blur_opacity: 0.3,
             style_background: None,
+            style_template: None,
             background_transition: false,
             background_path: None,
             imported_foreground_active: false,
@@ -653,6 +656,7 @@ impl Session {
             background_blur_px: 6.0,
             background_blur_opacity: 0.3,
             style_background: None,
+            style_template: None,
             background_transition: false,
             background_path: None,
             imported_foreground_active: false,
@@ -719,6 +723,10 @@ impl Session {
             .as_deref()
             .and_then(|root| Library::open(root).style_background())
             .and_then(|color| freeshow_output::parse_color(&color));
+        self.style_template = self
+            .root
+            .as_deref()
+            .and_then(|root| Library::open(root).style_template());
     }
 
     pub fn timer_label(&self) -> String {
