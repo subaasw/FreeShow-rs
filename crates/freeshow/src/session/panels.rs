@@ -157,6 +157,19 @@ pub fn lan_host() -> String {
     .clone()
 }
 
+/// CSS blend modes the output can draw, in the order the Inspector lists them.
+pub const BLEND_MODES: [&str; 9] = [
+    "normal",
+    "multiply",
+    "screen",
+    "overlay",
+    "darken",
+    "lighten",
+    "difference",
+    "exclusion",
+    "color-dodge",
+];
+
 /// Transition kinds the output can draw, in the order Settings lists them.
 pub const TRANSITION_KINDS: [&str; 6] = ["none", "fade", "blur", "scale", "slide", "spin"];
 
@@ -167,6 +180,7 @@ pub struct InspectorForm {
     pub label: String,
     pub typography: freeshow_data::ItemTypography,
     pub item_box: freeshow_data::ItemBox,
+    pub filters: freeshow_data::ItemFilters,
 }
 
 /// One stage item row in the Stage editor.
@@ -986,6 +1000,7 @@ impl Session {
             label: self.item_label(),
             typography: self.item_typography(),
             item_box,
+            filters: self.item_filters(),
         }
     }
 
@@ -1028,6 +1043,30 @@ impl Session {
                 let css = format!("{px}px");
                 self.edit_current_item(|show, slide, item| {
                     show.set_item_box_css(slide, item, key, &css)
+                })
+            }
+            "blur" | "grayscale" | "sepia" | "invert" | "brightness" | "contrast" | "saturate"
+            | "hue-rotate" | "opacity" | "blend" => {
+                let mut filters = self.item_filters();
+                match key {
+                    "blur" => filters.blur = parse_int(&value, 0, 100)? as i32,
+                    "grayscale" => filters.grayscale = parse_int(&value, 0, 100)? as i32,
+                    "sepia" => filters.sepia = parse_int(&value, 0, 100)? as i32,
+                    "invert" => filters.invert = parse_int(&value, 0, 100)? as i32,
+                    "brightness" => filters.brightness = parse_int(&value, 0, 500)? as i32,
+                    "contrast" => filters.contrast = parse_int(&value, 0, 500)? as i32,
+                    "saturate" => filters.saturate = parse_int(&value, 0, 500)? as i32,
+                    "hue-rotate" => filters.hue_rotate = parse_int(&value, 0, 360)? as i32,
+                    "opacity" => filters.opacity = parse_int(&value, 0, 100)? as i32,
+                    _ => {
+                        if !BLEND_MODES.contains(&value.as_str()) {
+                            return Err(format!("unknown blend mode {value:?}"));
+                        }
+                        filters.blend = value.clone();
+                    }
+                }
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_filters(slide, item, &filters)
                 })
             }
             "line-height" => {

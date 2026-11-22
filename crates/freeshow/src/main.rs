@@ -612,6 +612,16 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         shadow_y: inspector.typography.shadow.y,
         shadow_blur: inspector.typography.shadow.blur,
         shadow_color: inspector.typography.shadow.color.into(),
+        blur: inspector.filters.blur,
+        grayscale: inspector.filters.grayscale,
+        sepia: inspector.filters.sepia,
+        invert: inspector.filters.invert,
+        brightness: inspector.filters.brightness,
+        contrast: inspector.filters.contrast,
+        saturate: inspector.filters.saturate,
+        hue_rotate: inspector.filters.hue_rotate,
+        opacity: inspector.filters.opacity,
+        blend: inspector.filters.blend.into(),
     });
     ui.set_stage_layout_name(session.stage.name.clone().into());
     let rows: Vec<StageRowData> = session

@@ -4092,6 +4092,20 @@ impl Session {
         show.item_typography(&slide_id, self.current_item(show))
     }
 
+    pub fn item_filters(&self) -> freeshow_data::ItemFilters {
+        let Some(show) = self.current_show() else {
+            return freeshow_data::ItemFilters::default();
+        };
+        let Some(slide_id) = self.slide_index.and_then(|index| {
+            show.ordered_slides()
+                .get(index)
+                .map(|slide| slide.id.clone())
+        }) else {
+            return freeshow_data::ItemFilters::default();
+        };
+        show.item_filters(&slide_id, self.current_item(show))
+    }
+
     fn edit_current_item(
         &mut self,
         edit: impl FnOnce(&mut freeshow_data::ShowFile, &str, usize) -> bool,
@@ -7925,6 +7939,21 @@ Second line"
         session
             .inspector_set("background-color", "#00000080")
             .unwrap();
+        session.inspector_set("blur", "3").unwrap();
+        session.inspector_set("grayscale", "100").unwrap();
+        session.inspector_set("opacity", "60").unwrap();
+        session.inspector_set("blend", "screen").unwrap();
+        assert!(session.inspector_set("blend", "glow").is_err());
+        assert_eq!(session.inspector_form().filters.blur, 3);
+        let item = session.current_show().unwrap().show["slides"]["s1"]["items"][1].clone();
+        assert_eq!(item["filter"], "blur(3px) grayscale(1) opacity(0.6)");
+        assert_eq!(item["blend"], "screen");
+        session.inspector_set("opacity", "100").unwrap();
+        session.inspector_set("blur", "0").unwrap();
+        session.inspector_set("grayscale", "0").unwrap();
+        session.inspector_set("blend", "normal").unwrap();
+        let item = session.current_show().unwrap().show["slides"]["s1"]["items"][1].clone();
+        assert!(item.get("filter").is_none() && item.get("blend").is_none());
         assert!(session.inspector_set("color", "red;top:0").is_err());
         assert!(session.inspector_set("width", "0").is_err());
         let form = session.inspector_form();

@@ -84,6 +84,115 @@ impl TextShadow {
     }
 }
 
+/// An item's CSS `filter` and `mix-blend-mode`, as whole numbers the inspector edits.
+/// Percent fields use 100 for "unchanged" where CSS uses 1 (opacity, brightness, contrast, saturate).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemFilters {
+    pub blur: i32,
+    pub grayscale: i32,
+    pub sepia: i32,
+    pub invert: i32,
+    pub brightness: i32,
+    pub contrast: i32,
+    pub saturate: i32,
+    pub hue_rotate: i32,
+    pub opacity: i32,
+    pub blend: String,
+}
+
+impl Default for ItemFilters {
+    fn default() -> Self {
+        Self {
+            blur: 0,
+            grayscale: 0,
+            sepia: 0,
+            invert: 0,
+            brightness: 100,
+            contrast: 100,
+            saturate: 100,
+            hue_rotate: 0,
+            opacity: 100,
+            blend: String::new(),
+        }
+    }
+}
+
+impl ItemFilters {
+    /// Reads `blur(4px) grayscale(1) hue-rotate(90deg)`; fractions and percents both work.
+    pub fn parse(filter: &str, blend: &str) -> Self {
+        let mut filters = Self {
+            blend: blend.trim().to_string(),
+            ..Self::default()
+        };
+        let mut rest = filter;
+        while let Some(open) = rest.find('(') {
+            let name = rest[..open].trim();
+            let Some(close) = rest[open..].find(')') else {
+                break;
+            };
+            let arg = rest[open + 1..open + close].trim();
+            rest = &rest[open + close + 1..];
+            let percent = || {
+                if let Some(value) = arg.strip_suffix('%') {
+                    value.trim().parse::<f32>().ok()
+                } else {
+                    arg.parse::<f32>().ok().map(|value| value * 100.0)
+                }
+                .map(|value| value.round() as i32)
+            };
+            let length = |suffix: &str| {
+                arg.strip_suffix(suffix)
+                    .unwrap_or(arg)
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|value| value.round() as i32)
+            };
+            match name {
+                "blur" => filters.blur = length("px").unwrap_or(0),
+                "grayscale" => filters.grayscale = percent().unwrap_or(0),
+                "sepia" => filters.sepia = percent().unwrap_or(0),
+                "invert" => filters.invert = percent().unwrap_or(0),
+                "brightness" => filters.brightness = percent().unwrap_or(100),
+                "contrast" => filters.contrast = percent().unwrap_or(100),
+                "saturate" => filters.saturate = percent().unwrap_or(100),
+                "hue-rotate" => filters.hue_rotate = length("deg").unwrap_or(0),
+                "opacity" => filters.opacity = percent().unwrap_or(100),
+                _ => {}
+            }
+        }
+        filters
+    }
+
+    /// The CSS `filter` value, leaving out every function that changes nothing.
+    pub fn css(&self) -> String {
+        let fraction = |value: i32| f64::from(value) / 100.0;
+        let mut parts = Vec::new();
+        if self.blur > 0 {
+            parts.push(format!("blur({}px)", self.blur));
+        }
+        for (name, value, unchanged) in [
+            ("grayscale", self.grayscale, 0),
+            ("sepia", self.sepia, 0),
+            ("invert", self.invert, 0),
+            ("brightness", self.brightness, 100),
+            ("contrast", self.contrast, 100),
+            ("saturate", self.saturate, 100),
+        ] {
+            if value != unchanged {
+                parts.push(format!("{name}({})", fraction(value)));
+            }
+        }
+        if self.hue_rotate.rem_euclid(360) != 0 {
+            parts.push(format!("hue-rotate({}deg)", self.hue_rotate));
+        }
+        if self.opacity != 100 {
+            parts.push(format!("opacity({})", fraction(self.opacity)));
+        }
+        parts.join(" ")
+    }
+}
+
 impl ShowFile {
     pub fn item_count(&self, slide_id: &str) -> usize {
         self.items(slide_id).map(Vec::len).unwrap_or(0)
@@ -285,6 +394,42 @@ impl ShowFile {
 
     pub fn set_item_shadow(&mut self, slide_id: &str, index: usize, shadow: &TextShadow) -> bool {
         self.set_item_css(slide_id, index, "text-shadow", &shadow.css())
+    }
+
+    pub fn item_filters(&self, slide_id: &str, index: usize) -> ItemFilters {
+        let text = |key: &str| {
+            self.item(slide_id, index)
+                .and_then(|item| item.get(key))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        ItemFilters::parse(&text("filter"), &text("blend"))
+    }
+
+    /// Writes the item's `filter` and `blend` the way FreeShow stores them; unchanged ones are removed.
+    pub fn set_item_filters(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        filters: &ItemFilters,
+    ) -> bool {
+        let Some(item) = self.item_mut(slide_id, index) else {
+            return false;
+        };
+        let css = filters.css();
+        if css.is_empty() {
+            item.remove("filter");
+        } else {
+            item.insert("filter".to_string(), Value::String(css));
+        }
+        let blend = filters.blend.trim();
+        if blend.is_empty() || blend == "normal" {
+            item.remove("blend");
+        } else {
+            item.insert("blend".to_string(), Value::String(blend.to_string()));
+        }
+        true
     }
 
     /// Position, size and box fill of an item, from its `style` (FreeShow's default box when unset).
@@ -555,6 +700,30 @@ pub fn css_set(style: &str, key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_filters_round_trip_and_drop_what_changes_nothing() {
+        let filters = ItemFilters::parse(
+            "blur(4px) grayscale(1) brightness(120%) hue-rotate(90deg)",
+            "multiply",
+        );
+        assert_eq!(filters.blur, 4);
+        assert_eq!(filters.grayscale, 100);
+        assert_eq!(filters.brightness, 120);
+        assert_eq!(filters.hue_rotate, 90);
+        assert_eq!(filters.contrast, 100);
+        assert_eq!(filters.blend, "multiply");
+        assert_eq!(
+            filters.css(),
+            "blur(4px) grayscale(1) brightness(1.2) hue-rotate(90deg)"
+        );
+        assert_eq!(ItemFilters::default().css(), "");
+        let half = ItemFilters {
+            opacity: 50,
+            ..ItemFilters::default()
+        };
+        assert_eq!(half.css(), "opacity(0.5)");
+    }
 
     fn show() -> ShowFile {
         ShowFile::blank("id", "Song")
