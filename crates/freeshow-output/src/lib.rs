@@ -9,7 +9,9 @@ mod styled;
 mod text;
 pub use text::register_custom_fonts;
 
-pub use charts::{ChartPoint, chart_image, display_url, web_preview};
+pub use charts::{
+    ChartPoint, chart_image, display_url, html_snippet, strip_html, weather_card, web_preview,
+};
 pub use styled::qr_image;
 pub use styled::{
     Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, SlideWay, StyledItem, StyledLine,

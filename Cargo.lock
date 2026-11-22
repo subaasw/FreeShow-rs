@@ -1898,6 +1898,7 @@ dependencies = [
  "freeshow-output",
  "gstreamer",
  "gstreamer-app",
+ "serde_json",
  "symphonia",
 ]
 

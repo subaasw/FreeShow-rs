@@ -224,6 +224,17 @@ pub struct NdiTarget {
     pub id: String,
     pub name: String,
     pub stage: bool,
+    /// NDI discovery group. Members of the same group share one sender.
+    pub group: Option<String>,
+}
+
+impl NdiTarget {
+    pub fn grouped_name(&self) -> String {
+        match &self.group {
+            Some(group) => format!("{} [{group}]", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// An OMT picture the library asked to broadcast.
@@ -241,6 +252,14 @@ pub struct WebrtcTarget {
     pub url: String,
     pub token: Option<String>,
     pub stage: bool,
+}
+
+/// An RTMP destination the library asked to start automatically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RtmpTarget {
+    pub id: String,
+    pub url: String,
+    pub file: bool,
 }
 
 fn is_stage_output(output: &serde_json::Value) -> bool {
@@ -2959,8 +2978,8 @@ impl Session {
             .map(|target| (target.id, target.name))
     }
 
-    /// Enabled NDI pictures, including stage. Grouped outputs stay off because
-    /// the installed ndisink has no discovery-group property.
+    /// Enabled NDI pictures, including stage. Outputs that share an NDI group
+    /// use one sender named `{name} [{group}]`.
     pub fn ndi_outputs(&self) -> Vec<NdiTarget> {
         let Some(root) = &self.root else {
             return Vec::new();
@@ -2968,14 +2987,8 @@ impl Session {
         Library::open(root)
             .network_outputs("ndi")
             .into_iter()
-            .filter_map(|(id, output)| {
-                let groups = &output["ndiData"]["groups"];
-                if !groups.is_null() && groups.as_str() != Some("") {
-                    // The installed ndisink exposes no groups property. Do not publish
-                    // a grouped source to the default discovery group instead.
-                    tracing::warn!("grouped NDI output is not supported; sender disabled");
-                    return None;
-                }
+            .map(|(id, output)| {
+                let group = ndi_group(&output["ndiData"]["groups"]);
                 let valid = |value: &serde_json::Value| {
                     value
                         .as_str()
@@ -2990,7 +3003,12 @@ impl Session {
                 let stage = output["stageOutput"]
                     .as_str()
                     .is_some_and(|layout| !layout.is_empty());
-                Some(NdiTarget { id, name, stage })
+                NdiTarget {
+                    id,
+                    name,
+                    stage,
+                    group,
+                }
             })
             .collect()
     }
@@ -3037,6 +3055,116 @@ impl Session {
                 })
             })
             .collect()
+    }
+
+    /// RTMP destinations that should start when the operator opens the library.
+    pub fn rtmp_destinations(&self) -> Vec<RtmpTarget> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        let auto = self
+            .preferences
+            .special
+            .get("autoRtmp")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        Library::open(root)
+            .network_outputs("rtmp")
+            .into_iter()
+            .flat_map(|(id, output)| rtmp_targets_for(&id, &output, auto))
+            .collect()
+    }
+
+    /// Linux v4l2 loopback device for a virtual camera, when enabled.
+    pub fn virtual_camera_device(&self) -> Option<String> {
+        if let Some(device) = env_nonempty("FREESHOW_V4L2") {
+            return Some(device);
+        }
+        if !(special_flag(&self.preferences.special, "virtualCamera")
+            || special_flag(&self.preferences.special, "virtualOutput")
+            || self.output_flag("virtual")
+            || self.output_flag("virtualCamera"))
+        {
+            return None;
+        }
+        Some(
+            special_text(
+                &self.preferences.special,
+                &["v4l2Device", "virtualCameraDevice"],
+            )
+            .unwrap_or_else(|| "/dev/video10".to_string()),
+        )
+    }
+
+    /// Blackmagic Decklink device number, when the library asked to send to it.
+    pub fn blackmagic_device(&self) -> Option<i32> {
+        if let Some(value) = env_nonempty("FREESHOW_DECKLINK") {
+            return value.parse().ok();
+        }
+        if !(special_flag(&self.preferences.special, "blackmagic")
+            || special_flag(&self.preferences.special, "autoBlackmagic")
+            || self.output_flag("blackmagic")
+            || self.output_flag("decklink"))
+        {
+            return None;
+        }
+        special_text(
+            &self.preferences.special,
+            &["decklinkDevice", "blackmagicDevice"],
+        )
+        .and_then(|value| value.parse().ok())
+        .or(Some(0))
+    }
+
+    /// Spout or Syphon share name, when the operator enabled a texture share.
+    pub fn capture_share_name(&self) -> Option<String> {
+        if let Some(name) =
+            env_nonempty("FREESHOW_SPOUT").or_else(|| env_nonempty("FREESHOW_SYPHON"))
+        {
+            return Some(name);
+        }
+        if !(special_flag(&self.preferences.special, "spout")
+            || special_flag(&self.preferences.special, "syphon")
+            || self.output_flag("spout")
+            || self.output_flag("syphon"))
+        {
+            return None;
+        }
+        Some(
+            special_text(&self.preferences.special, &["spoutName", "syphonName"])
+                .unwrap_or_else(|| "FreeShow".to_string()),
+        )
+    }
+
+    /// NDI or OMT source the library asked to receive as a background, if any.
+    pub fn network_receive(&self) -> Option<(freeshow_ndi::SourceKind, String)> {
+        if let Some(name) = env_nonempty("FREESHOW_NDI_IN") {
+            return Some((freeshow_ndi::SourceKind::Ndi, name));
+        }
+        if let Some(name) = env_nonempty("FREESHOW_OMT_IN") {
+            return Some((freeshow_ndi::SourceKind::Omt, name));
+        }
+        let name = special_text(
+            &self.preferences.special,
+            &["ndiInput", "ndiSource", "omtInput", "omtSource"],
+        )?;
+        let omt = special_text(&self.preferences.special, &["omtInput", "omtSource"]).is_some();
+        let kind = if omt {
+            freeshow_ndi::SourceKind::Omt
+        } else {
+            freeshow_ndi::SourceKind::Ndi
+        };
+        Some((kind, name))
+    }
+
+    fn output_flag(&self, kind: &str) -> bool {
+        self.root.as_ref().is_some_and(|root| {
+            Library::open(root)
+                .network_outputs(kind)
+                .into_iter()
+                .next()
+                .is_some()
+        })
     }
 
     fn routes_for_sources(&self, sources: &[&str], file_gain: f32) -> Vec<SpeakerRoute> {
@@ -5081,6 +5209,94 @@ impl Session {
     }
 }
 
+fn ndi_group(value: &serde_json::Value) -> Option<String> {
+    if let Some(name) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return Some(name.to_string());
+    }
+    value.as_array().and_then(|items| {
+        items.iter().find_map(|item| {
+            item.as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
+    })
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn special_flag(special: &serde_json::Value, key: &str) -> bool {
+    special.get(key).and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+fn special_text(special: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        special
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn rtmp_targets_for(id: &str, output: &serde_json::Value, auto: bool) -> Vec<RtmpTarget> {
+    let data = &output["rtmpData"];
+    let streaming = data["streaming"].as_bool() == Some(true);
+    let mut targets = Vec::new();
+    if let Some(list) = data["destinations"].as_array() {
+        for dest in list {
+            if dest["enabled"].as_bool() == Some(false) {
+                continue;
+            }
+            let Some(url) = rtmp_url(dest["url"].as_str(), dest["key"].as_str()) else {
+                continue;
+            };
+            if streaming || auto || dest["file"].as_bool() == Some(true) {
+                targets.push(RtmpTarget {
+                    id: format!("{id}-{}", dest["id"].as_str().unwrap_or("dest")),
+                    url,
+                    file: dest["file"].as_bool() == Some(true),
+                });
+            }
+        }
+    }
+    if targets.is_empty()
+        && let Some(url) = rtmp_url(data["url"].as_str(), data["key"].as_str())
+        && (streaming || auto)
+    {
+        targets.push(RtmpTarget {
+            id: id.to_string(),
+            url,
+            file: false,
+        });
+    }
+    targets
+}
+
+fn rtmp_url(base: Option<&str>, key: Option<&str>) -> Option<String> {
+    let base = base.map(str::trim).filter(|url| !url.is_empty())?;
+    let key = key.map(str::trim).filter(|key| !key.is_empty());
+    let url = match key {
+        Some(key) if !base.contains(key) && !base.contains('?') => {
+            let slash = if base.ends_with('/') { "" } else { "/" };
+            format!("{base}{slash}{key}")
+        }
+        _ => base.to_string(),
+    };
+    (url.starts_with("rtmp://") || url.starts_with("rtmps://") || PathBuf::from(&url).is_absolute())
+        .then_some(url)
+}
+
 fn scripture_catalog(bibles: &[BibleFile]) -> Arc<Vec<freeshow_remote::RemoteBible>> {
     Arc::new(
         bibles
@@ -5309,18 +5525,20 @@ mod tests {
         settings["outputs"]["ndi"]["ndiData"] =
             serde_json::json!({"name":"My NDI","groups":"Private"});
         std::fs::write(&path, settings.to_string()).unwrap();
-        assert!(session.ndi_output().is_none());
+        assert_eq!(session.ndi_output(), Some(("ndi".into(), "My NDI".into())));
+        assert_eq!(session.ndi_outputs()[0].grouped_name(), "My NDI [Private]");
         settings["outputs"]["ndi"]["ndiData"]["groups"] = serde_json::json!(["Private"]);
         std::fs::write(&path, settings.to_string()).unwrap();
-        assert!(session.ndi_output().is_none());
+        assert_eq!(session.ndi_outputs()[0].group.as_deref(), Some("Private"));
         settings["outputs"]["ndi"]["ndiData"]["groups"] = serde_json::json!("");
         std::fs::write(&path, settings.to_string()).unwrap();
         assert_eq!(session.ndi_output(), Some(("ndi".into(), "My NDI".into())));
+        assert!(session.ndi_outputs()[0].group.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn ndi_outputs_send_each_ungrouped_picture_including_stage() {
+    fn ndi_outputs_include_grouped_and_stage_pictures() {
         let root =
             std::env::temp_dir().join(format!("freeshow-session-ndi-multi-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -5364,25 +5582,122 @@ mod tests {
             session.ndi_outputs(),
             vec![
                 NdiTarget {
+                    id: "grouped".into(),
+                    name: "Private NDI".into(),
+                    stage: false,
+                    group: Some("Staff".into()),
+                },
+                NdiTarget {
                     id: "main".into(),
                     name: "Sanctuary".into(),
-                    stage: false
+                    stage: false,
+                    group: None,
                 },
                 NdiTarget {
                     id: "overflow".into(),
                     name: "FreeShow NDI - Overflow".into(),
-                    stage: false
+                    stage: false,
+                    group: None,
                 },
                 NdiTarget {
                     id: "stage".into(),
                     name: "Stage NDI".into(),
-                    stage: true
+                    stage: true,
+                    group: None,
                 },
             ]
         );
         assert_eq!(
             session.ndi_output(),
-            Some(("main".into(), "Sanctuary".into()))
+            Some(("grouped".into(), "Private NDI".into()))
+        );
+        assert_eq!(
+            session.ndi_outputs()[0].grouped_name(),
+            "Private NDI [Staff]"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rtmp_destinations_start_from_auto_flag_and_legacy_url() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-session-rtmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            serde_json::json!({
+                "special": {
+                    "autoRtmp": true,
+                    "virtualCamera": true,
+                    "v4l2Device": "/dev/video42",
+                    "blackmagic": true,
+                    "decklinkDevice": "1",
+                    "spout": true,
+                    "spoutName": "Lobby",
+                    "ndiInput": "Cam 1"
+                },
+                "outputs": {
+                    "main": {
+                        "name": "Main",
+                        "rtmp": true,
+                        "enabled": true,
+                        "rtmpData": {
+                            "destinations": [
+                                {
+                                    "id": "yt",
+                                    "url": "rtmp://live.example/app",
+                                    "key": "secret"
+                                },
+                                {
+                                    "id": "off",
+                                    "enabled": false,
+                                    "url": "rtmp://ignored/app",
+                                    "key": "no"
+                                }
+                            ]
+                        }
+                    },
+                    "legacy": {
+                        "name": "Legacy",
+                        "rtmp": true,
+                        "enabled": true,
+                        "rtmpData": {
+                            "streaming": true,
+                            "url": "rtmps://backup.example/live",
+                            "key": "old"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let session = Session::open(root.clone());
+        assert_eq!(
+            session.rtmp_destinations(),
+            vec![
+                RtmpTarget {
+                    id: "legacy".into(),
+                    url: "rtmps://backup.example/live/old".into(),
+                    file: false,
+                },
+                RtmpTarget {
+                    id: "main-yt".into(),
+                    url: "rtmp://live.example/app/secret".into(),
+                    file: false,
+                },
+            ]
+        );
+        assert_eq!(
+            session.virtual_camera_device().as_deref(),
+            Some("/dev/video42")
+        );
+        assert_eq!(session.blackmagic_device(), Some(1));
+        assert_eq!(session.capture_share_name().as_deref(), Some("Lobby"));
+        assert_eq!(
+            session.network_receive(),
+            Some((freeshow_ndi::SourceKind::Ndi, "Cam 1".into()))
         );
         let _ = std::fs::remove_dir_all(root);
     }
