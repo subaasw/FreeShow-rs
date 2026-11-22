@@ -37,6 +37,11 @@ pub struct BoxStyle {
     pub stroke_px: f32,
     pub stroke_color: Option<Rgba>,
     pub shadow: Option<TextShadow>,
+    /// CSS `border-radius` in slide pixels. `50%` still uses `elliptical_background`.
+    pub radius: f32,
+    pub box_shadow: Option<BoxShadow>,
+    /// CSS `backdrop-filter` from the item style, or empty.
+    pub backdrop: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,6 +59,17 @@ pub struct TextShadow {
     pub y: f32,
     pub blur: f32,
     pub color: Rgba,
+}
+
+/// CSS `box-shadow` on an item box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub x: f32,
+    pub y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Rgba,
+    pub inset: bool,
 }
 
 impl Default for BoxStyle {
@@ -79,6 +95,9 @@ impl Default for BoxStyle {
             stroke_px: 0.0,
             stroke_color: None,
             shadow: None,
+            radius: 0.0,
+            box_shadow: None,
+            backdrop: String::new(),
         }
     }
 }
@@ -279,7 +298,15 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     style.background = Some(color);
                 }
             }
-            "border-radius" => style.elliptical_background = value == "50%",
+            "border-radius" => {
+                if value == "50%" {
+                    style.elliptical_background = true;
+                } else if let Some(radius) = px(value.split_whitespace().next().unwrap_or(value)) {
+                    style.radius = radius;
+                }
+            }
+            "box-shadow" => style.box_shadow = parse_box_shadow(value),
+            "backdrop-filter" => style.backdrop = value.to_string(),
             "text-align" => style.align = parse_align(value),
             "font-family" => style.font_family = font_family(value),
             "font-weight" => style.bold = value.trim() == "bold" || value.trim() == "700",
@@ -1008,6 +1035,37 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     let y = scale(style.top, slide.output_height, slide.source_height);
     let w = scale(style.width, slide.output_width, slide.source_width).max(1);
     let h = scale(style.height, slide.output_height, slide.source_height).max(1);
+    let radius = if style.elliptical_background {
+        0
+    } else {
+        scale(style.radius, slide.output_height, slide.source_height).max(0)
+    };
+    if !style.backdrop.trim().is_empty() {
+        apply_backdrop(
+            pixels,
+            slide,
+            x,
+            y,
+            w,
+            h,
+            radius,
+            style.elliptical_background,
+            &style.backdrop,
+        );
+    }
+    if let Some(shadow) = style.box_shadow.filter(|shadow| !shadow.inset) {
+        paint_box_shadow(
+            pixels,
+            slide,
+            x,
+            y,
+            w,
+            h,
+            radius,
+            style.elliptical_background,
+            shadow,
+        );
+    }
     let opacity = item.opacity.clamp(0.0, 1.0);
     let grayscale = item.grayscale.clamp(0.0, 1.0);
     let invert = item.invert.clamp(0.0, 1.0);
@@ -1044,6 +1102,8 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
                     }
                 }
             }
+        } else if radius > 0 {
+            fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
         } else {
             fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
         }
@@ -1363,6 +1423,19 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
                 blend,
             );
         }
+    }
+    if let Some(shadow) = style.box_shadow.filter(|shadow| shadow.inset) {
+        paint_inset_shadow(
+            pixels,
+            slide,
+            x,
+            y,
+            w,
+            h,
+            radius,
+            style.elliptical_background,
+            shadow,
+        );
     }
 }
 
@@ -2335,6 +2408,415 @@ fn parse_shadow(value: &str) -> Option<TextShadow> {
     })
 }
 
+fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+    let mut rest = value.trim();
+    if rest.is_empty() || rest.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let inset = rest
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("inset"));
+    let cleaned = rest
+        .split_whitespace()
+        .filter(|token| !token.eq_ignore_ascii_case("inset"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    rest = cleaned.trim();
+    let mut lengths = Vec::new();
+    while lengths.len() < 4 {
+        let trimmed = rest.trim_start();
+        let Some(token) = trimmed.split_whitespace().next() else {
+            break;
+        };
+        if px(token).is_none() {
+            break;
+        }
+        lengths.push(px(token).unwrap_or(0.0));
+        rest = &trimmed[token.len()..];
+    }
+    if lengths.len() < 2 {
+        return None;
+    }
+    Some(BoxShadow {
+        x: lengths[0],
+        y: lengths[1],
+        blur: lengths.get(2).copied().unwrap_or(0.0),
+        spread: lengths.get(3).copied().unwrap_or(0.0),
+        color: parse_color(rest).unwrap_or(Rgba::BLACK),
+        inset,
+    })
+}
+
+fn in_item_shape(
+    px: i32,
+    py: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    ellipse: bool,
+) -> bool {
+    if px < x || py < y || px >= x + w || py >= y + h {
+        return false;
+    }
+    if ellipse {
+        let dx = (px - x) as f32 + 0.5;
+        let dy = (py - y) as f32 + 0.5;
+        let nx = 2.0 * dx / w as f32 - 1.0;
+        let ny = 2.0 * dy / h as f32 - 1.0;
+        return nx * nx + ny * ny <= 1.0;
+    }
+    !outside_round_corner(px - x, py - y, w, h, radius)
+}
+
+fn apply_backdrop(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    ellipse: bool,
+    filter: &str,
+) {
+    let pad = output_spacing(filter_blur(filter), slide)
+        .round()
+        .clamp(0.0, 24.0) as i32;
+    let bx = x - pad;
+    let by = y - pad;
+    let bw = (w + pad * 2).max(1);
+    let bh = (h + pad * 2).max(1);
+    let (cx0, cy0, cx1, cy1) =
+        clipped_rect(slide.output_width, slide.output_height, bx, by, bw, bh);
+    let cw = cx1 - cx0;
+    let ch = cy1 - cy0;
+    if cw <= 0 || ch <= 0 {
+        return;
+    }
+    let mut filtered = copy_rect(
+        pixels,
+        slide.output_width,
+        slide.output_height,
+        bx,
+        by,
+        bw,
+        bh,
+    );
+    if pad > 0 {
+        box_blur_buffer(&mut filtered, cw, ch, pad);
+    }
+    let opacity = filter_opacity(filter);
+    let grayscale = filter_grayscale(filter);
+    let invert = filter_invert(filter);
+    let sepia = filter_sepia(filter);
+    let brightness = filter_brightness(filter);
+    let contrast = filter_contrast(filter);
+    let saturate = filter_saturate(filter);
+    let hue = filter_hue_rotate(filter);
+    let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            if !in_item_shape(px, py, x, y, w, h, radius, ellipse) {
+                continue;
+            }
+            let sx = (px - cx0).clamp(0, cw - 1) as usize;
+            let sy = (py - cy0).clamp(0, ch - 1) as usize;
+            let src = (sy * cw as usize + sx) * 4;
+            if src + 3 >= filtered.len() {
+                continue;
+            }
+            let color = filter_pixel(
+                [
+                    filtered[src],
+                    filtered[src + 1],
+                    filtered[src + 2],
+                    filtered[src + 3],
+                ],
+                opacity,
+                grayscale,
+                invert,
+                sepia,
+                brightness,
+                contrast,
+                saturate,
+                hue,
+            );
+            let dest = ((py as u32 * slide.output_width + px as u32) * 4) as usize;
+            if dest + 3 < pixels.len() {
+                pixels[dest..dest + 4].copy_from_slice(&color);
+            }
+        }
+    }
+}
+
+fn box_blur_buffer(pixels: &mut [u8], width: i32, height: i32, radius: i32) {
+    if radius <= 0 || width <= 0 || height <= 0 {
+        return;
+    }
+    let source = pixels.to_vec();
+    let radius = radius.max(1);
+    let width = width as usize;
+    let height = height as usize;
+    let r = radius as usize;
+    for y in 0..height {
+        for x in 0..width {
+            let mut sum = [0u32; 4];
+            let mut count = 0u32;
+            let y0 = y.saturating_sub(r);
+            let y1 = (y + r + 1).min(height);
+            let x0 = x.saturating_sub(r);
+            let x1 = (x + r + 1).min(width);
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    let i = (py * width + px) * 4;
+                    for channel in 0..4 {
+                        sum[channel] += u32::from(source[i + channel]);
+                    }
+                    count += 1;
+                }
+            }
+            let dest = (y * width + x) * 4;
+            for channel in 0..4 {
+                pixels[dest + channel] = (sum[channel] / count.max(1)) as u8;
+            }
+        }
+    }
+}
+
+fn filter_pixel(
+    mut painted: [u8; 4],
+    opacity: f32,
+    grayscale: f32,
+    invert: f32,
+    sepia: f32,
+    brightness: f32,
+    contrast: f32,
+    saturate: f32,
+    hue: f32,
+) -> [u8; 4] {
+    if grayscale > 0.0 {
+        let luma = 0.2126 * f32::from(painted[0])
+            + 0.7152 * f32::from(painted[1])
+            + 0.0722 * f32::from(painted[2]);
+        for channel in 0..3 {
+            let color = f32::from(painted[channel]);
+            painted[channel] = (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
+        }
+    }
+    if invert > 0.0 {
+        for channel in 0..3 {
+            let color = f32::from(painted[channel]);
+            painted[channel] = (color * (1.0 - invert) + (255.0 - color) * invert).round() as u8;
+        }
+    }
+    if sepia > 0.0 {
+        let red = f32::from(painted[0]);
+        let green = f32::from(painted[1]);
+        let blue = f32::from(painted[2]);
+        let toned = [
+            (red * 0.393 + green * 0.769 + blue * 0.189).clamp(0.0, 255.0),
+            (red * 0.349 + green * 0.686 + blue * 0.168).clamp(0.0, 255.0),
+            (red * 0.272 + green * 0.534 + blue * 0.131).clamp(0.0, 255.0),
+        ];
+        for channel in 0..3 {
+            let color = f32::from(painted[channel]);
+            painted[channel] = (color * (1.0 - sepia) + toned[channel] * sepia).round() as u8;
+        }
+    }
+    if (brightness - 1.0).abs() > 0.001 {
+        for channel in 0..3 {
+            painted[channel] = (f32::from(painted[channel]) * brightness)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+    }
+    if (contrast - 1.0).abs() > 0.001 {
+        for channel in 0..3 {
+            let color = f32::from(painted[channel]);
+            painted[channel] = ((color - 128.0) * contrast + 128.0)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+    }
+    if (saturate - 1.0).abs() > 0.001 {
+        let luma = 0.2126 * f32::from(painted[0])
+            + 0.7152 * f32::from(painted[1])
+            + 0.0722 * f32::from(painted[2]);
+        for channel in 0..3 {
+            let color = f32::from(painted[channel]);
+            painted[channel] = (luma + (color - luma) * saturate).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    if hue_changes(hue) {
+        let (r, g, b) = hue_spin(
+            f32::from(painted[0]),
+            f32::from(painted[1]),
+            f32::from(painted[2]),
+            hue,
+        );
+        painted[0] = r.round().clamp(0.0, 255.0) as u8;
+        painted[1] = g.round().clamp(0.0, 255.0) as u8;
+        painted[2] = b.round().clamp(0.0, 255.0) as u8;
+    }
+    painted[3] = (f32::from(painted[3]) * opacity).round().clamp(0.0, 255.0) as u8;
+    painted
+}
+
+fn paint_box_shadow(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    ellipse: bool,
+    shadow: BoxShadow,
+) {
+    let ox = scale(shadow.x, slide.output_width, slide.source_width);
+    let oy = scale(shadow.y, slide.output_height, slide.source_height);
+    let blur = scale(shadow.blur, slide.output_height, slide.source_height).clamp(0, 16);
+    let spread = scale(shadow.spread, slide.output_height, slide.source_height);
+    let sx = x + ox - spread;
+    let sy = y + oy - spread;
+    let sw = (w + spread * 2).max(1);
+    let sh = (h + spread * 2).max(1);
+    let faded = |alpha: u8| Rgba {
+        r: shadow.color.r,
+        g: shadow.color.g,
+        b: shadow.color.b,
+        a: alpha,
+    };
+    if blur <= 0 {
+        stamp_shadow_shape(
+            pixels,
+            slide.output_width,
+            slide.output_height,
+            sx,
+            sy,
+            sw,
+            sh,
+            radius + spread,
+            ellipse,
+            shadow.color,
+        );
+        return;
+    }
+    let samples = ((2 * blur + 1) * (2 * blur + 1)).max(1) as u16;
+    let alpha = ((u16::from(shadow.color.a) * 8) / samples.max(8))
+        .clamp(1, u16::from(shadow.color.a)) as u8;
+    for dy in -blur..=blur {
+        for dx in -blur..=blur {
+            if dx * dx + dy * dy > blur * blur {
+                continue;
+            }
+            stamp_shadow_shape(
+                pixels,
+                slide.output_width,
+                slide.output_height,
+                sx + dx,
+                sy + dy,
+                sw,
+                sh,
+                radius + spread,
+                ellipse,
+                faded(alpha),
+            );
+        }
+    }
+}
+
+fn stamp_shadow_shape(
+    pixels: &mut [u8],
+    frame_w: u32,
+    frame_h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    ellipse: bool,
+    color: Rgba,
+) {
+    let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            if in_item_shape(px, py, x, y, w, h, radius, ellipse) {
+                paint(pixels, frame_w, frame_h, px, py, color);
+            }
+        }
+    }
+}
+
+fn paint_inset_shadow(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    ellipse: bool,
+    shadow: BoxShadow,
+) {
+    let ox = scale(shadow.x, slide.output_width, slide.source_width);
+    let oy = scale(shadow.y, slide.output_height, slide.source_height);
+    let blur = scale(shadow.blur, slide.output_height, slide.source_height).clamp(0, 16);
+    let spread = scale(shadow.spread, slide.output_height, slide.source_height);
+    let inner_x = x + ox + spread;
+    let inner_y = y + oy + spread;
+    let inner_w = (w - spread * 2).max(1);
+    let inner_h = (h - spread * 2).max(1);
+    let inner_r = (radius - spread).max(0);
+    let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            if !in_item_shape(px, py, x, y, w, h, radius, ellipse) {
+                continue;
+            }
+            let inside =
+                in_item_shape(px, py, inner_x, inner_y, inner_w, inner_h, inner_r, ellipse);
+            if inside && blur <= 0 {
+                continue;
+            }
+            if inside {
+                let dx = (px - inner_x).min(inner_x + inner_w - 1 - px);
+                let dy = (py - inner_y).min(inner_y + inner_h - 1 - py);
+                let dist = dx.min(dy);
+                if dist >= blur {
+                    continue;
+                }
+                let fade = 1.0 - dist as f32 / blur.max(1) as f32;
+                let color = Rgba {
+                    r: shadow.color.r,
+                    g: shadow.color.g,
+                    b: shadow.color.b,
+                    a: (f32::from(shadow.color.a) * fade).round() as u8,
+                };
+                paint(
+                    pixels,
+                    slide.output_width,
+                    slide.output_height,
+                    px,
+                    py,
+                    color,
+                );
+            } else {
+                paint(
+                    pixels,
+                    slide.output_width,
+                    slide.output_height,
+                    px,
+                    py,
+                    shadow.color,
+                );
+            }
+        }
+    }
+}
+
 fn shadow_offsets(shadow: TextShadow, slide: &StyledSlide) -> Vec<(f32, f32)> {
     let ox = scale(shadow.x, slide.output_width, slide.source_width) as f32;
     let oy = scale(shadow.y, slide.output_height, slide.source_height) as f32;
@@ -2702,6 +3184,118 @@ mod tests {
             .unwrap();
         assert_eq!(faded_shadow.color.a, 204);
         assert!(parse_style("text-shadow: none;").shadow.is_none());
+        let box_shadow = parse_style("box-shadow: 2px 2px 8px 0 rgb(0 0 0 / 0.5);")
+            .box_shadow
+            .unwrap();
+        assert_eq!(box_shadow.x, 2.0);
+        assert_eq!(box_shadow.y, 2.0);
+        assert_eq!(box_shadow.blur, 8.0);
+        assert_eq!(box_shadow.spread, 0.0);
+        assert_eq!(box_shadow.color.a, 128);
+        assert!(!box_shadow.inset);
+        let inset = parse_style("box-shadow: inset 4px 6px 2px 3px #ff0000;")
+            .box_shadow
+            .unwrap();
+        assert!(inset.inset);
+        assert_eq!(inset.spread, 3.0);
+        assert_eq!(
+            inset.color,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+        assert!(parse_style("box-shadow: none;").box_shadow.is_none());
+        let rounded = parse_style("border-radius: 8px;backdrop-filter: blur(10px);");
+        assert_eq!(rounded.radius, 8.0);
+        assert!(!rounded.elliptical_background);
+        assert_eq!(rounded.backdrop, "blur(10px)");
+        assert!(parse_style("border-radius: 50%;").elliptical_background);
+    }
+
+    fn style_slide(style: &str) -> StyledSlide {
+        let mut slide = sample();
+        slide.items[0].style = style.into();
+        slide.items[0].lines.clear();
+        slide
+    }
+
+    #[test]
+    fn box_shadow_and_rounded_corners_and_backdrop_filters_are_painted() {
+        let shadow = render_styled(&style_slide(
+            "left:200px;top:200px;width:200px;height:200px;background:#ffffff;box-shadow: 200px 0px 0px 0 #ff0000;",
+        ));
+        // The white box is around x=100,y=100 at 960x540. A 200px source shadow is 100 output pixels to the right.
+        let x = 100 + 100 + 20;
+        let y = 100 + 20;
+        let i = ((y * 960 + x) * 4) as usize;
+        assert!(
+            shadow.pixels[i] > 200 && shadow.pixels[i + 1] < 40 && shadow.pixels[i + 2] < 40,
+            "expected red box-shadow, got {:?}",
+            &shadow.pixels[i..i + 4]
+        );
+        let sharp = render_styled(&style_slide(
+            "left:0px;top:0px;width:400px;height:400px;background:#ffffff;",
+        ));
+        let rounded = render_styled(&style_slide(
+            "left:0px;top:0px;width:400px;height:400px;background:#ffffff;border-radius: 200px;",
+        ));
+        // The far corner of a rounded box should stay the slide background.
+        // The box is 200x200 output pixels; (199,0) sits outside a 100px corner radius.
+        let c = 199 * 4;
+        assert_eq!(&sharp.pixels[c..c + 3], &[255, 255, 255]);
+        assert!(
+            rounded.pixels[c] < 40 && rounded.pixels[c + 1] < 40 && rounded.pixels[c + 2] < 40,
+            "rounded corner should stay black, got {:?}",
+            &rounded.pixels[c..c + 4]
+        );
+        let mut under = sample();
+        under.background = Rgba {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        under.items.insert(
+            0,
+            StyledItem {
+                style: "left:0px;top:0px;width:1920px;height:1080px;background:#0000ff;".into(),
+                align: String::new(),
+                lines: Vec::new(),
+                image: None,
+                fit: Fit::Fill,
+                line_bg: None,
+                line_gap: 0.0,
+                line_radius: 0.0,
+                flip_x: false,
+                flip_y: false,
+                opacity: 1.0,
+                grayscale: 0.0,
+                invert: 0.0,
+                sepia: 0.0,
+                brightness: 1.0,
+                contrast: 1.0,
+                saturate: 1.0,
+                hue_rotate: 0.0,
+                blur: 0.0,
+                blend: Blend::Normal,
+                crop: Crop::default(),
+            },
+        );
+        // Replace the sample item with a half-cover backdrop that inverts the blue field.
+        under.items[1].style =
+            "left:0px;top:0px;width:960px;height:1080px;backdrop-filter: invert(1);".into();
+        under.items[1].lines.clear();
+        let frame = render_styled(&under);
+        // Left half should invert blue -> yellow-ish (255-0, 255-0, 255-255) = (255,255,0)
+        let left = ((100 * 960 + 100) * 4) as usize;
+        assert!(
+            frame.pixels[left] > 200 && frame.pixels[left + 1] > 200 && frame.pixels[left + 2] < 40,
+            "backdrop invert, left={:?}",
+            &frame.pixels[left..left + 4]
+        );
     }
 
     #[test]
