@@ -14,6 +14,8 @@ struct Format {
     italic: Option<bool>,
     underline: Option<bool>,
     strike: Option<bool>,
+    caps: Option<bool>,
+    spacing_twips: Option<i32>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -147,6 +149,16 @@ impl Document {
                 },
             );
         }
+        if let Some(caps) = format.caps {
+            css.push_str(if caps {
+                "text-transform:uppercase;"
+            } else {
+                "text-transform:none;"
+            });
+        }
+        if let Some(twips) = format.spacing_twips {
+            let _ = write!(css, "letter-spacing:{}px;", f64::from(twips) / 20.0);
+        }
         css
     }
 }
@@ -272,6 +284,9 @@ impl Reader {
             "ul" => format.underline = on,
             "ulnone" => format.underline = Some(false),
             "strike" => format.strike = on,
+            "caps" => format.caps = on,
+            "expnd" => format.spacing_twips = number.map(|value| value.clamp(-2000, 2000) * 5),
+            "expndtw" => format.spacing_twips = number.map(|value| value.clamp(-10000, 10000)),
             "plain" => {
                 *format = Format {
                     font: self.default_font,
@@ -281,6 +296,8 @@ impl Reader {
                     italic: Some(false),
                     underline: Some(false),
                     strike: Some(false),
+                    caps: Some(false),
+                    spacing_twips: Some(0),
                 }
             }
             "ql" | "qr" | "qc" | "qj" | "pard" => {
@@ -389,5 +406,33 @@ fn ansi(byte: u8) -> char {
         C1[(byte - 0x80) as usize]
     } else {
         char::from(byte)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+
+    #[test]
+    fn caps_and_character_spacing_follow_rtf_group_scope() {
+        let document =
+            decode(r"{\rtf1\caps\expnd4 first {\caps0\expndtw-10 tighter} again \plain normal}");
+        assert_eq!(document.plain_text(), "first tighter again normal");
+        let lines = document.styled_lines("", false, false);
+        let runs = lines[0]["text"].as_array().unwrap();
+        assert_eq!(runs.len(), 4);
+        let spaced_caps = "text-transform:uppercase;letter-spacing:1px;";
+        assert_eq!(runs[0]["style"], spaced_caps);
+        assert_eq!(
+            runs[1]["style"],
+            "text-transform:none;letter-spacing:-0.5px;"
+        );
+        assert_eq!(runs[2]["style"], spaced_caps);
+        assert!(
+            runs[3]["style"]
+                .as_str()
+                .unwrap()
+                .ends_with("text-transform:none;letter-spacing:0px;")
+        );
     }
 }
