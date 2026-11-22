@@ -390,10 +390,10 @@ mod gst_player {
         // uses, then pass the native device ID to osxaudiosink.
         let mut devices = Vec::new();
         for id in macos_helpers::get_audio_device_ids().map_err(video_error)? {
-            if macos_helpers::get_audio_device_supports_scope(id, Scope::Output).unwrap_or(false) {
-                if let Ok(name) = macos_helpers::get_device_name(id) {
-                    devices.push((id, name));
-                }
+            if macos_helpers::get_audio_device_supports_scope(id, Scope::Output).unwrap_or(false)
+                && let Ok(name) = macos_helpers::get_device_name(id)
+            {
+                devices.push((id, name));
             }
         }
         Ok(devices)

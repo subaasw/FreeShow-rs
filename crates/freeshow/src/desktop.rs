@@ -45,7 +45,7 @@ pub fn install(uninstall: bool) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = uninstall;
-        return Err("desktop installation is only available in the Linux archive".into());
+        Err("desktop installation is only available in the Linux archive".into())
     }
     #[cfg(target_os = "linux")]
     {

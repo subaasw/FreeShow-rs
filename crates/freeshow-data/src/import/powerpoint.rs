@@ -1291,7 +1291,10 @@ mod tests {
         let show = import("Tiles.pptx", &files, Some(&path)).unwrap();
         let slides = &show.show["slides"];
         assert_eq!(slides["s1"]["items"][0]["fit"], "tile");
-        assert!(Path::new(slides["s1"]["items"][0]["src"].as_str().unwrap()).starts_with(&path));
+        assert!(
+            Path::new(slides["s1"]["items"][0]["src"].as_str().unwrap())
+                .starts_with(path.canonicalize().unwrap())
+        );
         assert_eq!(
             slides["s2"]["items"][0]["src"],
             "https://example.org/sky.png"
@@ -1367,7 +1370,9 @@ mod tests {
         assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Hello");
         assert_eq!(items[1]["type"], "media");
         assert!(items[1]["style"].as_str().unwrap().contains("left:0px"));
-        assert!(Path::new(items[1]["src"].as_str().unwrap()).starts_with(&path));
+        assert!(
+            Path::new(items[1]["src"].as_str().unwrap()).starts_with(path.canonicalize().unwrap())
+        );
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
         assert!(
             warnings

@@ -45,7 +45,6 @@ pub fn is_known(word: &str) -> bool {
     }
     let lower = word.to_ascii_lowercase();
     dictionary().contains(&lower)
-        || (word.chars().any(|ch| ch.is_ascii_uppercase()) && dictionary().contains(&lower))
 }
 
 /// Misspelled tokens in `text`, in appearance order.
@@ -78,7 +77,7 @@ pub fn suggestions(word: &str, limit: usize) -> Vec<String> {
         .map(|known| (edit_distance(&word, known), known.as_str()))
         .filter(|(distance, _)| *distance > 0 && *distance <= 2)
         .collect();
-    scored.sort_by_key(|(distance, known)| (*distance, known.len(), *known));
+    scored.sort_by_key(|(distance, known)| (*distance, known.len().abs_diff(word.len()), *known));
     scored
         .into_iter()
         .take(limit)
@@ -90,13 +89,18 @@ fn edit_distance(left: &str, right: &str) -> u32 {
     let left: Vec<u8> = left.bytes().collect();
     let right: Vec<u8> = right.bytes().collect();
     let mut prev: Vec<u32> = (0..=right.len() as u32).collect();
+    let mut two_back = vec![0; right.len() + 1];
     let mut next = vec![0; right.len() + 1];
     for (i, a) in left.iter().enumerate() {
         next[0] = i as u32 + 1;
         for (j, b) in right.iter().enumerate() {
             let cost = u32::from(a != b);
             next[j + 1] = (prev[j + 1] + 1).min(next[j] + 1).min(prev[j] + cost);
+            if i > 0 && j > 0 && *a == right[j - 1] && left[i - 1] == *b {
+                next[j + 1] = next[j + 1].min(two_back[j - 1] + 1);
+            }
         }
+        std::mem::swap(&mut two_back, &mut prev);
         std::mem::swap(&mut prev, &mut next);
     }
     prev[right.len()]

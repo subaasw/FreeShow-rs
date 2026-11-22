@@ -81,7 +81,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           test "$(uname -m)" = arm64
-          brew install pkgconf gstreamer
+          brew install pkgconf gstreamer libnice-gstreamer
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig" pkg-config --exists gstreamer-webrtc-1.0
 

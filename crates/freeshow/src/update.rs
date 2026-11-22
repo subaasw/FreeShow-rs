@@ -579,18 +579,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let marker = root.join("started");
-        let script = root.join("relaunch.sh");
-        std::fs::write(&script, "#!/bin/sh\nprintf ok > \"$1\"\n").unwrap();
         #[cfg(unix)]
-        {
+        let pid = {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
-        let pid = relaunch(&script, &[marker.to_string_lossy().into()]).unwrap();
+            let script = root.join("relaunch.sh");
+            std::fs::write(&script, "#!/bin/sh\nprintf ok > \"$1\"\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            relaunch(&script, &[marker.to_string_lossy().into_owned()]).unwrap()
+        };
+        #[cfg(windows)]
+        let pid = {
+            let shell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+            let marker = marker.to_string_lossy().replace('\'', "''");
+            relaunch(
+                &shell,
+                &[
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    format!("[IO.File]::WriteAllText('{marker}', 'ok')"),
+                ],
+            )
+            .unwrap()
+        };
         assert!(pid > 0);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
         while std::time::Instant::now() < deadline {
             if std::fs::read_to_string(&marker).ok().as_deref() == Some("ok") {
                 let _ = std::fs::remove_dir_all(&root);

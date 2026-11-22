@@ -529,8 +529,9 @@ mod tests {
 
     #[test]
     fn fontconfig_or_scan_finds_installed_families() {
-        let path = resolve_family("Liberation Sans", false)
-            .or_else(|| resolve_family("DejaVu Sans", false))
+        let path = ["Liberation Sans", "DejaVu Sans", "Arial"]
+            .into_iter()
+            .find_map(|family| resolve_family(family, false))
             .expect("a common system sans should be installed");
         assert!(path.is_file());
         let name = path
@@ -539,7 +540,7 @@ mod tests {
             .to_string_lossy()
             .to_ascii_lowercase();
         assert!(
-            name.contains("liberation") || name.contains("dejavu"),
+            name.contains("liberation") || name.contains("dejavu") || name.contains("arial"),
             "{path:?}"
         );
         if let Some(bold) = resolve_family("Liberation Sans", true) {
