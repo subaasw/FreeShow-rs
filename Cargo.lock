@@ -1879,6 +1879,7 @@ dependencies = [
 name = "freeshow-data"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "freeshow-core",
  "percent-encoding",
  "prost",
