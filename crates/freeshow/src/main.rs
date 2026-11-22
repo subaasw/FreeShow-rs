@@ -215,16 +215,96 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
 const THUMB_WIDTH: u32 = 56;
 const THUMB_HEIGHT: u32 = 40;
 
-fn media_thumb(entry: &MediaEntry) -> slint::Image {
-    if entry.exists
-        && entry.kind == MediaEntryKind::Image
-        && let Some(image) = std::fs::read(&entry.path)
-            .ok()
-            .and_then(|bytes| decode_image(&bytes))
-    {
-        return slint_image(&fit_raster(&image, THUMB_WIDTH, THUMB_HEIGHT));
+/// A media file and when it last changed, so an edited file gets a fresh thumbnail.
+type ThumbKey = (PathBuf, Option<std::time::SystemTime>);
+
+thread_local! {
+    /// Drawer thumbnails already made, so a refresh does not decode every picture again.
+    static MEDIA_THUMBS: RefCell<std::collections::HashMap<ThumbKey, slint::Image>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Video stills from the background worker: `None` while queued, then the still (or none).
+static VIDEO_STILLS: Mutex<Option<std::collections::HashMap<ThumbKey, Option<Option<Raster>>>>> =
+    Mutex::new(None);
+static VIDEO_STILLS_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static VIDEO_STILL_QUEUE: std::sync::OnceLock<Mutex<mpsc::Sender<ThumbKey>>> =
+    std::sync::OnceLock::new();
+
+/// Queues a video for one background worker, which decodes stills one at a time.
+fn queue_video_still(key: ThumbKey) {
+    let queue = VIDEO_STILL_QUEUE.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<ThumbKey>();
+        let _ = std::thread::Builder::new()
+            .name("video-stills".into())
+            .spawn(move || {
+                for key in rx {
+                    let still = freeshow_media::video_thumbnail(&key.0, THUMB_WIDTH, THUMB_HEIGHT);
+                    if let Ok(mut stills) = VIDEO_STILLS.lock() {
+                        stills
+                            .get_or_insert_with(Default::default)
+                            .insert(key, Some(still));
+                    }
+                    VIDEO_STILLS_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        Mutex::new(tx)
+    });
+    if let Ok(queue) = queue.lock() {
+        let _ = queue.send(key);
     }
-    slint_image(&kind_thumb(entry))
+}
+
+fn media_thumb(entry: &MediaEntry) -> slint::Image {
+    let modified = std::fs::metadata(&entry.path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    let key: ThumbKey = (entry.path.clone(), modified);
+    if let Some(image) = MEDIA_THUMBS.with(|thumbs| thumbs.borrow().get(&key).cloned()) {
+        return image;
+    }
+    let made = if !entry.exists {
+        Some(kind_thumb(entry))
+    } else {
+        match entry.kind {
+            MediaEntryKind::Image => Some(
+                std::fs::read(&entry.path)
+                    .ok()
+                    .and_then(|bytes| decode_image(&bytes))
+                    .map(|image| fit_raster(&image, THUMB_WIDTH, THUMB_HEIGHT))
+                    .unwrap_or_else(|| kind_thumb(entry)),
+            ),
+            MediaEntryKind::Video => {
+                let mut stills = VIDEO_STILLS.lock().ok();
+                let slot = stills
+                    .as_mut()
+                    .map(|stills| stills.get_or_insert_with(Default::default));
+                match slot.as_ref().and_then(|stills| stills.get(&key)) {
+                    Some(Some(still)) => Some(still.clone().unwrap_or_else(|| kind_thumb(entry))),
+                    Some(None) => None,
+                    None => {
+                        if let Some(stills) = slot {
+                            stills.insert(key.clone(), None);
+                        }
+                        drop(stills);
+                        queue_video_still(key.clone());
+                        None
+                    }
+                }
+            }
+            _ => Some(kind_thumb(entry)),
+        }
+    };
+    match made {
+        Some(raster) => {
+            let image = slint_image(&raster);
+            MEDIA_THUMBS.with(|thumbs| thumbs.borrow_mut().insert(key, image.clone()));
+            image
+        }
+        // Still decoding: show the play icon until the still arrives.
+        None => slint_image(&kind_thumb(entry)),
+    }
 }
 
 fn slint_image(raster: &Raster) -> slint::Image {
@@ -3782,6 +3862,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // New headlines show up in an open RSS tab without waiting for a click.
                 if fed
                     && current.tab == "rss"
+                    && let Some(ui) = clock_ui.upgrade()
+                {
+                    ui.set_drawer_rows(drawer_rows(&current));
+                }
+                // Video stills decoded in the background replace their placeholder icons.
+                if VIDEO_STILLS_READY.swap(false, std::sync::atomic::Ordering::Relaxed)
+                    && current.tab == "media"
                     && let Some(ui) = clock_ui.upgrade()
                 {
                     ui.set_drawer_rows(drawer_rows(&current));
