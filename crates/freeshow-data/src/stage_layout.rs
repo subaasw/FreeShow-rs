@@ -455,8 +455,10 @@ fn merge_item_options(
         }
         target["id"] = id.clone();
     }
-    if let Some(src) = modeled.get("src") {
-        item.insert("src".into(), src.clone());
+    for key in ["src", "fit"] {
+        if let Some(value) = modeled.get(key) {
+            item.insert(key.into(), value.clone());
+        }
     }
     if let Some(lines) = modeled.get("lines") {
         let current = Value::Object(item.clone());
@@ -501,6 +503,9 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
         }
         if let Some(src) = &item.src {
             object.insert("src".into(), Value::String(src.clone()));
+        }
+        if let Some(fit) = &item.fit {
+            object.insert("fit".into(), Value::String(fit.clone()));
         }
         if item.kind == StageItemKind::Text {
             let lines: Vec<Value> = item
@@ -901,8 +906,9 @@ mod tests {
               "next":{"type":"slide_text","offset":1,"style":"left:0px;"},
               "styled":{"type":"text","style":"","lines":[{"align":"","text":[{"value":"Hi","style":"color:red;"}]}]},
               "c":{"type":"clock","clock":{"seconds":true,"extra":"keep"},"style":""},
-              "t":{"type":"timer","style":""}
-            },"itemOrder":["next","styled","c","t"]}}"##,
+              "t":{"type":"timer","style":""},
+              "m":{"type":"media","src":"old.png","flipX":true,"style":""}
+            },"itemOrder":["next","styled","c","t","m"]}}"##,
         )
         .unwrap();
         let mut layout = load_stage_file(&path);
@@ -913,6 +919,8 @@ mod tests {
         layout.items[2].clock.seconds = false;
         layout.items[2].clock.date_format = "DD/MM/YYYY".into();
         layout.items[3].timer_id = Some("sermon".into());
+        layout.items[4].src = Some("Media/bg.mp4".into());
+        layout.items[4].fit = Some("cover".into());
         write_stage_layout(&path, &layout).unwrap();
         let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let items = &saved["default"]["items"];
@@ -926,6 +934,9 @@ mod tests {
         assert_eq!(items["c"]["clock"]["dateFormat"], "DD/MM/YYYY");
         assert_eq!(items["c"]["clock"]["extra"], "keep");
         assert_eq!(items["t"]["timer"]["id"], "sermon");
+        assert_eq!(items["m"]["src"], "Media/bg.mp4");
+        assert_eq!(items["m"]["fit"], "cover");
+        assert_eq!(items["m"]["flipX"], true);
         let mut layout = load_stage_file(&path);
         assert_eq!(layout.items[0].offset, 1);
         assert!(!layout.items[2].clock.seconds);

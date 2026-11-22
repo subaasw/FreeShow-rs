@@ -86,6 +86,8 @@ export struct StageRowData {
     seconds: bool,
     date-format: string,
     timer: string,
+    src: string,
+    fit: string,
 }
 
 component FieldLabel inherits Text {
@@ -917,6 +919,23 @@ export component StageEditorPanel inherits Rectangle {
                             model: root.timer-names;
                             value: root.timer-names[max(0, ComboIndex.find(root.timer-ids, root.current.timer))];
                             selected(value) => { root.set(root.current.id, "timer", root.timer-ids[self.current-index]); }
+                        }
+                    }
+                    if root.current.kind == "media": Row {
+                        FieldLabel { text: "File"; text-color: root.text-color; }
+                        LineEdit {
+                            colspan: 3;
+                            placeholder-text: "Picture or video path, then Enter";
+                            text: root.current.src;
+                            accepted(value) => { root.set(root.current.id, "src", value); }
+                        }
+                    }
+                    if root.current.kind == "media": Row {
+                        FieldLabel { text: "Fit"; text-color: root.text-color; }
+                        ValueCombo {
+                            model: ["contain", "cover", "fill"];
+                            value: root.current.fit;
+                            selected(value) => { root.set(root.current.id, "fit", value); }
                         }
                     }
                     if root.current.kind == "text": Row {
