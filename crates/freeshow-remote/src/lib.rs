@@ -210,6 +210,15 @@ pub fn remote_router(state: AppState) -> Router {
         .route("/stage-frame", get(stage_frame_png))
         .route("/state", get(state_json))
         .route("/action", post(action))
+        .route("/api/state", get(state_json))
+        .route("/api/action", post(action))
+        .route("/api/{channel}", post(api_channel).get(api_channel_get))
+        .route("/webhook", post(webhook).get(webhook_get))
+        .route("/companion", get(companion_index))
+        .route(
+            "/companion/{action}",
+            post(companion_press).get(companion_press_get),
+        )
         .route("/ws", get(ws_upgrade))
         .with_state(state)
 }
@@ -350,6 +359,163 @@ async fn action(
         Value::Array(replies)
     };
     Ok(Json(body))
+}
+
+/// Maps a short Companion/webhook name to a FreeShow API channel.
+pub fn normalize_action_channel(action: &str) -> String {
+    let trimmed = action.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        return "API:next_slide".to_string();
+    }
+    if trimmed.contains(':') {
+        return trimmed.to_string();
+    }
+    let key = trimmed.replace(['-', ' '], "_").to_ascii_lowercase();
+    match key.as_str() {
+        "next" | "next_slide" | "go" | "press" => "API:next_slide".into(),
+        "previous" | "prev" | "previous_slide" => "API:previous_slide".into(),
+        "clear" | "clear_all" => "API:clear_all".into(),
+        "clear_slide" => "API:clear_slide".into(),
+        "state" | "get_state" => "API:get_cleared".into(),
+        other => format!("API:{other}"),
+    }
+}
+
+fn message_from_action(action: &str, data: Option<Value>) -> Value {
+    let mut message = serde_json::json!({ "channel": normalize_action_channel(action) });
+    if let Some(Value::Object(map)) = data {
+        if let Some(channel) = map.get("channel").and_then(Value::as_str) {
+            message["channel"] = Value::String(normalize_action_channel(channel));
+        }
+        if let Some(action) = map
+            .get("action")
+            .or_else(|| map.get("event"))
+            .and_then(Value::as_str)
+        {
+            message["channel"] = Value::String(normalize_action_channel(action));
+        }
+        if let Some(payload) = map.get("data") {
+            message["data"] = payload.clone();
+        }
+    } else if let Some(data) = data {
+        message["data"] = data;
+    }
+    message
+}
+
+fn run_action(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &str,
+    data: Option<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !state.authorized(headers) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "channel": "PASSWORD",
+                "data": { "password": true }
+            })),
+        ));
+    }
+    let mut authenticated = true;
+    let incoming = message_from_action(action, data);
+    let replies = dispatch(state, &incoming, &mut authenticated);
+    let body = if replies.len() == 1 {
+        replies.into_iter().next().unwrap_or(Value::Null)
+    } else {
+        Value::Array(replies)
+    };
+    Ok(Json(body))
+}
+
+fn json_body(bytes: &[u8]) -> Option<Value> {
+    if bytes.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(bytes).ok()
+}
+
+async fn api_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(channel): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    run_action(&state, &headers, &channel, json_body(&body))
+}
+
+async fn api_channel_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(channel): axum::extract::Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    run_action(&state, &headers, &channel, None)
+}
+
+async fn webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    run_action(&state, &headers, "next", json_body(&body))
+}
+
+async fn webhook_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let action = query
+        .get("action")
+        .or_else(|| query.get("channel"))
+        .or_else(|| query.get("event"))
+        .cloned()
+        .unwrap_or_else(|| "next".to_string());
+    run_action(&state, &headers, &action, None)
+}
+
+async fn companion_index(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !state.authorized(&headers) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "channel": "PASSWORD",
+                "data": { "password": true }
+            })),
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "name": "FreeShow",
+        "protocol": "http+ws",
+        "actions": [
+            "next",
+            "previous",
+            "clear",
+            "clear_slide",
+            "go"
+        ]
+    })))
+}
+
+async fn companion_press(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    run_action(&state, &headers, &action, json_body(&body))
+}
+
+async fn companion_press_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(action): axum::extract::Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    run_action(&state, &headers, &action, None)
 }
 
 async fn ws_upgrade(State(state): State<AppState>, socket: WebSocketUpgrade) -> impl IntoResponse {
@@ -518,6 +684,86 @@ mod tests {
         assert_eq!(value["channel"], "OUT");
         assert_eq!(value["data"]["lines"][0], "how sweet");
         assert_eq!(rx.try_recv(), Ok(Command::SetSlide(1)));
+    }
+
+    #[test]
+    fn webhook_and_companion_names_map_to_api_channels() {
+        assert_eq!(normalize_action_channel("next"), "API:next_slide");
+        assert_eq!(normalize_action_channel("PREVIOUS"), "API:previous_slide");
+        assert_eq!(normalize_action_channel("API:clear_all"), "API:clear_all");
+        assert_eq!(
+            normalize_action_channel("toggle_media_mute"),
+            "API:toggle_media_mute"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_webhook_and_companion_advance_the_slide() {
+        let (state, rx) = harness();
+        let app = remote_router(state);
+
+        let api = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/next")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(api.status(), 200);
+        assert_eq!(rx.try_recv(), Ok(Command::SetSlide(1)));
+
+        let webhook = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook?action=previous")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(webhook.status(), 200);
+        assert_eq!(rx.try_recv(), Ok(Command::SetSlide(0)));
+
+        let companion = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/companion/next")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(companion.status(), 200);
+        assert_eq!(rx.try_recv(), Ok(Command::SetSlide(1)));
+
+        let index = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(index.status(), 200);
+        let body: Value =
+            serde_json::from_slice(&index.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(body["protocol"], "http+ws");
+        assert!(
+            body["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "next")
+        );
     }
 
     #[tokio::test]
