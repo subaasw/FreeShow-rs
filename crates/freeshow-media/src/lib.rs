@@ -47,18 +47,64 @@ pub enum MediaKind {
 }
 
 pub fn media_kind(path: &Path) -> MediaKind {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let raw = path.to_string_lossy();
+    if is_remote_url(&raw) {
+        return remote_media_kind(&raw);
+    }
+    match extension_of(&raw).as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => MediaKind::Image,
         "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => MediaKind::Video,
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => MediaKind::Audio,
         _ => MediaKind::Other,
     }
+}
+
+/// A path or media field that points at an HTTP or HTTPS resource.
+pub fn is_remote_url(path: &str) -> bool {
+    let path = path.trim();
+    path.starts_with("http://") || path.starts_with("https://")
+}
+
+fn extension_of(path: &str) -> String {
+    let bare = path.split(['?', '#']).next().unwrap_or(path);
+    Path::new(bare)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn remote_media_kind(path: &str) -> MediaKind {
+    match extension_of(path).as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => MediaKind::Image,
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => MediaKind::Audio,
+        "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" | "m3u8" | "mpd" => MediaKind::Video,
+        _ if is_stream_page(path) => MediaKind::Video,
+        _ => MediaKind::Video,
+    }
+}
+
+/// YouTube, Vimeo, and similar pages that are not a direct media file.
+pub fn is_stream_page(path: &str) -> bool {
+    host_of(path).is_some_and(|host| {
+        host == "youtube.com"
+            || host.ends_with(".youtube.com")
+            || host == "youtu.be"
+            || host == "vimeo.com"
+            || host.ends_with(".vimeo.com")
+    })
+}
+
+fn host_of(path: &str) -> Option<String> {
+    let rest = path
+        .strip_prefix("https://")
+        .or_else(|| path.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.rsplit_once(']').map_or(host, |(_, host)| host);
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.trim().trim_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 #[cfg(test)]
@@ -71,5 +117,23 @@ mod tests {
         assert_eq!(media_kind(Path::new("clip.mp4")), MediaKind::Video);
         assert_eq!(media_kind(Path::new("song.mp3")), MediaKind::Audio);
         assert_eq!(media_kind(Path::new("notes.txt")), MediaKind::Other);
+        assert_eq!(
+            media_kind(Path::new("https://cdn.example/cover.png?token=1")),
+            MediaKind::Image
+        );
+        assert_eq!(
+            media_kind(Path::new("https://cdn.example/clip.mp4")),
+            MediaKind::Video
+        );
+        assert_eq!(
+            media_kind(Path::new("https://vimeo.com/123")),
+            MediaKind::Video
+        );
+        assert_eq!(
+            media_kind(Path::new("https://youtu.be/abcd")),
+            MediaKind::Video
+        );
+        assert!(is_stream_page("https://vimeo.com/123"));
+        assert!(!is_stream_page("https://cdn.example/clip.mp4"));
     }
 }

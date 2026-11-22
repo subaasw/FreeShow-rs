@@ -43,18 +43,7 @@ mod gst_player {
             routes: &[SpeakerRoute],
             network: &[NetworkRoute],
         ) -> Result<Self, MediaError> {
-            let location = path
-                .to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            Self::from_launch_network(
-                &format!(
-                    "filesrc location=\"{location}\" ! decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
-                    rgba_caps()
-                ),
-                routes,
-                network,
-            )
+            Self::from_launch_network(&video_launch(path), routes, network)
         }
 
         pub fn open_camera(name: &str) -> Result<Self, MediaError> {
@@ -1133,6 +1122,20 @@ mod gst_player {
             .unwrap_or(0.0)
     }
 
+    fn video_launch(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        let location = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        let source = if crate::is_remote_url(&raw) {
+            format!("uridecodebin uri=\"{location}\" name=dec")
+        } else {
+            format!("filesrc location=\"{location}\" ! decodebin name=dec")
+        };
+        format!(
+            "{source} ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
+            rgba_caps()
+        )
+    }
+
     fn rgba_caps() -> String {
         format!(
             "videoscale add-borders=true ! video/x-raw,format=RGBA,width={OUTPUT_WIDTH},height={OUTPUT_HEIGHT},pixel-aspect-ratio=1/1"
@@ -1368,5 +1371,99 @@ mod tests {
         player.set_muted(false);
         let restored = player.output_volume().unwrap_or(0.0);
         assert!((restored - 0.4).abs() < 0.05);
+    }
+
+    #[test]
+    fn an_http_clip_plays_through_uridecodebin() {
+        gst::init().expect("gstreamer");
+        let path =
+            std::env::temp_dir().join(format!("freeshow-rust-http-{}.mkv", std::process::id()));
+        let location = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "");
+        let writer = gst::parse::launch(&format!(
+            "videotestsrc num-buffers=6 pattern=green ! videoconvert ! avenc_mjpeg ! matroskamux ! filesink location=\"{location}\""
+        ))
+        .expect("clip writer");
+        writer.set_state(gst::State::Playing).expect("start writer");
+        let bus = writer.bus().expect("writer bus");
+        let _ = bus.timed_pop_filtered(
+            gst::ClockTime::from_seconds(10),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        let _ = writer.set_state(gst::State::Null);
+        let data = std::fs::read(&path).expect("clip bytes");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let mut served = 0;
+            while served < 12 && std::time::Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                stream.set_nonblocking(false).ok();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .ok();
+                let mut request = Vec::new();
+                use std::io::{Read, Write};
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 16384 {
+                    let mut byte = [0];
+                    if stream.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                let text = String::from_utf8_lossy(&request);
+                let mut start = 0;
+                let mut end = data.len();
+                if let Some(range) = text
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("range:"))
+                    && let Some(spec) = range.split('=').nth(1)
+                {
+                    let spec = spec.trim();
+                    let (from, to) = spec.split_once('-').unwrap_or(("0", ""));
+                    start = from.parse().unwrap_or(0);
+                    end = if to.is_empty() {
+                        data.len()
+                    } else {
+                        to.parse::<usize>().unwrap_or(data.len() - 1) + 1
+                    }
+                    .min(data.len());
+                    start = start.min(end);
+                }
+                let body = &data[start..end];
+                let status = if start == 0 && end == data.len() {
+                    "HTTP/1.1 200 OK"
+                } else {
+                    "HTTP/1.1 206 Partial Content"
+                };
+                let last = end.saturating_sub(1);
+                let header = format!(
+                    "{status}\r\nContent-Type: video/x-matroska\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{last}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    body.len(),
+                    data.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body);
+                served += 1;
+            }
+        });
+        let url = format!("http://{addr}/clip.mkv");
+        let mut player = VideoPlayer::open(Path::new(&url)).expect("open remote clip");
+        let frame = wait_for_frame(&mut player).expect("http frame");
+        assert!(frame.width > 0 && frame.height > 0);
+        let _ = std::fs::remove_file(&path);
+        drop(player);
+        let _ = server.join();
     }
 }

@@ -125,14 +125,18 @@ pub(super) fn prepare_lesson(
             index += 1;
             let id = format!("s{index}");
             let media_id = format!("m{index}");
-            let source = file["url"].as_str().unwrap();
+            let source = media_source(&file).unwrap();
             let file_name = file["name"].as_str().unwrap_or("Media");
             let extension = media_extension(&file)?;
             let loops = file["loopVideo"].as_bool() == Some(true)
                 || file["loop"].as_bool() == Some(true)
                 || file_name.contains("Title");
             tracing::info!("preparing lesson media {index}/{count}: {file_name}");
-            let path = cache.download(source, extension, file_name, control)?;
+            let path = if caches_lesson_media(source) {
+                cache.download(source, extension, file_name, control)?
+            } else {
+                PathBuf::from(source)
+            };
             show.show["media"][&media_id] =
                 json!({"name":file_name,"path":path,"muted":false,"loop":loops});
             show.show["slides"][&id] = json!({"group":file_name,"color":"","settings":{},"notes":"","items":[],"children":[]});
@@ -254,7 +258,7 @@ fn lesson_groups(lesson: &Value) -> Result<Vec<Vec<Value>>, String> {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|file| file["url"].as_str().is_some_and(|url| !url.is_empty()))
+            .filter(|file| media_source(file).is_some())
             .cloned()
             .collect();
         if !files.is_empty() {
@@ -267,7 +271,7 @@ fn lesson_groups(lesson: &Value) -> Result<Vec<Vec<Value>>, String> {
     // Validate every media type/URL before starting the first download.
     for file in groups.iter().flatten() {
         media_extension(file)?;
-        let url = file["url"].as_str().unwrap();
+        let url = media_source(file).unwrap();
         if !url.starts_with("https://") && !url.starts_with("http://") {
             return Err("lesson media must use HTTP or HTTPS".into());
         }
@@ -289,24 +293,16 @@ pub(super) fn plan_media_show(
             return Err("service-plan media entry is not an object".into());
         }
         if !file["url"].as_str().is_some_and(|url| !url.is_empty()) {
-            let stream = file["streamUrl"].as_str().unwrap_or("");
-            let path = stream
-                .split(['?', '#'])
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if ![".mp4", ".mov", ".m4v", ".webm"]
-                .iter()
-                .any(|extension| path.ends_with(extension))
-            {
-                return Err("stream-only lesson media needs a downloadable video URL".into());
-            }
-            file["url"] = file["streamUrl"].clone();
+            let stream = file["streamUrl"].as_str().filter(|url| !url.is_empty());
+            let Some(stream) = stream else {
+                return Err("service-plan media is missing a media URL".into());
+            };
+            file["url"] = json!(stream);
         }
     }
     let groups = lesson_groups(&json!({"messages":[{"files":files}]}))?;
     if groups.first().map(Vec::len) != Some(files.len()) || files.is_empty() {
-        return Err("service-plan media is missing a downloadable URL".into());
+        return Err("service-plan media is missing a media URL".into());
     }
     let mut cache = MediaCache::open(library)?;
     let mut show = ShowFile::blank(id, name);
@@ -321,12 +317,17 @@ pub(super) fn plan_media_show(
         let slide_id = format!("s{}", index + 1);
         let media_id = format!("m{}", index + 1);
         let extension = media_extension(file)?;
-        let path = cache.download(
-            file["url"].as_str().unwrap(),
-            extension,
-            file["name"].as_str().unwrap_or("Media"),
-            control,
-        )?;
+        let source = media_source(file).unwrap();
+        let path = if caches_lesson_media(source) {
+            cache.download(
+                source,
+                extension,
+                file["name"].as_str().unwrap_or("Media"),
+                control,
+            )?
+        } else {
+            PathBuf::from(source)
+        };
         show.show["media"][&media_id] = json!({"name":file["name"],"path":path,
             "type":if is_video(extension) {"video"} else {"image"},
             "loop":file["loopVideo"].as_bool().unwrap_or(false),"muted":false});
@@ -336,6 +337,45 @@ pub(super) fn plan_media_show(
     }
     show.show["layouts"]["main"]["slides"] = json!(order);
     Ok(show)
+}
+
+fn media_source(file: &Value) -> Option<&str> {
+    file["url"]
+        .as_str()
+        .filter(|url| !url.is_empty())
+        .or_else(|| file["streamUrl"].as_str().filter(|url| !url.is_empty()))
+}
+
+fn caches_lesson_media(url: &str) -> bool {
+    if is_stream_page(url) {
+        return false;
+    }
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if path.ends_with(".m3u8") || path.ends_with(".mpd") {
+        return false;
+    }
+    true
+}
+
+fn is_stream_page(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.rsplit_once(']').map_or(host, |(_, host)| host);
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.trim().trim_matches('.').to_ascii_lowercase();
+    host == "youtube.com"
+        || host.ends_with(".youtube.com")
+        || host == "youtu.be"
+        || host == "vimeo.com"
+        || host.ends_with(".vimeo.com")
 }
 
 fn media_extension(file: &Value) -> Result<&'static str, String> {
@@ -353,8 +393,7 @@ fn media_extension(file: &Value) -> Result<&'static str, String> {
     if !extension.is_empty() {
         return Ok(extension);
     }
-    let url = file["url"]
-        .as_str()
+    let url = media_source(file)
         .unwrap_or("")
         .split(['?', '#'])
         .next()
@@ -367,9 +406,10 @@ fn media_extension(file: &Value) -> Result<&'static str, String> {
             return Ok(extension);
         }
     }
-    if file["streamUrl"]
-        .as_str()
-        .is_some_and(|url| !url.is_empty())
+    if media_source(file).is_some_and(is_stream_page)
+        || file["streamUrl"]
+            .as_str()
+            .is_some_and(|url| !url.is_empty())
     {
         return Ok("mp4");
     }
@@ -793,6 +833,58 @@ pub(super) mod tests {
         );
         assert_eq!(fs::read(library.projects_path()).unwrap(), project);
         assert_eq!(library.list_shows().unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stream_only_pages_are_published_without_downloading() {
+        let root = root("stream-only");
+        let lesson = json!({
+            "lessonName":"Stream Week",
+            "messages":[{"files":[
+                {"name":"Vimeo Story","streamUrl":"https://vimeo.com/144160599","fileType":"video"},
+                {"name":"YouTube Clip","streamUrl":"https://youtu.be/X-AJdKty74M"}
+            ]}]
+        });
+        let report = import_lesson_document(&root, &lesson).unwrap();
+        assert_eq!(report.shows, 1);
+        let library = Library::open(&root);
+        let path = fs::read_dir(library.shows_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("show"))
+            .unwrap();
+        let show = ShowFile::load(&path).unwrap();
+        let paths: Vec<String> = show.show["media"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|entry| entry["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(paths.contains(&"https://vimeo.com/144160599".into()));
+        assert!(paths.contains(&"https://youtu.be/X-AJdKty74M".into()));
+        let lessons = library.media_dir().join("Lessons");
+        if lessons.exists() {
+            let downloaded = fs::read_dir(&lessons)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let name = entry.file_name();
+                    name != "index.json" && entry.path().is_file()
+                });
+            assert!(!downloaded, "stream-only pages should not be downloaded");
+        }
+        let plan = plan_media_show(
+            &library,
+            "stream",
+            "Stream",
+            "",
+            &[json!({"name":"Talk","streamUrl":"https://vimeo.com/123","fileType":"video"})],
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.show["media"]["m1"]["path"], "https://vimeo.com/123");
+        assert_eq!(plan.show["media"]["m1"]["type"], "video");
         fs::remove_dir_all(root).unwrap();
     }
 }
