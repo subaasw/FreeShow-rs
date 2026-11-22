@@ -1963,6 +1963,7 @@ dependencies = [
 name = "freeshow-record"
 version = "0.1.0"
 dependencies = [
+ "freeshow-core",
  "freeshow-media",
  "gstreamer",
  "gstreamer-app",

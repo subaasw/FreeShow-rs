@@ -151,3 +151,14 @@ mod tests {
         );
     }
 }
+
+/// The audio-only Icecast node is shared by saved routing and the sender.
+pub const ICECAST_BUS: &str = "icecast";
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct IcecastDestination {
+    pub host: String,
+    pub port: u16,
+    pub mount: String,
+    pub password: String,
+}

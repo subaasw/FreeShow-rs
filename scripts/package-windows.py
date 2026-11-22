@@ -18,7 +18,7 @@ PLUGINS = """coreelements app playback typefindfunctions videoconvertscale
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png
 autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc wasapi2""".split()
-OPTIONAL_PLUGINS = "mediafoundation directshow ksvideo directsound wasapi".split()
+OPTIONAL_PLUGINS = "shout2 mediafoundation directshow ksvideo directsound wasapi".split()
 SAMPLE = ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4"
 
 

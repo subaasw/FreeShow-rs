@@ -38,6 +38,7 @@ pub enum Command {
     },
     StopAudio,
     ToggleMedia,
+    ToggleIcecast(Option<bool>),
     PauseAudio { name: String },
     SeekAudio { millis: u64 },
     SeekVideo { millis: u64 },
@@ -491,6 +492,17 @@ pub fn handle_message_authenticated(
         "API:play_audio" => play_named(snapshot, &data, false, &mut commands),
         "API:toggle_media_loop" => toggle_media_loop(snapshot, &mut commands),
         "API:toggle_media_mute" => toggle_media_mute(snapshot, &mut commands),
+        "API:toggle_icecast" => {
+            match &data["value"] {
+                Value::Null => commands.push(Command::ToggleIcecast(None)),
+                Value::Bool(value) => commands.push(Command::ToggleIcecast(Some(*value))),
+                Value::String(value) if value == "true" || value == "false" => {
+                    commands.push(Command::ToggleIcecast(Some(value == "true")));
+                }
+                _ => {}
+            }
+            Vec::new()
+        }
         "API:get_media_loop_state" => vec![json!({
             "channel": "API:get_media_loop_state",
             "data": snapshot.media_loop

@@ -21,7 +21,7 @@ SYSTEM = ("/usr/lib/", "/System/Library/")
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png osxaudio applemedia
-autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc""".split()
+autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc shout2""".split()
 
 
 def run(*args, **kwargs):
