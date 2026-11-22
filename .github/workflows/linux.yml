@@ -49,25 +49,32 @@ jobs:
         run: bash scripts/ci-run.sh timeout --kill-after=30s 12m cargo test --locked --workspace
       - name: Build and verify the Linux archive
         run: bash scripts/ci-run.sh scripts/package.sh
-      - name: Run --check-perf on the packaged AppRun
-        run: |
-          app="$(echo dist/freeshow-*/freeshow-rust-*-linux-x86_64/AppRun)"
-          test -x "$app"
-          "$app" --check-perf | tee dist/freeshow-*/linux-check-perf.json
       - name: Verify after removing the system GStreamer runtime
         run: |
           sudo apt-get remove -y libgstreamer1.0-0 libgstreamer-plugins-base1.0-0
           python3 - <<'PY'
-          import json,os,pathlib,subprocess,tempfile
-          root=pathlib.Path.cwd()
-          apps=list((root/'dist').glob('freeshow-*/freeshow-rust-*-linux-x86_64'))
-          assert len(apps)==1, apps
+          import json, pathlib, subprocess, sys, tempfile
+
+          root = pathlib.Path.cwd()
+          sys.path.insert(0, str(root / 'scripts'))
+          from package_media import serve_sample
+
+          apps = list((root / 'dist').glob('freeshow-*/freeshow-rust-*-linux-x86_64'))
+          assert len(apps) == 1, apps
+          app = apps[0] / 'AppRun'
+          sample = root / 'crates/freeshow-data/tests/fixtures/lesson-clip.mp4'
           with tempfile.TemporaryDirectory(prefix='freeshow-clean-runtime-') as temp:
-              env={'HOME':temp,'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'}
-              subprocess.run([str(apps[0]/'AppRun'),'--check-media',str(root/'crates/freeshow-data/tests/fixtures/lesson-clip.mp4')],env=env,check=True,timeout=60)
-          report={'system_gstreamer_removed':True,'empty_home_and_registry':True,'h264_decoded':True}
-          (apps[0].parent/'linux-clean-runtime.json').write_text(json.dumps(report,indent=2)+'\n')
-          print('::notice::'+json.dumps(report))
+              env = {'HOME': temp, 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
+              subprocess.run([str(app), '--check-media', str(sample)], env=env, check=True, timeout=60)
+              with serve_sample(sample) as url:
+                  subprocess.run([str(app), '--check-media', url], env=env, check=True, timeout=60)
+              perf = subprocess.run([str(app), '--check-perf'], env=env, text=True, stdout=subprocess.PIPE, timeout=180)
+              print(perf.stdout, end='', flush=True)
+              perf.check_returncode()
+          (app.parent.parent / 'linux-check-perf.json').write_text(perf.stdout)
+          report = {'system_gstreamer_removed': True, 'empty_home_and_registry': True, 'h264_decoded': True, 'http_video_decoded': True}
+          (app.parent.parent / 'linux-clean-runtime.json').write_text(json.dumps(report, indent=2) + '\n')
+          print('::notice::' + json.dumps(report))
           PY
       - name: Upload the installable archive and verification reports
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -77,7 +84,6 @@ jobs:
             dist/freeshow-*/*.tar.gz
             dist/freeshow-*/*.sha256
             dist/freeshow-*/linux-*.json
-            dist/freeshow-*/linux-check-perf.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

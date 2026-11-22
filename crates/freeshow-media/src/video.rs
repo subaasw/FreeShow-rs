@@ -961,6 +961,7 @@ mod gst_player {
             panic!("expected audio amplitude {expected}, received {last:?}");
         }
 
+        #[track_caller]
         fn expect_channels(sink: &AppSink, expected: &[f32]) {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             let mut last = vec![0.0_f32; expected.len()];
@@ -1062,9 +1063,19 @@ mod gst_player {
             };
             let audio = AudioBranch::new_routed(vec![(vec![route.clone()], sink.clone().upcast())])
                 .unwrap();
+            // Emit both levels from one clock so timing cannot introduce silence in the fixture.
             let player = VideoPlayer::from_launch_with_audio(
-                "videotestsrc is-live=true ! video/x-raw,width=2,height=2,framerate=5/1 ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink max-buffers=1 drop=true sync=false interleave name=stereo ! audio/x-raw,format=F32LE,channels=2,rate=8000 ! decodebin name=dec audiotestsrc is-live=true wave=square volume=0.8 samplesperbuffer=64 ! audio/x-raw,format=F32LE,channels=1,rate=8000 ! stereo.sink_0 audiotestsrc is-live=true wave=square volume=0.4 samplesperbuffer=64 ! audio/x-raw,format=F32LE,channels=1,rate=8000 ! stereo.sink_1", audio
-            ).unwrap();
+                concat!(
+                    "videotestsrc is-live=true ! video/x-raw,width=2,height=2,framerate=5/1 ! ",
+                    "videoconvert ! video/x-raw,format=RGBA ! appsink name=sink max-buffers=1 drop=true sync=false ",
+                    "audiotestsrc is-live=true wave=square volume=0.8 samplesperbuffer=64 ! ",
+                    "audio/x-raw,format=F32LE,channels=1,rate=8000 ! ",
+                    "audioconvert mix-matrix=\"<<(float)1.0>,<(float)0.5>>\" ! ",
+                    "audio/x-raw,format=F32LE,channels=2,rate=8000 ! decodebin name=dec",
+                ),
+                audio,
+            )
+            .unwrap();
             player.set_volume(1.0);
             expect_channels(&sink, &[0.0, 0.2]);
             let stereo = [
