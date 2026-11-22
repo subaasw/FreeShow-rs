@@ -114,7 +114,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 mixed RTF fonts, colors, emphasis, paragraph alignment, all caps, and letter spacing.
 - [x] ProPresenter RTF hex escapes decoded with their document code page and font charset.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
-- [x] ProPresenter 7 solid, unrotated rectangle and ellipse fills.
+- [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
 - [x] ProPresenter 7 timed next-slide cues within an arrangement.
 - [ ] Other ProPresenter 7 graphics, remaining RTF controls, and timeline/action parity.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.

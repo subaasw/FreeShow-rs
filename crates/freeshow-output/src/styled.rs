@@ -44,6 +44,7 @@ pub struct BoxStyle {
     pub box_shadow: Option<BoxShadow>,
     /// CSS `backdrop-filter` from the item style, or empty.
     pub backdrop: String,
+    rotation_deg: f32,
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_radial_focus: Option<[f32; 2]>,
@@ -111,6 +112,7 @@ impl Default for BoxStyle {
             radius: 0.0,
             box_shadow: None,
             backdrop: String::new(),
+            rotation_deg: 0.0,
             gradient: None,
             pptx_radial_focus: None,
             pptx_rectangular_focus: None,
@@ -338,6 +340,15 @@ pub fn parse_style(css: &str) -> BoxStyle {
             }
             "box-shadow" => style.box_shadow = parse_box_shadow(value),
             "backdrop-filter" => style.backdrop = value.to_string(),
+            "transform" => {
+                style.rotation_deg = value
+                    .strip_prefix("rotate(")
+                    .and_then(|angle| angle.strip_suffix(')'))
+                    .and_then(|angle| angle.trim().strip_suffix("deg"))
+                    .and_then(|degrees| degrees.trim().parse::<f32>().ok())
+                    .filter(|degrees| degrees.is_finite())
+                    .map_or(0.0, |degrees| degrees.rem_euclid(360.0));
+            }
             "text-align" => style.align = parse_align(value),
             "font-family" => style.font_family = font_family(value),
             "font-weight" => style.bold = value.trim() == "bold" || value.trim() == "700",
@@ -1082,6 +1093,110 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     let y = scale(style.top, slide.output_height, slide.source_height);
     let w = scale(style.width, slide.output_width, slide.source_width).max(1);
     let h = scale(style.height, slide.output_height, slide.source_height).max(1);
+    let bounds = text::Clip { x, y, w, h };
+    let opacity = item.opacity.clamp(0.0, 1.0);
+    if style.rotation_deg != 0.0 && draw_rotated_item(pixels, slide, item, &style, &bounds, opacity)
+    {
+        return;
+    }
+    draw_item_content(pixels, slide, item, &style, bounds, opacity);
+}
+
+fn draw_rotated_item(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    item: &StyledItem,
+    style: &BoxStyle,
+    bounds: &text::Clip,
+    opacity: f32,
+) -> bool {
+    let text::Clip { x, y, w, h } = *bounds;
+    let area = w as usize * h as usize;
+    // shortcut: keep oversized and backdrop-dependent items on the direct path until rotated tiling and backdrop sampling are supported.
+    if area > pixels.len() / 2 || !style.backdrop.trim().is_empty() || item.blend != Blend::Normal {
+        return false;
+    }
+    let scale_x = if slide.source_width > 0.0 {
+        slide.output_width as f32 / slide.source_width
+    } else {
+        1.0
+    };
+    let scale_y = if slide.source_height > 0.0 {
+        slide.output_height as f32 / slide.source_height
+    } else {
+        1.0
+    };
+    let ratio = scale_x / scale_y;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return false;
+    }
+    let (sin, cos) = style.rotation_deg.to_radians().sin_cos();
+    let (half_w, half_h) = (w as f32 / 2.0, h as f32 / 2.0);
+    let (cx, cy) = (x as f32 + half_w, y as f32 + half_h);
+    let extent_x = cos.abs() * half_w + sin.abs() * ratio * half_h;
+    let extent_y = cos.abs() * half_h + sin.abs() / ratio * half_w;
+    let x0 = (cx - extent_x).floor().max(0.0) as i32;
+    let y0 = (cy - extent_y).floor().max(0.0) as i32;
+    let x1 = (cx + extent_x).ceil().min(slide.output_width as f32) as i32;
+    let y1 = (cy + extent_y).ceil().min(slide.output_height as f32) as i32;
+    if x0 >= x1 || y0 >= y1 || opacity == 0.0 {
+        return true;
+    }
+    let local = StyledSlide {
+        output_width: w as u32,
+        output_height: h as u32,
+        source_width: w as f32 / scale_x,
+        source_height: h as f32 / scale_y,
+        background: Rgba::TRANSPARENT,
+        items: Vec::new(),
+    };
+    let mut layer = vec![0; area * 4];
+    draw_item_content(
+        &mut layer,
+        &local,
+        item,
+        style,
+        text::Clip { x: 0, y: 0, w, h },
+        1.0,
+    );
+    let (sin_x, sin_y) = (sin * ratio, sin / ratio);
+    for py in y0..y1 {
+        let dy = py as f32 + 0.5 - cy;
+        for px in x0..x1 {
+            let dx = px as f32 + 0.5 - cx;
+            let sx = (half_w + dx * cos + dy * sin_x).floor() as i32;
+            let sy = (half_h - dx * sin_y + dy * cos).floor() as i32;
+            if sx < 0 || sy < 0 || sx >= w || sy >= h {
+                continue;
+            }
+            let source = (sy as usize * w as usize + sx as usize) * 4;
+            paint(
+                pixels,
+                slide.output_width,
+                slide.output_height,
+                px,
+                py,
+                Rgba {
+                    r: layer[source],
+                    g: layer[source + 1],
+                    b: layer[source + 2],
+                    a: (f32::from(layer[source + 3]) * opacity).round() as u8,
+                },
+            );
+        }
+    }
+    true
+}
+
+fn draw_item_content(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    item: &StyledItem,
+    style: &BoxStyle,
+    bounds: text::Clip,
+    opacity: f32,
+) {
+    let text::Clip { x, y, w, h } = bounds;
     let radius = if style.elliptical_background {
         0
     } else {
@@ -1113,7 +1228,6 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
             shadow,
         );
     }
-    let opacity = item.opacity.clamp(0.0, 1.0);
     let grayscale = item.grayscale.clamp(0.0, 1.0);
     let invert = item.invert.clamp(0.0, 1.0);
     let sepia = item.sepia.clamp(0.0, 1.0);
@@ -1133,7 +1247,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
         || hue_changes(hue);
     let before = (color_filter || blur >= 0.5 || blend != Blend::Normal)
         .then(|| copy_rect(pixels, slide.output_width, slide.output_height, x, y, w, h));
-    fill_item_background(pixels, slide, &style, x, y, w, h, radius);
+    fill_item_background(pixels, slide, style, x, y, w, h, radius);
     if let Some(image) = &item.image {
         blit(
             pixels,
@@ -1152,7 +1266,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     let clip = text::Clip { x, y, w, h };
     let gap = scale(item.line_gap, slide.output_height, slide.source_height).max(0);
     let visual = wrap_lines(&item.lines, &item.style, slide, w);
-    let mut cursor_y = y + vertical_offset(item, &visual, &style, slide, h, gap);
+    let mut cursor_y = y + vertical_offset(item, &visual, style, slide, h, gap);
     for (index, line) in visual.iter().enumerate() {
         let mut line_style = style.clone();
         if let Some(align) = align_in(&line.align) {
@@ -3645,6 +3759,27 @@ mod tests {
         slide.background = parse_color("#00FF00").unwrap();
         let output = over(&render_styled(&slide), &layers);
         assert_eq!(output.pixel(0, 0), parse_color("#3F3F80").unwrap());
+    }
+
+    #[test]
+    fn rotated_item_draws_its_offscreen_source_pixels_at_the_new_position() {
+        let mut slide =
+            style_slide("left:-10px;top:40px;width:60px;height:20px;transform:rotate(90deg);");
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = Rgba::TRANSPARENT;
+        slide.items[0].image = Some(Raster {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 128, 0, 0, 255, 255],
+        });
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(20, 25), parse_color("#FF000080").unwrap());
+        assert_eq!(frame.pixel(20, 70), parse_color("#0000FF").unwrap());
+        assert_eq!(frame.pixel(40, 50), Rgba::TRANSPARENT);
+        assert_eq!(frame.pixel(20, 10), Rgba::TRANSPARENT);
     }
 
     #[test]
