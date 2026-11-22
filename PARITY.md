@@ -165,7 +165,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | PowerPoint includes linked and tiled backgrounds, linear, circular, and rectangular gradients with supported focus geometry, and opacity and gamma transforms on background fills. ProPresenter RTF preserves escaped text in declared document and font encodings and omits hidden text from imported lyrics and notes. ProPresenter 7 imports enabled, immediate global clear-audio and clear-background cues. See the M6 importer list in `PLAN.md` for remaining format details. |
+| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | PowerPoint includes linked and tiled backgrounds, linear, circular, and rectangular gradients with supported focus geometry, and opacity and gamma transforms on background fills. ProPresenter RTF preserves escaped text in declared document and font encodings and omits hidden text from imported lyrics and notes. ProPresenter 7 imports enabled, immediate global clear-audio and clear-background cues. Standalone cues keep the last audience and stage content. See the M6 importer list in `PLAN.md` for remaining format details. |
 | MediaShout XML/SSC/JSON, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only, project packages | done | 1.2 | Fixture tests for each |
 | Native MediaShout `.mdb` | not-yet | 0.3 | Not a viable pure-Rust path |
 

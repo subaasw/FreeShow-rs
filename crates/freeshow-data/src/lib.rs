@@ -2399,9 +2399,22 @@ impl ShowFile {
         let Some((slide_id, _)) = steps.get(index) else {
             return Vec::new();
         };
+        self.stage_text_boxes_for_slide(slide_id, current, reveal, clicks_shown, page)
+    }
+
+    pub fn stage_text_boxes_for_slide(
+        &self,
+        slide_id: &str,
+        current: bool,
+        reveal: u32,
+        clicks_shown: bool,
+        page: Option<(usize, usize)>,
+    ) -> Vec<Vec<String>> {
         let Some(items) = self
             .show
-            .pointer(&format!("/slides/{slide_id}/items"))
+            .get("slides")
+            .and_then(|slides| slides.get(slide_id))
+            .and_then(|slide| slide.get("items"))
             .and_then(Value::as_array)
         else {
             return Vec::new();

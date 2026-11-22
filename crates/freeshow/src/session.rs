@@ -125,6 +125,7 @@ pub struct Session {
     timeline_fired: usize,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
+    pub(crate) program_content: std::cell::RefCell<Option<crate::live::ProgramContent>>,
     /// The selected text box on the current slide.
     pub item_index: usize,
     pub templates: Vec<String>,
@@ -337,6 +338,7 @@ impl Session {
             timeline_fired: 0,
             show_index: None,
             slide_index: None,
+            program_content: Default::default(),
             item_index: 0,
             templates: Vec::new(),
             template_catalog: Catalog::empty(),
@@ -508,6 +510,7 @@ impl Session {
             timeline_fired: 0,
             show_index: None,
             slide_index: None,
+            program_content: Default::default(),
             item_index: 0,
             templates,
             template_catalog,
@@ -1161,6 +1164,7 @@ impl Session {
         if self.preferences.out_locked() {
             return;
         }
+        self.program_content.get_mut().take();
         self.replace_underlay(None);
         self.reset_background_look();
         self.playing_audio = None;
