@@ -462,7 +462,7 @@ export component ControlWindow inherits Window {
                         spacing: 8px;
                         alignment: start;
                         Text {
-                            text: root.editing ? "Editing this slide. The audience sees it after you press Go." : "Live output";
+                            text: !root.editing ? "Live output" : root.live-slide == root.selected-slide ? "Editing the live slide. The output changes as you type." : "Editing this slide. The audience sees it after you press Go.";
                             color: root.text-color;
                             opacity: 0.7;
                             font-size: 12px * OperatorStyle.font-scale;

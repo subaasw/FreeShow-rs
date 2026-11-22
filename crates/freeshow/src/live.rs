@@ -1985,4 +1985,36 @@ mod tests {
         assert_ne!(audience_frame(&session).pixels, live.pixels);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn editing_the_live_slide_marks_the_output_for_a_repaint() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-live-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with("a", "Alpha song", "Alpha\n\nBeta"));
+        assert!(session.create_show_with("b", "Bravo song", "Gamma"));
+        let position = |session: &Session, id: &str| {
+            session.shows.iter().position(|show| show.id == id).unwrap()
+        };
+        session.tab = "shows".into();
+        session.select_drawer(position(&session, "a"));
+        session.select_slide(0);
+        let before = audience_frame(&session);
+        session.select_slide_for_edit(0);
+        assert!(session.save_lyrics("Alpha, now much longer"));
+        assert!(session.live_edited);
+        assert_ne!(
+            audience_frame(&session).pixels,
+            before.pixels,
+            "the edit is on the output"
+        );
+
+        session.live_edited = false;
+        session.select_drawer(position(&session, "b"));
+        session.select_slide_for_edit(0);
+        assert!(session.save_lyrics("Gamma two"));
+        assert!(!session.live_edited, "another show changed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
