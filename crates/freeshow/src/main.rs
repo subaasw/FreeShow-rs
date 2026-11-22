@@ -536,10 +536,31 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             h: row.height,
             font_px: row.font_px,
             color: row.color.into(),
+            title: row.title.into(),
+            align: row.align.into(),
+            offset: row.offset,
+            line_count: row.line_count,
+            text: row.text.into(),
+            seconds: row.seconds,
+            date_format: row.date_format.into(),
+            timer: row.timer.into(),
         })
         .collect();
     ui.set_stage_rows(Rc::new(slint::VecModel::from(rows)).into());
     ui.set_stage_add_kinds(strings(&session::STAGE_ADD_KINDS.map(str::to_string)));
+    ui.set_stage_add_names(strings(&session::STAGE_ADD_NAMES.map(str::to_string)));
+    if ui.get_show_stage_editor() {
+        ui.set_stage_preview(present::frame_image(&stage_frame(session)));
+    }
+    ui.set_stage_date_formats(strings(&session::STAGE_DATE_FORMATS.map(str::to_string)));
+    let mut timer_ids = vec![String::new()];
+    let mut timer_names = vec!["Whichever timer is running".to_string()];
+    for (id, name) in session.timer_choices() {
+        timer_ids.push(id);
+        timer_names.push(name);
+    }
+    ui.set_stage_timer_ids(strings(&timer_ids));
+    ui.set_stage_timer_names(strings(&timer_names));
 }
 
 /// Closing an output or stage window with its title-bar button hides it and
@@ -2036,7 +2057,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let done = Rc::clone(&after_stage_edit);
             control.on_stage_set(move |id, key, value| {
                 let result = session.borrow_mut().stage_set(&id, &key, &value);
-                done(result.map(|()| format!("Saved {id} {key}")));
+                let name = session.borrow().stage_item_name(&id);
+                done(result.map(|()| format!("Saved {name}")));
             });
         }
         {
@@ -2049,9 +2071,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let (Some(ui), Some(_)) = (ui.upgrade(), added.as_ref()) {
                     ui.set_stage_selected(session.borrow().stage.items.len() as i32 - 1);
                 }
+                let named = added
+                    .as_ref()
+                    .map(|id| session.borrow().stage_item_name(id));
                 done(
-                    added
-                        .map(|id| format!("Added {id}"))
+                    named
+                        .map(|name| format!("Added {name}"))
                         .ok_or_else(|| "could not save stage.json".to_string()),
                 );
             });
@@ -2060,12 +2085,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
             control.on_stage_remove(move |id| {
+                let name = session.borrow().stage_item_name(&id);
                 let removed = session.borrow_mut().remove_stage_item(&id);
                 done(if removed {
-                    Ok(format!("Removed {id}"))
+                    Ok(format!("Removed {name}"))
                 } else {
-                    Err(format!("could not remove {id}"))
+                    Err(format!("could not remove {name}"))
                 });
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let ui = control.as_weak();
+            control.on_stage_editor_opened(move || {
+                if let Some(ui) = ui.upgrade() {
+                    refresh_panels(&ui, &session.borrow());
+                }
             });
         }
     }

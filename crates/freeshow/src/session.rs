@@ -21,7 +21,10 @@ use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
 };
 pub use library_edit::ProjectPick;
-pub use panels::{AUTOSAVE_CHOICES, STAGE_ADD_KINDS, TRANSITION_KINDS, setting_label};
+pub use panels::{
+    AUTOSAVE_CHOICES, STAGE_ADD_KINDS, STAGE_ADD_NAMES, STAGE_DATE_FORMATS, TRANSITION_KINDS,
+    setting_label,
+};
 
 /// Network feeds due for a refresh: weather locations and RSS URLs.
 #[derive(Debug, Clone, Default, PartialEq)]
