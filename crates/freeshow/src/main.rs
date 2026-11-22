@@ -2301,6 +2301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let live_pump = Rc::clone(&live_pump);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_hotkey(move |text, ctrl, alt, shift| {
             let mut chord = String::new();
             if ctrl {
@@ -2317,6 +2318,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && let Some(ui) = ui.upgrade()
             {
                 refresh(&ui, &session.borrow());
+                // Next/Previous in edit mode moves the editor to the slide that went live.
+                if ui.get_edit_mode() {
+                    publish(&edit_slot, edit_frame(&session.borrow()));
+                }
                 apply_window_behavior(
                     ui.window(),
                     session.borrow().always_on_top,
