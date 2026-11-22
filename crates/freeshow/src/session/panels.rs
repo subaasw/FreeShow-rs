@@ -10,12 +10,12 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 8] = [
-    "slide", "next", "notes", "clock", "timer", "text", "media", "tracker",
+pub const STAGE_ADD_KINDS: [&str; 9] = [
+    "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 8] = [
+pub const STAGE_ADD_NAMES: [&str; 9] = [
     "Current slide",
     "Next slide",
     "Slide notes",
@@ -24,6 +24,7 @@ pub const STAGE_ADD_NAMES: [&str; 8] = [
     "Text",
     "Picture or video",
     "Slide number",
+    "Variable",
 ];
 
 /// Library `settings.json` values shown in Settings.
@@ -210,6 +211,8 @@ pub struct StageRow {
     pub date_format: String,
     /// The timer a timer item follows; empty follows whichever timer runs.
     pub timer: String,
+    /// The variable a variable item shows; empty shows nothing.
+    pub variable: String,
     /// A media item's picture or video path.
     pub src: String,
     /// How a media item fills its box: contain, cover or fill.
@@ -1206,6 +1209,7 @@ impl Session {
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
                     timer: item.timer_id.clone().unwrap_or_default(),
+                    variable: item.variable_id.clone().unwrap_or_default(),
                     src: item.src.clone().unwrap_or_default(),
                     fit: item.fit.clone().unwrap_or_else(|| "contain".into()),
                     tracker_type: item.tracker.kind.clone(),
@@ -1226,6 +1230,7 @@ impl Session {
                 | "seconds"
                 | "date-format"
                 | "timer"
+                | "variable"
                 | "src"
                 | "fit"
                 | "tracker-type"
@@ -1277,9 +1282,22 @@ impl Session {
             .collect()
     }
 
+    /// Variables a stage variable item can show, as `(id, name)`.
+    pub fn variable_choices(&self) -> Vec<(String, String)> {
+        self.root
+            .as_deref()
+            .map(|root| freeshow_data::Library::open(root).variable_names())
+            .unwrap_or_default()
+    }
+
     /// Sets one per-kind option (alignment, slide offset, clock format, timer, text).
     fn stage_set_option(&mut self, id: &str, key: &str, value: &str) -> Result<(), String> {
         let timers: Vec<String> = self.timers.iter().map(|timer| timer.id.clone()).collect();
+        let variables: Vec<String> = self
+            .variable_choices()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         let item = self
             .stage
             .items
@@ -1345,6 +1363,13 @@ impl Session {
                     return Err(format!("no timer {timer:?}"));
                 }
                 item.timer_id = (!timer.is_empty()).then(|| timer.to_string());
+            }
+            "variable" => {
+                let variable = value.trim();
+                if !variable.is_empty() && !variables.iter().any(|known| known == variable) {
+                    return Err(format!("no variable {variable:?}"));
+                }
+                item.variable_id = (!variable.is_empty()).then(|| variable.to_string());
             }
             other => return Err(format!("unknown stage field {other:?}")),
         }
@@ -1628,6 +1653,42 @@ mod tests {
         assert!(saved.contains("400px"), "{saved}");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
+    }
+
+    #[test]
+    fn a_stage_variable_item_shows_the_variable_it_is_given() {
+        let (dir, mut session) = library("stage-variable");
+        std::fs::write(
+            dir.path().join("Config").join("settings_synced.json"),
+            r#"{"variables":{"v1":{"name":"Speaker","type":"text","text":"Pastor Ram"}}}"#,
+        )
+        .unwrap();
+        let id = session
+            .add_stage_item("variable", "left:10px;top:20px;width:600px;height:100px;")
+            .unwrap();
+        assert_eq!(session.stage_item_name(&id), "Variable");
+        assert_eq!(
+            session.variable_choices(),
+            vec![("v1".to_string(), "Speaker".to_string())]
+        );
+        assert!(session.stage_set(&id, "variable", "v9").is_err());
+        session.stage_set(&id, "variable", "v1").unwrap();
+        let row = session
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(
+            (row.kind.as_str(), row.variable.as_str()),
+            ("variable", "v1")
+        );
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("Config").join("stage.json")).unwrap(),
+        )
+        .unwrap();
+        let layout = saved.as_object().unwrap().values().next().unwrap();
+        assert_eq!(layout["items"][&id]["variable"]["id"], "v1");
+        assert_eq!(layout["items"][&id]["type"], "variable");
     }
 
     #[test]

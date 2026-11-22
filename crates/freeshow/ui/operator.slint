@@ -129,6 +129,8 @@ export component ControlWindow inherits Window {
     in property <[string]> stage-date-formats;
     in property <[string]> stage-timer-ids;
     in property <[string]> stage-timer-names;
+    in property <[string]> stage-variable-ids;
+    in property <[string]> stage-variable-names;
     in property <string> stage-status;
     in-out property <int> stage-selected: 0;
     callback stage-set(string, string, string);
@@ -1140,6 +1142,8 @@ export component ControlWindow inherits Window {
             date-formats: root.stage-date-formats;
             timer-ids: root.stage-timer-ids;
             timer-names: root.stage-timer-names;
+            variable-ids: root.stage-variable-ids;
+            variable-names: root.stage-variable-names;
             preview: root.stage-preview;
             status: root.stage-status;
             selected <=> root.stage-selected;

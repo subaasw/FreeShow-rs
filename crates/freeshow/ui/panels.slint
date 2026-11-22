@@ -108,6 +108,7 @@ export struct StageRowData {
     seconds: bool,
     date-format: string,
     timer: string,
+    variable: string,
     src: string,
     fit: string,
     tracker-type: string,
@@ -887,6 +888,9 @@ export component StageEditorPanel inherits Rectangle {
     // Timer choices: "" follows whichever timer runs, then each named timer's id.
     in property <[string]> timer-ids;
     in property <[string]> timer-names;
+    // Variable choices: "" shows nothing, then each variable's id.
+    in property <[string]> variable-ids;
+    in property <[string]> variable-names;
     in property <image> preview;
     in property <string> status;
     in-out property <int> selected: 0;
@@ -1044,6 +1048,15 @@ export component StageEditorPanel inherits Rectangle {
                             model: root.timer-names;
                             value: root.timer-names[max(0, ComboIndex.find(root.timer-ids, root.current.timer))];
                             selected(value) => { root.set(root.current.id, "timer", root.timer-ids[self.current-index]); }
+                        }
+                    }
+                    if root.current.kind == "variable": Row {
+                        FieldLabel { text: "Variable"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 3;
+                            model: root.variable-names;
+                            value: root.variable-names[max(0, ComboIndex.find(root.variable-ids, root.current.variable))];
+                            selected(value) => { root.set(root.current.id, "variable", root.variable-ids[self.current-index]); }
                         }
                     }
                     if root.current.kind == "media": Row {
