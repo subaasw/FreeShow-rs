@@ -208,7 +208,7 @@ def verify(app):
             profile = "(version 1)(allow default)(deny file-read* " + " ".join(f"(subpath {json.dumps(path)})" for path in blocked) + ")"
             prefix = ["/usr/bin/sandbox-exec", "-p", profile]
         executable = relocated / "Contents/MacOS/freeshow"
-        for args in (["--check-runtime"], ["--check-media", str(sample)]):
+        for args in (["--check-runtime"], ["--check-media", str(sample)], ["--check-perf"]):
             run(*prefix, executable, *args, env=environment, timeout=90)
         run("codesign", "--verify", "--deep", "--strict", relocated)
         return {"relocated_path_with_spaces":True, "empty_home_and_registry":True, "homebrew_and_rust_reads_blocked":bool(prefix), "h264_decoded":True}
