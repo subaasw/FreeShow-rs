@@ -252,6 +252,7 @@ impl Session {
                     .iter()
                     .position(|show| show.id == item.id)
                     .ok_or_else(missing)?;
+                self.hold_program();
                 self.tab = "shows".to_string();
                 if self.show_index != Some(show) {
                     self.show_index = Some(show);
