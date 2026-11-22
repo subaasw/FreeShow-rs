@@ -4,8 +4,8 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 ## Score
 
-- **Feature-weighted parity: 95.2%**
-- Sub-features: **84 done / 6 partial / 8 not-yet** (98 leaves).
+- **Feature-weighted parity: 95.6%**
+- Sub-features: **85 done / 5 partial / 8 not-yet** (98 leaves).
 - Area rows (derived from leaves): **9 done / 8 partial / 0 not-yet** (17 areas).
 - Scoring: each leaf has a weight (Sunday-operator impact). `done` scores 1, `partial` scores 1/2, `not-yet` scores 0. The percentage is `100 × Σ(weight × score) / Σ(weight)`. Credential-gated work is included as `not-yet` so the number stays honest about 1.6.8.
 
@@ -15,7 +15,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | --- | --- | ---: | --- |
 | Cargo workspace, GPL-3.0, README | done | 100% | 1 done |
 | Slint operator window | partial | 93% | 10 done, 1 partial |
-| Output and stage windows | partial | 92% | 5 done, 2 partial |
+| Output and stage windows | partial | 97% | 6 done, 1 partial |
 | Theme colors | done | 100% | 3 done |
 | Settings file and logging | done | 100% | 1 done |
 | Shows, projects, templates, overlays, scripture storage | done | 100% | 6 done |
@@ -64,7 +64,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Second-monitor auto placement | done | 0.8 | Used when no stored choice |
 | Installed item font-family | done | 1.2 | fontconfig / DirectWrite / Core Text, DejaVu fallback |
 | Output delay frame buffer | done | 1.5 | `special.outputDelayMs`, default 0 so perf stays clean |
-| Always-on-top / kiosk on output windows | partial | 0.8 | Flags exist on the operator; not every output-window Electron option |
+| Always-on-top / kiosk on output windows | done | 1.0 | The audience window follows the active output's `alwaysOnTop`/`kiosk` from settings.json at startup, on open and live from Settings → Display |
 | Pixel-perfect Electron window chrome | partial | 0.5 | Native windows, not the Electron shell |
 
 ### Theme colors

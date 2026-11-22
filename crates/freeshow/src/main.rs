@@ -302,6 +302,9 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         max_connections: settings.max_connections,
         theme: settings.theme.into(),
         profiles: settings.profiles.into(),
+        output_name: settings.output_name.into(),
+        output_always_on_top: settings.output_always_on_top,
+        output_kiosk: settings.output_kiosk,
     });
     ui.set_theme_names(strings(&settings.themes));
     ui.set_autosave_choices(strings(&session::AUTOSAVE_CHOICES.map(str::to_string)));
@@ -1493,7 +1496,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if settings.show_output || session.preferences.auto_output() {
         output.show()?;
         place_output(output.window(), settings.output_screen);
-        apply_window_behavior(output.window(), session.always_on_top, session.kiosk);
+        let (on_top, kiosk) = session.output_window_flags();
+        apply_window_behavior(output.window(), on_top, kiosk);
     }
     if settings.show_stage {
         stage.show()?;
@@ -1538,6 +1542,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let output_toggle = output.as_weak();
     let settings_for_output = Rc::clone(&settings);
+    let session_for_output_flags = Rc::clone(&session);
     let settings_path_for_output = settings_path.clone();
     control.on_open_output(move || {
         let Some(output) = output_toggle.upgrade() else {
@@ -1553,6 +1558,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 settings.active_profile().and_then(|p| p.output.as_ref()),
                 || place_output(output.window(), settings.output_screen),
             );
+            let (on_top, kiosk) = session_for_output_flags.borrow().output_window_flags();
+            apply_window_behavior(output.window(), on_top, kiosk);
         }
         settings_for_output.borrow_mut().show_output = !visible;
         if let Err(err) = settings_for_output.borrow().save(&settings_path_for_output) {
@@ -1650,6 +1657,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let settings = Rc::clone(&settings);
         let preview_slot = Rc::clone(&preview_slot);
+        let output_window = output.as_weak();
         control.on_apply_setting(move |key, value| {
             let result = session.borrow_mut().apply_setting(&key, &value);
             let Some(ui) = ui.upgrade() else {
@@ -1659,6 +1667,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => {
                     ui.set_settings_status(format!("Saved {key}").into());
                     let current = session.borrow();
+                    if key.starts_with("output")
+                        && let Some(output) = output_window.upgrade()
+                        && output.window().is_visible()
+                    {
+                        let (on_top, kiosk) = current.output_window_flags();
+                        apply_window_behavior(output.window(), on_top, kiosk);
+                    }
                     if key == "theme" {
                         let theme = theme::operator_theme(
                             settings.borrow().theme.as_deref(),

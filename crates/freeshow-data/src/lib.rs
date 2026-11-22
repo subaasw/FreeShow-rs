@@ -229,6 +229,14 @@ impl FreeShowPreferences {
         self.max_connections.unwrap_or(10)
     }
 
+    /// The audience output FreeShow would open: the active one, else the first enabled one.
+    pub fn active_output(&self) -> Option<&OutputPreference> {
+        self.outputs
+            .iter()
+            .find(|output| output.active)
+            .or_else(|| self.outputs.iter().find(|output| output.enabled))
+    }
+
     /// The output is locked unless this is stored as true.
     pub fn out_locked(&self) -> bool {
         self.out_locked.unwrap_or(false)

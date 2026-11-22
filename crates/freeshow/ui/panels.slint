@@ -21,6 +21,9 @@ export struct SettingsData {
     max-connections: int,
     theme: string,
     profiles: string,
+    output-name: string,
+    output-always-on-top: bool,
+    output-kiosk: bool,
 }
 
 export struct InspectorData {
@@ -190,6 +193,24 @@ export component SettingsPanel inherits Rectangle {
                             text: "Lock output";
                             checked: root.data.out-locked;
                             toggled => { root.apply("outLocked", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    Row {
+                        SettingLabel {
+                            text: root.data.output-name == "" ? "Output window" : "Output · " + root.data.output-name;
+                            text-color: root.text-color;
+                        }
+                        Switch {
+                            text: "Always on top";
+                            enabled: root.data.output-name != "";
+                            checked: root.data.output-always-on-top;
+                            toggled => { root.apply("outputAlwaysOnTop", Fmt.flag(self.checked)); }
+                        }
+                        Switch {
+                            text: "Kiosk (fullscreen)";
+                            enabled: root.data.output-name != "";
+                            checked: root.data.output-kiosk;
+                            toggled => { root.apply("outputKiosk", Fmt.flag(self.checked)); }
                         }
                     }
                     Row {
