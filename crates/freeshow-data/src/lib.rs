@@ -4118,23 +4118,34 @@ impl Library {
         atomic_write(&path, &serde_json::to_vec_pretty(&settings)?)
     }
 
-    /// First enabled output of this transport, used by the current single audience sender.
+    /// First enabled audience output of this transport.
     pub fn network_output(&self, kind: &str) -> Option<String> {
         self.network_output_settings(kind).map(|(id, _)| id)
     }
 
     pub fn network_output_settings(&self, kind: &str) -> Option<(String, Value)> {
-        let settings: Value =
-            serde_json::from_str(&fs::read_to_string(self.settings_path()).ok()?).ok()?;
+        self.network_outputs(kind)
+            .into_iter()
+            .find(|(_, output)| output["stageOutput"].as_str().is_none_or(str::is_empty))
+    }
+
+    /// Every enabled output of this transport, including stage pictures.
+    pub fn network_outputs(&self, kind: &str) -> Vec<(String, Value)> {
+        let Ok(text) = fs::read_to_string(self.settings_path()) else {
+            return Vec::new();
+        };
+        let Ok(settings) = serde_json::from_str::<Value>(&text) else {
+            return Vec::new();
+        };
         settings["outputs"]
-            .as_object()?
-            .iter()
-            .find(|(_, output)| {
-                output["enabled"].as_bool() != Some(false)
-                    && output[kind].as_bool() == Some(true)
-                    && output["stageOutput"].as_str().is_none_or(str::is_empty)
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, output)| {
+                output["enabled"].as_bool() != Some(false) && output[kind].as_bool() == Some(true)
             })
             .map(|(id, body)| (id.clone(), body.clone()))
+            .collect()
     }
     pub fn audio_mixer(&self) -> Value {
         let settings: Value = fs::read_to_string(self.settings_path())
