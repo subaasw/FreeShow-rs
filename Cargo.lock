@@ -1970,6 +1970,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

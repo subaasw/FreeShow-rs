@@ -13,3 +13,4 @@ freeshow-media = { path = "../freeshow-media" }
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 tracing = "0.1"
+ureq = "2.12"
