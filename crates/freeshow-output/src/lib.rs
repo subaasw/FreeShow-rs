@@ -70,6 +70,19 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub fn encode_png(&self) -> image::ImageResult<Vec<u8>> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes).write_image(
+            &self.pixels,
+            self.width,
+            self.height,
+            image::ExtendedColorType::Rgba8,
+        )?;
+        Ok(bytes)
+    }
+
+
     pub fn pixel(&self, x: u32, y: u32) -> Rgba {
         let index = ((y * self.width + x) * 4) as usize;
         Rgba {
