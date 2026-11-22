@@ -104,7 +104,19 @@ impl ShowFile {
                 .unwrap_or_else(|| blank_slide(template.as_ref()));
             if let Some(object) = slide.as_object_mut() {
                 object.remove("children");
+                let renamed = object.get("group").and_then(Value::as_str) != Some(group.as_str());
+                let uncoloured = object.get("color").is_none_or(Value::is_null);
                 object.insert("group".into(), Value::String(group.clone()));
+                // A new or renamed group takes FreeShow's colour for it; a colour picked by hand stays.
+                if renamed || uncoloured {
+                    let (global, color) = super::default_group(&group)
+                        .map(|(global, color)| (Value::from(global), Value::from(color)))
+                        .unwrap_or((Value::Null, Value::Null));
+                    if renamed || !color.is_null() {
+                        object.insert("globalGroup".into(), global);
+                        object.insert("color".into(), color);
+                    }
+                }
             }
             write_slide_text(&mut slide, &body);
             template = Some(slide.clone());
@@ -537,6 +549,21 @@ mod tests {
         slide["items"][0]["style"] = json!("left:10px;top:20px;width:900px;height:500px;");
         slide["items"][0]["lines"][0]["text"][0]["style"] = json!("font-size:80px;color:#ffee00;");
         show
+    }
+
+    #[test]
+    fn typed_groups_take_freeshow_colours_but_keep_a_hand_picked_one() {
+        let mut show = ShowFile::blank("song", "Song");
+        assert!(show.set_lyrics_text("[Verse 1]\nOne\n\n[Chorus]\nSing\n\n[Welcome]\nHi", 0));
+        let order = show.ordered_slides();
+        let slide = |index: usize| show.show["slides"][&order[index].id].clone();
+        assert_eq!(slide(0)["color"], "#5825f5");
+        assert_eq!(slide(0)["globalGroup"], "verse");
+        assert_eq!(slide(1)["color"], "#f525d2");
+        assert!(slide(2)["color"].is_null(), "no built-in group");
+        let mut picked = styled_song();
+        assert!(picked.set_lyrics_text("[Verse 1]\nOne\nTwo\n\n[Chorus]\nSing", 0));
+        assert_eq!(picked.show["slides"]["s1"]["color"], "#ff0000");
     }
 
     #[test]
