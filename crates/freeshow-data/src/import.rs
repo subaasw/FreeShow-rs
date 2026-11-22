@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::{DataError, ShowFile};
 
 mod propresenter;
+mod propresenter7;
 
 const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
 
@@ -58,6 +59,12 @@ pub fn import_sources(
         }
         let found = if propresenter::is_bundle(&path) {
             propresenter::import_bundle(&bytes, media)
+        } else if extension.eq_ignore_ascii_case("pro") {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("song");
+            propresenter7::decode(name, &bytes).map(|mut show| {
+                propresenter7::resolve_standalone_media(&mut show, &path);
+                vec![show]
+            })
         } else {
             import_shows(
                 path.file_name().and_then(|n| n.to_str()).unwrap_or("song"),
@@ -118,9 +125,9 @@ fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
         return powerpoint_show(file_name, bytes);
     }
     if ext == "pro" {
-        return Err(DataError::Scripture(
-            "ProPresenter 7 protobuf is not supported yet".into(),
-        ));
+        let mut show = propresenter7::decode(file_name, bytes)?;
+        propresenter7::resolve_standalone_media(&mut show, Path::new(file_name));
+        return Ok(show);
     }
     let text = String::from_utf8_lossy(bytes).replace('\u{feff}', "");
     let trimmed = text.trim();

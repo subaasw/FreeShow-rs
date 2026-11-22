@@ -601,6 +601,33 @@ mod tests {
     use freeshow_data::Catalog;
 
     #[test]
+    fn imported_propresenter_box_paints_at_its_original_resolution() {
+        let root = std::env::temp_dir().join(freeshow_data::new_id());
+        let library = freeshow_data::Library::open(&root);
+        std::fs::create_dir_all(library.imports_dir()).unwrap();
+        std::fs::write(
+            library.imports_dir().join("Test.pro"),
+            include_bytes!("../../freeshow-data/tests/fixtures/propresenter7.pro"),
+        )
+        .unwrap();
+        assert!(library.import_show_sources().unwrap().is_empty());
+        let show = library.list_shows().unwrap().remove(0);
+        std::fs::remove_dir_all(root).unwrap();
+
+        let frame = frame_for_slide(&show, 1, None, false, None, true, None, &[]);
+        assert_eq!(frame.pixel(0, 0), parse_color("#000040").unwrap());
+        let green = frame
+            .pixels
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[1] > 220 && pixel[0] < 30 && pixel[2] < 30)
+            .map(|(index, _)| (index % frame.width as usize, index / frame.width as usize))
+            .collect::<Vec<_>>();
+        assert!(!green.is_empty(), "the styled text did not render");
+        assert!(green.iter().all(|(x, y)| (33..590).contains(x) && (45..204).contains(y)));
+    }
+
+    #[test]
     fn stored_qr_items_render_the_same_square_on_audience_and_stage() {
         let item = serde_json::json!({
             "type": "qr_code",

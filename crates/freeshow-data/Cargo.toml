@@ -9,8 +9,10 @@ description = "Read and write a FreeShow data folder"
 
 [dependencies]
 freeshow-core = { path = "../freeshow-core" }
+prost = "0.14"
 quick-xml = "0.37"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 thiserror = "2"
+url = "2"
 zip = "2"

@@ -262,34 +262,38 @@ pub(super) fn bundle_shows(
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !entry.is_dir() && ["pro4", "pro5", "pro6"].contains(&extension.as_str()) {
+        if !entry.is_dir() && ["pro4", "pro5", "pro6", "pro"].contains(&extension.as_str()) {
             documents.push(index);
-        }
-        if extension == "pro" {
-            return Err(invalid(
-                "ProPresenter 7 protobuf bundles are not supported yet",
-            ));
         }
     }
     let mut shows = Vec::new();
     for index in documents {
         let mut entry = archive.by_index(index).map_err(invalid)?;
         if entry.size() > 16 * 1024 * 1024 {
-            return Err(invalid("ProPresenter XML exceeds 16 MiB"));
+            return Err(invalid("ProPresenter presentation exceeds 16 MiB"));
         }
-        let mut xml = String::new();
+        let mut document = Vec::new();
         entry
             .by_ref()
             .take(16 * 1024 * 1024 + 1)
-            .read_to_string(&mut xml)?;
-        if xml.len() > 16 * 1024 * 1024 {
-            return Err(invalid("ProPresenter XML exceeds 16 MiB"));
+            .read_to_end(&mut document)?;
+        if document.len() > 16 * 1024 * 1024 {
+            return Err(invalid("ProPresenter presentation exceeds 16 MiB"));
         }
-        shows.push((entry.name().to_string(), xml_show(entry.name(), &xml)?));
+        let name = entry.name();
+        let show = if Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pro"))
+        {
+            super::propresenter7::decode(name, &document)?
+        } else {
+            xml_show(name, std::str::from_utf8(&document).map_err(invalid)?)?
+        };
+        shows.push((name.to_owned(), show));
     }
     if shows.is_empty() {
         return Err(invalid(
-            "bundle contains no ProPresenter 4–6 XML presentations",
+            "bundle contains no supported ProPresenter presentations",
         ));
     }
     Ok((archive, shows))
@@ -593,7 +597,81 @@ mod tests {
     }
 
     #[test]
-    fn bundle_rejects_unsafe_entries_missing_media_and_unsupported_versions() {
+    fn protobuf_bundle_keeps_selected_arrangement_and_copies_its_background() {
+        let presentation = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let texture = include_bytes!("../../tests/fixtures/lesson-cover.png");
+        let standalone = crate::import::import_show("Sunday.pro", presentation).unwrap();
+        assert!(matches!(
+            standalone.backdrop_at(0),
+            SlideBackdrop::Picture { path, .. } if path.ends_with("sky blue.png") && !path.starts_with("file:")
+        ));
+
+        let archive = bundle(&[
+            ("Presentation/Sunday.pro", presentation),
+            ("Media/sky blue.png", texture),
+        ]);
+        let root = std::env::temp_dir().join(crate::new_id());
+        let library = crate::Library::open(&root);
+        fs::create_dir_all(library.imports_dir()).unwrap();
+        fs::write(library.imports_dir().join("Sunday.proBundle"), archive).unwrap();
+        assert!(library.import_show_sources().unwrap().is_empty());
+        let mut show = library.list_shows().unwrap().remove(0);
+        assert_eq!(show.id, "test-pro7");
+        assert_eq!(show.name(), "Test Presentation");
+        assert_eq!(show.active_layout(), "arrangement-2");
+        assert_eq!(
+            show.show["layouts"]["arrangement-2"]["notes"],
+            "Service notes"
+        );
+        assert_eq!(show.show["meta"]["CCLI"], "123");
+        let slides = show.ordered_slides();
+        assert_eq!(slides.len(), 4);
+        assert_eq!(slides[0].lines, ["Chorus"]);
+        assert_eq!(slides[0].id, slides[3].id);
+        assert_eq!(slides[1].notes, "Leader note");
+        assert_eq!(
+            slides[1].lines,
+            ["Verse", "And another line", "Another text box"]
+        );
+        assert_eq!(slides[2].lines, ["Disabled child"]);
+        assert_eq!(show.step_enabled(1, 1), Some(3));
+
+        let verse = &show.show["slides"][&slides[1].id];
+        assert_eq!(verse["settings"]["color"], "#000040ff");
+        assert_eq!(
+            verse["settings"]["resolution"],
+            json!({"width":1280.0,"height":720.0})
+        );
+        assert_eq!(verse["items"].as_array().unwrap().len(), 2);
+        let style = verse["items"][0]["style"].as_str().unwrap();
+        for expected in [
+            "left:45px",
+            "top:60px",
+            "width:740px",
+            "height:210px",
+            "font-family:Arial",
+            "font-size:72px",
+            "font-weight:bold",
+            "font-style:italic",
+            "color:#00ff00ff",
+            "text-align:right",
+            "align-items:flex-end",
+        ] {
+            assert!(style.contains(expected), "{style}");
+        }
+
+        let SlideBackdrop::Picture { path, .. } = show.backdrop_at(0) else {
+            panic!("missing bundle background");
+        };
+        assert!(Path::new(&path).starts_with(library.media_dir().canonicalize().unwrap()));
+        assert_eq!(fs::read(path).unwrap(), texture);
+        assert!(show.set_active_layout("arrangement-1"));
+        assert_eq!(show.ordered_slides()[0].group.as_deref(), Some("Verse 1"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundle_rejects_unsafe_entries_missing_media_and_malformed_presentations() {
         let source = xml("missing.png");
         let media =
             std::env::temp_dir().join(format!("freeshow-invalid-probundle-{}", std::process::id()));
