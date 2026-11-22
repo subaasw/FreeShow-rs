@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 /// Drawer tab id, full label, and compact label for `labelsDisabled`.
-pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'static str); 9] {
+pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'static str); 10] {
     match language
         .unwrap_or("en")
         .replace('_', "-")
@@ -17,6 +17,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
             ("templates", "Plantillas", "P"),
             ("scripture", "Escritura", "E"),
             ("calendar", "Calendario", "L"),
+            ("rss", "RSS", "R"),
             ("functions", "Funciones", "F"),
         ],
         "de" => [
@@ -28,6 +29,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
             ("templates", "Vorlagen", "V"),
             ("scripture", "Bibel", "B"),
             ("calendar", "Kalender", "K"),
+            ("rss", "RSS", "R"),
             ("functions", "Funktionen", "F"),
         ],
         "fr" | "fr-fr" => [
@@ -39,6 +41,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
             ("templates", "Modèles", "T"),
             ("scripture", "Écritures", "É"),
             ("calendar", "Calendrier", "L"),
+            ("rss", "RSS", "R"),
             ("functions", "Fonctions", "F"),
         ],
         "nb" | "nn" | "no" => [
@@ -50,6 +53,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
             ("templates", "Maler", "T"),
             ("scripture", "Skrift", "K"),
             ("calendar", "Kalender", "A"),
+            ("rss", "RSS", "R"),
             ("functions", "Funksjoner", "F"),
         ],
         _ => [
@@ -61,6 +65,7 @@ pub fn drawer_tabs(language: Option<&str>) -> [(&'static str, &'static str, &'st
             ("templates", "Templates", "T"),
             ("scripture", "Scripture", "B"),
             ("calendar", "Calendar", "C"),
+            ("rss", "RSS", "R"),
             ("functions", "Functions", "F"),
         ],
     }
@@ -82,7 +87,8 @@ mod tests {
         ] {
             let tabs = drawer_tabs(lang);
             assert_eq!(tabs[0].0, "shows");
-            assert_eq!(tabs[8].0, "functions");
+            assert_eq!(tabs[8].0, "rss");
+            assert_eq!(tabs[9].0, "functions");
             assert!(!tabs[0].1.is_empty());
         }
         assert_eq!(drawer_tabs(Some("nb"))[0].1, "Sanger");
