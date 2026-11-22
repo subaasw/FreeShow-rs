@@ -6322,6 +6322,7 @@ impl Session {
             "clock" => freeshow_data::StageItemKind::Clock,
             "timer" => freeshow_data::StageItemKind::Timer,
             "text" => freeshow_data::StageItemKind::Text,
+            "media" => freeshow_data::StageItemKind::Media,
             "tracker" => freeshow_data::StageItemKind::SlideTracker,
             _ => freeshow_data::StageItemKind::Slide,
         };
@@ -6335,7 +6336,11 @@ impl Session {
             text_box: None,
             invert_items: false,
             label: String::new(),
-            lines: Vec::new(),
+            lines: if kind == freeshow_data::StageItemKind::Text {
+                vec!["Text".into()]
+            } else {
+                Vec::new()
+            },
             variable_id: None,
             timer_id: None,
             src: None,

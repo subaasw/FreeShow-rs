@@ -544,6 +544,8 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             seconds: row.seconds,
             date_format: row.date_format.into(),
             timer: row.timer.into(),
+            src: row.src.into(),
+            fit: row.fit.into(),
         })
         .collect();
     ui.set_stage_rows(Rc::new(slint::VecModel::from(rows)).into());
@@ -2066,8 +2068,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let done = Rc::clone(&after_stage_edit);
             let ui = control.as_weak();
             control.on_stage_add(move |kind| {
-                let style = "left:60px;top:60px;width:600px;height:200px;font-size:80px;";
-                let added = session.borrow_mut().add_stage_item(&kind, style);
+                // Each new box lands a little lower and to the right so it never hides the last one.
+                let step = 60 + 40 * (session.borrow().stage.items.len() % 10);
+                let style =
+                    format!("left:{step}px;top:{step}px;width:600px;height:200px;font-size:80px;");
+                let added = session.borrow_mut().add_stage_item(&kind, &style);
                 if let (Some(ui), Some(_)) = (ui.upgrade(), added.as_ref()) {
                     ui.set_stage_selected(session.borrow().stage.items.len() as i32 - 1);
                 }

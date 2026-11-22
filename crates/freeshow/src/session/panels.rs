@@ -10,18 +10,19 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 7] = [
-    "slide", "next", "notes", "clock", "timer", "text", "tracker",
+pub const STAGE_ADD_KINDS: [&str; 8] = [
+    "slide", "next", "notes", "clock", "timer", "text", "media", "tracker",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 7] = [
+pub const STAGE_ADD_NAMES: [&str; 8] = [
     "Current slide",
     "Next slide",
     "Slide notes",
     "Clock",
     "Timer",
     "Text",
+    "Picture or video",
     "Slide number",
 ];
 
@@ -187,6 +188,10 @@ pub struct StageRow {
     pub date_format: String,
     /// The timer a timer item follows; empty follows whichever timer runs.
     pub timer: String,
+    /// A media item's picture or video path.
+    pub src: String,
+    /// How a media item fills its box: contain, cover or fill.
+    pub fit: String,
 }
 
 /// Date formats a stage clock can show, as FreeShow stores them; `none` hides the date.
@@ -1037,6 +1042,8 @@ impl Session {
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
                     timer: item.timer_id.clone().unwrap_or_default(),
+                    src: item.src.clone().unwrap_or_default(),
+                    fit: item.fit.clone().unwrap_or_else(|| "contain".into()),
                 }
             })
             .collect()
@@ -1046,7 +1053,15 @@ impl Session {
     pub fn stage_set(&mut self, id: &str, key: &str, value: &str) -> Result<(), String> {
         if matches!(
             key,
-            "align" | "offset" | "line-count" | "text" | "seconds" | "date-format" | "timer"
+            "align"
+                | "offset"
+                | "line-count"
+                | "text"
+                | "seconds"
+                | "date-format"
+                | "timer"
+                | "src"
+                | "fit"
         ) {
             return self.stage_set_option(id, key, value);
         }
@@ -1132,6 +1147,16 @@ impl Session {
                     return Err(format!("unknown date format {value:?}"));
                 }
                 item.clock.date_format = value.trim().to_string();
+            }
+            "src" => {
+                let src = value.trim();
+                item.src = (!src.is_empty()).then(|| src.to_string());
+            }
+            "fit" => {
+                if !matches!(value.trim(), "contain" | "cover" | "fill") {
+                    return Err(format!("unknown fit {value:?}"));
+                }
+                item.fit = Some(value.trim().to_string());
             }
             "timer" => {
                 let timer = value.trim();
