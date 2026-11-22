@@ -1826,6 +1826,7 @@ dependencies = [
  "freeshow-record",
  "freeshow-remote",
  "freeshow-timecode",
+ "libc",
  "serde_json",
  "sha2",
  "slint",

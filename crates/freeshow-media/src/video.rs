@@ -843,10 +843,17 @@ mod gst_player {
     fn video_launch(path: &Path) -> String {
         let raw = path.to_string_lossy();
         let location = raw.replace('\\', "\\\\").replace('"', "\\\"");
-        let source = if crate::is_remote_url(&raw) {
-            format!("uridecodebin uri=\"{location}\" name=dec")
+        // This pipeline feeds CPU pixels to the compositor. On macOS,
+        // VideoToolbox cold-probes hardware even for small local clips.
+        let decoder_options = if cfg!(target_os = "macos") {
+            "name=dec force-sw-decoders=true"
         } else {
-            format!("filesrc location=\"{location}\" ! decodebin name=dec")
+            "name=dec"
+        };
+        let source = if crate::is_remote_url(&raw) {
+            format!("uridecodebin uri=\"{location}\" {decoder_options}")
+        } else {
+            format!("filesrc location=\"{location}\" ! decodebin {decoder_options}")
         };
         format!(
             "{source} ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
