@@ -1,12 +1,7 @@
-name: macOS release package
+name: Package (macOS)
 
+# Reusable: called only by release.yml (tag push or manual dispatch).
 on:
-  push:
-    branches: [main]
-    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/macos.yml']
-  pull_request:
-    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/macos.yml']
-  workflow_dispatch:
   workflow_call:
 
 permissions:

@@ -1,12 +1,7 @@
-name: Windows release installer
+name: Package (Windows)
 
+# Reusable: called only by release.yml (tag push or manual dispatch).
 on:
-  push:
-    branches: [main]
-    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/windows.yml']
-  pull_request:
-    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/windows.yml']
-  workflow_dispatch:
   workflow_call:
 
 permissions:

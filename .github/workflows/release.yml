@@ -1,19 +1,75 @@
-name: Three-platform release packages
+name: Release
 
+# The only entry point for CI. Nothing runs on branch pushes or pull requests.
+#   git tag v0.2.0 && git push origin v0.2.0   -> gate, package, publish a GitHub release
+#   Actions -> Release -> Run workflow         -> gate and package only (artifacts, no release)
 on:
-  workflow_dispatch:
   push:
     tags: ['v*']
-    branches: [main]
-    paths: ['.github/workflows/release.yml', '.github/workflows/linux.yml', '.github/workflows/windows.yml', '.github/workflows/macos.yml', 'Cargo.lock', 'Cargo.toml', 'crates/freeshow-media/**', 'crates/freeshow-record/**', 'scripts/package*']
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    name: Tag matches Cargo version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare tag with workspace.package.version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python3 -c "import tomllib;print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1; }
+
+  gate:
+    needs: version
+    uses: ./.github/workflows/gate.yml
+
   linux:
-    uses: ./.github/workflows/linux.yml
+    needs: gate
+    uses: ./.github/workflows/package-linux.yml
   windows:
-    uses: ./.github/workflows/windows.yml
+    needs: gate
+    uses: ./.github/workflows/package-windows.yml
   macos:
-    uses: ./.github/workflows/macos.yml
+    needs: gate
+    uses: ./.github/workflows/package-macos.yml
+
+  publish:
+    name: Publish GitHub release
+    needs: [linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Verify SHA-256 sidecars
+        working-directory: assets
+        run: |
+          shopt -s nullglob
+          sidecars=(*.sha256)
+          test ${#sidecars[@]} -ge 3 || { echo "::error::expected a .sha256 per platform"; ls -la; exit 1; }
+          for sum in "${sidecars[@]}"; do sha256sum --check "$sum"; done
+      - name: Create release with installers and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "FreeShow-rs $GITHUB_REF_NAME" --generate-notes \
+            assets/*.tar.gz assets/*.exe assets/*.dmg assets/*.sha256
