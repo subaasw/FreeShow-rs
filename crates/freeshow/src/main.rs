@@ -363,7 +363,13 @@ fn sentence_case(text: &str) -> String {
     }
 }
 
+thread_local! {
+    /// Set whenever the operator window refreshes, so the clock redraws the stage soon after.
+    static STAGE_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 fn refresh(ui: &ControlWindow, session: &Session) {
+    STAGE_DIRTY.set(true);
     ui.set_drawer_rows(drawer_rows(session));
     ui.set_slide_cards(slide_cards(session));
     ui.set_slides_columns(session.slides_list_columns() as i32);
@@ -438,6 +444,7 @@ fn fill_drawer_form(ui: &ControlWindow, session: &Session) {
 
 /// Settings, Inspector and Stage editor data.
 fn refresh_panels(ui: &ControlWindow, session: &Session) {
+    STAGE_DIRTY.set(true);
     let settings = session.settings_form();
     ui.set_settings_data(SettingsData {
         language: settings.language.into(),
@@ -3647,6 +3654,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut icecast_sender: Option<freeshow_record::IcecastSender> = None;
     let mut last_icecast = None;
+    let mut last_stage_second = 0;
     clock_timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(100),
@@ -3729,12 +3737,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     publish(&clock_preview, audience);
                 }
             }
-            let frame = stage_frame(&clock_session.borrow());
-            if let Ok(request) = stage_frame_rx.try_recv() {
-                request.publish(&frame);
+            // Stage clocks and timers count whole seconds, so the foldback is redrawn once a
+            // second, after an operator change, or when asked, instead of every tick.
+            let second = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let request = stage_frame_rx.try_recv().ok();
+            if STAGE_DIRTY.replace(false) || ran || request.is_some() || second != last_stage_second
+            {
+                last_stage_second = second;
+                let frame = stage_frame(&clock_session.borrow());
+                if let Some(request) = request {
+                    request.publish(&frame);
+                }
+                *clock_last.borrow_mut() = frame.clone();
+                publish(&clock_stage, frame);
             }
-            *clock_last.borrow_mut() = frame.clone();
-            publish(&clock_stage, frame);
         },
     );
     place(control.window(), 40, 40);
