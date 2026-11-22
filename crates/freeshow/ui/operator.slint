@@ -67,6 +67,8 @@ export component ControlWindow inherits Window {
     callback open-stage();
     callback choose-screen();
     in-out property <string> screen-label: "Screen";
+    in-out property <bool> output-open: false;
+    in-out property <bool> stage-open: false;
     in-out property <string> search-query: "";
     in-out property <int> drawer-width: 240;
     in-out property <int> project-width: 260;
@@ -220,16 +222,16 @@ export component ControlWindow inherits Window {
                 }
                 HeaderButton {
                     label: root.show-labels ? "Output" : "O";
-                    accent: root.accent;
+                    accent: root.output-open ? root.accent : root.primary-lighter;
                     text-color: root.text-color;
-                    accent-text: root.accent-text;
+                    accent-text: root.output-open ? root.accent-text : root.text-color;
                     clicked => { root.open-output(); }
                 }
                 HeaderButton {
                     label: root.show-labels ? "Stage" : "S";
-                    accent: root.accent;
+                    accent: root.stage-open ? root.accent : root.primary-lighter;
                     text-color: root.text-color;
-                    accent-text: root.accent-text;
+                    accent-text: root.stage-open ? root.accent-text : root.text-color;
                     clicked => { root.open-stage(); }
                 }
             }
