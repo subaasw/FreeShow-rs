@@ -325,6 +325,8 @@ impl Session {
             "slide-down" => {
                 self.edit_slides("Move slide", |show, index| show.move_slide_at(index, 1))
             }
+            "slide-to-overlay" => self.save_slide_as("overlay"),
+            "slide-to-template" => self.save_slide_as("template"),
             "open-project" => self.open_project(arg),
             "rename-project" => self.rename_project(arg),
             "delete-project" => self.delete_current_project(),
@@ -336,6 +338,55 @@ impl Session {
             tracing::warn!("{action}: {error}");
             self.notice = error.clone();
         })
+    }
+
+    /// Saves the selected slide's boxes as a new overlay or template in the library.
+    fn save_slide_as(&mut self, kind: &str) -> Result<String, String> {
+        let index = self.selected_show()?;
+        let show = &self.shows[index];
+        let slides = show.ordered_slides();
+        let slide = self
+            .slide_index
+            .and_then(|position| slides.get(position))
+            .ok_or("select a slide first")?;
+        let items = show.slide_items(&slide.id);
+        if items.is_empty() {
+            return Err("this slide has nothing to save".into());
+        }
+        let root = self.root.clone().ok_or("choose a library folder first")?;
+        let library = Library::open(&root);
+        let (base, catalog, path) = if kind == "overlay" {
+            let base = slide
+                .group
+                .clone()
+                .filter(|group| !group.trim().is_empty())
+                .or_else(|| slide.lines.first().cloned())
+                .unwrap_or_else(|| show.name());
+            (base, &mut self.overlay_catalog, library.overlays_path())
+        } else {
+            (
+                show.name(),
+                &mut self.template_catalog,
+                library.templates_path(),
+            )
+        };
+        let name = unique_name(base.trim(), catalog.names());
+        let mut entry =
+            serde_json::json!({ "name": name, "color": null, "category": null, "items": items });
+        if kind == "template" {
+            entry["settings"] = serde_json::json!({});
+        }
+        catalog.insert(&new_id(), entry);
+        catalog
+            .save(&path)
+            .map_err(|err| format!("could not save the {kind}: {err}"))?;
+        let names = catalog.names();
+        if kind == "overlay" {
+            self.overlays = names;
+        } else {
+            self.templates = names;
+        }
+        Ok(format!("Saved {kind} \u{201c}{name}\u{201d}"))
     }
 
     /// True right after a delete, while the deleted show can still be brought back.
@@ -811,6 +862,29 @@ mod tests {
         session.slide_index = Some(0);
         assert!(session.library_action("slide-up", "").is_err());
         assert_eq!(session.notice, "the slide cannot move further");
+    }
+
+    #[test]
+    fn a_slide_can_become_an_overlay_or_a_template() {
+        let (dir, mut session) = library("as-overlay");
+        assert!(session.create_show());
+        session.library_action("rename-show", "Notices").unwrap();
+        session
+            .library_action("show-text", "[Welcome]\nWelcome home\n\nCoffee after")
+            .unwrap();
+        session.slide_index = Some(0);
+        session.library_action("slide-to-overlay", "").unwrap();
+        session.library_action("slide-to-overlay", "").unwrap();
+        assert_eq!(session.overlays, ["Welcome", "Welcome 2"]);
+        session.slide_index = Some(1);
+        session.library_action("slide-to-template", "").unwrap();
+        assert_eq!(session.templates, ["Notices"]);
+        let reloaded = Session::open(dir.0.clone());
+        assert_eq!(reloaded.overlays, ["Welcome", "Welcome 2"]);
+        assert_eq!(reloaded.templates, ["Notices"]);
+        let id = reloaded.overlay_catalog.id_named("Welcome").unwrap();
+        let text = reloaded.overlay_catalog.get(&id).unwrap().to_string();
+        assert!(text.contains("Welcome home"), "{text}");
     }
 
     #[test]

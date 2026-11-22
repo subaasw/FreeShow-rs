@@ -1206,6 +1206,17 @@ impl ShowFile {
     }
 
     /// Plain text of each slide, in the same order FreeShow stores slide objects.
+    /// The raw items of one slide, for saving it as an overlay or template.
+    pub fn slide_items(&self, slide_id: &str) -> Vec<Value> {
+        self.show
+            .get("slides")
+            .and_then(|slides| slides.get(slide_id))
+            .and_then(|slide| slide.get("items"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn slides(&self) -> Vec<SlideView> {
         let Some(slides) = self.show.get("slides").and_then(Value::as_object) else {
             return Vec::new();

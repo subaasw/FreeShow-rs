@@ -425,6 +425,14 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-down", ""); } }
                             BoxButton { label: "Delete"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("delete-slide", ""); } }
                         }
+                        if root.editing: HorizontalLayout {
+                            padding-left: 4px;
+                            padding-right: 4px;
+                            padding-bottom: 4px;
+                            spacing: 4px;
+                            BoxButton { label: "Save as overlay"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-to-overlay", ""); } }
+                            BoxButton { label: "Save as template"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-to-template", ""); } }
+                        }
                     }
                     editor-scroll := ScrollView {
                         horizontal-stretch: 1;
