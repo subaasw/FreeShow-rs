@@ -83,6 +83,7 @@ pub enum DrawerAction {
 
 pub struct Session {
     pub root: Option<PathBuf>,
+    pub icecast: Option<(freeshow_core::IcecastDestination, bool)>,
     /// Settings read from the FreeShow library, not this app's own settings file.
     pub preferences: FreeShowPreferences,
     pub audio_device_map: std::collections::BTreeMap<String, String>,
@@ -187,6 +188,7 @@ impl Session {
     pub fn empty() -> Self {
         Self {
             root: None,
+            icecast: None,
             preferences: FreeShowPreferences::default(),
             audio_device_map: Default::default(),
             shows: Vec::new(),
@@ -318,6 +320,7 @@ impl Session {
         let (volume, audio_muted) = library.main_audio();
         Self {
             root: Some(root),
+            icecast: library.icecast(),
             preferences,
             audio_device_map: Default::default(),
             shows,
@@ -627,6 +630,11 @@ impl Session {
                 "OBS stream".to_string(),
                 "OBS record".to_string(),
                 "AI".to_string(),
+                match self.icecast.as_ref() {
+                    Some((_, true)) => "Disable Icecast",
+                    Some((_, false)) => "Enable Icecast",
+                    None => "Icecast (not routed)",
+                }.to_string(),
             ],
             _ => Vec::new(),
         }
@@ -1351,6 +1359,7 @@ impl Session {
         self.apply_transition_change();
         self.apply_timer_steps();
         self.apply_mix_steps();
+        self.apply_icecast_actions();
         self.apply_variable_actions();
         self.apply_playlist_steps();
         self.apply_audio_effects();
@@ -1516,6 +1525,40 @@ impl Session {
         let library = Library::open(&root);
         for action in actions {
             let _ = library.apply_variable(&action);
+        }
+    }
+
+    fn apply_icecast_actions(&mut self) {
+        let actions = self
+            .current_show()
+            .and_then(|show| self.slide_index.map(|index| show.actions_at(index)))
+            .unwrap_or_default();
+        for action in actions {
+            if action["triggers"].as_array().is_some_and(|triggers| {
+                triggers.iter().any(|trigger| trigger.as_str() == Some("toggle_icecast"))
+            }) {
+                match action.pointer("/actionValues/toggle_icecast/value") {
+                    None | Some(serde_json::Value::Null) => self.toggle_icecast(None),
+                    Some(serde_json::Value::Bool(value)) => self.toggle_icecast(Some(*value)),
+                    Some(serde_json::Value::String(value)) if value == "true" || value == "false" => {
+                        self.toggle_icecast(Some(value == "true"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub fn toggle_icecast(&mut self, enabled: Option<bool>) {
+        let (Some(root), Some((_, current))) = (&self.root, &mut self.icecast) else {
+            return;
+        };
+        let enabled = enabled.unwrap_or(!*current);
+        if enabled != *current {
+            match Library::open(root).set_icecast_enabled(enabled) {
+                Ok(()) => *current = enabled,
+                Err(err) => tracing::error!("could not save Icecast enabled state: {err}"),
+            }
         }
     }
 
@@ -2536,6 +2579,7 @@ impl Session {
                     self.pending_play = Some(PendingPlay::PauseAudio);
                 }
             }
+            freeshow_remote::Command::ToggleIcecast(enabled) => self.toggle_icecast(enabled),
             freeshow_remote::Command::ToggleMedia => {
                 self.pending_play = Some(PendingPlay::ToggleMedia);
             }
@@ -6063,6 +6107,36 @@ mod tests {
         assert!((session.audio_tempo() - 1.5).abs() < 0.001);
         assert!((session.audio_routes()[0].gain - 0.2).abs() < 0.001);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn icecast_slide_and_remote_toggles_keep_the_saved_connection_settings() {
+        let root = std::env::temp_dir().join(freeshow_data::new_id());
+        let library = Library::open(&root);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(library.settings_path(), r#"{
+            "audioRouting":{"connections":[{"from":"main","to":"icecast"}]},
+            "special":{"icecast":{"host":"stream.local","port":"8123","mount":"live.opus","password":"test"}}
+        }"#).unwrap();
+        let mut session = Session::open(root.clone());
+        let (configured, enabled) = session.icecast.as_ref().unwrap();
+        assert!(*enabled);
+        assert_eq!((configured.port, configured.mount.as_str()), (8123, "/live.opus"));
+        let mut show = ShowFile::blank("test", "Test");
+        show.set_actions_at(0, &[serde_json::json!({
+            "triggers": ["toggle_icecast"],
+            "actionValues": {"toggle_icecast":{"value":"false"}}
+        })]);
+        session.shows = vec![show];
+        session.show_index = Some(0);
+        session.slide_index = Some(0);
+        session.apply_icecast_actions();
+        assert!(!library.icecast().unwrap().1);
+        session.apply_remote(freeshow_remote::Command::ToggleIcecast(Some(true)));
+        let (saved, enabled) = library.icecast().unwrap();
+        assert!(enabled);
+        assert_eq!((saved.host.as_str(), saved.password.as_str()), ("stream.local", "test"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

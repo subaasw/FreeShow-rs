@@ -1703,6 +1703,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         current.shows = fresh.shows;
                         current.projects = fresh.projects;
                         current.bibles = fresh.bibles;
+                        current.icecast = fresh.icecast;
                         current.warnings = fresh.warnings;
                     }
                     9 => {
@@ -1737,6 +1738,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             publish(&preview_slot, audience_frame(&current));
                         }
                     }
+                    13 => current.toggle_icecast(None),
                     _ => {}
                 }
                 if let Some(ui) = ui.upgrade() {
@@ -2378,11 +2380,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     );
+    let mut icecast_sender: Option<freeshow_record::IcecastSender> = None;
+    let mut last_icecast = None;
     clock_timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(100),
         move || {
             let ran = clock_session.borrow_mut().run_due_actions();
+            {
+                let current = clock_session.borrow();
+                let destination = current
+                    .icecast
+                    .as_ref()
+                    .filter(|(_, enabled)| *enabled)
+                    .map(|(destination, _)| destination);
+                if destination != last_icecast.as_ref() {
+                    last_icecast = destination.cloned();
+                    if icecast_sender.is_none() && destination.is_some() {
+                        match freeshow_record::IcecastSender::new() {
+                            Ok(sender) => icecast_sender = Some(sender),
+                            Err(err) => tracing::error!("could not start Icecast: {err}"),
+                        }
+                    }
+                    if let Some(sender) = &icecast_sender {
+                        sender.update(last_icecast.clone());
+                    }
+                }
+            }
             if ran {
                 let plays = clock_session.borrow_mut().take_plays();
                 let playback = LivePlayback {

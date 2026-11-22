@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod icecast;
+pub use icecast::IcecastSender;
+
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, OnceLock};

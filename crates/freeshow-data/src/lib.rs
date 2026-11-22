@@ -3735,6 +3735,58 @@ impl Library {
         network_audio_routes(&settings, sources, main_gain)
     }
 
+    /// Icecast uses a standalone mixer node instead of a video output.
+    pub fn icecast(&self) -> Option<(freeshow_core::IcecastDestination, bool)> {
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(self.settings_path()).ok()?).ok()?;
+        let connections = settings.pointer("/audioRouting/connections")?.as_array()?;
+        if !connections
+            .iter()
+            .any(|edge| edge["to"].as_str() == Some(freeshow_core::ICECAST_BUS))
+        {
+            return None;
+        }
+        let value = &settings["special"]["icecast"];
+        let host = value["host"].as_str().filter(|host| !host.is_empty()).unwrap_or("localhost");
+        let mount = value["mount"].as_str().filter(|mount| !mount.is_empty()).unwrap_or("/stream.opus");
+        let password = value["password"].as_str().unwrap_or("hackme");
+        let port = if value["port"].is_null() {
+            8000
+        } else {
+            u16::try_from(json_u64(value.get("port"))?).ok().filter(|port| *port != 0)?
+        };
+        if host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            || host.contains(['/', '@', '?', '#', '\\'])
+            || mount.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            || mount.contains(['?', '#'])
+            || password.contains('\0')
+        {
+            return None;
+        }
+        let mount = if mount.starts_with('/') { mount.to_owned() } else { format!("/{mount}") };
+        Some((
+            freeshow_core::IcecastDestination {
+                host: host.to_owned(),
+                port,
+                mount,
+                password: password.to_owned(),
+            },
+            value["enabled"].as_bool() != Some(false),
+        ))
+    }
+
+    pub fn set_icecast_enabled(&self, enabled: bool) -> Result<(), DataError> {
+        let path = self.settings_path();
+        let mut settings: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let root = settings.as_object_mut().ok_or(DataError::ShowShape)?;
+        let special = root.entry("special").or_insert_with(|| serde_json::json!({}));
+        let special = special.as_object_mut().ok_or(DataError::ShowShape)?;
+        let icecast = special.entry("icecast").or_insert_with(|| serde_json::json!({}));
+        let icecast = icecast.as_object_mut().ok_or(DataError::ShowShape)?;
+        icecast.insert("enabled".into(), Value::Bool(enabled));
+        atomic_write(&path, &serde_json::to_vec_pretty(&settings)?)
+    }
+
     /// First enabled output of this transport, used by the current single audience sender.
     pub fn network_output(&self, kind: &str) -> Option<String> {
         self.network_output_settings(kind).map(|(id, _)| id)

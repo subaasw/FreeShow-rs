@@ -3,7 +3,7 @@
 //! Shared settings, FreeShow theme colors, and logging.
 
 mod audio;
-pub use audio::{NetworkRoute, SpeakerRoute, speaker_matrix};
+pub use audio::{ICECAST_BUS, IcecastDestination, NetworkRoute, SpeakerRoute, speaker_matrix};
 
 mod log;
 mod settings;

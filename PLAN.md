@@ -68,7 +68,8 @@ the show or reveals lyrics until the password is accepted.
 - [x] Route video sound through the active audience output's mixer channels.
 - [x] Route individual hardware channels for audio files and video.
 - [x] Feed the existing NDI and RTMP senders from saved stereo network routes.
-- [ ] Remaining network transports (OMT, WebRTC, Icecast), NDI groups, and
+- [x] Icecast stereo audio on the saved mixer node with operator and slide controls.
+- [ ] Remaining network transports (OMT, WebRTC), NDI groups, and
       multiple independent network pictures.
 - [x] Keep the main volume and mute controls working for paths through Main.
 - [x] Remote channel list, per-channel volume, and independent mute.

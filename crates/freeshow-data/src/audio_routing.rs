@@ -119,6 +119,12 @@ fn resolve_routes(
         if !visited.insert(id.clone()) {
             continue;
         }
+        if id == freeshow_core::ICECAST_BUS {
+            if network {
+                *destinations.entry((Some(id), None, None)).or_default() += gain;
+            }
+            continue;
+        }
         if let Some(output) = id.strip_prefix("network_sub_") {
             if network && settings["outputs"][output]["enabled"].as_bool() != Some(false) {
                 *destinations
@@ -272,6 +278,30 @@ fn resolve_routes(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn icecast_is_an_explicit_network_destination_with_mixer_gain() {
+        let settings = serde_json::json!({
+            "audioRouting": {"connections": [
+                {"from": "drawer_audio", "to": "main"},
+                {"from": "main", "to": "icecast"}
+            ]}
+        });
+        assert!(audio_routes(&settings, &["drawer_audio"], 0.25).is_empty());
+        let route = network_audio_routes(&settings, &["drawer_audio"], 0.25);
+        assert_eq!(
+            route,
+            [freeshow_core::NetworkRoute {
+                output_id: "icecast".into(),
+                gain: 0.25,
+            }]
+        );
+        assert_eq!(
+            network_audio_routes(&settings, &["drawer_audio"], 0.0)[0].gain,
+            0.0
+        );
+        assert!(network_audio_routes(&settings, &["output_window"], 1.0).is_empty());
+    }
 
     #[test]
     fn network_mix_is_independent_from_room_and_disabled_outputs_stay_silent() {
