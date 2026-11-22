@@ -238,6 +238,7 @@ slint::slint! {
         in-out property <int> selected-project: -1;
         in-out property <image> preview;
         in property <string> import-status;
+        in-out property <string> chrome-status: "";
         in property <bool> import-running;
         callback cancel-import();
         callback open-output();
@@ -581,8 +582,15 @@ slint::slint! {
                     padding-left: 12px;
                     alignment: center;
                     Text {
+                        text: root.chrome-status;
+                        color: root.text-color;
+                        font-size: 12px * OperatorStyle.font-scale;
+                        vertical-alignment: center;
+                    }
+                    Text {
                         text: root.import-status == "" ? root.data-path : root.import-status;
                         overflow: elide;
+                        horizontal-stretch: 1;
                         color: root.text-color;
                         font-size: 12px * OperatorStyle.font-scale;
                         vertical-alignment: center;
@@ -792,6 +800,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         _ => -1,
     });
     ui.set_volume(session.volume * 100.0);
+    ui.set_chrome_status(session.chrome_status().into());
     ui.set_selected_slide(if session.tab == "scripture" {
         selected(session.verse_index)
     } else {
@@ -1592,13 +1601,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut session = if let Some(root) = settings.data_path.clone() {
         let planned = freeshow_pco::PlanningCenter.sync(&root);
-        if let Some(obs) = freeshow_obs::ObsOutput::configured()
-            && let Ok(scene) = std::env::var("FREESHOW_OBS_SCENE")
-            && !scene.trim().is_empty()
-        {
-            let scene = scene.trim().to_string();
-            std::thread::spawn(move || obs.set_scene(&scene));
-        }
         if std::env::var("FREESHOW_CLOUD_DIR")
             .ok()
             .is_some_and(|value| !value.trim().is_empty())
@@ -1617,6 +1619,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Session::empty()
     };
+    if let Some(obs) = freeshow_obs::ObsOutput::from_settings(&session.preferences.obs_data)
+        && let Ok(scene) = std::env::var("FREESHOW_OBS_SCENE")
+        && !scene.trim().is_empty()
+    {
+        let scene = scene.trim().to_string();
+        std::thread::spawn(move || obs.set_scene(&scene));
+    }
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
@@ -1771,6 +1780,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audio_out: Rc<RefCell<Option<AudioOutput>>> = Rc::new(RefCell::new(None));
     let video_player: Rc<RefCell<Option<VideoPlayer>>> = Rc::new(RefCell::new(None));
     let video_timer = Rc::new(slint::Timer::default());
+    let metronome_timer = Rc::new(slint::Timer::default());
+    {
+        let session = Rc::clone(&session);
+        let ui = control.as_weak();
+        metronome_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(50),
+            move || {
+                let Some(ui) = ui.upgrade() else {
+                    return;
+                };
+                let mut current = session.borrow_mut();
+                if !current.metronome_on {
+                    return;
+                }
+                let before = current.metronome_beat;
+                current.update_metronome(std::time::Instant::now());
+                if current.metronome_beat != before {
+                    let status = current.chrome_status();
+                    drop(current);
+                    ui.set_chrome_status(status.into());
+                }
+            },
+        );
+    }
 
     let output_toggle = output.as_weak();
     let settings_for_output = Rc::clone(&settings);
@@ -2128,10 +2162,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tracing::error!("obs scene name is missing");
                             return;
                         };
-                        freeshow_obs::ObsOutput::from_env().set_scene(scene.trim());
+                        freeshow_obs::ObsOutput::from_settings(&current.preferences.obs_data)
+                            .unwrap_or_else(freeshow_obs::ObsOutput::from_env)
+                            .set_scene(scene.trim());
                     }
-                    10 => freeshow_obs::ObsOutput::from_env().toggle_stream(),
-                    11 => freeshow_obs::ObsOutput::from_env().toggle_record(),
+                    10 => freeshow_obs::ObsOutput::from_settings(&current.preferences.obs_data)
+                        .unwrap_or_else(freeshow_obs::ObsOutput::from_env)
+                        .toggle_stream(),
+                    11 => freeshow_obs::ObsOutput::from_settings(&current.preferences.obs_data)
+                        .unwrap_or_else(freeshow_obs::ObsOutput::from_env)
+                        .toggle_record(),
                     12 => {
                         let Some(assist) = freeshow_ai::OllamaAssist::configured() else {
                             tracing::error!("ai is not configured");
@@ -2177,6 +2217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(err) => tracing::warn!("screenshot was not saved: {err}"),
                         }
                     }
+                    18 => current.toggle_metronome(),
                     _ => {}
                 }
                 if let Some(ui) = ui.upgrade() {

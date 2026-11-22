@@ -103,6 +103,9 @@ pub struct Session {
     pub tab: String,
     /// Quick-search text that filters the current drawer list.
     pub search_query: String,
+    pub metronome_on: bool,
+    metronome_started: Option<std::time::Instant>,
+    pub metronome_beat: u32,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     /// The selected text box on the current slide.
@@ -274,6 +277,9 @@ impl Session {
             folder_index: 0,
             tab: "shows".to_string(),
             search_query: String::new(),
+            metronome_on: false,
+            metronome_started: None,
+            metronome_beat: 0,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -413,6 +419,9 @@ impl Session {
             folder_index: 0,
             tab: "shows".to_string(),
             search_query: String::new(),
+            metronome_on: false,
+            metronome_started: None,
+            metronome_beat: 0,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -696,6 +705,53 @@ impl Session {
         self.search_query = query.into();
     }
 
+    pub fn toggle_metronome(&mut self) {
+        self.metronome_on = !self.metronome_on;
+        if self.metronome_on {
+            self.metronome_started = Some(std::time::Instant::now());
+            self.metronome_beat = 0;
+        } else {
+            self.metronome_started = None;
+            self.metronome_beat = 0;
+        }
+    }
+
+    pub fn metronome_beat_at(&self, now: std::time::Instant) -> u32 {
+        let Some(started) = self.metronome_started else {
+            return 0;
+        };
+        let bpm = f64::from(self.preferences.metronome_bpm());
+        let beats = self.preferences.metronome_beats().max(1);
+        let elapsed = now.saturating_duration_since(started).as_secs_f64();
+        let index = (elapsed * bpm / 60.0).floor() as u32;
+        index % beats
+    }
+
+    pub fn update_metronome(&mut self, now: std::time::Instant) {
+        if self.metronome_on {
+            self.metronome_beat = self.metronome_beat_at(now);
+        }
+    }
+
+    /// Footer text for the metronome and a configured timecode mode.
+    pub fn chrome_status(&self) -> String {
+        let mut parts = Vec::new();
+        if self.metronome_on {
+            parts.push(format!(
+                "Metronome {} BPM {}/{}",
+                self.preferences.metronome_bpm(),
+                self.metronome_beat + 1,
+                self.preferences.metronome_beats()
+            ));
+        }
+        if let Some(kind) = self.preferences.timecode_kind() {
+            let clock = freeshow_timecode::latest_clock()
+                .unwrap_or_else(|| format!("{:.0} fps", self.preferences.timecode_framerate()));
+            parts.push(format!("Timecode {kind} {clock}"));
+        }
+        parts.join("  ·  ")
+    }
+
     fn drawer_names(&self) -> Vec<String> {
         match self.tab.as_str() {
             "shows" => self.shows.iter().map(ShowFile::name).collect(),
@@ -733,6 +789,11 @@ impl Session {
                 "Export PDF".to_string(),
                 "Export package".to_string(),
                 "Screenshot".to_string(),
+                if self.metronome_on {
+                    "Stop metronome".to_string()
+                } else {
+                    "Metronome".to_string()
+                },
             ],
             _ => Vec::new(),
         }
@@ -4838,6 +4899,33 @@ mod tests {
             Some("screenshot.png")
         );
         assert!(std::fs::read(&shot).unwrap().starts_with(b"\x89PNG"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn metronome_advances_beats_from_the_stored_tempo() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-metronome-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"metronome":{"tempo":120,"beats":4}}"#,
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        assert_eq!(session.preferences.metronome_bpm(), 120);
+        assert!(session.chrome_status().is_empty());
+        session.toggle_metronome();
+        assert!(session.metronome_on);
+        assert!(session.chrome_status().contains("120 BPM"));
+        let started = session.metronome_started.unwrap();
+        session.update_metronome(started + std::time::Duration::from_millis(510));
+        assert_eq!(session.metronome_beat, 1);
+        session.update_metronome(started + std::time::Duration::from_secs(2));
+        assert_eq!(session.metronome_beat, 0);
+        session.toggle_metronome();
+        assert!(!session.metronome_on);
         let _ = std::fs::remove_dir_all(&root);
     }
 
