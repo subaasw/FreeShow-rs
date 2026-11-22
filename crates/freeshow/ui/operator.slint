@@ -154,7 +154,7 @@ export component ControlWindow inherits Window {
     in-out property <bool> text-mode: false;
     // Edit mode: clicking a slide only selects it for editing. Otherwise a click presents it.
     in-out property <bool> edit-mode: false;
-    property <bool> editing: root.active-tab == "shows" && root.show-name != "" && root.edit-mode;
+    out property <bool> editing: root.active-tab == "shows" && root.show-name != "" && root.edit-mode;
     callback clear-output(string);
     callback audio-control(string);
     out property <bool> text-focused: show-editor.has-focus;
