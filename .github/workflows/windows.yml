@@ -1,0 +1,86 @@
+name: Windows release installer
+
+on:
+  push:
+    branches: [main]
+    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/windows.yml']
+  pull_request:
+    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/windows.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      PYTHONUTF8: 1
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned MSVC GStreamer SDK
+        run: |
+          $gst = Join-Path $env:RUNNER_TEMP 'freeshow-gstreamer'
+          scripts/windows/setup-gstreamer.ps1 -Destination $gst
+          $pkgConfig = @("$gst\bin\pkg-config.exe", "$gst\bin\pkgconf.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$pkgConfig) {
+            $pkgConfig = (Get-Command pkg-config.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (!$pkgConfig -and (Test-Path 'C:\msys64\usr\bin\pkg-config.exe')) {
+            $pkgConfig = 'C:\msys64\usr\bin\pkg-config.exe'
+          }
+          if (!$pkgConfig) { throw 'Could not find pkg-config or pkgconf' }
+          "FREESHOW_GSTREAMER_ROOT=$gst" >> $env:GITHUB_ENV
+          "PKG_CONFIG=$pkgConfig" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          "PKG_CONFIG_LIBDIR=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$gst\bin" >> $env:GITHUB_PATH
+          $env:PKG_CONFIG_PATH = "$gst\lib\pkgconfig"
+          & $pkgConfig --modversion gstreamer-1.0
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Restore native compilation cache
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: windows-2025-gst1.28.9-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: windows-2025-gst1.28.9-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile native workspace tests
+        run: python scripts/windows/ci-run.py cargo test --locked --workspace --no-run
+      - name: Run native workspace tests
+        run: python scripts/windows/ci-run.py --timeout 720 cargo test --locked --workspace
+      - name: Build the locked MSVC release
+        run: python scripts/windows/ci-run.py cargo build --locked --release -p freeshow
+      - name: Package and verify installer without the SDK
+        run: python scripts/windows/ci-run.py python scripts/package-windows.py --gst "$env:FREESHOW_GSTREAMER_ROOT" --verify
+      - name: Upload installer, checksum and verification reports
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: freeshow-windows-x86_64
+          path: |
+            dist/freeshow-windows-x86_64/*.exe
+            dist/freeshow-windows-x86_64/*.sha256
+            dist/freeshow-windows-x86_64/*verification.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Save native compilation cache
+        if: always() && steps.native-cache.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}

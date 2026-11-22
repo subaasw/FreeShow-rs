@@ -14,12 +14,31 @@ fn bundle_paths(executable: &Path) -> Option<(PathBuf, PathBuf)> {
     ))
 }
 
+fn windows_bundle_paths(executable: &Path) -> Option<(PathBuf, PathBuf)> {
+    let directory = executable.parent()?;
+    directory
+        .join("share/windows-build.json")
+        .is_file()
+        .then(|| {
+            (
+                directory.join("lib/gstreamer-1.0"),
+                directory.join("gst-plugin-scanner.exe"),
+            )
+        })
+}
+
 /// Must run at the start of main, before any threads or GStreamer calls.
 pub fn configure_bundle() -> Result<(), Box<dyn std::error::Error>> {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", windows)) {
         return Ok(());
     }
-    let Some((plugins, scanner)) = bundle_paths(&std::env::current_exe()?) else {
+    let executable = std::env::current_exe()?;
+    let paths = if cfg!(windows) {
+        windows_bundle_paths(&executable)
+    } else {
+        bundle_paths(&executable)
+    };
+    let Some((plugins, scanner)) = paths else {
         return Ok(());
     };
     if !plugins.is_dir() || !scanner.is_file() {
@@ -44,8 +63,14 @@ pub fn configure_bundle() -> Result<(), Box<dyn std::error::Error>> {
     }
     if std::env::var_os("GST_REGISTRY").is_none() && std::env::var_os("GST_REGISTRY_1_0").is_none()
     {
-        if let Some(home) = std::env::var_os("HOME") {
-            let cache = PathBuf::from(home).join("Library/Caches/org.freeshow.rust");
+        let cache = if cfg!(windows) {
+            std::env::var_os("LOCALAPPDATA")
+                .map(|root| PathBuf::from(root).join("FreeShow Rust/Cache"))
+        } else {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join("Library/Caches/org.freeshow.rust"))
+        };
+        if let Some(cache) = cache {
             std::fs::create_dir_all(&cache)?;
             // SAFETY: this is still single-threaded startup.
             unsafe {
