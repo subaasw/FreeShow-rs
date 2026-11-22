@@ -22,7 +22,7 @@ pub use media_library::{
 };
 pub use stage_layout::{
     ChartItem, ChartSample, QrItem, StageClockOptions, StageItemKind, StageItemSpec, StageLayout,
-    default_stage,
+    default_stage, load_stage_file, serialize_stage, write_stage_layout,
 };
 
 /// FreeShow `settings.json` text transition. `kind` is the stored type

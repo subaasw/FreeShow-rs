@@ -12,6 +12,8 @@ pub struct ItemTypography {
     pub font_px: i32,
     pub family: String,
     pub bold: bool,
+    pub color: String,
+    pub align: String,
 }
 
 impl ShowFile {
@@ -134,7 +136,17 @@ impl ShowFile {
             family: css_value(&style, "font-family").unwrap_or_default(),
             bold: css_value(&style, "font-weight")
                 .is_some_and(|value| value.eq_ignore_ascii_case("bold") || value == "700"),
+            color: css_value(&style, "color").unwrap_or_default(),
+            align: css_value(&style, "text-align").unwrap_or_default(),
         }
+    }
+
+    pub fn set_item_color(&mut self, slide_id: &str, index: usize, color: &str) -> bool {
+        self.set_item_css(slide_id, index, "color", color)
+    }
+
+    pub fn set_item_align(&mut self, slide_id: &str, index: usize, align: &str) -> bool {
+        self.set_item_css(slide_id, index, "text-align", align)
     }
 
     pub fn adjust_item_font_size(&mut self, slide_id: &str, index: usize, delta: i32) -> bool {
