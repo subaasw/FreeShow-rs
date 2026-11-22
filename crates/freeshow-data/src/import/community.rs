@@ -886,30 +886,27 @@ fn pdf_placeholder_pages(file_name: &str, bytes: &[u8]) -> Vec<(String, PathBuf)
 
 fn pdf_page_count(bytes: &[u8]) -> usize {
     let text = String::from_utf8_lossy(bytes);
-    if let Some(count) = pdf_pages_count(&text) {
-        return count.max(1);
-    }
-    let pages = text.matches("/Type /Page").count();
-    let trees = text.matches("/Type /Pages").count();
-    pages.saturating_sub(trees).max(1)
-}
-
-fn pdf_pages_count(text: &str) -> Option<usize> {
-    let mut search = text;
-    while let Some(start) = search.find("/Type /Pages") {
-        let window = &search[start..start.saturating_add(400).min(search.len())];
-        if let Some(pos) = window.find("/Count") {
-            let rest = window[pos + 6..].trim_start();
-            let number: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-            if let Ok(count) = number.parse::<usize>()
-                && count > 0
-            {
-                return Some(count);
+    let mut pages = 0;
+    let mut count = 0;
+    for after_type in text.split("/Type").skip(1) {
+        let mut tokens = after_type
+            .split(|ch: char| ch.is_ascii_whitespace() || "()<>[]{}/%".contains(ch))
+            .filter(|token| !token.is_empty());
+        match tokens.next() {
+            Some("Page") => pages += 1,
+            Some("Pages") => {
+                let tree = after_type.split("endobj").next().unwrap_or("");
+                if let Some(rest) = tree.split_once("/Count").map(|(_, rest)| rest.trim_start()) {
+                    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                    count = count.max(rest[..digits].parse::<usize>().unwrap_or(0));
+                }
             }
+            _ => {}
         }
-        search = &search[start + 12..];
     }
-    None
+    // A fallback uses labels alone. Keep malformed PDFs from allocating
+    // unbounded slides based on a forged page count.
+    count.max(pages).clamp(1, 2000)
 }
 
 fn pdf_text_show(name: &str, pages: usize) -> ShowFile {

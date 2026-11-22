@@ -4,6 +4,7 @@
 //! `hid` feature). Missing devices stay silent.
 
 /// Elgato / Corsair Stream Deck USB vendor id.
+#[cfg(target_os = "linux")]
 pub const ELGATO_VID: u16 = 0x0FD9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub fn stream_deck_kind(product_id: u16) -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub fn key_count(product_id: u16) -> u8 {
     match product_id {
         0x0063 | 0x0090 => 6,
@@ -125,6 +127,7 @@ fn list_hidraw() -> Vec<StreamDeckDevice> {
     devices
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn hid_ids(uevent: &str) -> Option<(u16, u16)> {
     for line in uevent.lines() {
         let Some(value) = line.strip_prefix("HID_ID=") else {

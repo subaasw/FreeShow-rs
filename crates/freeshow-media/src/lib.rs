@@ -57,7 +57,7 @@ pub fn media_kind(path: &Path) -> MediaKind {
     if is_remote_url(&raw) {
         return remote_media_kind(&raw);
     }
-    match extension_of(&raw).as_str() {
+    match extension_of(path).as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => MediaKind::Image,
         "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => MediaKind::Video,
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => MediaKind::Audio,
@@ -71,17 +71,16 @@ pub fn is_remote_url(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://")
 }
 
-fn extension_of(path: &str) -> String {
-    let bare = path.split(['?', '#']).next().unwrap_or(path);
-    Path::new(bare)
-        .extension()
+fn extension_of(path: &Path) -> String {
+    path.extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_ascii_lowercase()
 }
 
 fn remote_media_kind(path: &str) -> MediaKind {
-    match extension_of(path).as_str() {
+    let bare = path.split(['?', '#']).next().unwrap_or(path);
+    match extension_of(Path::new(bare)).as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => MediaKind::Image,
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => MediaKind::Audio,
         "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" | "m3u8" | "mpd" => MediaKind::Video,
@@ -116,6 +115,15 @@ fn host_of(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_paths_keep_query_and_fragment_characters() {
+        assert_eq!(
+            media_kind(Path::new(r"\\?\C:\Show\clip.mp4")),
+            MediaKind::Video
+        );
+        assert_eq!(media_kind(Path::new("story #1?.png")), MediaKind::Image);
+    }
 
     #[test]
     fn extensions_map_to_kinds() {
