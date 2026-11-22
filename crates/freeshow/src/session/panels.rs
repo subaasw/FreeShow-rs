@@ -136,12 +136,12 @@ impl Session {
             time_format: prefs.time_format.clone().unwrap_or_else(|| "24".into()),
             autosave: prefs.autosave.clone().unwrap_or_else(|| "15min".into()),
             alert_updates: prefs.alert_updates(),
-            auto_output: prefs.auto_output.unwrap_or(false),
+            auto_output: prefs.auto_output(),
             out_locked: prefs.out_locked(),
-            full_colors: prefs.full_colors.unwrap_or(false),
-            labels_disabled: prefs.labels_disabled.unwrap_or(false),
-            group_numbers: prefs.group_numbers.unwrap_or(false),
-            split_lines: prefs.split_lines.unwrap_or(0) as i32,
+            full_colors: prefs.full_colors(),
+            labels_disabled: prefs.labels_disabled(),
+            group_numbers: prefs.group_numbers(),
+            split_lines: prefs.split_lines() as i32,
             remote_port: i32::from(prefs.remote_port.unwrap_or(freeshow_remote::REMOTE_PORT)),
             stage_port: i32::from(prefs.stage_port.unwrap_or(freeshow_remote::STAGE_PORT)),
             max_connections: prefs.max_connections.unwrap_or(10) as i32,
@@ -206,11 +206,10 @@ impl Session {
                 json!(parse_int(value, 1024, 65535)?),
             ),
             "outputAlwaysOnTop" | "outputKiosk" => {
-                let id = self
-                    .preferences
-                    .active_output()
-                    .map(|output| output.id.clone())
-                    .ok_or("no output is stored in settings.json yet")?;
+                let id = match self.preferences.active_output() {
+                    Some(output) => output.id.clone(),
+                    None => self.add_default_output()?,
+                };
                 let field = if key == "outputKiosk" {
                     "kiosk"
                 } else {
@@ -256,6 +255,31 @@ impl Session {
             .active_output()
             .map(|output| (output.always_on_top, output.kiosk))
             .unwrap_or((true, false))
+    }
+
+    /// A library that never had an output stored gets FreeShow's default "Primary" output.
+    fn add_default_output(&mut self) -> Result<String, String> {
+        let wrote = self.patch_settings(|settings| {
+            if !settings
+                .get("outputs")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                settings["outputs"] = serde_json::json!({});
+            }
+            settings["outputs"]["default"] = serde_json::json!({
+                "enabled": true,
+                "active": true,
+                "name": "Primary",
+                "color": "#F0008C",
+                "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+                "alwaysOnTop": true,
+            });
+        });
+        if wrote && self.preferences.active_output().is_some() {
+            Ok("default".into())
+        } else {
+            Err("could not write settings.json".into())
+        }
     }
 
     fn patch_output(
@@ -450,6 +474,10 @@ mod tests {
     fn settings_write_back_validated_values_and_keep_unknown_keys() {
         let (dir, mut session) = library("settings");
         assert_eq!(session.settings_form().theme, "dark");
+        assert!(
+            session.settings_form().group_numbers,
+            "on by default, as the slides show"
+        );
         session.apply_setting("outLocked", "true").unwrap();
         session.apply_setting("stagePort", "5600").unwrap();
         session.apply_setting("autosave", "5min").unwrap();
@@ -476,7 +504,13 @@ mod tests {
     fn output_window_flags_follow_the_active_output() {
         let (dir, mut session) = library("outputs");
         assert_eq!(session.output_window_flags(), (true, false));
-        assert!(session.apply_setting("outputKiosk", "true").is_err());
+        session.apply_setting("outputKiosk", "true").unwrap();
+        assert_eq!(
+            session.output_window_flags(),
+            (true, true),
+            "a Primary output was added"
+        );
+        assert_eq!(session.settings_form().output_name, "Primary");
         std::fs::write(
             dir.path().join("settings.json"),
             r#"{"outputs":{"a":{"name":"Side","enabled":true},"b":{"name":"Main","active":true,"alwaysOnTop":false}}}"#,
