@@ -188,7 +188,7 @@ Acceptance: a church that already routes a stereo mix to NDI/RTMP/Icecast can al
 - [x] PowerPoint linear gradients, including theme `gradFill` styles and scheme colors, become a full-slide shape painted with CSS `linear-gradient`. The first stop is stored as `settings.color`. Empty theme `gradFill` entries stay unresolved.
 - [x] PowerPoint tiled and linked media: `a:tile` uses fit `tile` and repeats at the picture's source size; `r:link` http(s) images are stored as remote paths and fetched when presented. Other URL schemes and path traversal stay rejected.
 - [x] PowerPoint rich objects: positioned `p:sp` and `p:pic` items keep their EMU bounds, fills, and rounded or elliptical geometry. Tables and charts stay off the slide and are recorded as import warnings.
-- Backgrounds from other import formats still listed as incomplete in `PARITY.md`.
+- [x] OpenSong `<backgrounds>` JPEG data and SongBeamer `#BackgroundImage=` local pictures (safe relative paths only) are copied into `Media/` and attached to the first layout slide.
 
 Acceptance: the fixtures in `crates/freeshow-data/tests/fixtures` plus a documented set of real `.pro` / `.pptx` samples present with original backgrounds, typography, and slide order. Unsupported features warn; they never crash or silently retarget media.
 

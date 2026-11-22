@@ -92,9 +92,11 @@ pub fn import_sources(
                 vec![show]
             })
         } else {
-            import_shows(
+            import_shows_from(
                 path.file_name().and_then(|n| n.to_str()).unwrap_or("song"),
                 &bytes,
+                Some(&path),
+                Some(media),
             )
         };
         match found {
@@ -131,6 +133,15 @@ pub fn import_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError>
 }
 
 pub fn import_shows(file_name: &str, bytes: &[u8]) -> Result<Vec<ShowFile>, DataError> {
+    import_shows_from(file_name, bytes, None, None)
+}
+
+fn import_shows_from(
+    file_name: &str,
+    bytes: &[u8],
+    source: Option<&Path>,
+    media: Option<&Path>,
+) -> Result<Vec<ShowFile>, DataError> {
     if propresenter::is_bundle(Path::new(file_name)) {
         return propresenter::bundle_shows(bytes)
             .map(|(_, shows)| shows.into_iter().map(|(_, show)| show).collect());
@@ -138,10 +149,15 @@ pub fn import_shows(file_name: &str, bytes: &[u8]) -> Result<Vec<ShowFile>, Data
     if is_sqlite(file_name, bytes) {
         return openlp_database(bytes);
     }
-    Ok(vec![import_one(file_name, bytes)?])
+    Ok(vec![import_one(file_name, bytes, source, media)?])
 }
 
-fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
+fn import_one(
+    file_name: &str,
+    bytes: &[u8],
+    source: Option<&Path>,
+    media: Option<&Path>,
+) -> Result<ShowFile, DataError> {
     let ext = Path::new(file_name)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -163,14 +179,19 @@ fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
     if is_propresenter(trimmed) {
         return propresenter::xml_show(file_name, &text);
     }
+    let mut background = None;
     let (name, sections) = if is_chordpro(trimmed) {
         chordpro(&text)
     } else if is_openlyrics(trimmed) {
         openlyrics(&text)?
     } else if is_opensong(trimmed) {
-        opensong(&text)?
+        let (name, sections, image) = opensong(&text)?;
+        background = opensong_background_path(file_name, media, image)?;
+        (name, sections)
     } else if is_songbeamer(&text) {
-        songbeamer(&text)
+        let (name, sections, image) = songbeamer(&text);
+        background = songbeamer_background_path(source, media, image)?;
+        (name, sections)
     } else if is_easyworship(&text) || ext == "rtf" {
         plain(&decode_rtf(&text))
     } else {
@@ -186,7 +207,98 @@ fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
             "{file_name} did not contain slides"
         )));
     }
-    Ok(show_file(file_name, &name, sections))
+    let mut show = show_file(file_name, &name, sections);
+    if let Some(path) = background {
+        attach_layout_background(&mut show, &path);
+    }
+    Ok(show)
+}
+
+fn attach_layout_background(show: &mut ShowFile, path: &Path) {
+    let media_id = "m1";
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("background");
+    show.show["media"][media_id] = json!({"name": name, "path": path});
+    if let Some(first) = show
+        .show
+        .pointer_mut("/layouts/main/slides")
+        .and_then(|order| order.as_array_mut())
+        .and_then(|slides| slides.first_mut())
+    {
+        first["background"] = json!(media_id);
+    }
+}
+
+fn opensong_background_path(
+    file_name: &str,
+    media: Option<&Path>,
+    image: Option<Vec<u8>>,
+) -> Result<Option<PathBuf>, DataError> {
+    let Some(bytes) = image.filter(|bytes| bytes.starts_with(&[0xFF, 0xD8])) else {
+        return Ok(None);
+    };
+    let Some(media) = media else {
+        return Ok(None);
+    };
+    save_imported_media(media, &format!("{}.jpg", file_stem_str(file_name)), &bytes).map(Some)
+}
+
+fn songbeamer_background_path(
+    source: Option<&Path>,
+    media: Option<&Path>,
+    image: Option<String>,
+) -> Result<Option<PathBuf>, DataError> {
+    let Some(image) = image else {
+        return Ok(None);
+    };
+    let Some(path) = safe_local_image(source, &image) else {
+        return Ok(None);
+    };
+    let bytes = fs::read(&path)?;
+    if let Some(media) = media {
+        return save_imported_media(
+            media,
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("background.jpg"),
+            &bytes,
+        )
+        .map(Some);
+    }
+    Ok(Some(path))
+}
+
+fn safe_local_image(source: Option<&Path>, target: &str) -> Option<PathBuf> {
+    let target = target.trim();
+    if target.is_empty()
+        || target.contains("..")
+        || target.contains('\\')
+        || target.contains('\n')
+        || target.contains('\r')
+        || target.starts_with("//")
+        || target.contains(':')
+    {
+        return None;
+    }
+    let path = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        source.and_then(Path::parent)?.join(target)
+    };
+    let path = path.canonicalize().ok()?;
+    path.is_file().then_some(path).filter(|path| {
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+        )
+    })
 }
 
 #[derive(Clone)]
@@ -629,11 +741,13 @@ fn page_break(event: &quick_xml::events::BytesStart<'_>) -> bool {
         .contains("page-break-after")
 }
 
-fn opensong(text: &str) -> Result<(String, Vec<Section>), DataError> {
+fn opensong(text: &str) -> Result<(String, Vec<Section>, Option<Vec<u8>>), DataError> {
     let mut title = String::new();
     let mut lyrics = String::new();
+    let mut backgrounds = String::new();
     let mut in_title = false;
     let mut in_lyrics = false;
+    let mut in_backgrounds = false;
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -643,6 +757,7 @@ fn opensong(text: &str) -> Result<(String, Vec<Section>), DataError> {
                 let name = local_name(event.name().as_ref());
                 in_title = name == "title";
                 in_lyrics = name == "lyrics";
+                in_backgrounds = name == "backgrounds";
             }
             Ok(Event::Text(event)) => {
                 let text = event
@@ -653,11 +768,14 @@ fn opensong(text: &str) -> Result<(String, Vec<Section>), DataError> {
                     title.push_str(text.trim());
                 } else if in_lyrics {
                     lyrics.push_str(&text);
+                } else if in_backgrounds {
+                    backgrounds.push_str(&text);
                 }
             }
             Ok(Event::End(_)) => {
                 in_title = false;
                 in_lyrics = false;
+                in_backgrounds = false;
             }
             Ok(Event::Eof) => break,
             Err(err) => return Err(DataError::Scripture(err.to_string())),
@@ -704,7 +822,8 @@ fn opensong(text: &str) -> Result<(String, Vec<Section>), DataError> {
             chords,
         });
     }
-    Ok((title, sections))
+    let image = base64_decode(backgrounds.trim()).filter(|bytes| !bytes.is_empty());
+    Ok((title, sections, image))
 }
 
 /// OpenSong puts chords on a line that starts with `.`. Spaces between names are their positions.
@@ -744,9 +863,10 @@ fn opensong_group(tag: &str) -> String {
     }
 }
 
-fn songbeamer(text: &str) -> (String, Vec<Section>) {
+fn songbeamer(text: &str) -> (String, Vec<Section>, Option<String>) {
     let stored = songbeamer_chords(text);
     let mut name = String::new();
+    let mut background = None;
     let mut sections = Vec::new();
     let mut chord_line = 0usize;
     for section in text.split("\n---") {
@@ -764,6 +884,9 @@ fn songbeamer(text: &str) -> (String, Vec<Section>) {
             for line in lines {
                 if let Some(title) = line.strip_prefix("#Title=") {
                     name = title.trim().to_string();
+                }
+                if let Some(image) = line.strip_prefix("#BackgroundImage=") {
+                    background = Some(image.trim().to_string());
                 }
             }
             continue;
@@ -797,7 +920,7 @@ fn songbeamer(text: &str) -> (String, Vec<Section>) {
             });
         }
     }
-    (name, sections)
+    (name, sections, background)
 }
 
 fn songbeamer_chords(text: &str) -> std::collections::BTreeMap<usize, Vec<ChordMark>> {
@@ -1437,6 +1560,86 @@ how sweet</lines></verse></lyrics></song>"#;
             .unwrap();
         assert_eq!(marks[0]["key"], "G");
         assert_eq!(marks[0]["pos"], 0);
+    }
+
+    #[test]
+    fn opensong_and_songbeamer_keep_safe_backgrounds() {
+        fn b64(bytes: &[u8]) -> String {
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let a = u32::from(chunk[0]);
+                let b = u32::from(chunk.get(1).copied().unwrap_or(0));
+                let c = u32::from(chunk.get(2).copied().unwrap_or(0));
+                let n = (a << 16) | (b << 8) | c;
+                out.push(T[(n >> 18) as usize] as char);
+                out.push(T[((n >> 12) & 63) as usize] as char);
+                out.push(if chunk.len() > 1 {
+                    T[((n >> 6) & 63) as usize] as char
+                } else {
+                    '='
+                });
+                out.push(if chunk.len() > 2 {
+                    T[(n & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            out
+        }
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xD9];
+        let path = std::env::temp_dir().join(crate::new_id());
+        let imports = path.join("Imports");
+        let media = path.join("Media");
+        let shows = path.join("Shows");
+        std::fs::create_dir_all(&imports).unwrap();
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::create_dir_all(&shows).unwrap();
+        std::fs::write(
+            imports.join("OpenGrace.xml"),
+            format!(
+                "<song><title>Grace</title><lyrics>\n[V1]\nAmazing grace\n</lyrics><backgrounds>{}</backgrounds></song>",
+                b64(&jpeg)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            imports.join("sky.png"),
+            include_bytes!("../tests/fixtures/lesson-cover.png"),
+        )
+        .unwrap();
+        std::fs::write(
+            imports.join("BeamerGrace.sng"),
+            "#Title=Beamer\n#BackgroundImage=sky.png\n---\nVerse 1\nAmazing grace\n",
+        )
+        .unwrap();
+        std::fs::write(
+            imports.join("Unsafe.sng"),
+            "#Title=Unsafe\n#BackgroundImage=../secret.png\n---\nVerse 1\nHidden\n",
+        )
+        .unwrap();
+        let warnings = import_sources(&imports, &shows, &media).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let library = crate::Library::open(&path);
+        let list = library.list_shows().unwrap();
+        let opensong = list.iter().find(|show| show.name() == "Grace").unwrap();
+        let beamer = list.iter().find(|show| show.name() == "Beamer").unwrap();
+        let unsafe_show = list.iter().find(|show| show.name() == "Unsafe").unwrap();
+        let jpg = PathBuf::from(opensong.show["media"]["m1"]["path"].as_str().unwrap());
+        assert!(jpg.starts_with(media.canonicalize().unwrap()));
+        assert_eq!(std::fs::read(&jpg).unwrap(), jpeg);
+        assert_eq!(
+            opensong.show["layouts"]["main"]["slides"][0]["background"],
+            "m1"
+        );
+        let png = PathBuf::from(beamer.show["media"]["m1"]["path"].as_str().unwrap());
+        assert!(png.starts_with(media.canonicalize().unwrap()));
+        assert_eq!(
+            std::fs::read(&png).unwrap(),
+            include_bytes!("../tests/fixtures/lesson-cover.png")
+        );
+        assert!(unsafe_show.show["media"].as_object().unwrap().is_empty());
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
