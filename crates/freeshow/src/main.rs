@@ -199,6 +199,16 @@ slint::slint! {
         callback save-lyrics(string);
         callback save-group(string);
         callback nudge-box(int, int, int, int);
+        in-out property <string> item-label: "Box 1 of 1";
+        in-out property <string> font-family: "";
+        in-out property <bool> item-bold: false;
+        callback prev-item();
+        callback next-item();
+        callback add-item();
+        callback remove-item();
+        callback adjust-font(int);
+        callback toggle-bold();
+        callback set-font-family(string);
         callback go-slide(string);
         callback move-project(int);
         callback choose-project(int);
@@ -410,6 +420,31 @@ slint::slint! {
                                 text <=> root.group;
                                 placeholder-text: "Group";
                                 edited(value) => { root.save-group(value); }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: root.item-label;
+                                    color: root.text-color;
+                                    font-size: 12px * OperatorStyle.font-scale;
+                                    vertical-alignment: center;
+                                }
+                                BoxButton { label: "Prev box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.prev-item(); } }
+                                BoxButton { label: "Next box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.next-item(); } }
+                                BoxButton { label: "Add box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-item(); } }
+                                BoxButton { label: "Remove"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.remove-item(); } }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                BoxButton { label: "Larger"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.adjust-font(10); } }
+                                BoxButton { label: "Smaller"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.adjust-font(-10); } }
+                                BoxButton { label: root.item-bold ? "Unbold" : "Bold"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.toggle-bold(); } }
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    text <=> root.font-family;
+                                    placeholder-text: "Font family";
+                                    edited(value) => { root.set-font-family(value); }
+                                }
                             }
                             HorizontalLayout {
                                 spacing: 6px;
@@ -673,6 +708,10 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_project_title(session.project_title().into());
     ui.set_lyrics(session.lyrics().into());
     ui.set_group(session.group().into());
+    ui.set_item_label(session.item_label().into());
+    let typography = session.item_typography();
+    ui.set_font_family(typography.family.into());
+    ui.set_item_bold(typography.bold);
     ui.set_selected_drawer(match session.tab.as_str() {
         "shows" => selected(session.show_index),
         "scripture" => selected(session.bible_index),
@@ -2069,6 +2108,104 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_prev_item(move || {
+            session.borrow_mut().prev_item();
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_next_item(move || {
+            session.borrow_mut().next_item();
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_add_item(move || {
+            if !session.borrow_mut().add_item_box() {
+                tracing::error!("could not add a text box");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_remove_item(move || {
+            if !session.borrow_mut().remove_item_box() {
+                tracing::error!("could not remove the text box");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_adjust_font(move |delta| {
+            if !session.borrow_mut().adjust_font(delta) {
+                tracing::error!("could not change the font size");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_toggle_bold(move || {
+            if !session.borrow_mut().toggle_bold() {
+                tracing::error!("could not change bold");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_set_font_family(move |family| {
+            if session.borrow().item_typography().family == family.as_str() {
+                return;
+            }
+            if !session.borrow_mut().set_font_family(family.as_str()) {
+                tracing::error!("could not change the font family");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&preview_slot, audience_frame(&session.borrow()));
             }
         });
     }
