@@ -33,6 +33,8 @@ enum Background {
         part: String,
         crop: [f64; 4],
         inset: [f64; 4],
+        tile: bool,
+        linked: bool,
     },
     Gradient(GradientFill),
     CssGradient {
@@ -46,6 +48,7 @@ struct Relationship {
     id: String,
     kind: String,
     target: String,
+    external: bool,
 }
 
 pub(super) fn import(
@@ -85,8 +88,9 @@ pub(super) fn import(
         let (lines, disabled) = slide_text(&xml)?;
         let found = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
         let fill = realize_background(&mut themes, &mut archive, part, &xml, found)?;
-        if let Some(Background::Picture { part, .. }) = &fill
+        if let Some(Background::Picture { part, linked, .. }) = &fill
             && media.is_some()
+            && !linked
             && !assets.contains_key(part)
         {
             let mut file = archive.by_name(part).map_err(invalid)?;
@@ -127,7 +131,18 @@ pub(super) fn import(
         ));
         match fill {
             Some(Background::Color(color)) => apply_solid_color(slide, &color)?,
-            Some(Background::Picture { part, crop, inset }) if files.contains_key(&part) => {
+            Some(Background::Picture {
+                part,
+                crop,
+                inset,
+                tile,
+                linked,
+            }) if linked || files.contains_key(&part) => {
+                let src = if linked {
+                    json!(part)
+                } else {
+                    json!(files[&part])
+                };
                 let [left, top, right, bottom] = inset;
                 let style = format!(
                     "left:{}px;top:{}px;width:{}px;height:{}px;",
@@ -139,7 +154,7 @@ pub(super) fn import(
                 // A slide-local image item lets a later slide return to its
                 // own background, and preserves PowerPoint's stretch/crop.
                 slide["items"].as_array_mut().unwrap().insert(0, json!({
-                    "type":"media", "style":style, "fit":"fill", "src":files[&part],
+                    "type":"media", "style":style, "fit":if tile { "tile" } else { "fill" }, "src":src,
                     "cropping":{"type":"ppt","left":crop[0],"top":crop[1],"right":crop[2],"bottom":crop[3]}
                 }));
             }
@@ -341,6 +356,7 @@ fn find_background(
                         }
                         (Some("blipFill"), "blip") => {
                             picture = relationship_attr(&element, "embed")
+                                .or_else(|| relationship_attr(&element, "link"));
                         }
                         (Some("blipFill"), "tile") => tiled = true,
                         (Some("blipFill"), "srcRect") => crop = percentages(&element),
@@ -372,21 +388,17 @@ fn find_background(
             stops: gradient_stops,
         }
     });
-    let fill = if let Some(id) = picture.filter(|_| !tiled) {
+    let fill = if let Some(id) = picture {
         relationships(archive, part)?
             .into_iter()
             .find(|rel| rel.id == id && rel.kind == "image")
-            .filter(|rel| {
-                Path::new(&rel.target).extension().is_some_and(|ext| {
-                    ["png", "jpg", "jpeg"]
-                        .iter()
-                        .any(|supported| ext.eq_ignore_ascii_case(supported))
-                })
-            })
+            .filter(|rel| rel.external || image_part(&rel.target))
             .map(|rel| Background::Picture {
                 part: rel.target,
                 crop,
                 inset,
+                tile: tiled,
+                linked: rel.external,
             })
             .or(Some(Background::Unsupported))
     } else if let Some(gradient) = gradient {
@@ -430,10 +442,10 @@ fn relationships(archive: &mut Archive<'_>, part: &str) -> Result<Vec<Relationsh
     let mut seen = HashSet::new();
     let mut invalid_row = false;
     elements(&xml, |name, element| {
-        if name != "Relationship" || attribute(element, "TargetMode").as_deref() == Some("External")
-        {
+        if name != "Relationship" {
             return;
         }
+        let external = attribute(element, "TargetMode").as_deref() == Some("External");
         let (Some(id), Some(kind), Some(target)) = (
             attribute(element, "Id"),
             attribute(element, "Type"),
@@ -447,8 +459,26 @@ fn relationships(archive: &mut Archive<'_>, part: &str) -> Result<Vec<Relationsh
             return;
         }
         let kind = kind.rsplit('/').next().unwrap_or("").to_owned();
+        if external {
+            if kind == "image"
+                && let Some(target) = remote_media_url(&target)
+            {
+                rows.push(Relationship {
+                    id,
+                    kind,
+                    target,
+                    external: true,
+                });
+            }
+            return;
+        }
         if let Some(target) = internal_target(directory, &target) {
-            rows.push(Relationship { id, kind, target });
+            rows.push(Relationship {
+                id,
+                kind,
+                target,
+                external: false,
+            });
         }
     })?;
     if invalid_row {
@@ -593,6 +623,26 @@ fn theme_percentage(value: &str) -> Option<f64> {
         .map_or((value, 100_000.0), |value| (value, 100.0));
     let parsed = number.parse::<f64>().ok()?;
     parsed.is_finite().then(|| parsed / divisor)
+}
+
+fn remote_media_url(target: &str) -> Option<String> {
+    let target = target.trim();
+    let scheme = target.split_once("://")?.0;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    if target.chars().any(|ch| matches!(ch, '\\' | '\n' | '\r')) {
+        return None;
+    }
+    Some(target.to_string())
+}
+
+fn image_part(path: &str) -> bool {
+    Path::new(path).extension().is_some_and(|ext| {
+        ["png", "jpg", "jpeg"]
+            .iter()
+            .any(|supported| ext.eq_ignore_ascii_case(supported))
+    })
 }
 
 fn invalid(error: impl std::fmt::Display) -> DataError {
@@ -836,6 +886,74 @@ mod tests {
     }
 
     #[test]
+    fn tiled_and_linked_media_become_slide_items() {
+        let layout = br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#;
+        let layout_master = br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
+        let master = br#"<p:sldMaster xmlns:p="p"><p:cSld/></p:sldMaster>"#;
+        let files = archive(&[
+            (
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:bg><p:bgPr><a:blipFill>
+                    <a:blip r:embed="bg"/><a:tile/>
+                </a:blipFill></p:bgPr></p:bg></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide2.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:bg><p:bgPr><a:blipFill>
+                    <a:blip r:link="bg"/>
+                </a:blipFill></p:bgPr></p:bg></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide3.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:bg><p:bgPr><a:blipFill>
+                    <a:blip r:link="bg"/>
+                </a:blipFill></p:bgPr></p:bg></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                br#"<Relationships>
+                    <Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+                    <Relationship Id="bg" Type="o/image" Target="../media/sky.png"/>
+                </Relationships>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide2.xml.rels",
+                br#"<Relationships>
+                    <Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+                    <Relationship Id="bg" Type="o/image" Target="https://example.org/sky.png" TargetMode="External"/>
+                </Relationships>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide3.xml.rels",
+                br#"<Relationships>
+                    <Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+                    <Relationship Id="bg" Type="o/image" Target="file:///etc/passwd" TargetMode="External"/>
+                </Relationships>"#,
+            ),
+            ("ppt/slideLayouts/slideLayout1.xml", layout),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", layout_master),
+            ("ppt/slideMasters/slideMaster1.xml", master),
+            (
+                "ppt/media/sky.png",
+                include_bytes!("../../tests/fixtures/lesson-cover.png"),
+            ),
+        ]);
+        let path = std::env::temp_dir().join(crate::new_id());
+        std::fs::create_dir_all(&path).unwrap();
+        let show = import("Tiles.pptx", &files, Some(&path)).unwrap();
+        let slides = &show.show["slides"];
+        assert_eq!(slides["s1"]["items"][0]["fit"], "tile");
+        assert!(Path::new(slides["s1"]["items"][0]["src"].as_str().unwrap()).starts_with(&path));
+        assert_eq!(
+            slides["s2"]["items"][0]["src"],
+            "https://example.org/sky.png"
+        );
+        assert_eq!(slides["s2"]["items"][0]["fit"], "fill");
+        assert_ne!(slides["s3"]["items"][0]["type"], "media");
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn internal_relationships_cannot_address_the_filesystem_or_network() {
         for path in [
             "../../escape.png",
@@ -851,5 +969,17 @@ mod tests {
             internal_target("ppt/slides", "../media/p%20q.png").as_deref(),
             Some("ppt/media/p q.png")
         );
+        assert_eq!(
+            remote_media_url("https://example.org/sky.png").as_deref(),
+            Some("https://example.org/sky.png")
+        );
+        for path in [
+            "file:///etc/passwd",
+            "C:/file.png",
+            "//server/file.png",
+            "ftp://example.org/a.png",
+        ] {
+            assert_eq!(remote_media_url(path), None, "{path}");
+        }
     }
 }

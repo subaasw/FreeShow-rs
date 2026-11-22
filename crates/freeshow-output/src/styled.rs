@@ -140,6 +140,8 @@ pub enum Fit {
     Fill,
     Contain,
     Cover,
+    /// The picture is repeated at its source size to fill the box.
+    Tile,
     /// The picture stays contained, with a blurred cover copy behind it.
     Blur,
 }
@@ -150,6 +152,7 @@ impl Fit {
         match name {
             "cover" => Self::Cover,
             "fill" => Self::Fill,
+            "tile" => Self::Tile,
             "blur" => Self::Blur,
             _ => Self::Contain,
         }
@@ -1108,8 +1111,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     if let Some(image) = &item.image {
         blit(
             pixels,
-            slide.output_width,
-            slide.output_height,
+            slide,
             x,
             y,
             w,
@@ -2855,8 +2857,7 @@ fn align_in(value: &str) -> Option<Align> {
 
 fn blit(
     pixels: &mut [u8],
-    frame_w: u32,
-    frame_h: u32,
+    slide: &StyledSlide,
     x: i32,
     y: i32,
     w: i32,
@@ -2870,7 +2871,23 @@ fn blit(
     if image.width == 0 || image.height == 0 || w <= 0 || h <= 0 {
         return;
     }
-    let (draw_w, draw_h, ox, oy) = fitted(image.width, image.height, w, h, fit);
+    let frame_w = slide.output_width;
+    let frame_h = slide.output_height;
+    let (draw_w, draw_h, ox, oy) = if fit == Fit::Tile {
+        (
+            scale(image.width as f32, slide.output_width, slide.source_width).max(1),
+            scale(
+                image.height as f32,
+                slide.output_height,
+                slide.source_height,
+            )
+            .max(1),
+            0,
+            0,
+        )
+    } else {
+        fitted(image.width, image.height, w, h, fit)
+    };
     if draw_w <= 0 || draw_h <= 0 {
         return;
     }
@@ -2887,8 +2904,11 @@ fn blit(
             if dx < inset_left || dx >= w - inset_right {
                 continue;
             }
-            let local_x = dx - ox;
-            let local_y = dy - oy;
+            let (local_x, local_y) = if fit == Fit::Tile {
+                (dx.rem_euclid(draw_w), dy.rem_euclid(draw_h))
+            } else {
+                (dx - ox, dy - oy)
+            };
             if local_x < 0 || local_y < 0 || local_x >= draw_w || local_y >= draw_h {
                 continue;
             }
@@ -2925,7 +2945,7 @@ fn fitted(image_w: u32, image_h: u32, box_w: i32, box_h: i32, fit: Fit) -> (i32,
     let image_w = image_w as i32;
     let image_h = image_h as i32;
     let (draw_w, draw_h) = match fit {
-        Fit::Fill => (box_w, box_h),
+        Fit::Fill | Fit::Tile => (box_w, box_h),
         Fit::Contain => {
             if box_w * image_h <= box_h * image_w {
                 (box_w, (box_w * image_h) / image_w)
@@ -3420,6 +3440,43 @@ mod tests {
             right.b > 200 && right.r < 40,
             "right should be blue, got {right:?}"
         );
+    }
+
+    #[test]
+    fn tiled_media_repeats_the_picture_across_the_item_box() {
+        let mut slide = style_slide("left:0px;top:0px;width:1920px;height:1080px;");
+        // A 4x1 source-pixel stamp becomes a 2 output-pixel-wide tile at 960x540.
+        slide.items[0].fit = Fit::Tile;
+        slide.items[0].image = Some(Raster {
+            width: 4,
+            height: 1,
+            rgba: vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+            ],
+        });
+        let frame = render_styled(&slide);
+        let left = frame.pixel(0, 10);
+        let mid = frame.pixel(1, 10);
+        let wrap = frame.pixel(2, 10);
+        assert_eq!(
+            left,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+        assert_eq!(
+            mid,
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255
+            }
+        );
+        assert_eq!(wrap, left);
     }
 
     fn style_slide(style: &str) -> StyledSlide {
