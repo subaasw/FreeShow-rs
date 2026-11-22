@@ -302,6 +302,9 @@ fn add_slide(
     }
     if !clear.is_empty() {
         node["actions"]["slideActions"] = json!([{"triggers":clear}]);
+        if action.is_none() {
+            settings["actionOnly"] = json!(true);
+        }
     }
     slides.insert(
         slide_id,
@@ -729,6 +732,10 @@ mod tests {
         let show = crate::import::import_show("Clears.pro", &presentation.encode_to_vec()).unwrap();
         let slides = show.ordered_slides();
         assert!(slides[2].lines.is_empty());
+        assert_eq!(
+            show.show["slides"][&slides[2].id]["settings"]["actionOnly"],
+            true
+        );
         assert!(matches!(
             show.backdrop_at(0),
             crate::SlideBackdrop::Picture { .. }

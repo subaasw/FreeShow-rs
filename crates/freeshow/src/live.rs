@@ -55,6 +55,18 @@ impl OpeningFade {
     }
 }
 
+/// The content layer of the last audience frame, independent of the cue being run.
+pub(crate) enum ProgramContent {
+    Scripture(Vec<String>),
+    Slide {
+        show_id: String,
+        slide_id: String,
+        reveal: u32,
+        clicks: bool,
+        page: Option<(usize, usize)>,
+    },
+}
+
 pub fn audience_frame(session: &Session) -> Frame {
     let mut frame = if !session.blanked {
         if let Some(image) = &session.underlay {
@@ -77,26 +89,96 @@ pub fn audience_frame(session: &Session) -> Frame {
         clear_frame(session.output_width, session.output_height)
     };
     paint_overlays(&mut frame, session, true);
-    if !session.blanked && !session.slide_hidden {
-        if session.tab == "scripture" {
-            composite_styled(
-                &mut frame,
-                &lines_slide_at(
-                    &session.output_lines(),
-                    true,
-                    session.output_width,
-                    session.output_height,
-                ),
-            );
-        } else if let Some(slide) = show_styled(session, session.slide_index) {
-            composite_styled(&mut frame, &slide);
-        }
-    }
+    paint_program_content(&mut frame, session);
     paint_overlays(&mut frame, session, false);
     paint_interaction(&mut frame, session);
     paint_drawing(&mut frame, session);
     paint_effects(&mut frame, session);
     delayed_audience_frame(frame, session.preferences.output_delay_ms())
+}
+
+fn paint_program_content(frame: &mut Frame, session: &Session) {
+    let mut program = session.program_content.borrow_mut();
+    if session.blanked || session.slide_hidden {
+        *program = None;
+        return;
+    }
+    let (width, height) = (session.output_width, session.output_height);
+    if session.tab == "scripture" {
+        let lines = session.output_lines();
+        composite_styled(frame, &lines_slide_at(&lines, true, width, height));
+        *program = Some(ProgramContent::Scripture(lines));
+        return;
+    }
+    let selected = session
+        .show_index
+        .and_then(|slot| session.shows.get(slot))
+        .and_then(|show| {
+            let slide_id = show.ordered_slides().get(session.slide_index?)?.id.clone();
+            let slide = show.show.get("slides")?.get(&slide_id)?;
+            Some((show, slide_id, slide))
+        });
+    let Some((show, slide_id, slide)) = selected else {
+        *program = None;
+        return;
+    };
+    let shown = if action_only(slide) {
+        match program.as_ref() {
+            Some(ProgramContent::Scripture(lines)) => {
+                composite_styled(frame, &lines_slide_at(lines, true, width, height));
+                return;
+            }
+            Some(ProgramContent::Slide {
+                show_id, slide_id, ..
+            }) => session
+                .shows
+                .iter()
+                .find(|show| &show.id == show_id)
+                .and_then(|show| show.show.get("slides")?.get(slide_id)),
+            None => None,
+        }
+    } else {
+        *program = Some(ProgramContent::Slide {
+            show_id: show.id.clone(),
+            slide_id,
+            reveal: session.reveal_count,
+            clicks: session.click_revealed,
+            page: session.style_page(),
+        });
+        Some(slide)
+    };
+    if let (
+        Some(slide),
+        Some(ProgramContent::Slide {
+            reveal,
+            clicks,
+            page,
+            ..
+        }),
+    ) = (shown, program.as_ref())
+    {
+        composite_styled(
+            frame,
+            &styled_slide(
+                slide,
+                session.root.as_deref(),
+                true,
+                Some(*reveal),
+                *clicks,
+                *page,
+                &session_variables(session),
+                width,
+                height,
+            ),
+        );
+    }
+}
+
+fn action_only(slide: &serde_json::Value) -> bool {
+    slide
+        .pointer("/settings/actionOnly")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 thread_local! {
@@ -323,20 +405,16 @@ pub fn stage_frame(session: &Session) -> Frame {
                     .enumerate()
                     .map(|(slide_index, slide)| {
                         let current = current_index == Some(slide_index);
-                        crate::stage::StageSlide {
-                            text_boxes: show
-                                .stage_text_boxes(slide_index, current, reveal, clicks, page)
-                                .into_iter()
-                                .map(|lines| {
-                                    lines
-                                        .into_iter()
-                                        .map(|line| {
-                                            freeshow_data::fill_variables(&line, &variables)
-                                        })
-                                        .collect()
-                                })
-                                .collect(),
-                            notes: freeshow_data::fill_variables(&slide.notes, &variables),
+                        if current && action_only(&show.show["slides"][&slide.id]) {
+                            program_stage_slide(session, &variables)
+                        } else {
+                            stage_slide(
+                                show.stage_text_boxes_for_slide(
+                                    &slide.id, current, reveal, clicks, page,
+                                ),
+                                &slide.notes,
+                                &variables,
+                            )
                         }
                     })
                     .collect()
@@ -420,6 +498,49 @@ pub fn stage_frame(session: &Session) -> Frame {
         session.output_width,
         session.output_height,
     )
+}
+
+fn program_stage_slide(
+    session: &Session,
+    variables: &[(String, String)],
+) -> crate::stage::StageSlide {
+    match session.program_content.borrow().as_ref() {
+        Some(ProgramContent::Scripture(lines)) => stage_slide(vec![lines.clone()], "", variables),
+        Some(ProgramContent::Slide {
+            show_id,
+            slide_id,
+            reveal,
+            clicks,
+            page,
+        }) => {
+            if let Some(show) = session.shows.iter().find(|show| &show.id == show_id) {
+                let notes = show.show["slides"][slide_id]["notes"]
+                    .as_str()
+                    .unwrap_or_default();
+                return stage_slide(
+                    show.stage_text_boxes_for_slide(slide_id, true, *reveal, *clicks, *page),
+                    notes,
+                    variables,
+                );
+            }
+            stage_slide(Vec::new(), "", variables)
+        }
+        None => stage_slide(Vec::new(), "", variables),
+    }
+}
+
+fn stage_slide(
+    mut text_boxes: Vec<Vec<String>>,
+    notes: &str,
+    variables: &[(String, String)],
+) -> crate::stage::StageSlide {
+    for line in text_boxes.iter_mut().flatten() {
+        *line = freeshow_data::fill_variables(line, variables);
+    }
+    crate::stage::StageSlide {
+        text_boxes,
+        notes: freeshow_data::fill_variables(notes, variables),
+    }
 }
 
 fn clock_label() -> String {
@@ -534,6 +655,31 @@ fn styled_slide_at(
         .show
         .get("slides")
         .and_then(|slides| slides.get(&slide_id))?;
+    Some(styled_slide(
+        slide,
+        root,
+        over_media,
+        reveal,
+        clicks_shown,
+        page,
+        variables,
+        output_width,
+        output_height,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn styled_slide(
+    slide: &serde_json::Value,
+    root: Option<&Path>,
+    over_media: bool,
+    reveal: Option<u32>,
+    clicks_shown: bool,
+    page: Option<(usize, usize)>,
+    variables: &[(String, String)],
+    output_width: u32,
+    output_height: u32,
+) -> StyledSlide {
     let background = slide
         .pointer("/settings/color")
         .and_then(|value| value.as_str())
@@ -565,14 +711,14 @@ fn styled_slide_at(
                 .collect()
         })
         .unwrap_or_default();
-    Some(StyledSlide {
+    StyledSlide {
         output_width,
         output_height,
         source_width,
         source_height,
         background,
         items,
-    })
+    }
 }
 
 fn styled_item(
@@ -1673,5 +1819,53 @@ mod tests {
         let stage = stage_frame(&session);
         assert_eq!((stage.width, stage.height), (1280, 720));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn standalone_clear_cue_keeps_the_actual_program_slide_on_audience_and_stage() {
+        use freeshow_data::StageItemKind;
+        use serde_json::json;
+
+        let mut show = ShowFile::blank("cues", "Cues");
+        let first = show.ordered_slides()[0].id.clone();
+        let skipped = show.add_slide().unwrap();
+        let clear = show.add_slide().unwrap();
+        show.show["slides"][&first]["items"] = json!([
+            {"type":"shape","style":"left:0px;top:0px;width:200px;height:200px;background:#ff0000;"},
+            {"type":"text","lines":[{"text":[{"value":"On screen"}]}]}
+        ]);
+        show.show["slides"][&skipped]["settings"]["color"] = json!("#00ff00");
+        show.show["slides"][&clear]["settings"]["actionOnly"] = json!(true);
+        show.show["layouts"]["main"]["slides"][2]["actions"] = json!({
+            "slideActions": [{"triggers": ["clear_background"]}]
+        });
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        session.show_index = Some(0);
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == StageItemKind::Slide && item.offset == 0);
+        assert!(!session.stage.items.is_empty());
+        session.select_slide(0);
+        session.replace_underlay(Some(Raster {
+            width: 16,
+            height: 9,
+            rgba: [0, 0, 255, 255].repeat(144),
+        }));
+        let original = audience_frame(&session);
+        let stage = stage_frame(&session);
+        assert_eq!(original.pixel(0, 0), parse_color("#ff0000").unwrap());
+        assert_eq!(original.pixel(800, 300), parse_color("#0000ff").unwrap());
+
+        session.select_slide(2);
+        let after = audience_frame(&session);
+        assert_eq!(session.slide_index, Some(2));
+        assert_eq!(after.pixel(0, 0), original.pixel(0, 0));
+        assert_eq!(after.pixel(800, 300), Rgba::BLACK);
+        assert_eq!(stage_frame(&session).pixels, stage.pixels);
+        session.clear_output();
+        assert_eq!(audience_frame(&session).pixel(0, 0), Rgba::BLACK);
+        assert_ne!(stage_frame(&session).pixels, stage.pixels);
     }
 }
