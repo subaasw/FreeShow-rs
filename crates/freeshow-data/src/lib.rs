@@ -1311,15 +1311,14 @@ impl ShowFile {
         if template_id.is_empty() {
             return false;
         }
-        let template_item = template
+        let has_text_box = template
             .get("items")
             .and_then(Value::as_array)
-            .and_then(|items| {
-                items.iter().find(|item| {
+            .is_some_and(|items| {
+                items.iter().any(|item| {
                     item.get("type").and_then(Value::as_str).unwrap_or("text") == "text"
                 })
-            })
-            .cloned();
+            });
         let Some(settings) = self
             .show
             .pointer_mut("/settings")
@@ -1331,64 +1330,14 @@ impl ShowFile {
             "template".to_string(),
             Value::String(template_id.to_string()),
         );
-        let Some(template_item) = template_item else {
+        if !has_text_box {
             return true;
-        };
-        let style = template_item
-            .get("style")
-            .cloned()
-            .unwrap_or_else(|| Value::String(String::new()));
-        let align = template_item
-            .get("align")
-            .cloned()
-            .unwrap_or_else(|| Value::String(String::new()));
-        let line_align = template_item
-            .pointer("/lines/0/align")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let text_style = template_item
-            .pointer("/lines/0/text/0/style")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        }
         let Some(slides) = self.show.get_mut("slides").and_then(Value::as_object_mut) else {
             return true;
         };
         for slide in slides.values_mut() {
-            if slide.get("locked").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            let Some(items) = slide.get_mut("items").and_then(Value::as_array_mut) else {
-                continue;
-            };
-            for item in items {
-                if item.get("type").and_then(Value::as_str).unwrap_or("text") != "text" {
-                    continue;
-                }
-                let Some(object) = item.as_object_mut() else {
-                    continue;
-                };
-                object.insert("style".to_string(), style.clone());
-                object.insert("align".to_string(), align.clone());
-                let Some(lines) = object.get_mut("lines").and_then(Value::as_array_mut) else {
-                    continue;
-                };
-                for line in lines {
-                    let Some(line) = line.as_object_mut() else {
-                        continue;
-                    };
-                    line.insert("align".to_string(), Value::String(line_align.clone()));
-                    let Some(texts) = line.get_mut("text").and_then(Value::as_array_mut) else {
-                        continue;
-                    };
-                    for text in texts {
-                        if let Some(text) = text.as_object_mut() {
-                            text.insert("style".to_string(), Value::String(text_style.clone()));
-                        }
-                    }
-                }
-            }
+            restyle_with_template(slide, template);
         }
         true
     }
@@ -5361,6 +5310,16 @@ impl Library {
     }
 
     /// How many lyric lines the active output style shows at once. Zero means the whole slide.
+    /// The template id the active output style lays every slide out with, if any.
+    pub fn style_template(&self) -> Option<String> {
+        let id = self.output_style_id();
+        self.style_value(&id)
+            .get("template")
+            .and_then(Value::as_str)
+            .filter(|template| !template.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn style_lines(&self) -> u32 {
         let id = self.output_style_id();
         if id.is_empty() {
@@ -6446,6 +6405,76 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), DataError> {
     }
 }
 
+/// Gives every lyric box on `slide` the first text box look of `template`, keeping its words.
+/// Locked slides and non-text items stay as they are. Returns whether anything changed.
+pub fn restyle_with_template(slide: &mut Value, template: &Value) -> bool {
+    let Some(template_item) = template
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("type").and_then(Value::as_str).unwrap_or("text") == "text")
+        })
+    else {
+        return false;
+    };
+    if slide.get("locked").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    let style = template_item
+        .get("style")
+        .cloned()
+        .unwrap_or_else(|| Value::String(String::new()));
+    let align = template_item
+        .get("align")
+        .cloned()
+        .unwrap_or_else(|| Value::String(String::new()));
+    let line_align = template_item
+        .pointer("/lines/0/align")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let text_style = template_item
+        .pointer("/lines/0/text/0/style")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let Some(items) = slide.get_mut("items").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for item in items {
+        if item.get("type").and_then(Value::as_str).unwrap_or("text") != "text" {
+            continue;
+        }
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        object.insert("style".to_string(), style.clone());
+        object.insert("align".to_string(), align.clone());
+        changed = true;
+        let Some(lines) = object.get_mut("lines").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for line in lines {
+            let Some(line) = line.as_object_mut() else {
+                continue;
+            };
+            line.insert("align".to_string(), Value::String(line_align.clone()));
+            let Some(texts) = line.get_mut("text").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for text in texts {
+                if let Some(text) = text.as_object_mut() {
+                    text.insert("style".to_string(), Value::String(text_style.clone()));
+                }
+            }
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6878,6 +6907,29 @@ mod tests {
         assert_eq!(show.transition_at(2), None);
         assert_eq!(show.next_timer_at(0), Some(4.0));
         assert_eq!(show.next_timer_at(1), None);
+    }
+
+    #[test]
+    fn one_slide_can_be_restyled_for_an_output_alone() {
+        let template = serde_json::json!({"items":[{"style":"top:900px;","align":"","lines":[{"align":"left","text":[{"value":"","style":"font-size:40px;"}]}]}]});
+        let mut slide = serde_json::json!({"items":[
+            {"style":"top:0px;","lines":[{"align":"","text":[{"value":"Words","style":"font-size:90px;"}]}]},
+            {"type":"media","src":"a.png"}
+        ]});
+        assert!(restyle_with_template(&mut slide, &template));
+        assert_eq!(slide["items"][0]["style"], "top:900px;");
+        assert_eq!(slide["items"][0]["lines"][0]["text"][0]["value"], "Words");
+        assert_eq!(
+            slide["items"][0]["lines"][0]["text"][0]["style"],
+            "font-size:40px;"
+        );
+        assert_eq!(slide["items"][1]["src"], "a.png");
+        let mut locked = serde_json::json!({"locked":true,"items":[{"style":"top:0px;"}]});
+        assert!(!restyle_with_template(&mut locked, &template));
+        assert!(!restyle_with_template(
+            &mut slide,
+            &serde_json::json!({"items":[]})
+        ));
     }
 
     #[test]

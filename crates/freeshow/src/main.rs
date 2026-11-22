@@ -564,6 +564,8 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         style_blur_amount: settings.style_blur_amount,
         style_blur_opacity: settings.style_blur_opacity,
         style_lines: settings.style_lines,
+        style_template: settings.style_template.into(),
+        template_choices: strings(&settings.template_choices),
         output_names: strings(&settings.output_names),
         theme_colors: slint::ModelRc::new(slint::VecModel::from(
             settings

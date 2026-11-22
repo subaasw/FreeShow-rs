@@ -45,6 +45,8 @@ export struct SettingsData {
     style-blur-amount: int,
     style-blur-opacity: int,
     style-lines: int,
+    style-template: string,
+    template-choices: [string],
     output-names: [string],
     theme-colors: [ThemeColorRow],
     theme-font: string,
@@ -584,10 +586,19 @@ export component SettingsPanel inherits Rectangle {
                         }
                     }
                     Row {
+                        SettingLabel { text: "Template"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 2;
+                            model: root.data.template-choices;
+                            value: root.data.style-template;
+                            selected(value) => { root.apply("styleTemplate", value); }
+                        }
+                    }
+                    Row {
                         Rectangle {}
                         Text {
                             colspan: 2;
-                            text: "A style is the look of an output. Background fills the screen behind slides and when it is cleared. Blur is the radius and the opacity (%) of the blurred fill around a contained picture. Max lines splits long slides into pages; 0 shows every line. Slides that name their own style switch the output to it.";
+                            text: "A style is the look of an output. Background fills the screen behind slides and when it is cleared. Blur is the radius and the opacity (%) of the blurred fill around a contained picture. Max lines splits long slides into pages; 0 shows every line. A template lays out every slide on this output in its text look without changing the shows. Slides that name their own style switch the output to it.";
                             color: root.text-color;
                             opacity: 0.6;
                             font-size: 12px;

@@ -65,6 +65,10 @@ pub struct SettingsForm {
     pub style_blur_amount: i32,
     pub style_blur_opacity: i32,
     pub style_lines: i32,
+    /// The template the style lays slides out with, or "None".
+    pub style_template: String,
+    /// "None" then every template name, for the Styles tab.
+    pub template_choices: Vec<String>,
     /// Audience outputs by name; `output_name` is the one the output window shows.
     pub output_names: Vec<String>,
     /// The theme editor: `(key, label, #hex)` per colour, font, size (%) and corner radius.
@@ -120,6 +124,7 @@ pub fn setting_label(key: &str) -> &str {
         "styleFit" => "media fit",
         "styleBlurAmount" | "styleBlurOpacity" => "blur",
         "styleLines" => "max lines",
+        "styleTemplate" => "style template",
         "outputPick" => "active output",
         "outputNew" => "new output",
         "outputDelete" => "output removal",
@@ -409,6 +414,19 @@ impl Session {
         form.style_blur_amount = amount.round() as i32;
         form.style_blur_opacity = (opacity * 100.0).round() as i32;
         form.style_lines = library.style_lines() as i32;
+        form.style_template = library
+            .style_template()
+            .and_then(|template| {
+                self.template_catalog
+                    .get(&template)?
+                    .get("name")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "None".into());
+        form.template_choices = std::iter::once("None".to_string())
+            .chain(self.template_catalog.names())
+            .collect();
         form
     }
 
@@ -467,6 +485,17 @@ impl Session {
             "styleBlurOpacity" => {
                 let percent = parse_int(value, 1, 100)?;
                 library.patch_style(&id, "blurOpacity", json!(percent as f64 / 100.0))
+            }
+            "styleTemplate" => {
+                if value == "None" {
+                    library.patch_style(&id, "template", Value::Null)
+                } else {
+                    let template = self
+                        .template_catalog
+                        .id_named(value)
+                        .ok_or_else(|| format!("no template named {value:?}"))?;
+                    library.patch_style(&id, "template", json!(template))
+                }
             }
             "styleLines" => {
                 let lines = parse_int(value, 0, 20)?;
@@ -569,7 +598,8 @@ impl Session {
                 return self.patch_output(&id, field, json!(parse_bool(value)?));
             }
             "outputStyle" | "styleNew" | "styleDelete" | "styleName" | "styleBackground"
-            | "styleFit" | "styleBlurAmount" | "styleBlurOpacity" | "styleLines" => {
+            | "styleFit" | "styleBlurAmount" | "styleBlurOpacity" | "styleLines"
+            | "styleTemplate" => {
                 return self.apply_style_setting(key, value);
             }
             "outputPick" | "outputNew" | "outputDelete" | "outputName" => {
@@ -1363,6 +1393,26 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn an_output_style_can_lay_slides_out_with_a_template() {
+        let (_dir, mut session) = library("style-template");
+        session.template_catalog.insert(
+            "lower",
+            serde_json::json!({"name":"Lower third","items":[{"style":"top:900px;","lines":[{"align":"","text":[{"value":"","style":"font-size:40px;"}]}]}]}),
+        );
+        let form = session.settings_form();
+        assert_eq!(form.style_template, "None");
+        assert_eq!(form.template_choices, ["None", "Lower third"]);
+        session
+            .apply_setting("styleTemplate", "Lower third")
+            .unwrap();
+        assert_eq!(session.style_template.as_deref(), Some("lower"));
+        assert_eq!(session.settings_form().style_template, "Lower third");
+        assert!(session.apply_setting("styleTemplate", "Missing").is_err());
+        session.apply_setting("styleTemplate", "None").unwrap();
+        assert_eq!(session.style_template, None);
     }
 
     #[test]

@@ -194,7 +194,7 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
                     composite_styled(
                         frame,
                         &styled_slide(
-                            slide,
+                            &output_look(session, slide),
                             session.root.as_deref(),
                             true,
                             Some(reveal),
@@ -270,7 +270,7 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
         composite_styled(
             frame,
             &styled_slide(
-                slide,
+                &output_look(session, slide),
                 session.root.as_deref(),
                 true,
                 Some(*reveal),
@@ -281,6 +281,28 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
                 height,
             ),
         );
+    }
+}
+
+/// The slide as the output shows it: restyled by the output style's template when it has one.
+fn output_look<'a>(
+    session: &Session,
+    slide: &'a serde_json::Value,
+) -> std::borrow::Cow<'a, serde_json::Value> {
+    let template = session
+        .style_template
+        .as_deref()
+        .and_then(|id| session.template_catalog.get(id));
+    match template {
+        Some(template) => {
+            let mut restyled = slide.clone();
+            if freeshow_data::restyle_with_template(&mut restyled, template) {
+                std::borrow::Cow::Owned(restyled)
+            } else {
+                std::borrow::Cow::Borrowed(slide)
+            }
+        }
+        None => std::borrow::Cow::Borrowed(slide),
     }
 }
 
