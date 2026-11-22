@@ -2957,7 +2957,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let clear = matches!(batch.last(), Some(freeshow_remote::Command::Clear));
             sample_audio(&remote_session, &remote_audio);
-            remote_session.borrow_mut().refresh_output = false;
+            let output_refresh = std::mem::take(&mut remote_session.borrow_mut().refresh_output);
             let (audience, stage, timed_move) = {
                 let mut session = remote_session.borrow_mut();
                 for command in batch {
@@ -2973,7 +2973,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let plays = remote_session.borrow_mut().take_plays();
             let fades = picture_fades_in(&plays[0], &remote_session.borrow());
-            if timed_move {
+            if timed_move || output_refresh {
                 remote_next_slide.stop();
                 if !fades && remote_session.borrow().background_transition {
                     stop_video(&remote_video_timer, &remote_video);

@@ -46,6 +46,8 @@ pub(super) struct TimelineCue {
     pub cue_id: Option<Uuid>,
     #[prost(string, tag = "3")]
     pub name: String,
+    #[prost(message, optional, tag = "4")]
+    pub action: Option<Action>,
 }
 
 #[derive(Clone, PartialEq, Message)]

@@ -5868,7 +5868,10 @@ pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
             .pointer("/data/id")
             .and_then(Value::as_str)
             .or_else(|| action.pointer("/data/path").and_then(Value::as_str))
-            .or_else(|| (kind != "slide").then(|| action["name"].as_str()).flatten())
+            .or_else(|| match kind.as_str() {
+                "slide" | "clear_background" | "clear_audio" => None,
+                _ => action["name"].as_str(),
+            })
             .map(str::to_string)
             .or_else(|| {
                 action

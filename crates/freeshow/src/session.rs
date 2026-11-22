@@ -1689,6 +1689,14 @@ impl Session {
             }
             "scene" => cue.data.as_deref().is_some_and(|id| self.start_scene(id)),
             "effect" => cue.data.as_deref().is_some_and(|id| self.start_effect(id)),
+            "clear_background" if !self.preferences.out_locked() => {
+                self.clear_background();
+                true
+            }
+            "clear_audio" if !self.preferences.out_locked() => {
+                self.stop_audio();
+                true
+            }
             "clear" => {
                 self.clear_output();
                 true
@@ -2149,6 +2157,16 @@ impl Session {
         self.background_path = None;
     }
 
+    fn clear_background(&mut self) {
+        self.replace_underlay(None);
+        self.reset_background_look();
+        self.slide_hidden = false;
+        self.background_transition = true;
+        if matches!(self.pending_play, Some(PendingPlay::Video(_))) {
+            self.pending_play = self.pending_also.take();
+        }
+    }
+
     /// Puts this slide's picture behind the lyrics, carries an earlier picture, or clears it.
     fn apply_slide_background(&mut self) {
         self.apply_slide_actions();
@@ -2387,12 +2405,7 @@ impl Session {
             if let Some(backdrop) = backdrop {
                 match backdrop {
                     SlideBackdrop::Unchanged => {}
-                    SlideBackdrop::Clear => {
-                        self.replace_underlay(None);
-                        self.reset_background_look();
-                        self.slide_hidden = false;
-                        self.background_transition = true;
-                    }
+                    SlideBackdrop::Clear => self.clear_background(),
                     SlideBackdrop::Picture { path, foreground } => {
                         let path = PathBuf::from(path);
                         if media_kind(&path) == MediaKind::Video {
@@ -2857,9 +2870,12 @@ impl Session {
             .current_show()
             .and_then(|show| self.slide_index.map(|index| show.clears_audio_at(index)))
             .unwrap_or(false);
-        if !clear {
-            return;
+        if clear {
+            self.stop_audio();
         }
+    }
+
+    fn stop_audio(&mut self) {
         self.playing_audio = None;
         self.audio_paused = false;
         self.keep_video_then(PendingPlay::StopAudio);
@@ -6694,6 +6710,73 @@ Second line"
         assert!(!session.tick_timeline(start + Duration::from_millis(1499)));
         assert!(session.tick_timeline(start + Duration::from_millis(1500)));
         assert_eq!(session.slide_index, Some(3));
+        assert!(!session.timeline_playing);
+    }
+
+    #[test]
+    fn imported_timeline_clears_background_and_audio_at_their_own_times() {
+        let mut show = ShowFile::blank("clear", "Clear");
+        let slide = show.ordered_slides()[0].id.clone();
+        show.show["slides"][&slide]["items"] = serde_json::json!([
+            {"type":"shape","style":"left:0px;top:0px;width:200px;height:200px;background:#ff0000;"},
+            {"type":"text","lines":[{"text":[{"value":"On screen"}]}]}
+        ]);
+        show.show["origin"] = serde_json::json!("propresenter");
+        show.show["layouts"]["main"]["timeline"] = serde_json::json!({"actions": [
+            {"time": 1000, "name": "Background off", "type": "clear_background"},
+            {"time": 1500, "name": "Audio off", "type": "clear_audio"}
+        ]});
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == freeshow_data::StageItemKind::Slide && item.offset == 0);
+        assert!(session.present_show_id("clear"));
+        assert!(session.save_timeline(&session.timeline_text()));
+        assert_eq!(session.timeline_cues[0].name, "Background off");
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        let video = PathBuf::from("background.mp4");
+        let audio = PathBuf::from("song.mp3");
+        session.background_path = Some(video.clone());
+        session.underlay = Some(Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 255, 255],
+        });
+        let before = crate::live::audience_frame(&session);
+        let stage = crate::live::stage_frame(&session);
+        session.pending_play = Some(PendingPlay::Video(video));
+        session.pending_also = Some(PendingPlay::Audio(audio.clone()));
+        session.playing_audio = Some(audio.clone());
+        assert!(!session.tick_timeline(start + Duration::from_millis(999)));
+        assert!(session.underlay.is_some());
+        assert!(session.tick_timeline(start + Duration::from_millis(1000)));
+        assert!(session.underlay.is_none());
+        assert!(session.background_path.is_none());
+        assert!(session.background_transition);
+        let after = crate::live::audience_frame(&session);
+        assert_eq!(
+            before.pixel(0, 0),
+            freeshow_output::parse_color("#ff0000").unwrap()
+        );
+        assert_eq!(after.pixel(0, 0), before.pixel(0, 0));
+        assert_ne!(after.pixel(800, 300), before.pixel(800, 300));
+        assert_eq!(crate::live::stage_frame(&session).pixels, stage.pixels);
+        assert_eq!(session.playing_audio.as_ref(), Some(&audio));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(path)), None] if path == audio)
+        );
+        assert!(!session.tick_timeline(start + Duration::from_millis(1499)));
+        assert!(session.tick_timeline(start + Duration::from_millis(1500)));
+        assert!(session.playing_audio.is_none());
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::StopAudio), None]
+        ));
+        assert_eq!(session.slide_index, Some(0));
+        assert!(session.program_content.borrow().is_some());
         assert!(!session.timeline_playing);
     }
 
