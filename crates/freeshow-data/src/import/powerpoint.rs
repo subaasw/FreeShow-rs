@@ -631,6 +631,7 @@ fn find_background(
     let mut tiled = false;
     let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
     let mut gradient_angle = 90.0;
+    let mut radial_gradient = false;
     let mut gs_pos = None;
     let mut gs_color = None;
     loop {
@@ -689,6 +690,7 @@ fn find_background(
                                 gradient_angle = 90.0 - value / 60_000.0;
                             }
                         }
+                        (Some("gradFill"), "path") => radial_gradient = true,
                         (Some("blipFill"), "blip") => {
                             picture = relationship_attr(&element, "embed")
                                 .or_else(|| relationship_attr(&element, "link"));
@@ -719,7 +721,7 @@ fn find_background(
     let gradient = (gradient_stops.len() >= 2).then(|| {
         gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
         GradientFill {
-            angle: gradient_angle,
+            linear_angle: (!radial_gradient).then_some(gradient_angle),
             stops: gradient_stops,
         }
     });
@@ -1158,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_gradients_become_full_slide_shape_items() {
+    fn linear_and_radial_gradients_become_full_slide_shape_items() {
         let layout_rel = br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
         let files = archive(&[
             (
@@ -1175,6 +1177,16 @@ mod tests {
                 "ppt/slides/slide2.xml",
                 br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1001"><a:srgbClr val="00AA00"/></p:bgRef></p:bg>
                     <a:p><a:r><a:t>Theme</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide3.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill>
+                    <a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst>
+                    <a:path path="circle"/>
+                </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Radial</a:t></a:r></a:p></p:cSld></p:sld>"#,
             ),
             ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
@@ -1200,7 +1212,7 @@ mod tests {
                                     <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
                                     <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                                 </a:gsLst>
-                                <a:lin ang="0"/>
+                                <a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>
                             </a:gradFill>
                         </a:bgFillStyleLst>
                     </a:fmtScheme>
@@ -1227,9 +1239,15 @@ mod tests {
             second["items"][0]["style"]
                 .as_str()
                 .unwrap()
-                .contains("linear-gradient(90deg, #00AA00 0%, #0000FF 100%)"),
+                .contains("radial-gradient(circle at center, #00AA00 0%, #0000FF 100%)"),
             "{}",
             second["items"][0]["style"]
+        );
+        assert!(
+            show.show["slides"]["s3"]["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)")
         );
     }
 
