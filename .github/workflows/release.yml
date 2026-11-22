@@ -62,6 +62,8 @@ jobs:
         working-directory: assets
         run: |
           shopt -s nullglob
+          # Artifacts uploaded from a wildcard directory (dist/freeshow-*/) keep that folder.
+          find . -mindepth 2 -type f -exec mv -n -t . {} +
           sidecars=(*.sha256)
           test ${#sidecars[@]} -ge 3 || { echo "::error::expected a .sha256 per platform"; ls -la; exit 1; }
           for sum in "${sidecars[@]}"; do sha256sum --check "$sum"; done
