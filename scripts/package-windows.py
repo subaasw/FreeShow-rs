@@ -160,8 +160,10 @@ def verify(installer, sdk):
             app = installed / "freeshow.exe"
             runtime = run(app, "--check-runtime", env=env, cwd=temp, stdout=subprocess.PIPE, timeout=90)
             decode = run(app, "--check-media", sample, env=env, cwd=temp, stdout=subprocess.PIPE, timeout=90)
+            perf = run(app, "--check-perf", env=env, cwd=temp, stdout=subprocess.PIPE, timeout=180)
             assert json.loads(runtime.stdout)["missing"] == [], runtime.stdout
             assert json.loads(decode.stdout.splitlines()[-1])["decoded_video"], decode.stdout
+            assert "next_ms" in json.loads(perf.stdout), perf.stdout
             assert list(profile.rglob("registry-*.bin")), "bundled runtime did not create a cold registry"
         finally:
             hidden.rename(sdk)

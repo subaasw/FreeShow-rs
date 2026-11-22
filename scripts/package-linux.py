@@ -126,6 +126,7 @@ def verify(directory):
         launcher = relocated / "AppRun"
         run(launcher, "--check-runtime", env=environment, timeout=60)
         run(launcher, "--check-media", ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4", env=environment, timeout=60)
+        run(launcher, "--check-perf", env=environment, timeout=180)
         run(relocated / "install.sh", env=environment, timeout=30)
         desktop = home / ".local/share/applications/org.freeshow.rust.desktop"
         run("desktop-file-validate", desktop)
@@ -143,7 +144,7 @@ def verify(directory):
         run(relocated / "install.sh", "--uninstall", env=environment, timeout=30)
         if desktop.exists() or (home / ".local/bin/freeshow-rust").is_symlink() or not sentinel.is_file():
             raise RuntimeError("desktop uninstall removed user data or left a launcher behind")
-    return {"relocated_special_character_path":True,"empty_home_and_registry":True,"h264_decoded":True,
+    return {"relocated_special_character_path":True,"empty_home_and_registry":True,"h264_decoded":True,"check_perf":True,
         "desktop_entry_validated_and_launched":True,"uninstall_keeps_library":True}
 
 
