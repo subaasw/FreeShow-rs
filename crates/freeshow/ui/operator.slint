@@ -407,8 +407,8 @@ export component ControlWindow inherits Window {
                             property <length> card-width: (self.width - 8px - (self.columns - 1) * 4px) / self.columns;
                             property <length> card-height: root.slide-cards.length > 0 && root.slide-cards[0].has-thumb ? (self.card-width - 6px) * 9 / 16 + 28px : 36px;
                             vertical-stretch: 1;
-                            viewport-width: self.width;
-                            viewport-height: ceil(root.slide-cards.length / self.columns) * (self.card-height + 4px) + 8px;
+                            content-width: self.width;
+                            content-height: ceil(root.slide-cards.length / self.columns) * (self.card-height + 4px) + 8px;
                             // Placed by hand: a layout here would feed card sizes back into the column width.
                             for slide[position] in root.slide-cards: SlideCard {
                                 x: 4px + mod(position, slides-flick.columns) * (slides-flick.card-width + 4px);
@@ -913,8 +913,9 @@ export component ControlWindow inherits Window {
             }
         }
         if !root.focus-mode: Rectangle {
-            // The library keeps a usable share of short windows instead of the rail squeezing it.
-            min-height: min(root.drawer-height * 1px, max(120px, root.height * 0.25));
+            // The library keeps a usable strip on short windows instead of the rail squeezing it;
+            // a fixed floor, because reading the window height here loops the layout.
+            min-height: min(root.drawer-height * 1px, 160px);
             preferred-height: root.drawer-height * 1px;
             max-height: root.drawer-height * 1px;
             background: root.primary;
@@ -950,8 +951,8 @@ export component ControlWindow inherits Window {
                 property <int> columns: max(1, floor((self.width - 8px) / 224px));
                 property <length> cell-width: (self.width - 8px) / self.columns;
                 property <length> cell-height: root.drawer-rows.length > 0 && root.drawer-rows[0].show-thumb ? 52px : 38px;
-                viewport-width: self.width;
-                viewport-height: ceil(root.drawer-rows.length / self.columns) * self.cell-height + 8px;
+                content-width: self.width;
+                content-height: ceil(root.drawer-rows.length / self.columns) * self.cell-height + 8px;
                 for item[index] in root.drawer-rows: ListRow {
                     x: 4px + mod(index, drawer-flick.columns) * drawer-flick.cell-width;
                     y: 4px + floor(index / drawer-flick.columns) * drawer-flick.cell-height;
