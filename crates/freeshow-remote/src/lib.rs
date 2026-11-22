@@ -60,6 +60,8 @@ pub struct AppState {
     pub password: Option<String>,
     stage_only: bool,
     stage_frames: Option<mpsc::SyncSender<StageFrameRequest>>,
+    max_connections: u32,
+    connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AppState {
@@ -71,7 +73,41 @@ impl AppState {
                 .filter(|password| !password.is_empty()),
             stage_only: false,
             stage_frames: None,
+            max_connections: 10,
+            connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    pub fn with_max_connections(mut self, max: u32) -> Self {
+        self.max_connections = max.max(1);
+        self
+    }
+
+    fn try_acquire_connection(&self) -> bool {
+        let max = self.max_connections as usize;
+        loop {
+            let current = self.connections.load(std::sync::atomic::Ordering::SeqCst);
+            if current >= max {
+                return false;
+            }
+            if self
+                .connections
+                .compare_exchange(
+                    current,
+                    current + 1,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn release_connection(&self) {
+        self.connections
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn requires_password(&self) -> bool {
@@ -126,6 +162,17 @@ pub fn spawn(
     ports: RemotePorts,
     stage_frames: mpsc::SyncSender<StageFrameRequest>,
 ) {
+    spawn_limited(snapshot, commands, password, ports, stage_frames, 10);
+}
+
+pub fn spawn_limited(
+    snapshot: Arc<Mutex<ShowSnapshot>>,
+    commands: mpsc::Sender<Command>,
+    password: Option<String>,
+    ports: RemotePorts,
+    stage_frames: mpsc::SyncSender<StageFrameRequest>,
+    max_connections: u32,
+) {
     let started = std::thread::Builder::new()
         .name("freeshow-remote".into())
         .spawn(move || {
@@ -140,7 +187,8 @@ pub fn spawn(
                 }
             };
             runtime.block_on(async move {
-                let mut state = AppState::new(ShowBus { snapshot, commands }, password);
+                let mut state = AppState::new(ShowBus { snapshot, commands }, password)
+                    .with_max_connections(max_connections);
                 state.stage_frames = Some(stage_frames);
                 let remote = with_socket(remote_router(state.clone()), state.clone(), "REMOTE");
                 let stage = stage_router(state);
@@ -182,6 +230,15 @@ fn with_socket(router: Router, state: AppState, event: &'static str) -> Router {
     let (layer, io) = SocketIo::new_layer();
     io.ns("/", async move |socket: SocketRef| {
         let state = state.clone();
+        if !state.try_acquire_connection() {
+            tracing::warn!("remote connection limit reached");
+            let _ = socket.disconnect();
+            return;
+        }
+        let released = state.clone();
+        socket.on_disconnect(async move || {
+            released.release_connection();
+        });
         let authenticated = Arc::new(AtomicBool::new(!state.requires_password()));
         socket.on(
             event,
@@ -296,7 +353,12 @@ async fn action(
 }
 
 async fn ws_upgrade(State(state): State<AppState>, socket: WebSocketUpgrade) -> impl IntoResponse {
-    socket.on_upgrade(move |socket| handle_socket(socket, state))
+    if !state.try_acquire_connection() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    socket
+        .on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
@@ -315,6 +377,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+    state.release_connection();
 }
 
 fn dispatch(state: &AppState, incoming: &Value, authenticated: &mut bool) -> Vec<Value> {

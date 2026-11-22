@@ -118,6 +118,10 @@ impl FreeShowPreferences {
         self.format_new_show.unwrap_or(false)
     }
 
+    pub fn auto_output(&self) -> bool {
+        self.auto_output.unwrap_or(false)
+    }
+
     pub fn max_connections(&self) -> u32 {
         self.max_connections.unwrap_or(10)
     }
@@ -591,6 +595,11 @@ impl ShowFile {
     /// Replaces the active layout with one slide per blank-line block.
     /// This is the text the phone remote edits.
     pub fn replace_lyrics(&mut self, text: &str) -> bool {
+        self.replace_lyrics_with(text, false)
+    }
+
+    /// When `format` is true, group headers such as `[Verse]` or `Chorus:` become slide groups.
+    pub fn replace_lyrics_with(&mut self, text: &str, format: bool) -> bool {
         let layout_id = self
             .show
             .pointer("/settings/activeLayout")
@@ -618,15 +627,29 @@ impl ShowFile {
                     .to_string()
             })
             .collect();
-        let chunks: Vec<&str> = text
-            .split("\n\n")
-            .map(str::trim)
-            .filter(|chunk| !chunk.is_empty())
-            .collect();
-        let chunks: Vec<&str> = if chunks.is_empty() { vec![""] } else { chunks };
+        let stanzas: Vec<(String, String)> = if format {
+            formatted_stanzas(text)
+        } else {
+            let chunks: Vec<&str> = text
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|chunk| !chunk.is_empty())
+                .collect();
+            let chunks: Vec<&str> = if chunks.is_empty() { vec![""] } else { chunks };
+            chunks
+                .into_iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    (
+                        previous_groups.get(index).cloned().unwrap_or_default(),
+                        chunk.to_string(),
+                    )
+                })
+                .collect()
+        };
         let mut slides = serde_json::Map::new();
         let mut order = Vec::new();
-        for (index, chunk) in chunks.iter().enumerate() {
+        for (index, (group, chunk)) in stanzas.iter().enumerate() {
             let id = format!("s{}", index + 1);
             let lines: Vec<Value> = if chunk.is_empty() {
                 vec![serde_json::json!({
@@ -647,7 +670,8 @@ impl ShowFile {
             slides.insert(
                 id.clone(),
                 serde_json::json!({
-                    "group": previous_groups.get(index).cloned().unwrap_or_default(),
+                    "group": group,
+
                     "color": null,
                     "settings": {},
                     "notes": "",
@@ -2584,6 +2608,79 @@ impl ShowFile {
         };
         *value = Value::String(next);
         true
+    }
+}
+
+fn formatted_stanzas(text: &str) -> Vec<(String, String)> {
+    let chunks: Vec<&str> = text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|chunk| !chunk.is_empty())
+        .collect();
+    if chunks.is_empty() {
+        return vec![(String::new(), String::new())];
+    }
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let mut lines: Vec<&str> = chunk.lines().collect();
+            let group = lines
+                .first()
+                .and_then(|line| group_header(line))
+                .unwrap_or_default();
+            if !group.is_empty() {
+                lines.remove(0);
+            }
+            (group, lines.join("\n"))
+        })
+        .collect()
+}
+
+fn group_header(line: &str) -> Option<String> {
+    let line = line.trim();
+    let line = line
+        .strip_prefix('[')
+        .and_then(|line| line.strip_suffix(']'))
+        .unwrap_or(line);
+    let line = line.strip_suffix(':').unwrap_or(line).trim();
+    if line.is_empty() {
+        return None;
+    }
+    const NAMES: &[&str] = &[
+        "verse",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "prechorus",
+        "intro",
+        "outro",
+        "tag",
+        "ending",
+        "interlude",
+        "vamp",
+        "instrumental",
+        "break",
+        "coda",
+    ];
+    let lowered = line.to_ascii_lowercase();
+    let key = lowered
+        .trim_end_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
+        .trim();
+    if NAMES
+        .iter()
+        .any(|name| key == *name || (key.starts_with(name) && key.len() <= name.len() + 3))
+    {
+        Some(title_group(line))
+    } else {
+        None
+    }
+}
+
+fn title_group(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -4966,6 +5063,21 @@ mod tests {
         assert_eq!(slides[0].group.as_deref(), Some("Chorus"));
         assert_eq!(slides[1].group.as_deref(), Some("Verse"));
         assert_eq!(slides[1].lines, vec!["two".to_string()]);
+    }
+
+    #[test]
+    fn formatted_lyrics_turn_headers_into_groups() {
+        let mut show = ShowFile::blank("song", "Song");
+        assert!(show.replace_lyrics_with(
+            "[Verse]\nIn the beginning\n\nChorus:\nPraise the Lord",
+            true
+        ));
+        let slides = show.ordered_slides();
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].group.as_deref(), Some("Verse"));
+        assert_eq!(slides[0].lines, vec!["In the beginning".to_string()]);
+        assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
+        assert_eq!(slides[1].lines, vec!["Praise the Lord".to_string()]);
     }
 
     #[test]

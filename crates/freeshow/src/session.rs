@@ -2919,7 +2919,7 @@ impl Session {
             unique_name(name, self.shows.iter().map(ShowFile::name).collect())
         };
         let mut show = ShowFile::blank(id, &name);
-        let _ = show.replace_lyrics(text);
+        let _ = show.replace_lyrics_with(text, self.preferences.format_new_show());
         let path = Library::open(&root)
             .shows_dir()
             .join(format!("{name}.show"));
@@ -2956,7 +2956,7 @@ impl Session {
             let Some(show) = self.shows.get_mut(index) else {
                 return false;
             };
-            if !show.replace_lyrics(text) {
+            if !show.replace_lyrics_with(text, self.preferences.format_new_show()) {
                 return false;
             }
             match show.path.clone() {
@@ -4281,6 +4281,26 @@ mod tests {
             muted.slide_labels(),
             vec!["Verse: first".to_string(), "Verse: second".to_string()]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn format_new_show_splits_headers_into_groups() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-format-show-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), r#"{"formatNewShow":true}"#).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with(
+            "song1",
+            "Song",
+            "[Verse]\nIn the beginning\n\nChorus:\nPraise the Lord"
+        ));
+        let show = session.current_show().unwrap();
+        let slides = show.ordered_slides();
+        assert_eq!(slides[0].group.as_deref(), Some("Verse"));
+        assert_eq!(slides[1].group.as_deref(), Some("Chorus"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
