@@ -193,16 +193,19 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
                 name: entry.label().into(),
                 thumb: media_thumb(entry),
                 show_thumb: true,
+                on: false,
             })
             .collect::<Vec<_>>()
     } else {
         session
             .drawer()
             .into_iter()
-            .map(|name| DrawerRowData {
+            .zip(session.drawer_on())
+            .map(|(name, on)| DrawerRowData {
                 name: name.into(),
                 thumb: slint::Image::default(),
                 show_thumb: false,
+                on,
             })
             .collect()
     };
@@ -308,6 +311,25 @@ fn spelling_note(session: &Session, text: &str) -> String {
         spell::report(text, 4)
     } else {
         String::new()
+    }
+}
+
+fn show_now_playing(ui: &ControlWindow, session: &Session) {
+    let (name, time, progress, paused) = session.now_playing().unwrap_or_default();
+    if ui.get_now_playing().as_str() != name {
+        ui.set_now_playing(name.into());
+        if session.tab == "audio" {
+            ui.set_drawer_rows(drawer_rows(session));
+        }
+    }
+    if ui.get_now_playing_time().as_str() != time {
+        ui.set_now_playing_time(time.into());
+    }
+    if (ui.get_now_playing_progress() - progress).abs() > f32::EPSILON {
+        ui.set_now_playing_progress(progress);
+    }
+    if ui.get_now_playing_paused() != paused {
+        ui.set_now_playing_paused(paused);
     }
 }
 
@@ -2679,6 +2701,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let session = Rc::clone(&session);
+        let live_pump = Rc::clone(&live_pump);
+        control.on_audio_control(move |action| {
+            if session.borrow_mut().audio_control(action.as_str()) {
+                pump_live(&live_pump);
+            }
+        });
+    }
+
+    {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         control.on_save_lyrics(move |text| {
@@ -3515,6 +3547,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         *clock_update.borrow_mut() = Some(update);
                     }
                 }
+            }
+            if let Some(ui) = clock_ui.upgrade() {
+                show_now_playing(&ui, &clock_session.borrow());
             }
             let ran = clock_session.borrow_mut().run_due_actions();
             {

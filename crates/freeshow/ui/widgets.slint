@@ -131,6 +131,8 @@ export component ListRow inherits Rectangle {
     in property <bool> active;
     in property <image> thumb;
     in property <bool> show-thumb;
+    // On air: an overlay that is showing or the audio that is playing.
+    in property <bool> on: false;
     in property <color> accent;
     in property <color> text-color;
     in property <color> accent-text;
@@ -161,6 +163,12 @@ export component ListRow inherits Rectangle {
             horizontal-stretch: 1;
             overflow: elide;
         }
+    }
+    if root.on && !root.active: Rectangle {
+        x: 0;
+        width: 4px;
+        height: 100%;
+        background: root.accent;
     }
     if root.has-color && !root.full-color && !root.active: Rectangle {
         y: parent.height - 2px;

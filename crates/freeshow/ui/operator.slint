@@ -13,6 +13,7 @@ export struct DrawerRowData {
     name: string,
     thumb: image,
     show-thumb: bool,
+    on: bool,
 }
 
 export struct SlideRowData {
@@ -56,6 +57,10 @@ export component ControlWindow inherits Window {
     in-out property <int> selected-drawer: -1;
     in-out property <int> selected-slide: -1;
     in property <int> live-slide: -1;
+    in property <string> now-playing;
+    in property <string> now-playing-time;
+    in property <float> now-playing-progress;
+    in property <bool> now-playing-paused;
     in-out property <int> selected-project: -1;
     in-out property <image> preview;
     in-out property <image> edit-preview;
@@ -142,6 +147,7 @@ export component ControlWindow inherits Window {
     in-out property <bool> edit-mode: false;
     property <bool> editing: root.active-tab == "shows" && root.show-name != "" && root.edit-mode;
     callback clear-output(string);
+    callback audio-control(string);
     out property <bool> text-focused: show-editor.has-focus;
     in property <string> notice;
     in property <bool> can-restore;
@@ -596,6 +602,42 @@ export component ControlWindow inherits Window {
                             }
                         }
                     }
+                    if root.now-playing != "": Rectangle {
+                        background: root.primary-darker;
+                        border-radius: 4px;
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 6px;
+                            Text {
+                                text: (root.now-playing-paused ? "Paused: " : "Playing: ") + root.now-playing;
+                                color: root.text-color;
+                                font-size: 13px * OperatorStyle.font-scale;
+                                overflow: elide;
+                            }
+                            Rectangle {
+                                height: 4px;
+                                background: root.primary-lighter;
+                                Rectangle {
+                                    x: 0;
+                                    width: parent.width * clamp(root.now-playing-progress, 0, 1);
+                                    background: root.accent;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: root.now-playing-time;
+                                    color: root.text-color;
+                                    opacity: 0.7;
+                                    font-size: 12px * OperatorStyle.font-scale;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                BoxButton { label: root.now-playing-paused ? "Play" : "Pause"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.audio-control("toggle"); } }
+                                BoxButton { label: "Stop"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.audio-control("stop"); } }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -783,21 +825,26 @@ export component ControlWindow inherits Window {
                 font-size: 13px * OperatorStyle.font-scale;
                 text: "Nothing matches “" + root.search-query + "”";
             }
-            Flickable {
-                HorizontalLayout {
-                    spacing: 0;
-                    alignment: start;
-                    for item[index] in root.drawer-rows: ListRow {
-                        width: 220px;
-                        label: item.name;
-                        thumb: item.thumb;
-                        show-thumb: item.show-thumb;
-                        active: root.selected-drawer == index;
-                        accent: root.accent;
-                        text-color: root.text-color;
-                        accent-text: root.accent-text;
-                        clicked => { window-keys.focus(); root.choose-drawer(index); }
-                    }
+            drawer-flick := Flickable {
+                // A wrapping grid, placed by hand so row sizes never feed back into the width.
+                property <int> columns: max(1, floor((self.width - 8px) / 224px));
+                property <length> cell-width: (self.width - 8px) / self.columns;
+                property <length> cell-height: root.drawer-rows.length > 0 && root.drawer-rows[0].show-thumb ? 52px : 38px;
+                viewport-width: self.width;
+                viewport-height: ceil(root.drawer-rows.length / self.columns) * self.cell-height + 8px;
+                for item[index] in root.drawer-rows: ListRow {
+                    x: 4px + mod(index, drawer-flick.columns) * drawer-flick.cell-width;
+                    y: 4px + floor(index / drawer-flick.columns) * drawer-flick.cell-height;
+                    width: drawer-flick.cell-width - 4px;
+                    label: item.name;
+                    thumb: item.thumb;
+                    show-thumb: item.show-thumb;
+                    on: item.on;
+                    active: root.selected-drawer == index;
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { window-keys.focus(); root.choose-drawer(index); }
                 }
             }
         }
