@@ -349,6 +349,15 @@ fn show_now_playing(ui: &ControlWindow, session: &Session) {
     }
 }
 
+/// Status messages start with a capital letter, whichever part of the app wrote them.
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_drawer_rows(drawer_rows(session));
     ui.set_slide_cards(slide_cards(session));
@@ -365,7 +374,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_group(session.group().into());
     ui.set_item_label(session.item_label().into());
     ui.set_show_name(session.show_name().into());
-    ui.set_notice(session.notice.clone().into());
+    ui.set_notice(sentence_case(&session.notice).into());
     ui.set_can_restore(session.can_restore_show());
     ui.set_project_choices(strings(&session.project_choices()));
     ui.set_project_choice(session.project_choice_index());
