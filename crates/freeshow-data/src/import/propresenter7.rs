@@ -36,7 +36,13 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
             action_carries_slide(action)?;
             action.slide.as_ref()?.presentation.as_ref()
         });
-        if action.is_none() && background(cue).is_none() {
+        if action.is_none()
+            && background(cue).is_none()
+            && !cue
+                .actions
+                .iter()
+                .any(|action| clear_target(action).is_some())
+        {
             continue;
         }
         if cues.insert(id, (cue, action)).is_some() {
@@ -272,15 +278,30 @@ fn add_slide(
                 .filter_map(|item| slide_item(item.element.as_ref()?)),
         );
     }
-    if let Some((media_action, path)) = background(cue) {
-        let media_id = format!("m{}", media.len() + 1);
-        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-        let mut item = json!({"name":name,"path":path});
-        if let Some(video) = &media_action.video {
-            item["loop"] = json!(video.playback == 1);
+    let mut clear = Vec::new();
+    if cue
+        .actions
+        .iter()
+        .any(|action| clear_target(action) == Some(wire::ClearTarget::Audio))
+    {
+        clear.push("clear_audio");
+    }
+    match background(cue) {
+        Some(CueBackground::Clear) => clear.push("clear_background"),
+        Some(CueBackground::Media(media_action, path)) => {
+            let media_id = format!("m{}", media.len() + 1);
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            let mut item = json!({"name":name,"path":path});
+            if let Some(video) = &media_action.video {
+                item["loop"] = json!(video.playback == 1);
+            }
+            media.insert(media_id.clone(), item);
+            node["background"] = json!(media_id);
         }
-        media.insert(media_id.clone(), item);
-        node["background"] = json!(media_id);
+        None => {}
+    }
+    if !clear.is_empty() {
+        node["actions"]["slideActions"] = json!([{"triggers":clear}]);
     }
     slides.insert(
         slide_id,
@@ -317,7 +338,10 @@ fn action_carries_media(action: &wire::Action) -> Option<()> {
 fn unsupported_actions(cue: &wire::Cue) -> Vec<&'static str> {
     let mut labels = Vec::new();
     for action in &cue.actions {
-        if action_carries_slide(action).is_some() || action_carries_media(action).is_some() {
+        if action_carries_slide(action).is_some()
+            || action_carries_media(action).is_some()
+            || clear_target(action).is_some()
+        {
             continue;
         }
         match action.kind() {
@@ -410,8 +434,30 @@ fn layout_timeline(
     Some(value)
 }
 
-fn background(cue: &wire::Cue) -> Option<(&wire::MediaAction, &str)> {
-    cue.actions.iter().find_map(|action| {
+fn clear_target(action: &wire::Action) -> Option<wire::ClearTarget> {
+    if action.kind() != wire::ActionType::Clear || !action.enabled || action.delay != 0.0 {
+        return None;
+    }
+    let clear = action
+        .clear
+        .as_ref()
+        .filter(|clear| clear.destination == 0)?;
+    match clear.target() {
+        target @ (wire::ClearTarget::Audio | wire::ClearTarget::Background) => Some(target),
+        wire::ClearTarget::All => None,
+    }
+}
+
+enum CueBackground<'a> {
+    Clear,
+    Media(&'a wire::MediaAction, &'a str),
+}
+
+fn background(cue: &wire::Cue) -> Option<CueBackground<'_>> {
+    cue.actions.iter().rev().find_map(|action| {
+        if clear_target(action) == Some(wire::ClearTarget::Background) {
+            return Some(CueBackground::Clear);
+        }
         action_carries_media(action)?;
         let media = action.media.as_ref().filter(|media| media.layer == 0)?;
         let url = media.element.as_ref()?.url.as_ref()?;
@@ -420,7 +466,7 @@ fn background(cue: &wire::Cue) -> Option<(&wire::MediaAction, &str)> {
         } else {
             &url.absolute
         };
-        (!path.is_empty() && !path.contains('\0')).then_some((media, path.as_str()))
+        (!path.is_empty() && !path.contains('\0')).then_some(CueBackground::Media(media, path))
     })
 }
 
@@ -647,6 +693,69 @@ fn invalid(error: impl std::fmt::Display) -> DataError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_global_clear_cues_in_arrangement_and_media_order() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let clear = |target| wire::Action {
+            kind: wire::ActionType::Clear as i32,
+            enabled: true,
+            clear: Some(wire::ClearAction {
+                target,
+                destination: 0,
+            }),
+            ..Default::default()
+        };
+        let background = clear(wire::ClearTarget::Background as i32);
+        let audio = clear(wire::ClearTarget::Audio as i32);
+        presentation.cues[1].enabled = true;
+        presentation.cues[1].actions = vec![background.clone(), audio.clone()];
+        presentation.cues[2].actions.insert(1, background.clone());
+        presentation.cues[0].actions.extend([
+            wire::Action {
+                delay: 1.0,
+                ..background
+            },
+            wire::Action {
+                clear: Some(wire::ClearAction {
+                    target: wire::ClearTarget::Audio as i32,
+                    destination: 1,
+                }),
+                ..audio
+            },
+        ]);
+
+        let show = crate::import::import_show("Clears.pro", &presentation.encode_to_vec()).unwrap();
+        let slides = show.ordered_slides();
+        assert!(slides[2].lines.is_empty());
+        assert!(matches!(
+            show.backdrop_at(0),
+            crate::SlideBackdrop::Picture { .. }
+        ));
+        assert!(matches!(
+            show.backdrop_at(1),
+            crate::SlideBackdrop::Picture { .. }
+        ));
+        assert_eq!(show.backdrop_at(2), crate::SlideBackdrop::Clear);
+        assert!(!show.clears_audio_at(1));
+        assert!(show.clears_audio_at(2));
+        let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0]
+                .as_str()
+                .unwrap()
+                .ends_with("unsupported actions (clear)")
+        );
+
+        let actions = &mut presentation.cues[2].actions;
+        let clear_after_media = actions.remove(1);
+        actions.push(clear_after_media);
+        let show = crate::import::import_show("Clears.pro", &presentation.encode_to_vec()).unwrap();
+        assert_eq!(show.backdrop_at(0), crate::SlideBackdrop::Clear);
+        assert!(show.show["media"].as_object().unwrap().is_empty());
+    }
 
     #[test]
     fn imports_timed_next_cues_for_each_layout_position() {
