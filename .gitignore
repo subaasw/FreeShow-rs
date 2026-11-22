@@ -4,3 +4,13 @@
 .DS_Store
 __pycache__/
 .serena/
+# local artifacts
+*.profraw
+*.dmg
+*.exe
+*.AppImage
+/perf-*.json
+/screenshots/
+.idea/
+.vscode/
+*.swp

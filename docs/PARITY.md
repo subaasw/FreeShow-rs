@@ -165,7 +165,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | PowerPoint includes linked and tiled backgrounds, linear, circular, and rectangular gradients with supported focus geometry, and opacity and gamma transforms on background fills. ProPresenter RTF preserves escaped text in declared document and font encodings and omits hidden text from imported lyrics and notes. ProPresenter 7 imports enabled, immediate global clear-audio and clear-background cues. Standalone cues keep the last audience and stage content. Timed next-slide, loop-to-start, and specific-cue jumps run during background playback. Recorded timeline slide cues select the saved arrangement position at the recorded time. See the M6 importer list in `PLAN.md` for remaining format details. |
+| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | PowerPoint includes linked and tiled backgrounds, linear, circular, and rectangular gradients with supported focus geometry, and opacity and gamma transforms on background fills. ProPresenter RTF preserves escaped text in declared document and font encodings and omits hidden text from imported lyrics and notes. ProPresenter 7 imports enabled, immediate global clear-audio and clear-background cues. Standalone cues keep the last audience and stage content. Timed next-slide, loop-to-start, and specific-cue jumps run during background playback. Recorded timeline slide cues select the saved arrangement position at the recorded time. See the M6 importer list in `ROADMAP.md` for remaining format details. |
 | MediaShout XML/SSC/JSON, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only, project packages | done | 1.2 | Fixture tests for each |
 | Native MediaShout `.mdb` | not-yet | 0.3 | Not a viable pure-Rust path |
 
@@ -211,7 +211,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{linux,windows,macos,release}.yml`; packaged AppRun/exe/app run `--check-perf`. All three native jobs passed for `e075bea`. [Release run](https://github.com/subaasw/FreeShow-rs/actions/runs/45023447856) |
+| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{release,gate,package-linux,package-windows,package-macos}.yml` (tag-only, see `docs/RELEASING.md`); packaged AppRun/exe/app run `--check-perf`. All three native jobs passed for `e075bea`. [Release run](https://github.com/subaasw/FreeShow-rs/actions/runs/45023447856) |
 | Crash-safe autosave | done | 0.5 | Library autosave setting is honored |
 | `--check-perf` and `--check-library` budgets | done | 0.4 | Also `--check-service` for a Sunday import/present/REST/Companion/stage path; CI runs `--check-perf` on each packaged runner |
 | Apple Developer ID signing and notarization | not-yet | 0.3 | Needs Apple credentials; CI stays unsigned/ad-hoc |
@@ -247,4 +247,4 @@ M7 is **not** complete. The lists below are the honest leftovers after the no-cr
 
 ### Packaging
 
-- Public-distribution Developer ID signing and notarization stay documented and unsigned/ad-hoc in CI, because they need Apple credentials. The locked three-platform installer workflows live in `.github/workflows/{linux,windows,macos,release}.yml`. Each package job builds an unsigned artifact and runs `--check-perf` on the packaged AppRun, Windows exe, or macOS app. `--check-library` and `--check-service` cover library presentation and a Sunday import/present/REST/Companion/stage path. The compositor paints at 1920×1080 by default, or the active output's stored `bounds` (width is snapped to a multiple of 64 for wgpu row alignment). Slide layout stays 1920×1080.
+- Public-distribution Developer ID signing and notarization stay documented and unsigned/ad-hoc in CI, because they need Apple credentials. The locked three-platform installer workflows live in `.github/workflows/{release,gate,package-linux,package-windows,package-macos}.yml` (tag-only, see `docs/RELEASING.md`). Each package job builds an unsigned artifact and runs `--check-perf` on the packaged AppRun, Windows exe, or macOS app. `--check-library` and `--check-service` cover library presentation and a Sunday import/present/REST/Companion/stage path. The compositor paints at 1920×1080 by default, or the active output's stored `bounds` (width is snapped to a multiple of 64 for wgpu row alignment). Slide layout stays 1920×1080.

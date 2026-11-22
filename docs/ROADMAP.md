@@ -1,4 +1,4 @@
-# Plan
+# Roadmap
 
 ## Goal
 
@@ -12,7 +12,7 @@ GPL-3.0-only.
 ## Architecture
 
 The crate layout, UI-stack decision, performance budgets, and the remaining
-milestones to feature parity are in `docs/MIGRATION_PLAN.md`. This file stays
+milestones to feature parity are in `MIGRATION_PLAN.md`. This file stays
 the short working plan. Do not replace Slint or the headless compositor.
 
 ## Where the project is
@@ -146,7 +146,7 @@ item gets a test at the layer that owns it (`freeshow-output` for painting,
 
 - Small, coherent commits; each one leaves `cargo test --workspace` green.
 - New behavior gets a test in the crate that owns it.
-- Update `PARITY.md` and `README.md` in the same commit as the behavior.
+- Update `PARITY.md` and `USAGE.md` in the same commit as the behavior.
 - Push after each coherent milestone so the remote is never far behind.
 - When FreeShow behavior is ambiguous, read the Electron source in `../FreeShow`
   rather than guessing.
