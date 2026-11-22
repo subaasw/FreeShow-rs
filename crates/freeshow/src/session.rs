@@ -823,20 +823,38 @@ impl Session {
             .position(|(index, _)| *index == real)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn slide_labels(&self) -> Vec<String> {
+        self.slide_rows().into_iter().map(|row| row.text).collect()
+    }
+
+    pub fn slide_rows(&self) -> Vec<SlideLabel> {
         if self.tab == "scripture" {
             return self
                 .verse_hits
                 .iter()
-                .map(|hit| format!("{}  {}", hit.reference, hit.text))
+                .map(|hit| SlideLabel {
+                    text: format!("{}  {}", hit.reference, hit.text),
+                    color: None,
+                })
                 .collect();
         }
         if self.tab != "shows" {
             return Vec::new();
         }
         self.current_show()
-            .map(|show| slide_labels_for(&show.ordered_slides(), self.preferences.group_numbers()))
+            .map(|show| slide_rows_for(&show.ordered_slides(), self.preferences.group_numbers()))
             .unwrap_or_default()
+    }
+
+    pub fn slides_list_columns(&self) -> usize {
+        if self.tab == "scripture" {
+            return 1;
+        }
+        match self.preferences.slides_mode() {
+            "list" | "lyrics" => 1,
+            _ => self.preferences.slides_columns().max(1) as usize,
+        }
     }
 
     pub fn project_title(&self) -> String {
@@ -4147,12 +4165,12 @@ fn remote_slides(
     slides: Vec<freeshow_data::SlideView>,
     group_numbers: bool,
 ) -> Vec<freeshow_remote::RemoteSlide> {
-    let labels = slide_labels_for(&slides, group_numbers);
+    let labels = slide_rows_for(&slides, group_numbers);
     slides
         .into_iter()
         .zip(labels)
         .map(|(slide, label)| freeshow_remote::RemoteSlide {
-            label,
+            label: label.text,
             lines: slide.lines,
             notes: slide.notes,
             id: slide.id,
@@ -4161,7 +4179,13 @@ fn remote_slides(
         .collect()
 }
 
-fn slide_labels_for(slides: &[freeshow_data::SlideView], group_numbers: bool) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlideLabel {
+    pub text: String,
+    pub color: Option<String>,
+}
+
+fn slide_rows_for(slides: &[freeshow_data::SlideView], group_numbers: bool) -> Vec<SlideLabel> {
     let mut counts = HashMap::<&str, usize>::new();
     if group_numbers {
         for slide in slides {
@@ -4187,7 +4211,10 @@ fn slide_labels_for(slides: &[freeshow_data::SlideView], group_numbers: bool) ->
                         group.to_string()
                     }
                 });
-            slide_label_with_group(slide, group_name.as_deref())
+            SlideLabel {
+                text: slide_label_with_group(slide, group_name.as_deref()),
+                color: slide.color.clone(),
+            }
         })
         .collect()
 }
@@ -4824,6 +4851,58 @@ mod tests {
             muted.slide_labels(),
             vec!["Verse: first".to_string(), "Verse: second".to_string()]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn slide_grid_uses_group_colors_and_column_count() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-slide-grid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"fullColors":true,"slidesOptions":{"columns":3,"mode":"grid"}}"#,
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert!(session.save_lyrics("first"));
+        assert!(session.save_group("Verse"));
+        assert!(session.add_slide());
+        session.slide_index = Some(1);
+        assert!(session.save_lyrics("second"));
+        assert!(session.save_group("Chorus"));
+        let ids: Vec<String> = session.shows[0]
+            .ordered_slides()
+            .iter()
+            .map(|slide| slide.id.clone())
+            .collect();
+        session.shows[0].show["slides"][&ids[0]]["color"] = serde_json::json!("#ff0000");
+        session.shows[0].show["slides"][&ids[1]]["color"] = serde_json::json!("#00ff00");
+        assert!(session.preferences.full_colors());
+        assert_eq!(session.slides_list_columns(), 3);
+        assert_eq!(
+            session.slide_rows(),
+            vec![
+                SlideLabel {
+                    text: "Verse: first".to_string(),
+                    color: Some("#ff0000".to_string()),
+                },
+                SlideLabel {
+                    text: "Chorus: second".to_string(),
+                    color: Some("#00ff00".to_string()),
+                },
+            ]
+        );
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"fullColors":false,"slidesOptions":{"columns":4,"mode":"list"}}"#,
+        )
+        .unwrap();
+        let listed = Session::open(root.clone());
+        assert_eq!(listed.slides_list_columns(), 1);
+        assert!(!listed.preferences.full_colors());
         let _ = std::fs::remove_dir_all(&root);
     }
 
