@@ -14,6 +14,7 @@ pub use export::{write_project_package, write_show_pdf};
 mod item_edit;
 mod media_library;
 mod scripture;
+mod show_edit;
 mod stage_layout;
 
 pub use item_edit::{ItemBox, ItemTypography, css_px, css_set, css_value};
