@@ -33,6 +33,10 @@ pub struct SettingsForm {
     pub theme: String,
     pub themes: Vec<String>,
     pub profiles: String,
+    /// Name of the audience output the window flags apply to, or empty when none is stored.
+    pub output_name: String,
+    pub output_always_on_top: bool,
+    pub output_kiosk: bool,
 }
 
 /// The selected slide item as the Inspector shows it.
@@ -148,6 +152,18 @@ impl Session {
             } else {
                 profiles.join(", ")
             },
+            output_name: prefs
+                .active_output()
+                .map(|output| {
+                    if output.name.is_empty() {
+                        output.id.clone()
+                    } else {
+                        output.name.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            output_always_on_top: self.output_window_flags().0,
+            output_kiosk: self.output_window_flags().1,
         }
     }
 
@@ -189,6 +205,19 @@ impl Session {
                 vec!["ports", "stage"],
                 json!(parse_int(value, 1024, 65535)?),
             ),
+            "outputAlwaysOnTop" | "outputKiosk" => {
+                let id = self
+                    .preferences
+                    .active_output()
+                    .map(|output| output.id.clone())
+                    .ok_or("no output is stored in settings.json yet")?;
+                let field = if key == "outputKiosk" {
+                    "kiosk"
+                } else {
+                    "alwaysOnTop"
+                };
+                return self.patch_output(&id, field, json!(parse_bool(value)?));
+            }
             "theme" => {
                 let Some(theme) = self
                     .settings_form()
@@ -212,6 +241,37 @@ impl Session {
                 node = &mut node[*part];
             }
             node[path[path.len() - 1]] = value;
+        });
+        if wrote {
+            Ok(())
+        } else {
+            Err("could not write settings.json".into())
+        }
+    }
+
+    /// Always-on-top and kiosk for the audience output window, from its stored output.
+    /// FreeShow keeps outputs on top unless `alwaysOnTop` is false.
+    pub fn output_window_flags(&self) -> (bool, bool) {
+        self.preferences
+            .active_output()
+            .map(|output| (output.always_on_top, output.kiosk))
+            .unwrap_or((true, false))
+    }
+
+    fn patch_output(
+        &mut self,
+        id: &str,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Result<(), String> {
+        let wrote = self.patch_settings(|settings| {
+            if let Some(output) = settings
+                .get_mut("outputs")
+                .and_then(|outputs| outputs.get_mut(id))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                output.insert(field.to_string(), value);
+            }
         });
         if wrote {
             Ok(())
@@ -410,6 +470,30 @@ mod tests {
         .unwrap();
         assert_eq!(saved["unknownKey"]["keep"], 1);
         assert_eq!(saved["ports"]["stage"], 5600);
+    }
+
+    #[test]
+    fn output_window_flags_follow_the_active_output() {
+        let (dir, mut session) = library("outputs");
+        assert_eq!(session.output_window_flags(), (true, false));
+        assert!(session.apply_setting("outputKiosk", "true").is_err());
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"outputs":{"a":{"name":"Side","enabled":true},"b":{"name":"Main","active":true,"alwaysOnTop":false}}}"#,
+        )
+        .unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(session.output_window_flags(), (false, false));
+        assert_eq!(session.settings_form().output_name, "Main");
+        session.apply_setting("outputKiosk", "true").unwrap();
+        session.apply_setting("outputAlwaysOnTop", "true").unwrap();
+        assert_eq!(session.output_window_flags(), (true, true));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["outputs"]["b"]["kiosk"], true);
+        assert!(saved["outputs"]["a"].get("kiosk").is_none());
     }
 
     #[test]
