@@ -234,10 +234,11 @@ export component SettingsPanel inherits Rectangle {
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Language"; text-color: root.text-color; }
-                        ValueEdit {
-                            shown: root.data.language;
-                            placeholder-text: "en";
-                            accepted(value) => { root.apply("language", value); }
+                        // The languages the operator labels are translated into.
+                        ValueCombo {
+                            model: ["en", "de", "es", "fr", "nb"];
+                            value: root.data.language;
+                            selected(value) => { root.apply("language", value); }
                         }
                     }
                     Row {

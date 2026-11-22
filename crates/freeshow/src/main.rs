@@ -492,12 +492,14 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     // A shortcut or remote command can open the next project item in another drawer tab.
     if ui.get_active_tab().as_str() != session.tab {
         ui.set_active_tab(session.tab.clone().into());
-        if let Some((_, label, _)) = lang::drawer_tabs(session.preferences.language.as_deref())
-            .into_iter()
-            .find(|(id, _, _)| *id == session.tab)
-        {
-            ui.set_panel_title(label.into());
-        }
+    }
+    // The heading follows the tab and the chosen language.
+    if let Some((_, label, _)) = lang::drawer_tabs(session.preferences.language.as_deref())
+        .into_iter()
+        .find(|(id, _, _)| *id == session.tab)
+        && ui.get_panel_title().as_str() != label
+    {
+        ui.set_panel_title(label.into());
     }
     ui.set_drawer_rows(drawer_rows(session));
     ui.set_slide_cards(slide_cards(session));
