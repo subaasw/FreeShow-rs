@@ -255,6 +255,8 @@ pub struct Session {
     pub refresh_output: bool,
     /// The operator is looking at another show, slide or tab; the output keeps what is live.
     pub program_held: bool,
+    /// An edit changed the show that is on air, so the output repaints without a transition.
+    pub live_edited: bool,
     /// Live commands from the operator window, run with the remote batch.
     pub ui_commands: Vec<freeshow_remote::Command>,
     pub audio_paused: bool,
@@ -466,6 +468,7 @@ impl Session {
             media_finished: None,
             refresh_output: false,
             program_held: false,
+            live_edited: false,
             ui_commands: Vec::new(),
             audio_paused: false,
             media_paused: false,
@@ -644,6 +647,7 @@ impl Session {
             media_finished: None,
             refresh_output: false,
             program_held: false,
+            live_edited: false,
             ui_commands: Vec::new(),
             audio_paused: false,
             media_paused: false,
@@ -5632,10 +5636,22 @@ impl Session {
         let Some(snap) = snap else {
             return;
         };
+        self.note_live_edit(&snap.show_id);
         self.history.push(snap);
         self.redo.clear();
         if self.history.len() > 40 {
             self.history.remove(0);
+        }
+    }
+
+    /// Marks the output for a repaint when the edited show is the one on air.
+    fn note_live_edit(&mut self, show_id: &str) {
+        let on_air = matches!(
+            self.program_content.borrow().as_ref(),
+            Some(crate::live::ProgramContent::Slide { show_id: live, .. }) if live == show_id
+        );
+        if on_air && !self.blanked {
+            self.live_edited = true;
         }
     }
 
@@ -5649,6 +5665,7 @@ impl Session {
             return false;
         };
         self.shows[index].show = snap.show;
+        self.note_live_edit(&snap.show_id);
         self.show_index = Some(index);
         self.slide_index = snap.slide_index;
         if let Some(path) = self.shows[index].path.clone() {

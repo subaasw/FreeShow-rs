@@ -3104,6 +3104,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut session = remote_session.borrow_mut();
                 session.run_due_cue_completion(std::time::Instant::now()) || session.refresh_output
             };
+            let live_edited = !started
+                && !moved
+                && !remote_output_fade.running()
+                && std::mem::take(&mut remote_session.borrow_mut().live_edited);
+            if live_edited {
+                // An edit to what is on air shows up right away, without a transition.
+                let (audience, stage) = {
+                    let session = remote_session.borrow();
+                    (audience_frame(&session), stage_frame(&session))
+                };
+                *remote_last_output.borrow_mut() = audience.clone();
+                submit_network(NetworkPicture::Audience, &audience);
+                publish_audience(&remote_output, audience.clone());
+                publish(&remote_preview, audience);
+                *remote_last_stage.borrow_mut() = stage.clone();
+                publish_stage(&remote_stage, stage);
+            }
             if started || moved {
                 remote_session.borrow_mut().refresh_output = false;
                 if moved {
