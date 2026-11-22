@@ -109,7 +109,8 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [ ] Stream-only lesson media without a direct downloadable URL.
 - [x] Background lesson downloads with progress and cancellation.
 - [x] ProPresenter bundle backgrounds land in `Media/` and stay linked.
-- [ ] Background media from the other import formats.
+- [x] PowerPoint embedded slide, layout, and master backgrounds.
+- [ ] PowerPoint theme fills, linked or tiled media, and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
 their original backgrounds.

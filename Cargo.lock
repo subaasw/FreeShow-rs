@@ -1876,6 +1876,7 @@ name = "freeshow-data"
 version = "0.1.0"
 dependencies = [
  "freeshow-core",
+ "percent-encoding",
  "prost",
  "quick-xml 0.37.5",
  "rusqlite",

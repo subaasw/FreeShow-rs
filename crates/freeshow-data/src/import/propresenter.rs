@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{
-    Section, attribute, base64_decode, decode_rtf, file_stem, file_stem_str, local_name, show_file,
-};
+use super::{Section, attribute, base64_decode, decode_rtf, file_stem_str, local_name, show_file};
 use crate::{DataError, ShowFile};
 use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 fn invalid(message: impl ToString) -> DataError {
@@ -326,7 +323,10 @@ pub(super) fn import_bundle(bytes: &[u8], media: &Path) -> Result<Vec<ShowFile>,
         if bytes.len() > 512 * 1024 * 1024 {
             return Err(invalid("bundled media exceeds 512 MiB"));
         }
-        copied.insert(name.clone(), save_media(media, name, &bytes)?);
+        copied.insert(
+            name.clone(),
+            super::save_imported_media(media, name, &bytes)?,
+        );
     }
     for (document, show) in &mut shows {
         for item in show.show["media"].as_object_mut().unwrap().values_mut() {
@@ -417,51 +417,12 @@ fn find_asset<'a>(source: &str, names: &'a [String], document: &str) -> Result<&
     Ok(matches[0])
 }
 
-fn save_media(media: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, DataError> {
-    fs::create_dir_all(media)?;
-    let media = media.canonicalize()?;
-    let basename = source_basename(name);
-    let stem = file_stem(&basename);
-    let extension = Path::new(&basename)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("");
-    // Use a flat filename; archive directory components never reach the disk.
-    for suffix in 0..10_000 {
-        let suffix = if suffix == 0 {
-            String::new()
-        } else {
-            format!("-{suffix}")
-        };
-        let path = media.join(format!("{stem}{suffix}.{extension}"));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let result = file.write_all(bytes).and_then(|_| file.sync_all());
-                if let Err(error) = result {
-                    let _ = fs::remove_file(&path);
-                    return Err(error.into());
-                }
-                return Ok(path);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = fs::symlink_metadata(&path)?;
-                if metadata.is_file()
-                    && metadata.len() == bytes.len() as u64
-                    && fs::read(&path)? == bytes
-                {
-                    return Ok(path);
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err(invalid("too many imported media filename collisions"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Library, SlideBackdrop};
+    use std::fs;
+    use std::io::Write;
 
     fn xml(source: &str) -> String {
         format!(
