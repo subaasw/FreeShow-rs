@@ -532,6 +532,7 @@ mod gst_player {
                     device: routes[0].device.clone(),
                     routes,
                     upstream,
+                    pending: Default::default(),
                     input_format,
                     convert,
                     filter,
@@ -556,20 +557,41 @@ mod gst_player {
         device: Option<String>,
         routes: Vec<SpeakerRoute>,
         upstream: gst::Pad,
+        pending: std::sync::Arc<std::sync::Mutex<Option<MixUpdate>>>,
         input_format: gst::Element,
         convert: gst::Element,
         filter: gst::Element,
         volume: gst::Element,
     }
 
+    struct MixUpdate {
+        matrix: gst::Array,
+        caps: gst::Caps,
+        gain: f64,
+    }
+
     impl ChannelOutput {
         fn configure(&self, matrix: Vec<gst::Array>, caps: gst::Caps, gain: f64) {
+            let active = self.upstream.is_active();
+            let update = MixUpdate {
+                matrix: gst::Array::new(matrix),
+                caps,
+                gain,
+            };
+            let replaced = self.pending.lock().unwrap().replace(update).is_some();
+            if active && replaced {
+                return;
+            }
+            let pending = self.pending.clone();
             let convert = self.convert.clone();
             let input_format = self.input_format.clone();
             let filter = self.filter.clone();
             let volume = self.volume.clone();
-            let matrix = gst::Array::new(matrix);
-            self.upstream.add_probe(gst::PadProbeType::IDLE, move |_, _| {
+            let update = move || {
+                let queued = pending.lock().unwrap().take();
+                let Some(MixUpdate { matrix, caps, gain }) = queued else {
+                    return;
+                };
                 volume.set_property("volume", 0.0_f64);
                 let was_explicit = !convert
                     .property::<gst::Array>("mix-matrix")
@@ -594,8 +616,20 @@ mod gst_player {
                     );
                 }
                 volume.set_property("volume", gain);
-                gst::PadProbeReturn::Remove
-            });
+            };
+            // An IDLE probe can execute on the operator thread while holding the pad
+            // lock. Negotiate an active branch from its streaming task instead.
+            if active {
+                self.upstream.add_probe(
+                    gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+                    move |_, _| {
+                        update();
+                        gst::PadProbeReturn::Remove
+                    },
+                );
+            } else {
+                update();
+            }
         }
     }
 
@@ -879,6 +913,21 @@ mod gst_player {
         }
 
         #[test]
+        fn active_audio_branch_keeps_only_the_latest_update_until_the_next_buffer() {
+            gst::init().unwrap();
+            let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+            let audio = AudioBranch::new(vec![(None, 1.0, sink)]).unwrap();
+            let config = audio.mix.lock().unwrap();
+            let branch = &config.outputs[0];
+            branch.upstream.set_active(true).unwrap();
+            branch.configure(Vec::new(), gst::Caps::new_any(), 0.25);
+            branch.configure(Vec::new(), gst::Caps::new_any(), 0.75);
+            assert_eq!(branch.volume.property::<f64>("volume"), 1.0);
+            assert_eq!(branch.pending.lock().unwrap().as_ref().unwrap().gain, 0.75);
+            branch.upstream.set_active(false).unwrap();
+        }
+
+        #[test]
         fn video_channel_matrix_preserves_sources_and_never_leaks_to_unmapped_ports() {
             gst::init().unwrap();
             let sink = capture_sink();
@@ -902,14 +951,21 @@ mod gst_player {
             ).unwrap();
             player.set_volume(1.0);
             expect_channels(&sink, &[0.0, 0.2]);
-            player.set_audio_routes(&[
+            let stereo = [
                 SpeakerRoute {
                     input_channel: Some(0),
                     output_channel: Some(0),
                     ..SpeakerRoute::stereo(None, 0.25)
                 },
                 route.clone(),
-            ]);
+            ];
+            for _ in 0..3 {
+                player.set_audio_routes(&stereo);
+                expect_channels(&sink, &[0.2, 0.2]);
+                player.set_audio_routes(std::slice::from_ref(&route));
+                expect_channels(&sink, &[0.0, 0.2]);
+            }
+            player.set_audio_routes(&stereo);
             expect_channels(&sink, &[0.2, 0.2]);
             player.set_muted(true);
             expect_channels(&sink, &[0.0, 0.0]);
@@ -1093,13 +1149,24 @@ mod tests {
 
     use super::*;
 
+    fn wait_for_frame(player: &mut VideoPlayer) -> Option<Raster> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(frame) = player.next_frame() {
+                return Some(frame);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
+    }
+
     #[test]
     fn a_wide_frame_is_letterboxed() {
         let mut player = VideoPlayer::from_launch(
             "videotestsrc num-buffers=1 pattern=red ! video/x-raw,width=8,height=2 ! videoconvert ! videoscale add-borders=true ! video/x-raw,format=RGBA,width=8,height=8,pixel-aspect-ratio=1/1 ! appsink name=sink sync=false",
         )
         .expect("letterbox pipeline");
-        let frame = player.next_frame().expect("letterboxed frame");
+        let frame = wait_for_frame(&mut player).expect("letterboxed frame");
         let corner = &frame.rgba[0..4];
         assert_eq!(corner, &[0, 0, 0, 255], "the bars stay black");
         let middle = 4 * (4 * 8);
@@ -1112,7 +1179,7 @@ mod tests {
             "videotestsrc num-buffers=1 pattern=red ! videoconvert ! video/x-raw,format=RGBA,width=16,height=16 ! appsink name=sink sync=false",
         )
         .expect("videotestsrc pipeline");
-        let frame = player.next_frame().expect("one red frame");
+        let frame = wait_for_frame(&mut player).expect("one red frame");
         assert_eq!(frame.width, 16);
         assert_eq!(frame.rgba[0], 255);
         assert_eq!(frame.rgba[1], 0);
