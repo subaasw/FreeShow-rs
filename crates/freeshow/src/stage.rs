@@ -3,12 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use freeshow_data::{
-    StageClockOptions, StageItemKind, StageItemSpec, StageLayout, fill_variables,
-};
+use freeshow_data::{fill_variables, StageClockOptions, StageItemKind, StageItemSpec, StageLayout};
 use freeshow_output::{
-    Blend, Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
-    StyledLine, StyledSlide, TextRun, parse_color, render_styled,
+    parse_color, render_styled, Blend, Fit, Raster, Rgba, StyledItem, StyledLine, StyledSlide,
+    TextRun, OUTPUT_HEIGHT, OUTPUT_WIDTH, SOURCE_HEIGHT, SOURCE_WIDTH,
 };
 
 pub struct StageSlide {
@@ -37,15 +35,27 @@ impl StageMedia {
                     return StageFile::default();
                 };
                 if freeshow_media::media_kind(&path) == freeshow_media::MediaKind::Video {
-                    let video = freeshow_media::VideoPlayer::open_with_network(&path, &[], &[]).ok();
-                    StageFile { picture: None, video }
+                    let video =
+                        freeshow_media::VideoPlayer::open_with_network(&path, &[], &[]).ok();
+                    StageFile {
+                        picture: None,
+                        video,
+                    }
                 } else {
-                    let picture = std::fs::read(path).ok()
+                    let picture = std::fs::read(path)
+                        .ok()
                         .and_then(|bytes| freeshow_output::decode_image(&bytes));
-                    StageFile { picture, video: None }
+                    StageFile {
+                        picture,
+                        video: None,
+                    }
                 }
             });
-            if let Some(frame) = file.video.as_mut().and_then(|player| player.try_next_frame()) {
+            if let Some(frame) = file
+                .video
+                .as_mut()
+                .and_then(|player| player.try_next_frame())
+            {
                 file.picture = Some(frame);
             }
         }
@@ -109,23 +119,24 @@ pub fn paint_stage(
                 Some(image.clone())
             } else {
                 match item.kind {
-                    StageItemKind::Media => {
-                        item.src.as_deref().and_then(|src| context.media?.picture(src))
-                    }
+                    StageItemKind::Media => item
+                        .src
+                        .as_deref()
+                        .and_then(|src| context.media?.picture(src)),
                     StageItemKind::QrCode => {
                         fit = Fit::Contain;
                         item.qr.as_ref().and_then(|qr| {
                             freeshow_output::qr_image(&qr.text, &qr.color, &qr.background)
                         })
                     }
-                    StageItemKind::Slide if item.include_media && item.offset == 0 => {
-                        context.current_background.map(|(image, audience_fit, x, y)| {
+                    StageItemKind::Slide if item.include_media && item.offset == 0 => context
+                        .current_background
+                        .map(|(image, audience_fit, x, y)| {
                             fit = audience_fit;
                             flip_x = x;
                             flip_y = y;
                             image.clone()
-                        })
-                    }
+                        }),
                     StageItemKind::Slide if item.include_media => context
                         .still_backgrounds
                         .and_then(|backgrounds| backgrounds.get(&item.offset))
@@ -242,24 +253,28 @@ fn lines_for(
             .unwrap_or_default(),
         StageItemKind::SlideTracker => tracker_text(slides, index),
         StageItemKind::Media | StageItemKind::QrCode | StageItemKind::CurrentOutput => Vec::new(),
-        StageItemKind::Custom => vec![if item.label.is_empty() {
-            item.id.clone()
-        } else {
+        StageItemKind::Camera | StageItemKind::Custom => vec![if !item.label.is_empty() {
             item.label.clone()
+        } else if let Some(name) = item.device_name.as_deref().filter(|name| !name.is_empty()) {
+            name.to_string()
+        } else {
+            item.id.clone()
         }],
     }
 }
 
-fn slide_lines(
-    slides: &[StageSlide],
-    index: Option<usize>,
-    item: &StageItemSpec,
-) -> Vec<String> {
+fn slide_lines(slides: &[StageSlide], index: Option<usize>, item: &StageItemSpec) -> Vec<String> {
     let Some(slide) = slide_at(slides, index, item.offset) else {
         return Vec::new();
     };
     let mut lines = if let Some(number) = item.text_box {
-        slide.text_boxes.iter().rev().nth(number).cloned().unwrap_or_default()
+        slide
+            .text_boxes
+            .iter()
+            .rev()
+            .nth(number)
+            .cloned()
+            .unwrap_or_default()
     } else {
         let mut boxes = slide.text_boxes.iter().collect::<Vec<_>>();
         if !item.invert_items {
@@ -383,7 +398,7 @@ fn format_date(format: &str, now: &chrono::DateTime<chrono::Local>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use freeshow_data::{StageClockOptions, default_stage};
+    use freeshow_data::{default_stage, StageClockOptions};
     use freeshow_output::fingerprint;
 
     fn spec(kind: StageItemKind) -> StageItemSpec {
@@ -401,6 +416,8 @@ mod tests {
             variable_id: None,
             timer_id: None,
             src: None,
+            device_name: None,
+            device_type: None,
             output_source: None,
             show_output_label: false,
             include_media: false,
@@ -475,6 +492,9 @@ mod tests {
         let mut unlabeled = spec(StageItemKind::Custom);
         unlabeled.id = "web".into();
         unlabeled.label = String::new();
+        let mut camera = spec(StageItemKind::Camera);
+        camera.label = String::new();
+        camera.device_name = Some("PTZ Front".into());
 
         let cases = [
             (spec(StageItemKind::Slide), vec!["current".to_string()]),
@@ -487,6 +507,7 @@ mod tests {
             (spec(StageItemKind::Media), Vec::new()),
             (spec(StageItemKind::Custom), vec!["Web".to_string()]),
             (unlabeled, vec!["web".to_string()]),
+            (camera, vec!["PTZ Front".to_string()]),
         ];
         for (item, expected) in cases {
             assert_eq!(
@@ -573,10 +594,7 @@ mod tests {
     #[test]
     fn variables_fall_back_from_raw_id_to_name() {
         let values = vec![("speaker".to_string(), "Ada".to_string())];
-        assert_eq!(
-            variable_value("$Speaker", &values).as_deref(),
-            Some("Ada")
-        );
+        assert_eq!(variable_value("$Speaker", &values).as_deref(), Some("Ada"));
         assert_eq!(
             variable_value("variable_speaker", &values).as_deref(),
             Some("Ada")

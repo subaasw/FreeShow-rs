@@ -345,6 +345,8 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         variable_id: None,
         timer_id: None,
         src: None,
+        device_name: None,
+        device_type: None,
         output_source: None,
         show_output_label: false,
         include_media: false,
@@ -397,6 +399,7 @@ fn kind_of(id: &str, item: &Value) -> StageItemKind {
         "variable" => StageItemKind::Variable,
         "slide_tracker" => StageItemKind::SlideTracker,
         "media" => StageItemKind::Media,
+        "camera" => StageItemKind::Camera,
         "current_output" => StageItemKind::CurrentOutput,
         "qr_code" => StageItemKind::QrCode,
         "" => legacy_kind(&id),
@@ -506,5 +509,17 @@ mod tests {
         assert_eq!(layout.items[2].offset, 0);
         assert!(!layout.items[3].clock.seconds);
         assert_eq!(layout.items[3].clock.date_format, "DD/MM/YYYY");
+    }
+
+    #[test]
+    fn camera_items_keep_their_saved_device() {
+        let layout = parse_stage(
+            r##"{"stage":{"name":"Cams","items":{"cam":{"type":"camera","device":{"name":"PTZ Front","type":"camera"},"style":"left:9px;"}}}}"##,
+        )
+        .unwrap();
+        assert_eq!(layout.items[0].kind, StageItemKind::Camera);
+        assert_eq!(layout.items[0].id, "cam");
+        assert_eq!(layout.items[0].device_name.as_deref(), Some("PTZ Front"));
+        assert_eq!(layout.items[0].device_type.as_deref(), Some("camera"));
     }
 }
