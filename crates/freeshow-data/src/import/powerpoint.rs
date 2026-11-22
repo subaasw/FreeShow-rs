@@ -67,7 +67,8 @@ pub(super) fn import(
             return Err(invalid("duplicate ZIP part"));
         }
     }
-    let (parts, height) = slide_order(&mut archive)?;
+    let (parts, size) = slide_order(&mut archive)?;
+    let height = size.height;
     if parts.is_empty() || parts.len() > 2000 {
         return Err(invalid("expected between 1 and 2000 slides"));
     }
@@ -79,13 +80,17 @@ pub(super) fn import(
     let mut themes = ThemeReader::default();
     let mut assets = BTreeMap::new();
     let mut image_bytes = 0_u64;
+    let mut object_items: Vec<Vec<SlideObject>> = Vec::new();
+    let mut import_warnings = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let xml = read_xml(&mut archive, part)?.ok_or_else(|| invalid("slide part is missing"))?;
         slide_xml_bytes += xml.len();
         if slide_xml_bytes > 64 * 1024 * 1024 {
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
-        let (lines, disabled) = slide_text(&xml)?;
+        let mut content = slide_content(&xml, &size)?;
+        let lines = std::mem::take(&mut content.lines);
+        let disabled = content.hidden;
         let found = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
         let fill = realize_background(&mut themes, &mut archive, part, &xml, found)?;
         if let Some(Background::Picture { part, linked, .. }) = &fill
@@ -105,6 +110,33 @@ pub(super) fn import(
             image_bytes += data.len() as u64;
             assets.insert(part.clone(), data);
         }
+        let picture_ids = content.picture_ids.clone();
+        let rels = relationships(&mut archive, part)?;
+        for rid in picture_ids {
+            if let Some(rel) = rels.iter().find(|rel| rel.id == rid && rel.kind == "image") {
+                if !rel.external && media.is_some() && !assets.contains_key(&rel.target) {
+                    let mut file = archive.by_name(&rel.target).map_err(invalid)?;
+                    if file.size() > IMAGE_LIMIT || image_bytes + file.size() > 256 * 1024 * 1024 {
+                        return Err(invalid("embedded pictures exceed size limits"));
+                    }
+                    let mut data = Vec::new();
+                    file.by_ref().take(IMAGE_LIMIT + 1).read_to_end(&mut data)?;
+                    if data.len() as u64 != file.size() {
+                        return Err(invalid("embedded picture is truncated"));
+                    }
+                    image_bytes += data.len() as u64;
+                    assets.insert(rel.target.clone(), data);
+                }
+                content.resolve_picture(rel);
+            }
+        }
+        import_warnings.extend(
+            content
+                .warnings
+                .iter()
+                .map(|warning| format!("Slide {}: {warning}", index + 1)),
+        );
+        object_items.push(content.objects);
         sections.push(Section::plain(format!("Slide {}", index + 1), lines));
         fills.push(fill);
         hidden.push(disabled);
@@ -123,12 +155,27 @@ pub(super) fn import(
     for (index, fill) in fills.into_iter().enumerate() {
         let slide = &mut show.show["slides"][format!("s{}", index + 1)];
         slide["settings"]["resolution"] = json!({"width": 1920, "height": height});
-        // The existing text importer uses one centered text box per slide.
-        slide["items"][0]["style"] = json!(format!(
-            "left:50px;top:{}px;width:1820px;height:{}px;text-align:center;font-size:60px;",
-            height * 0.11,
-            height * 0.78
-        ));
+        if !object_items[index].is_empty() {
+            for object in &mut object_items[index] {
+                if let Some(src) = object.src.as_ref()
+                    && let Some(saved) = files.get(src)
+                {
+                    object.src = Some(saved.to_string_lossy().into_owned());
+                }
+            }
+            let items: Vec<serde_json::Value> = object_items[index]
+                .drain(..)
+                .filter_map(SlideObject::into_item)
+                .collect();
+            slide["items"] = json!(items);
+        } else {
+            // The existing text importer uses one centered text box per slide.
+            slide["items"][0]["style"] = json!(format!(
+                "left:50px;top:{}px;width:1820px;height:{}px;text-align:center;font-size:60px;",
+                height * 0.11,
+                height * 0.78
+            ));
+        }
         match fill {
             Some(Background::Color(color)) => apply_solid_color(slide, &color)?,
             Some(Background::Picture {
@@ -175,12 +222,49 @@ pub(super) fn import(
             show.show["layouts"]["main"]["slides"][index]["disabled"] = json!(true);
         }
     }
+    if !import_warnings.is_empty() {
+        show.show["settings"]["importWarnings"] = json!(import_warnings);
+    }
     Ok(show)
 }
 
-fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, f64), DataError> {
+struct SlideSize {
+    height: f64,
+    emu_cx: f64,
+    emu_cy: f64,
+}
+
+impl SlideSize {
+    fn from_emu(cx: f64, cy: f64) -> Self {
+        let height = if cx > 0.0 {
+            let suggested = 1920.0 * cy / cx;
+            if (240.0..=8192.0).contains(&suggested) {
+                suggested
+            } else {
+                1080.0
+            }
+        } else {
+            1080.0
+        };
+        Self {
+            height,
+            emu_cx: if cx > 0.0 { cx } else { 12_192_000.0 },
+            emu_cy: if cy > 0.0 { cy } else { 6_858_000.0 },
+        }
+    }
+
+    fn px_x(&self, emu: f64) -> f64 {
+        1920.0 * emu / self.emu_cx
+    }
+
+    fn px_y(&self, emu: f64) -> f64 {
+        self.height * emu / self.emu_cy
+    }
+}
+
+fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, SlideSize), DataError> {
     let part = "ppt/presentation.xml";
-    let mut height = 1080.0;
+    let mut size = SlideSize::from_emu(12_192_000.0, 6_858_000.0);
     let mut ids = Vec::new();
     if let Some(xml) = read_xml(archive, part)? {
         elements(&xml, |name, element| {
@@ -190,10 +274,8 @@ fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, f64), DataErro
                 }
             } else if name == "sldSz"
                 && let (Some(cx), Some(cy)) = (number(element, "cx"), number(element, "cy"))
-                && let suggested = 1920.0 * cy / cx
-                && (240.0..=8192.0).contains(&suggested)
             {
-                height = suggested;
+                size = SlideSize::from_emu(cx, cy);
             }
         })?;
     }
@@ -209,7 +291,7 @@ fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, f64), DataErro
                     .ok_or_else(|| invalid("slide relationship is missing"))
             })
             .collect::<Result<_, _>>()?;
-        return Ok((order, height));
+        return Ok((order, size));
     }
     let mut order: Vec<_> = archive
         .file_names()
@@ -222,7 +304,7 @@ fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, f64), DataErro
             .parse::<u32>()
             .unwrap_or(u32::MAX)
     });
-    Ok((order, height))
+    Ok((order, size))
 }
 
 fn slide_text(xml: &str) -> Result<(Vec<String>, bool), DataError> {
@@ -264,6 +346,260 @@ fn slide_text(xml: &str) -> Result<(Vec<String>, bool), DataError> {
         }
     }
     Ok((lines, hidden))
+}
+
+struct SlideContent {
+    lines: Vec<String>,
+    hidden: bool,
+    objects: Vec<SlideObject>,
+    warnings: Vec<String>,
+    picture_ids: Vec<String>,
+}
+
+struct SlideObject {
+    kind: ObjectKind,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    lines: Vec<String>,
+    fill: Option<String>,
+    ellipse: bool,
+    radius: f64,
+    crop: [f64; 4],
+    tile: bool,
+    picture_id: Option<String>,
+    src: Option<String>,
+    linked: bool,
+}
+
+enum ObjectKind {
+    Text,
+    Shape,
+    Picture,
+}
+
+impl SlideContent {
+    fn resolve_picture(&mut self, rel: &Relationship) {
+        for object in &mut self.objects {
+            if object.picture_id.as_deref() == Some(rel.id.as_str()) {
+                object.src = Some(rel.target.clone());
+                object.linked = rel.external;
+            }
+        }
+    }
+}
+
+impl SlideObject {
+    fn into_item(self) -> Option<serde_json::Value> {
+        let mut style = format!(
+            "left:{}px;top:{}px;width:{}px;height:{}px;",
+            self.x.round(),
+            self.y.round(),
+            self.width.max(1.0).round(),
+            self.height.max(1.0).round()
+        );
+        if self.ellipse {
+            style.push_str("border-radius:50%;");
+        } else if self.radius > 0.0 {
+            style.push_str(&format!("border-radius:{}px;", self.radius.round()));
+        }
+        match self.kind {
+            ObjectKind::Picture => {
+                let src = self.src?;
+                Some(json!({
+                    "type": "media",
+                    "style": style,
+                    "fit": if self.tile { "tile" } else { "fill" },
+                    "src": src,
+                    "cropping": {
+                        "type": "ppt",
+                        "left": self.crop[0],
+                        "top": self.crop[1],
+                        "right": self.crop[2],
+                        "bottom": self.crop[3]
+                    }
+                }))
+            }
+            ObjectKind::Shape => {
+                if let Some(fill) = &self.fill {
+                    style.push_str(&format!("background:{fill};"));
+                }
+                Some(json!({
+                    "type": "shape",
+                    "style": style,
+                    "lines": []
+                }))
+            }
+            ObjectKind::Text => {
+                if let Some(fill) = &self.fill {
+                    style.push_str(&format!("background:{fill};"));
+                }
+                style.push_str("text-align:center;font-size:60px;");
+                let lines = self
+                    .lines
+                    .iter()
+                    .map(|line| json!({ "align": "", "text": [{ "value": line, "style": "" }] }))
+                    .collect::<Vec<_>>();
+                Some(json!({
+                    "style": style,
+                    "lines": lines
+                }))
+            }
+        }
+    }
+}
+
+fn slide_content(xml: &str, size: &SlideSize) -> Result<SlideContent, DataError> {
+    let (lines, hidden) = slide_text(xml)?;
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().expand_empty_elements = true;
+    let mut stack = Vec::new();
+    let mut in_tree = false;
+    let mut objects = Vec::new();
+    let mut warnings = Vec::new();
+    let mut current: Option<SlideObject> = None;
+    let mut text = String::new();
+    let mut capture = false;
+    let mut paragraph = false;
+    let mut picture_ids = Vec::new();
+    loop {
+        match reader.read_event().map_err(invalid)? {
+            Event::Start(element) => {
+                let name = local_name(element.name().as_ref());
+                match (stack.last().map(String::as_str), name.as_str()) {
+                    (_, "spTree") => in_tree = true,
+                    (Some("spTree" | "grpSp"), "sp" | "pic" | "cxnSp") if in_tree => {
+                        current = Some(SlideObject {
+                            kind: if name == "pic" {
+                                ObjectKind::Picture
+                            } else {
+                                ObjectKind::Shape
+                            },
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                            lines: Vec::new(),
+                            fill: None,
+                            ellipse: false,
+                            radius: 0.0,
+                            crop: [0.0; 4],
+                            tile: false,
+                            picture_id: None,
+                            src: None,
+                            linked: false,
+                        });
+                    }
+                    (Some("spTree" | "grpSp"), "graphicFrame") if in_tree => {
+                        warnings.push(
+                            "tables and charts are not imported as slide objects".to_string(),
+                        );
+                    }
+                    (Some("xfrm") | Some("off"), _) => {}
+                    _ => {}
+                }
+                if let Some(object) = current.as_mut() {
+                    match (stack.last().map(String::as_str), name.as_str()) {
+                        (Some("xfrm"), "off") => {
+                            object.x = size.px_x(number(&element, "x").unwrap_or(0.0));
+                            object.y = size.px_y(number(&element, "y").unwrap_or(0.0));
+                        }
+                        (Some("xfrm"), "ext") => {
+                            object.width = size.px_x(number(&element, "cx").unwrap_or(0.0));
+                            object.height = size.px_y(number(&element, "cy").unwrap_or(0.0));
+                        }
+                        (_, "prstGeom") => {
+                            match attribute(&element, "prst").as_deref() {
+                                Some("ellipse") => object.ellipse = true,
+                                Some("roundRect") => {
+                                    object.radius =
+                                        (object.width.min(object.height) * 0.125).max(8.0);
+                                }
+                                Some("rect" | "round1Rect" | "round2SameRect") | None => {}
+                                Some(other) => {
+                                    // Unrecognized presets still occupy their bounding box.
+                                    let _ = other;
+                                }
+                            }
+                        }
+                        (Some("solidFill"), "srgbClr") => {
+                            if let Some(val) = attribute(&element, "val")
+                                && val.len() == 6
+                            {
+                                object.fill = Some(format!("#{val}"));
+                            }
+                        }
+                        (Some("blipFill"), "blip") => {
+                            if let Some(id) = relationship_attr(&element, "embed")
+                                .or_else(|| relationship_attr(&element, "link"))
+                            {
+                                object.kind = ObjectKind::Picture;
+                                object.picture_id = Some(id.clone());
+                                if !picture_ids.contains(&id) {
+                                    picture_ids.push(id);
+                                }
+                            }
+                        }
+                        (Some("blipFill"), "tile") => object.tile = true,
+                        (Some("blipFill"), "srcRect") => object.crop = percentages(&element),
+                        (_, "p") => paragraph = true,
+                        (_, "t") => capture = true,
+                        (_, "br") if paragraph => text.push('\n'),
+                        _ => {}
+                    }
+                }
+                stack.push(name);
+            }
+            Event::Text(value) if capture => {
+                text.push_str(&value.unescape().map_err(invalid)?);
+            }
+            Event::End(element) => {
+                let name = local_name(element.name().as_ref());
+                if name == "t" {
+                    capture = false;
+                }
+                if (name == "p" || (name == "t" && !paragraph)) && current.is_some() {
+                    if let Some(object) = current.as_mut() {
+                        object.lines.extend(text.trim().lines().map(str::to_owned));
+                    }
+                    text.clear();
+                    paragraph = false;
+                }
+                if matches!(name.as_str(), "sp" | "pic" | "cxnSp")
+                    && stack.last().map(String::as_str) == Some(name.as_str())
+                {
+                    if let Some(mut object) = current.take() {
+                        if matches!(object.kind, ObjectKind::Shape) && !object.lines.is_empty() {
+                            object.kind = ObjectKind::Text;
+                        }
+                        if object.width > 0.0 || object.height > 0.0 || !object.lines.is_empty() {
+                            objects.push(object);
+                        }
+                    }
+                }
+                if name == "spTree" {
+                    in_tree = false;
+                }
+                stack.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    // Keep the historic single-box fallback when the slide has no positioned objects.
+    if objects.iter().all(|object| {
+        object.x == 0.0 && object.y == 0.0 && object.width == 0.0 && object.height == 0.0
+    }) {
+        objects.clear();
+    }
+    Ok(SlideContent {
+        lines,
+        hidden,
+        objects,
+        warnings,
+        picture_ids,
+    })
 }
 
 fn find_background(
@@ -611,8 +947,21 @@ fn apply_solid_color(slide: &mut serde_json::Value, color: &str) -> Result<(), D
         299 * ((channels >> 16) & 255) + 587 * ((channels >> 8) & 255) + 114 * (channels & 255);
     slide["settings"]["color"] = json!(color);
     if luminance >= 155_000 {
-        let style = slide["items"][0]["style"].as_str().unwrap();
-        slide["items"][0]["style"] = json!(format!("{style}color:#000000;"));
+        let items = slide["items"]
+            .as_array_mut()
+            .ok_or_else(|| invalid("slide items"))?;
+        let index = items
+            .iter()
+            .position(|item| {
+                item["lines"]
+                    .as_array()
+                    .is_some_and(|lines| !lines.is_empty())
+            })
+            .unwrap_or(0);
+        let style = items[index]["style"].as_str().unwrap_or("").to_string();
+        if !style.contains("color:") {
+            items[index]["style"] = json!(format!("{style}color:#000000;"));
+        }
     }
     Ok(())
 }
@@ -950,6 +1299,83 @@ mod tests {
         );
         assert_eq!(slides["s2"]["items"][0]["fit"], "fill");
         assert_ne!(slides["s3"]["items"][0]["type"], "media");
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn rich_objects_keep_their_bounds_and_tables_warn() {
+        let files = archive(&[
+            (
+                "ppt/presentation.xml",
+                br#"<p:presentation xmlns:p="p" xmlns:q="r"><p:sldIdLst>
+                    <p:sldId id="256" q:id="rId1"/></p:sldIdLst>
+                    <p:sldSz cx="12192000" cy="6858000"/></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="o/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
+                    <p:sp>
+                        <p:spPr>
+                            <a:xfrm><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
+                            <a:prstGeom prst="roundRect"/>
+                            <a:solidFill><a:srgbClr val="00AA00"/></a:solidFill>
+                        </p:spPr>
+                        <p:txBody><a:p><a:r><a:t>Hello</a:t></a:r></a:p></p:txBody>
+                    </p:sp>
+                    <p:pic>
+                        <p:spPr>
+                            <a:xfrm><a:off x="0" y="3429000"/><a:ext cx="3048000" cy="1714500"/></a:xfrm>
+                        </p:spPr>
+                        <p:blipFill><a:blip r:embed="img"/></p:blipFill>
+                    </p:pic>
+                    <p:graphicFrame>
+                        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"/></a:graphic>
+                    </p:graphicFrame>
+                </p:spTree></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                br#"<Relationships><Relationship Id="img" Type="o/image" Target="../media/sky.png"/></Relationships>"#,
+            ),
+            (
+                "ppt/media/sky.png",
+                include_bytes!("../../tests/fixtures/lesson-cover.png"),
+            ),
+        ]);
+        let path = std::env::temp_dir().join(crate::new_id());
+        std::fs::create_dir_all(&path).unwrap();
+        let show = import("Objects.pptx", &files, Some(&path)).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0]["style"].as_str().unwrap().contains("left:144px"));
+        assert!(items[0]["style"].as_str().unwrap().contains("top:108px"));
+        assert!(
+            items[0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("border-radius:")
+        );
+        assert!(
+            items[0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("background:#00AA00")
+        );
+        assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Hello");
+        assert_eq!(items[1]["type"], "media");
+        assert!(items[1]["style"].as_str().unwrap().contains("left:0px"));
+        assert!(Path::new(items[1]["src"].as_str().unwrap()).starts_with(&path));
+        let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().unwrap().contains("tables and charts")),
+            "{warnings:?}"
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 
