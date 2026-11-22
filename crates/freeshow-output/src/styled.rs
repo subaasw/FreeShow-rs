@@ -26,6 +26,7 @@ pub struct BoxStyle {
     pub color: Rgba,
     pub background: Option<Rgba>,
     pub elliptical_background: bool,
+    fill_polygon: Vec<[f32; 2]>,
     pub font_px: f32,
     pub align: Align,
     pub font_family: String,
@@ -159,6 +160,7 @@ impl Default for BoxStyle {
             color: Rgba::WHITE,
             background: None,
             elliptical_background: false,
+            fill_polygon: Vec::new(),
             font_px: 100.0,
             align: Align::Center,
             font_family: String::new(),
@@ -391,6 +393,9 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 }
             }
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
+            "--shape-fill-polygon" => {
+                style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
+            }
             "--pptx-rectangular-focus" => {
                 style.pptx_rectangular_focus = parse_rectangular_focus(value)
             }
@@ -3436,7 +3441,15 @@ fn fill_item_background(
     let Some(background) = style.background else {
         return;
     };
-    if style.elliptical_background {
+    if !style.fill_polygon.is_empty() {
+        fill_polygon(
+            pixels,
+            slide,
+            text::Clip { x, y, w, h },
+            &style.fill_polygon,
+            background,
+        );
+    } else if style.elliptical_background {
         let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
         for py in y0..y1 {
             for px in x0..x1 {
@@ -3449,6 +3462,64 @@ fn fill_item_background(
         fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
     } else {
         fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
+    }
+}
+
+fn parse_fill_polygon(value: &str) -> Option<Vec<[f32; 2]>> {
+    let mut vertices = Vec::new();
+    for pair in value.split(',') {
+        let mut coords = pair.split_whitespace();
+        let x = coords.next()?.parse::<f32>().ok()?;
+        let y = coords.next()?.parse::<f32>().ok()?;
+        if coords.next().is_some()
+            || !(0.0..=1.0).contains(&x)
+            || !(0.0..=1.0).contains(&y)
+            || vertices.len() == 128
+        {
+            return None;
+        }
+        vertices.push([x, y]);
+    }
+    (vertices.len() >= 3).then_some(vertices)
+}
+
+fn fill_polygon(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    bounds: text::Clip,
+    vertices: &[[f32; 2]],
+    color: Rgba,
+) {
+    let text::Clip { x, y, w, h } = bounds;
+    let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
+    let mut crossings = Vec::with_capacity(vertices.len());
+    let edges = vertices.iter().zip(vertices.iter().cycle().skip(1));
+    let edge_to_pixel = |edge: f32| (x as f32 + edge * w as f32 - 0.5).ceil() as i32;
+    for py in y0..y1 {
+        let scan_y = (py as f32 + 0.5 - y as f32) / h as f32;
+        crossings.clear();
+        for (&[ax, ay], &[bx, by]) in edges.clone() {
+            // Treat each edge's vertical extent as half-open to count shared crossings once.
+            if (ay > scan_y) != (by > scan_y) {
+                let t = (scan_y - ay) / (by - ay);
+                crossings.push(ax + (bx - ax) * t);
+            }
+        }
+        crossings.sort_unstable_by(f32::total_cmp);
+        for &[left, right] in crossings.as_chunks::<2>().0 {
+            let start = edge_to_pixel(left).max(x0);
+            let end = edge_to_pixel(right).min(x1);
+            fill_rect(
+                pixels,
+                slide.output_width,
+                slide.output_height,
+                start,
+                py,
+                end.saturating_sub(start),
+                1,
+                color,
+            );
+        }
     }
 }
 
@@ -3693,6 +3764,39 @@ mod tests {
         assert_eq!(frame.pixel(60, 30), Rgba::BLACK);
         assert_eq!(frame.pixel(0, 30), parse_color("#800000").unwrap());
         assert_eq!(frame.pixel(40, 30), parse_color("#800000").unwrap());
+    }
+
+    #[test]
+    fn polygon_fill_leaves_exposed_corners_and_rotates_with_its_item() {
+        let style = "left:20px;top:20px;width:60px;height:40px;background-color:#ff000080;--shape-fill-polygon:0.5 0,1 1,0 1;";
+        let mut slide = style_slide(style);
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = Rgba::TRANSPARENT;
+        let red = parse_color("#ff000080").unwrap();
+        let fill = render_styled(&slide);
+        assert_eq!(fill.pixel(22, 22), Rgba::TRANSPARENT);
+        assert_eq!(fill.pixel(22, 58), red);
+        assert_eq!(fill.pixel(50, 27), red);
+
+        slide.items[0].style = format!("{style}transform:rotate(90deg);");
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(68, 13), Rgba::TRANSPARENT);
+        assert_eq!(frame.pixel(31, 13), red);
+
+        slide.items[0].style = style.into();
+        let text = shadow_slide("font-size:24px;color:#ffffff;")
+            .items
+            .pop()
+            .unwrap();
+        slide.items[0].align = text.align;
+        slide.items[0].lines = text.lines;
+        let frame = render_styled(&slide);
+        assert!((23..38).any(|x| (23..38).any(|y| {
+            fill.pixel(x, y) == Rgba::TRANSPARENT && frame.pixel(x, y) == Rgba::WHITE
+        })));
     }
 
     fn sample() -> StyledSlide {
