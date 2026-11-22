@@ -319,6 +319,7 @@ export component InspectorPanel inherits VerticalLayout {
     in property <InspectorData> data;
     in property <color> text-color;
     callback set(string, string);
+    // Two fields per row so the boxes fit the narrow editor column without clipping.
     spacing: 6px;
     HorizontalLayout {
         spacing: 6px;
@@ -337,6 +338,9 @@ export component InspectorPanel inherits VerticalLayout {
             value: root.data.font-px;
             edited(value) => { root.set("font-size", value); }
         }
+    }
+    HorizontalLayout {
+        spacing: 6px;
         CheckBox {
             text: "Bold";
             enabled: root.data.has-item;
@@ -349,17 +353,6 @@ export component InspectorPanel inherits VerticalLayout {
             checked: root.data.italic;
             toggled => { root.set("italic", Fmt.flag(self.checked)); }
         }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Color"; text-color: root.text-color; min-width: 48px; }
-        LineEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            text: root.data.color;
-            placeholder-text: "#FFFFFF";
-            accepted(value) => { root.set("color", value); }
-        }
         FieldLabel { text: "Align"; text-color: root.text-color; min-width: 40px; }
         ComboBox {
             horizontal-stretch: 1;
@@ -371,18 +364,15 @@ export component InspectorPanel inherits VerticalLayout {
     }
     HorizontalLayout {
         spacing: 6px;
-        FieldLabel { text: "X"; text-color: root.text-color; min-width: 16px; }
-        SpinBox { enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.x; edited(value) => { root.set("left", value); } }
-        FieldLabel { text: "Y"; text-color: root.text-color; min-width: 16px; }
-        SpinBox { enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.y; edited(value) => { root.set("top", value); } }
-        FieldLabel { text: "W"; text-color: root.text-color; min-width: 16px; }
-        SpinBox { enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.w; edited(value) => { root.set("width", value); } }
-        FieldLabel { text: "H"; text-color: root.text-color; min-width: 16px; }
-        SpinBox { enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.h; edited(value) => { root.set("height", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Background"; text-color: root.text-color; min-width: 72px; }
+        FieldLabel { text: "Color"; text-color: root.text-color; min-width: 48px; }
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            text: root.data.color;
+            placeholder-text: "#FFFFFF";
+            accepted(value) => { root.set("color", value); }
+        }
+        FieldLabel { text: "Fill"; text-color: root.text-color; min-width: 32px; }
         LineEdit {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
@@ -390,8 +380,26 @@ export component InspectorPanel inherits VerticalLayout {
             placeholder-text: "none";
             accepted(value) => { root.set("background-color", value); }
         }
-        FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 44px; }
-        SpinBox { enabled: root.data.has-item; minimum: 0; maximum: 2000; value: root.data.radius; edited(value) => { root.set("border-radius", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "X"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.x; edited(value) => { root.set("left", value); } }
+        FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.y; edited(value) => { root.set("top", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Width"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.w; edited(value) => { root.set("width", value); } }
+        FieldLabel { text: "Height"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.h; edited(value) => { root.set("height", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 2000; value: root.data.radius; edited(value) => { root.set("border-radius", value); } }
+        Rectangle { horizontal-stretch: 1; }
     }
 }
 
