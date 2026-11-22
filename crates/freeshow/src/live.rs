@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::session::Session;
@@ -654,9 +655,33 @@ fn font_size_px(style: &str) -> Option<u32> {
 }
 
 pub(crate) fn load_image(root: Option<&Path>, src: &str) -> Option<Raster> {
-    let path = resolve_media(root, src)?;
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = if freeshow_media::is_remote_url(src) {
+        fetch_remote_image(src)?
+    } else {
+        std::fs::read(resolve_media(root, src)?).ok()?
+    };
     decode_image(&bytes)
+}
+
+fn fetch_remote_image(url: &str) -> Option<Vec<u8>> {
+    if !freeshow_media::is_remote_url(url) {
+        return None;
+    }
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .ok()?;
+    if !(200..300).contains(&response.status()) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= LIMIT && !bytes.is_empty()).then_some(bytes)
 }
 
 pub(crate) fn resolve_media(root: Option<&Path>, src: &str) -> Option<PathBuf> {
@@ -738,6 +763,32 @@ fn lines_frame(lines: &[String], over_media: bool) -> Frame {
 mod tests {
     use super::*;
     use freeshow_data::Catalog;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn an_http_still_is_decoded_from_a_remote_url() {
+        let png = include_bytes!("../../freeshow-data/tests/fixtures/lesson-cover.png");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    png.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(png);
+            }
+        });
+        let url = format!("http://{addr}/sky.png");
+        let image = load_image(None, &url).expect("remote still");
+        assert!(image.width > 0 && image.height > 0);
+        let _ = server.join();
+    }
 
     #[test]
     fn imported_propresenter_box_paints_at_its_original_resolution() {
