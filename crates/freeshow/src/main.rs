@@ -453,6 +453,16 @@ thread_local! {
 
 fn refresh(ui: &ControlWindow, session: &Session) {
     STAGE_DIRTY.set(true);
+    // A shortcut or remote command can open the next project item in another drawer tab.
+    if ui.get_active_tab().as_str() != session.tab {
+        ui.set_active_tab(session.tab.clone().into());
+        if let Some((_, label, _)) = lang::drawer_tabs(session.preferences.language.as_deref())
+            .into_iter()
+            .find(|(id, _, _)| *id == session.tab)
+        {
+            ui.set_panel_title(label.into());
+        }
+    }
     ui.set_drawer_rows(drawer_rows(session));
     ui.set_slide_cards(slide_cards(session));
     ui.set_slides_columns(session.slides_list_columns() as i32);
