@@ -223,7 +223,10 @@ pub fn stage_frame(session: &Session) -> Frame {
         .stage
         .items
         .iter()
-        .filter(|item| item.kind == freeshow_data::StageItemKind::Media)
+        .filter(|item| {
+            item.kind == freeshow_data::StageItemKind::Media
+                || item.kind == freeshow_data::StageItemKind::Web
+        })
         .filter_map(|item| item.src.as_deref())
         .chain(still_backgrounds.values().map(String::as_str));
     let mut media = session.stage_media.borrow_mut();

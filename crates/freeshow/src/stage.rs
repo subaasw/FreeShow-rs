@@ -191,6 +191,34 @@ pub fn paint_stage(
                         .device_name
                         .as_deref()
                         .and_then(|name| context.media?.camera(name)),
+                    StageItemKind::Web => item
+                        .src
+                        .as_deref()
+                        .and_then(|src| context.media?.picture(src))
+                        .or_else(|| {
+                            item.url
+                                .as_deref()
+                                .filter(|url| !url.is_empty())
+                                .map(|url| freeshow_output::web_preview(url, 800, 450))
+                        }),
+                    StageItemKind::Chart => item.chart.as_ref().and_then(|chart| {
+                        let points: Vec<_> = chart
+                            .samples()
+                            .into_iter()
+                            .map(|sample| freeshow_output::ChartPoint {
+                                label: sample.label,
+                                value: sample.value,
+                                color: sample.color,
+                            })
+                            .collect();
+                        freeshow_output::chart_image(
+                            &chart.kind,
+                            &points,
+                            chart.hole_size,
+                            800,
+                            480,
+                        )
+                    }),
                     StageItemKind::QrCode => {
                         fit = Fit::Contain;
                         item.qr.as_ref().and_then(|qr| {
@@ -216,6 +244,14 @@ pub fn paint_stage(
                 lines.clear();
             } else if image.is_none() && item.kind == StageItemKind::Media {
                 lines = vec![media_label(item)];
+            } else if image.is_none() && item.kind == StageItemKind::Web {
+                lines = vec![web_label(item)];
+            } else if image.is_none() && item.kind == StageItemKind::Chart {
+                lines = vec![if item.label.is_empty() {
+                    "Chart".into()
+                } else {
+                    item.label.clone()
+                }];
             }
             if lines.iter().all(|line| line.is_empty()) && image.is_none() {
                 return None;
@@ -320,7 +356,11 @@ fn lines_for(
             .map(|value| vec![value])
             .unwrap_or_default(),
         StageItemKind::SlideTracker => tracker_text(slides, index),
-        StageItemKind::Media | StageItemKind::QrCode | StageItemKind::CurrentOutput => Vec::new(),
+        StageItemKind::Media
+        | StageItemKind::QrCode
+        | StageItemKind::CurrentOutput
+        | StageItemKind::Chart
+        | StageItemKind::Web => Vec::new(),
         StageItemKind::Camera | StageItemKind::Custom => vec![if !item.label.is_empty() {
             item.label.clone()
         } else if let Some(name) = item.device_name.as_deref().filter(|name| !name.is_empty()) {
@@ -422,6 +462,20 @@ fn media_label(item: &StageItemSpec) -> String {
         .to_string()
 }
 
+fn web_label(item: &StageItemSpec) -> String {
+    if !item.label.is_empty() {
+        return item.label.clone();
+    }
+    if let Some(url) = item.url.as_deref().filter(|url| !url.is_empty()) {
+        return freeshow_output::display_url(url);
+    }
+    if item.id.is_empty() {
+        "Web".into()
+    } else {
+        item.id.clone()
+    }
+}
+
 fn clock_text(clock: &str, options: &StageClockOptions, twelve_hour: bool) -> String {
     let mut text = freeshow_data::format_clock(clock, twelve_hour, options.seconds);
     let date = format_date(&options.date_format, &chrono::Local::now());
@@ -489,6 +543,8 @@ mod tests {
             flip_x: false,
             flip_y: false,
             qr: None,
+            url: None,
+            chart: None,
             clock: StageClockOptions::default(),
         }
     }
@@ -572,6 +628,8 @@ mod tests {
             (spec(StageItemKind::Custom), vec!["Web".to_string()]),
             (unlabeled, vec!["web".to_string()]),
             (camera, vec!["PTZ Front".to_string()]),
+            (spec(StageItemKind::Web), Vec::new()),
+            (spec(StageItemKind::Chart), Vec::new()),
         ];
         for (item, expected) in cases {
             assert_eq!(
@@ -741,6 +799,57 @@ mod tests {
             .filter(|px| px.iter().any(|b| *b > 0))
             .count();
         assert!(lit > red, "missing camera should keep a label");
+    }
+
+    #[test]
+    fn web_and_chart_boxes_are_painted() {
+        let slides = vec![StageSlide {
+            text_boxes: vec![vec!["line".into()]],
+            notes: String::new(),
+        }];
+        let mut web = spec(StageItemKind::Web);
+        web.label = String::new();
+        web.url = Some("https://www.example.com/lyrics".into());
+        web.style = "left:0px;top:0px;width:500px;height:300px;".into();
+        let mut chart = spec(StageItemKind::Chart);
+        chart.label = String::new();
+        chart.chart = Some(freeshow_data::ChartItem {
+            kind: "bar".into(),
+            data: "A: 10\nB: 20".into(),
+            hole_size: 0,
+        });
+        chart.style = "left:520px;top:0px;width:500px;height:300px;".into();
+        let mut empty = spec(StageItemKind::Chart);
+        empty.label = String::new();
+        empty.style =
+            "left:0px;top:320px;width:400px;height:80px;color:#ffffff;font-size:36px;".into();
+        let layout = StageLayout {
+            name: "Boxes".into(),
+            background: "#000000".into(),
+            items: vec![web, chart, empty],
+        };
+        let frame = paint_stage(
+            &slides,
+            Some(0),
+            &layout,
+            "12:00:00",
+            "05:00",
+            &StageContext::default(),
+        );
+        let lit = frame
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| px.iter().any(|byte| *byte > 0))
+            .count();
+        assert!(lit > 1_000, "web and chart pixels={lit}");
+        // Empty chart data still shows a "Chart" label.
+        assert!(
+            frame
+                .pixels
+                .chunks_exact(4)
+                .any(|px| px[0] > 200 && px[1] > 200 && px[2] > 200),
+            "empty chart should keep a label"
+        );
     }
 
     #[test]

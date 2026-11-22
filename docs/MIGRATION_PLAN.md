@@ -167,7 +167,7 @@ Acceptance: a volunteer can open their existing library, recognize the theme and
 
 - [x] System fonts beyond DejaVu / optional Arial: use the item's `font-family` through fontconfig (`fc-match`) on Unix, then a scan of the DirectWrite and Core Text font folders, with bundled DejaVu Sans as the last fallback.
 - Remaining typography and effects called out as partial in `PARITY.md` (filters and blends on stills are started; keep going from the highest-impact gaps).
-- Live camera, web, and chart boxes on the native stage (today: labeled placeholders). Camera should use the saved `device` name/type against `freeshow-media` discovery.
+- [x] Live camera, web, and chart boxes on the native stage. Camera uses the saved `device` name against `freeshow-media` discovery and shows a label when that device is missing. Web boxes show a stored still or a URL preview card (no embedded browser). Chart boxes paint bar, line, and pie/doughnut charts from stored `chart` data.
 - Current Output / local stage video already work; do not regress them.
 
 Acceptance: a `stage.json` from Electron renders every box type the Sunday operator actually uses, including a named camera, without falling back to a label unless the device is missing.
@@ -215,4 +215,4 @@ Acceptance: a machine without a Rust toolchain can install a signed (or document
 
 1. Finish M1 quality CI and the workspace rustfmt commit.
 2. Start M2 with the unread remainder of `settings.json` and drawer media thumbnails — the highest Sunday-operator impact that is still marked partial.
-3. Then M3 camera stage sources, reusing the device fields already stored on `StageItemSpec`.
+3. M3 camera, web, and chart stage boxes are in place; continue with remaining typography and effects called out as partial in `PARITY.md`.

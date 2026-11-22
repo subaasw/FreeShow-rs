@@ -19,7 +19,8 @@ pub use media_library::{
     MediaEntry, MediaEntryKind, image_dimensions, media_duration, media_entry_kind,
 };
 pub use stage_layout::{
-    QrItem, StageClockOptions, StageItemKind, StageItemSpec, StageLayout, default_stage,
+    ChartItem, ChartSample, QrItem, StageClockOptions, StageItemKind, StageItemSpec, StageLayout,
+    default_stage,
 };
 
 /// FreeShow `settings.json` text transition. `kind` is the stored type

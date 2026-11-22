@@ -26,6 +26,10 @@ pub enum StageItemKind {
     Camera,
     CurrentOutput,
     QrCode,
+    /// A web page preview; a live browser is not embedded.
+    Web,
+    /// A bar, line, or pie chart from stored `chart` data.
+    Chart,
     /// A FreeShow item this app does not draw yet, shown as its label.
     Custom,
 }
@@ -76,6 +80,114 @@ impl QrItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChartItem {
+    pub kind: String,
+    pub data: String,
+    pub hole_size: u8,
+}
+
+impl ChartItem {
+    pub fn parse(item: &Value) -> Option<Self> {
+        let data = item.get("chart")?;
+        let kind = data
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("bar")
+            .to_owned();
+        let chart_data = data
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if kind.is_empty() && chart_data.is_empty() {
+            return None;
+        }
+        let hole_size = data
+            .get("holeSize")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(100) as u8;
+        Some(Self {
+            kind: if kind.is_empty() { "bar".into() } else { kind },
+            data: chart_data,
+            hole_size,
+        })
+    }
+
+    pub fn samples(&self) -> Vec<ChartSample> {
+        parse_chart_data(&self.data)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartSample {
+    pub label: String,
+    pub value: f64,
+    pub color: String,
+}
+
+fn parse_chart_data(data: &str) -> Vec<ChartSample> {
+    let grid = parse_chart_grid(data);
+    let has_header = grid.first().is_some_and(|row| {
+        row.first()
+            .is_some_and(|label| label.eq_ignore_ascii_case("label"))
+            && row
+                .get(1)
+                .is_some_and(|value| parse_chart_value(value).is_none())
+    });
+    let start = if has_header { 1 } else { 0 };
+    grid[start..]
+        .iter()
+        .map(|row| {
+            let label = row.first().cloned().unwrap_or_default();
+            let value = row
+                .get(1)
+                .and_then(|cell| parse_chart_value(cell))
+                .unwrap_or(0.0);
+            let color = row.get(2).cloned().unwrap_or_default();
+            ChartSample {
+                label,
+                value,
+                color,
+            }
+        })
+        .collect()
+}
+
+fn parse_chart_grid(data: &str) -> Vec<Vec<String>> {
+    if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(data) {
+        return rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| match cell {
+                        Value::String(text) => text,
+                        Value::Number(number) => number.to_string(),
+                        other => other.to_string(),
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+    data.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            if let Some((label, value)) = line.split_once(':') {
+                vec![label.trim().to_string(), value.trim().to_string()]
+            } else {
+                vec![line.trim().to_string(), "0".into()]
+            }
+        })
+        .collect()
+}
+
+fn parse_chart_value(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let text = text.strip_suffix('%').unwrap_or(text).trim();
+    text.parse().ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageItemSpec {
     pub kind: StageItemKind,
     /// The key this item has in `stage.json`.
@@ -106,6 +218,8 @@ pub struct StageItemSpec {
     pub flip_x: bool,
     pub flip_y: bool,
     pub qr: Option<QrItem>,
+    pub url: Option<String>,
+    pub chart: Option<ChartItem>,
     pub clock: StageClockOptions,
 }
 
@@ -299,6 +413,8 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
             flip_x: item_value["flipped"].as_bool() == Some(true),
             flip_y: item_value["flippedY"].as_bool() == Some(true),
             qr: QrItem::parse(item_value),
+            url: web_url(item_value),
+            chart: ChartItem::parse(item_value),
             clock: StageClockOptions {
                 seconds: item_value
                     .pointer("/clock/seconds")
@@ -330,6 +446,27 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
     })
 }
 
+fn web_url(item: &Value) -> Option<String> {
+    for pointer in ["/web/src", "/web/url", "/url"] {
+        if let Some(url) = item
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+        {
+            return Some(url.to_string());
+        }
+    }
+    item.get("src")
+        .and_then(Value::as_str)
+        .filter(|src| !src.is_empty() && looks_like_url(src))
+        .map(str::to_string)
+}
+
+fn looks_like_url(text: &str) -> bool {
+    let text = text.trim();
+    text.contains("://") || text.starts_with("www.")
+}
+
 fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>) -> StageItemSpec {
     StageItemSpec {
         kind,
@@ -354,6 +491,8 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         flip_x: false,
         flip_y: false,
         qr: None,
+        url: None,
+        chart: None,
         clock: StageClockOptions::default(),
     }
 }
@@ -402,6 +541,8 @@ fn kind_of(id: &str, item: &Value) -> StageItemKind {
         "camera" => StageItemKind::Camera,
         "current_output" => StageItemKind::CurrentOutput,
         "qr_code" => StageItemKind::QrCode,
+        "web" => StageItemKind::Web,
+        "chart" => StageItemKind::Chart,
         "" => legacy_kind(&id),
         _ => StageItemKind::Custom,
     }
@@ -435,7 +576,7 @@ mod tests {
     #[test]
     fn parses_freeshow_stage_layout_and_falls_back() {
         let layout = parse_stage(
-            r##"{"default":{"name":"Main","disabled":false,"settings":{"color":"#101010"},"itemOrder":["textNext","textCurrent","notes","caption","var","timer","media","web"],"items":{"textCurrent":{"type":"slide_text","style":"left:1px;"},"textNext":{"type":"slide_text","slideOffset":1,"lineCount":2,"itemNumber":2,"invertItems":true,"style":"left:2px;"},"notes":{"type":"slide_notes","style":"left:3px;"},"caption":{"type":"text","label":"Welcome","style":"left:4px;","lines":[{"align":"","text":[{"value":"Hello "},{"value":"world"}]}]},"var":{"type":"variable","variable":{"id":"v1"},"style":"left:5px;"},"timer":{"type":"timer","timer":{"id":"sermon"},"style":"left:6px;"},"media":{"type":"media","src":"Media/bg.png","style":"left:7px;"},"web":{"type":"web","style":"left:8px;"},"hidden":{"type":"clock","enabled":false,"style":""}}}}"##,
+            r##"{"default":{"name":"Main","disabled":false,"settings":{"color":"#101010"},"itemOrder":["textNext","textCurrent","notes","caption","var","timer","media","web","chart"],"items":{"textCurrent":{"type":"slide_text","style":"left:1px;"},"textNext":{"type":"slide_text","slideOffset":1,"lineCount":2,"itemNumber":2,"invertItems":true,"style":"left:2px;"},"notes":{"type":"slide_notes","style":"left:3px;"},"caption":{"type":"text","label":"Welcome","style":"left:4px;","lines":[{"align":"","text":[{"value":"Hello "},{"value":"world"}]}]},"var":{"type":"variable","variable":{"id":"v1"},"style":"left:5px;"},"timer":{"type":"timer","timer":{"id":"sermon"},"style":"left:6px;"},"media":{"type":"media","src":"Media/bg.png","style":"left:7px;"},"web":{"type":"web","style":"left:8px;","web":{"src":"https://example.com/lyrics"}},"chart":{"type":"chart","style":"left:9px;","chart":{"type":"pie","data":"A: 10\nB: 20","holeSize":40}},"hidden":{"type":"clock","enabled":false,"style":""}}}}"##,
         )
         .unwrap();
         assert_eq!(layout.name, "Main");
@@ -455,7 +596,19 @@ mod tests {
         assert_eq!(layout.items[5].timer_id.as_deref(), Some("sermon"));
         assert_eq!(layout.items[6].kind, StageItemKind::Media);
         assert_eq!(layout.items[6].src.as_deref(), Some("Media/bg.png"));
-        assert_eq!(layout.items[7].kind, StageItemKind::Custom);
+        assert_eq!(layout.items[7].kind, StageItemKind::Web);
+        assert_eq!(
+            layout.items[7].url.as_deref(),
+            Some("https://example.com/lyrics")
+        );
+        assert_eq!(layout.items[8].kind, StageItemKind::Chart);
+        let chart = layout.items[8].chart.as_ref().expect("chart data");
+        assert_eq!(chart.kind, "pie");
+        assert_eq!(chart.hole_size, 40);
+        assert_eq!(chart.samples()[0].label, "A");
+        assert_eq!(chart.samples()[0].value, 10.0);
+        assert_eq!(chart.samples()[1].label, "B");
+        assert_eq!(chart.samples()[1].value, 20.0);
         assert_eq!(layout.items[7].id, "web");
         assert_eq!(layout.items[7].label, "");
         assert!(
@@ -521,5 +674,26 @@ mod tests {
         assert_eq!(layout.items[0].id, "cam");
         assert_eq!(layout.items[0].device_name.as_deref(), Some("PTZ Front"));
         assert_eq!(layout.items[0].device_type.as_deref(), Some("camera"));
+    }
+
+    #[test]
+    fn chart_data_parses_json_grids_and_labeled_lines() {
+        let json = ChartItem {
+            kind: "bar".into(),
+            data: r##"[["Label","Value","Color"],["A","10","#ff0000"],["B","20%"]]"##.into(),
+            hole_size: 0,
+        };
+        let samples = json.samples();
+        assert_eq!(samples[0].label, "A");
+        assert_eq!(samples[0].value, 10.0);
+        assert_eq!(samples[0].color, "#ff0000");
+        assert_eq!(samples[1].value, 20.0);
+        let lines = ChartItem {
+            kind: "bar".into(),
+            data: "One: 3\nTwo: 7".into(),
+            hole_size: 0,
+        };
+        assert_eq!(lines.samples()[0].label, "One");
+        assert_eq!(lines.samples()[1].value, 7.0);
     }
 }

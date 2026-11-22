@@ -4,9 +4,11 @@
 //! frames through wgpu. This crate stays headless so a known slide can be checked
 //! without a window.
 
+mod charts;
 mod styled;
 mod text;
 
+pub use charts::{ChartPoint, chart_image, display_url, web_preview};
 pub use styled::qr_image;
 pub use styled::{
     Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, SlideWay, StyledItem, StyledLine,
