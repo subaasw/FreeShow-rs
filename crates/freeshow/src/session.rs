@@ -723,6 +723,7 @@ impl Session {
                 Some(0)
             }
         });
+        self.load_timeline();
         self.apply_slide_actions();
         self.follow_started_show(0);
         self.follow_slide_jump(0);
@@ -1132,6 +1133,7 @@ impl Session {
         match self.tab.as_str() {
             "shows" => {
                 if index < self.shows.len() {
+                    let changed = self.show_index != Some(index);
                     self.show_index = Some(index);
                     self.slide_index = self.current_show().and_then(|show| {
                         if show.ordered_slides().is_empty() {
@@ -1140,6 +1142,9 @@ impl Session {
                             Some(0)
                         }
                     });
+                    if changed {
+                        self.load_timeline();
+                    }
                 }
                 DrawerAction::None
             }
@@ -1520,7 +1525,7 @@ impl Session {
     }
 
     pub fn start_timeline(&mut self) -> bool {
-        if self.timeline_cues.is_empty() {
+        if self.current_show().is_some() {
             self.load_timeline();
         }
         if self.timeline_cues.is_empty() {
@@ -1548,7 +1553,7 @@ impl Session {
         };
         let elapsed = now.saturating_duration_since(started).as_millis() as u64;
         let mut changed = false;
-        while self.timeline_fired < self.timeline_cues.len() {
+        while self.timeline_playing && self.timeline_fired < self.timeline_cues.len() {
             let cue = self.timeline_cues[self.timeline_fired].clone();
             if cue.time_ms > elapsed {
                 break;
@@ -1566,6 +1571,7 @@ impl Session {
         match cue.kind.to_ascii_lowercase().as_str() {
             "next" | "next_slide" | "go" => self.advance_show(),
             "previous" | "previous_slide" => self.retreat_show(),
+            "slide" => self.run_timeline_slide(cue),
             "overlay" => {
                 if let Some(id) = cue
                     .data
@@ -1586,6 +1592,35 @@ impl Session {
             }
             _ => false,
         }
+    }
+
+    fn run_timeline_slide(&mut self, cue: &TimelineCue) -> bool {
+        if self.preferences.out_locked() {
+            return false;
+        }
+        let Some(show) = self.current_show() else {
+            return false;
+        };
+        let (output_id, output_name) = self.audience();
+        let eligible = |index| show.can_output(index, &output_id, &output_name);
+        let numbered = cue.slide_index.filter(|&index| eligible(index));
+        let next = match cue.data.as_deref() {
+            Some(id) if show.show["slides"].get(id).is_some() => numbered
+                .filter(|&index| {
+                    show.ordered_slides()
+                        .get(index)
+                        .is_some_and(|slide| slide.id == id)
+                })
+                .or_else(|| show.output_index_for_slide(id, &output_id, &output_name)),
+            Some(index) => index.parse::<usize>().ok().filter(|&index| eligible(index)),
+            None => numbered,
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.tab = "shows".to_string();
+        self.select_slide(next);
+        true
     }
 
     /// Selects the first show and first slide and applies that slide.
@@ -6579,6 +6614,36 @@ Second line"
         assert!(functions.contains(&"Timeline".to_string()));
         assert!(functions.contains(&"Clear effects".to_string()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn imported_timeline_plays_the_recorded_arrangement_position() {
+        let mut show = ShowFile::blank("recording", "Recording");
+        let chorus = show.add_slide().unwrap();
+        show.add_slide().unwrap();
+        let mut arrangement = show.show["layouts"]["main"].clone();
+        arrangement["slides"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id":chorus}));
+        arrangement["timeline"]["actions"] = serde_json::json!([{
+            "time":1500.0,
+            "name":"Second chorus",
+            "type":"slide",
+            "data":{"id":chorus,"index":3}
+        }]);
+        show.show["layouts"]["arranged"] = arrangement;
+        show.show["origin"] = serde_json::json!("propresenter");
+        assert!(show.set_active_layout("arranged"));
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        assert!(session.present_show_id("recording"));
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        assert!(!session.tick_timeline(start + Duration::from_millis(1499)));
+        assert!(session.tick_timeline(start + Duration::from_millis(1500)));
+        assert_eq!(session.slide_index, Some(3));
+        assert!(!session.timeline_playing);
     }
 
     #[test]

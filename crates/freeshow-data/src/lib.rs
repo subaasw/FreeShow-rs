@@ -183,6 +183,7 @@ pub struct TimelineCue {
     pub name: String,
     pub kind: String,
     pub data: Option<String>,
+    pub slide_index: Option<usize>,
 }
 
 impl FreeShowPreferences {
@@ -5810,14 +5811,21 @@ pub fn player_videos_from(value: &Value) -> Vec<PlayerVideo> {
 
 /// Timeline cues stored on a show document.
 pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
-    let actions = show
+    let active = show
+        .pointer("/settings/activeLayout")
+        .and_then(Value::as_str)
+        .unwrap_or("main");
+    let top_level = show
         .get("timeline")
         .and_then(|timeline| timeline.get("actions"))
-        .and_then(Value::as_array)
-        .or_else(|| {
-            show.pointer("/layouts/main/timeline/actions")
-                .and_then(Value::as_array)
-        });
+        .and_then(Value::as_array);
+    let imported_ms = top_level.is_none() && show["origin"] == "propresenter";
+    let actions = top_level.or_else(|| {
+        show.get("layouts")?
+            .get(active)?
+            .pointer("/timeline/actions")?
+            .as_array()
+    });
     let Some(actions) = actions else {
         return Vec::new();
     };
@@ -5827,10 +5835,10 @@ pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
             .get("time")
             .and_then(Value::as_u64)
             .or_else(|| {
-                action
-                    .get("time")
-                    .and_then(json_f32)
-                    .map(|secs| (secs * 1000.0).round() as u64)
+                action.get("time").and_then(json_f32).map(|time| {
+                    // Earlier ProPresenter imports saved millisecond positions as JSON floats.
+                    (if imported_ms { time } else { time * 1000.0 }).round() as u64
+                })
             })
             .unwrap_or(0);
         let kind = action
@@ -5838,11 +5846,14 @@ pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
             .and_then(Value::as_str)
             .unwrap_or("action")
             .to_string();
+        let slide_index = (kind == "slide")
+            .then(|| action.pointer("/data/index").and_then(json_usize))
+            .flatten();
         let data = action
             .pointer("/data/id")
             .and_then(Value::as_str)
             .or_else(|| action.pointer("/data/path").and_then(Value::as_str))
-            .or_else(|| action.get("name").and_then(Value::as_str))
+            .or_else(|| (kind != "slide").then(|| action["name"].as_str()).flatten())
             .map(str::to_string)
             .or_else(|| {
                 action
@@ -5859,6 +5870,7 @@ pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
                 .to_string(),
             kind,
             data,
+            slide_index,
         });
     }
     cues.sort_by_key(|cue| cue.time_ms);
@@ -5912,6 +5924,7 @@ pub fn parse_timeline_text(text: &str) -> Vec<TimelineCue> {
             name: kind.to_string(),
             kind: kind.to_string(),
             data,
+            slide_index: None,
         });
     }
     cues.sort_by_key(|cue| cue.time_ms);
