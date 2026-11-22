@@ -116,6 +116,7 @@ pub(super) struct Cue {
 pub(super) enum CompletionTarget {
     None = 0,
     Next = 1,
+    First = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
