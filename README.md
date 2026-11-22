@@ -100,7 +100,7 @@ cargo build --locked --release -p freeshow
 python scripts/package-windows.py --gst C:\gstreamer\1.0\msvc_x86_64
 ```
 
-The unsigned setup executable installs to the current user's Programs folder and adds a Start menu shortcut. It carries the selected GStreamer DLLs, plugins, and scanner, the app-local Visual C++ runtime, source, notices, and provenance. The Windows CI gate runs the installer, checks H.264 decoding with a cold registry while the build SDK is hidden, and exercises uninstall. Native verification is pending.
+The unsigned setup executable installs to the current user's Programs folder and adds a Start menu shortcut. It carries the selected GStreamer DLLs, plugins, and scanner, the app-local Visual C++ runtime, source, notices, and provenance. Native Windows CI verified installation, H.264 decoding with a cold registry and the build SDK hidden, and uninstall.
 
 Headless diagnostics also work on a development binary:
 
