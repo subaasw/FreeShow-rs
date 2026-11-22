@@ -350,6 +350,46 @@ mod gst_player {
         }
     }
 
+    /// A still from about a second into the video, letterboxed to `width`×`height`, or
+    /// `None` when it cannot be decoded. Nothing plays; the pipeline only prerolls.
+    pub fn video_thumbnail(path: &Path, width: u32, height: u32) -> Option<Raster> {
+        gst::init().ok()?;
+        let uri = gst::glib::filename_to_uri(path, None).ok()?;
+        let pipeline = gst::parse::launch(&format!(
+            "uridecodebin uri=\"{uri}\" ! videoconvert ! videoscale add-borders=true ! \
+             video/x-raw,format=RGBA,width={width},height={height},pixel-aspect-ratio=1/1 ! \
+             appsink name=sink sync=false max-buffers=1"
+        ))
+        .ok()?
+        .downcast::<gst::Pipeline>()
+        .ok()?;
+        let sink = pipeline.by_name("sink")?.downcast::<AppSink>().ok()?;
+        let wait = gst::ClockTime::from_seconds(3);
+        let still = (|| {
+            pipeline.set_state(gst::State::Paused).ok()?;
+            let (state, ..) = pipeline.state(wait);
+            state.ok()?;
+            // The very first frame is often black, so step a little in when the clip allows.
+            let long_enough = pipeline
+                .query_duration::<gst::ClockTime>()
+                .is_some_and(|duration| duration > gst::ClockTime::from_seconds(2));
+            if long_enough
+                && pipeline
+                    .seek_simple(
+                        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                        gst::ClockTime::from_seconds(1),
+                    )
+                    .is_ok()
+            {
+                let _ = pipeline.state(wait);
+            }
+            sink.try_pull_preroll(wait)
+                .and_then(VideoPlayer::sample_raster)
+        })();
+        let _ = pipeline.set_state(gst::State::Null);
+        still
+    }
+
     fn camera_devices() -> Result<Vec<gst::Device>, MediaError> {
         gst::init().map_err(video_error)?;
         let monitor = gst::DeviceMonitor::new();
@@ -901,6 +941,22 @@ mod gst_player {
         use super::*;
 
         #[test]
+        fn a_video_thumbnail_is_a_letterboxed_still() {
+            let dir = std::env::temp_dir().join(format!("freeshow-thumb-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let clip = dir.join("clip.mp4");
+            if crate::write_benchmark_video(&clip).is_err() {
+                // No H.264 encoder on this machine; nothing to decode.
+                return;
+            }
+            let still = video_thumbnail(&clip, 56, 40).expect("a still from the clip");
+            assert_eq!((still.width, still.height), (56, 40));
+            assert!(still.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
+            assert!(video_thumbnail(&dir.join("missing.mp4"), 56, 40).is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn secondary_preview_reads_the_preroll_before_playing() {
             gst::init().unwrap();
             let audio = AudioBranch::new_targets(Vec::new()).unwrap();
@@ -1231,7 +1287,13 @@ mod gst_player {
 }
 
 #[cfg(feature = "gst")]
-pub use gst_player::{VideoPlayer, cameras, video_output_devices};
+pub use gst_player::{VideoPlayer, cameras, video_output_devices, video_thumbnail};
+
+/// Without GStreamer there is no decoder, so videos keep their placeholder icon.
+#[cfg(not(feature = "gst"))]
+pub fn video_thumbnail(_path: &Path, _width: u32, _height: u32) -> Option<Raster> {
+    None
+}
 
 #[cfg(not(feature = "gst"))]
 pub struct VideoPlayer;

@@ -21,7 +21,7 @@ pub use dsp::{AudioEffect, apply_effects, effects_from_value};
 pub use stream::{
     first_http_url, resolve_playable_path, resolve_stream_page, ytdlp_available, ytdlp_path,
 };
-pub use video::{VideoPlayer, cameras, video_output_devices};
+pub use video::{VideoPlayer, cameras, video_output_devices, video_thumbnail};
 
 use std::path::Path;
 
