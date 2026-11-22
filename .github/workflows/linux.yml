@@ -42,27 +42,12 @@ jobs:
             target
           key: linux-ubuntu24-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: linux-ubuntu24-${{ hashFiles('Cargo.lock') }}-
-      - name: Test and package the native release
-        run: |
-          run_checked() {
-            log="$RUNNER_TEMP/$1.log"
-            shift
-            if "$@" > "$log" 2>&1; then
-              cat "$log"
-            else
-              cat "$log"
-              python3 - "$log" <<'PY'
-          import pathlib,sys
-          text=pathlib.Path(sys.argv[1]).read_text(errors='replace')[-9000:]
-          for start in range(0,len(text),2000):
-              chunk=text[start:start+2000]
-              print('::error::'+chunk.replace('%','%25').replace('\r','%0D').replace('\n','%0A'))
-          PY
-              return 1
-            fi
-          }
-          run_checked tests cargo test --locked --workspace
-          run_checked package scripts/package.sh
+      - name: Compile native workspace tests
+        run: bash scripts/ci-run.sh cargo test --locked --workspace --no-run
+      - name: Run native workspace tests
+        run: bash scripts/ci-run.sh timeout --kill-after=30s 12m cargo test --locked --workspace
+      - name: Build and verify the Linux archive
+        run: bash scripts/ci-run.sh scripts/package.sh
       - name: Verify after removing the system GStreamer runtime
         run: |
           sudo apt-get remove -y libgstreamer1.0-0 libgstreamer-plugins-base1.0-0
