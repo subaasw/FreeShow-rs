@@ -13,7 +13,7 @@ mod scripture;
 mod stage_layout;
 
 pub use stage_layout::{
-    StageClockOptions, StageItemKind, StageItemSpec, StageLayout, default_stage,
+    QrItem, StageClockOptions, StageItemKind, StageItemSpec, StageLayout, default_stage,
 };
 
 /// FreeShow `settings.json` text transition. `kind` is the stored type

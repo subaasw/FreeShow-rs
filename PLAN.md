@@ -84,8 +84,9 @@ main fader still controls the main channel.
 - [x] Layout switching from the stage window and from a slide action.
 
 Acceptance: a `stage.json` made by FreeShow renders all of its boxes without
-falling back to the four built-in types. Live video, camera, web, chart, and QR
-boxes render a labeled placeholder until the compositor grows those sources.
+falling back to the four built-in types. QR boxes render from their saved
+payload and colors. Live video, camera, web, and chart boxes render a labeled
+placeholder until the compositor grows those sources.
 
 ### M5. Installers and packaging
 

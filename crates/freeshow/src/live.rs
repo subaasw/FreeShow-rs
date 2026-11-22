@@ -306,6 +306,16 @@ fn styled_item(
                 .collect()
         })
         .unwrap_or_default();
+    let qr = item.get("type").and_then(|value| value.as_str()) == Some("qr_code");
+    let image = if qr {
+        freeshow_data::QrItem::parse(item).and_then(|qr| {
+            freeshow_output::qr_image(&qr.text, &qr.color, &qr.background)
+        })
+    } else {
+        item.get("src")
+            .and_then(|value| value.as_str())
+            .and_then(|src| load_image(root, src))
+    };
     StyledItem {
         style: item
             .get("style")
@@ -317,12 +327,13 @@ fn styled_item(
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .to_string(),
-        lines,
-        image: item
-            .get("src")
-            .and_then(|value| value.as_str())
-            .and_then(|src| load_image(root, src)),
-        fit: Fit::named(item.get("fit").and_then(|value| value.as_str()).unwrap_or("contain")),
+        lines: if qr { Vec::new() } else { lines },
+        image,
+        fit: if qr {
+            Fit::Contain
+        } else {
+            Fit::named(item.get("fit").and_then(|value| value.as_str()).unwrap_or("contain"))
+        },
         line_bg: item
             .pointer("/specialStyle/lineBg")
             .and_then(|value| value.as_str())
@@ -588,6 +599,47 @@ fn lines_frame(lines: &[String], over_media: bool) -> Frame {
 mod tests {
     use super::*;
     use freeshow_data::Catalog;
+
+    #[test]
+    fn stored_qr_items_render_the_same_square_on_audience_and_stage() {
+        let item = serde_json::json!({
+            "type": "qr_code",
+            "style": "left:0px;top:0px;width:320px;height:160px;",
+            "qr_code": {"text":"https://example.org", "color":"#c01054", "background":"#fff"}
+        });
+        let mut show = ShowFile::blank("qr", "QR");
+        show.show["slides"]["s1"]["items"] = serde_json::json!([item.clone()]);
+        let audience = frame_for_slide(&show, 0, None, false, None, true, None, &[]);
+
+        let temporary = std::env::temp_dir().join(freeshow_data::new_id());
+        let library = freeshow_data::Library::open(&temporary);
+        let stage_path = library.stage_path();
+        std::fs::create_dir_all(stage_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            stage_path,
+            serde_json::json!({"layout":{"items":{"code": item}}}).to_string(),
+        )
+        .unwrap();
+        let mut session = Session::empty();
+        session.stage = library.load_stage_layout();
+        std::fs::remove_dir_all(temporary).unwrap();
+        let stage = stage_frame(&session);
+
+        let foreground = parse_color("#c01054").unwrap();
+        let quiet_zone = parse_color("#fff").unwrap();
+        for frame in [&audience, &stage] {
+            assert_eq!(frame.pixel(40, 0), quiet_zone);
+            assert_eq!(frame.pixel(119, 79), quiet_zone);
+            assert_ne!(frame.pixel(39, 0), quiet_zone);
+            assert_ne!(frame.pixel(120, 79), quiet_zone);
+            assert_eq!(frame.pixel(52, 12), foreground);
+        }
+        for y in 0..80 {
+            for x in 40..120 {
+                assert_eq!(audience.pixel(x, y), stage.pixel(x, y));
+            }
+        }
+    }
 
     #[test]
     fn the_first_video_frame_fades_in_from_the_previous_picture() {

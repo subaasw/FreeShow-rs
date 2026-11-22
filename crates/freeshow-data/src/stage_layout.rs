@@ -22,6 +22,7 @@ pub enum StageItemKind {
     SlideTracker,
     /// A still image from the library.
     Media,
+    QrCode,
     /// A FreeShow item this app does not draw yet, shown as its label.
     Custom,
 }
@@ -44,6 +45,33 @@ impl Default for StageClockOptions {
     }
 }
 
+/// Content and colors shared by audience and stage QR items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QrItem {
+    pub text: String,
+    pub color: String,
+    pub background: String,
+}
+
+impl QrItem {
+    pub fn parse(item: &Value) -> Option<Self> {
+        let data = item.get("qr_code")?;
+        Some(Self {
+            text: data.get("text")?.as_str()?.to_owned(),
+            color: data
+                .get("color")
+                .and_then(Value::as_str)
+                .unwrap_or("#000000")
+                .into(),
+            background: data
+                .get("background")
+                .and_then(Value::as_str)
+                .unwrap_or("#FFFFFF")
+                .into(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageItemSpec {
     pub kind: StageItemKind,
@@ -63,6 +91,7 @@ pub struct StageItemSpec {
     pub timer_id: Option<String>,
     /// Media path for a `media` item.
     pub src: Option<String>,
+    pub qr: Option<QrItem>,
     pub clock: StageClockOptions,
 }
 
@@ -223,6 +252,7 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .and_then(Value::as_str)
                 .filter(|src| !src.is_empty())
                 .map(str::to_string),
+            qr: QrItem::parse(item_value),
             clock: StageClockOptions {
                 seconds: item_value
                     .pointer("/clock/seconds")
@@ -267,6 +297,7 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         variable_id: None,
         timer_id: None,
         src: None,
+        qr: None,
         clock: StageClockOptions::default(),
     }
 }
@@ -312,6 +343,7 @@ fn kind_of(id: &str, item: &Value) -> StageItemKind {
         "variable" => StageItemKind::Variable,
         "slide_tracker" => StageItemKind::SlideTracker,
         "media" => StageItemKind::Media,
+        "qr_code" => StageItemKind::QrCode,
         "" => legacy_kind(&id),
         _ => StageItemKind::Custom,
     }

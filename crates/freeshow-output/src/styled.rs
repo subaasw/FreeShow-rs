@@ -889,6 +889,51 @@ pub fn with_underlay(
     over(&image_frame(image, width, height), &slide)
 }
 
+/// Paint one pixel per QR module. The compositor scales the raster with
+/// nearest-neighbor sampling and keeps the four-module quiet zone.
+pub fn qr_image(text: &str, foreground: &str, background: &str) -> Option<Raster> {
+    use qrcode::{Color, EcLevel, QrCode};
+    if text.is_empty() {
+        return None;
+    }
+    let code = QrCode::new(text)
+        .or_else(|_| QrCode::with_error_correction_level(text, EcLevel::L))
+        .ok()?;
+    let dark = parse_color(foreground).unwrap_or(Rgba::BLACK);
+    let light = if background.is_empty() {
+        Rgba::TRANSPARENT
+    } else {
+        parse_color(background).unwrap_or(Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        })
+    };
+    let width = code.width();
+    let side = width + 8;
+    let modules = code.into_colors();
+    let mut rgba = Vec::with_capacity(side * side * 4);
+    for y in 0..side {
+        for x in 0..side {
+            let color = if (4..width + 4).contains(&x)
+                && (4..width + 4).contains(&y)
+                && modules[(y - 4) * width + x - 4] == Color::Dark
+            {
+                dark
+            } else {
+                light
+            };
+            rgba.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
+    }
+    Some(Raster {
+        width: side as u32,
+        height: side as u32,
+        rgba,
+    })
+}
+
 pub fn decode_image(bytes: &[u8]) -> Option<Raster> {
     let image = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (width, height) = image.dimensions();
