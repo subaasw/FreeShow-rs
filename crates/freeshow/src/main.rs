@@ -48,6 +48,31 @@ fn color_rgba(color: freeshow_core::Rgba) -> slint::Color {
     slint::Color::from_argb_u8(color.a, color.r, color.g, color.b)
 }
 
+/// The theme's text colour on `back`, or black or white when that text would be hard to read
+/// (some built-in themes, such as Papyrus, put dark text on a dark accent).
+fn readable_on(text: Rgb, back: Rgb) -> Rgb {
+    fn luminance(rgb: Rgb) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b)
+    }
+    let (a, b) = (luminance(text), luminance(back));
+    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+    if ratio >= 1.5 {
+        text
+    } else if b > 0.18 {
+        Rgb { r: 16, g: 16, b: 20 }
+    } else {
+        Rgb { r: 240, g: 240, b: 255 }
+    }
+}
+
 fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     let palette = &theme.palette;
     ui.set_primary(color(palette.primary));
@@ -56,7 +81,7 @@ fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     ui.set_primary_darkest(color(palette.primary_darkest));
     ui.set_text_color(color(palette.text));
     ui.set_accent(color(palette.secondary));
-    ui.set_accent_text(color(palette.secondary_text));
+    ui.set_accent_text(color(readable_on(palette.secondary_text, palette.secondary)));
     let primary = palette.primary;
     let luma = 0.2126 * f32::from(primary.r)
         + 0.7152 * f32::from(primary.g)
@@ -4099,4 +4124,29 @@ fn spawn_feed_worker() -> (
             }
         });
     (request_tx, result_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_text_stays_readable() {
+        let rgb = |r, g, b| Rgb { r, g, b };
+        // Papyrus: dark navy text on a dark navy accent becomes light.
+        assert_eq!(
+            readable_on(rgb(0x00, 0x02, 0x42), rgb(0x00, 0x03, 0x61)),
+            rgb(240, 240, 255)
+        );
+        // The default theme keeps its own text on green.
+        assert_eq!(
+            readable_on(rgb(0xf0, 0xf0, 0xff), rgb(0x2e, 0xcc, 0x71)),
+            rgb(0xf0, 0xf0, 0xff)
+        );
+        // Light text on a pale accent becomes dark.
+        assert_eq!(
+            readable_on(rgb(0xff, 0xff, 0xff), rgb(0xf8, 0xf8, 0xf0)),
+            rgb(16, 16, 20)
+        );
+    }
 }
