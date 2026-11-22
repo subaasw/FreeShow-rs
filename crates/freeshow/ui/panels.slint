@@ -202,13 +202,11 @@ export component SettingsPanel inherits Rectangle {
                         }
                         Switch {
                             text: "Always on top";
-                            enabled: root.data.output-name != "";
                             checked: root.data.output-always-on-top;
                             toggled => { root.apply("outputAlwaysOnTop", Fmt.flag(self.checked)); }
                         }
                         Switch {
                             text: "Kiosk (fullscreen)";
-                            enabled: root.data.output-name != "";
                             checked: root.data.output-kiosk;
                             toggled => { root.apply("outputKiosk", Fmt.flag(self.checked)); }
                         }
