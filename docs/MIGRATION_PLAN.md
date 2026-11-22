@@ -2,8 +2,8 @@
 
 > Living plan for the native Rust rewrite of [FreeShow](https://freeshow.app/).
 > Upstream behavior reference: ChurchApps/FreeShow **1.6.8** (this review used `1.6.8-beta.5`).
-> Working status of individual features lives in [`PARITY.md`](../PARITY.md).
-> Short-term working notes live in [`PLAN.md`](../PLAN.md).
+> Working status of individual features lives in [`PARITY.md`](PARITY.md).
+> Milestone history and working method live in [`ROADMAP.md`](ROADMAP.md).
 
 **Goal:** A native, cross-platform presenter that opens an existing FreeShow library, edits a project, presents songs and scripture, runs a stage layout, plays media, and is controlled from the phone remote — with lower CPU, RAM, and startup cost than the Electron app, and without losing data written by that app.
 
@@ -74,7 +74,7 @@ Library folders use the same names as Electron: `Shows/`, `Config/` (`projects.j
 
 - Workspace: Cargo resolver 3, edition 2024, `rust-version = "1.92"`, release uses thin LTO, one codegen unit, and symbol stripping.
 - Tests: about 270 unit/integration tests plus a few ignored smoke tests (RTMP loopback, NDI SDK).
-- Existing CI (`.github/workflows/{linux,windows,release}.yml`) is packaging-heavy: it compiles and runs tests, then builds and verifies installers. It does **not** run `rustfmt` or `clippy`, and macOS unit tests are not on the default pull-request path (they sit in the three-platform release workflow).
+- Existing CI (`.github/workflows/{release,gate,package-*}.yml`) is packaging-heavy: it compiles and runs tests, then builds and verifies installers. It does **not** run `rustfmt` or `clippy`, and macOS unit tests are not on the default pull-request path (they sit in the three-platform release workflow).
 - `thiserror` is used in `freeshow-data`. Other crates still use ad-hoc error enums (`MediaError`, `SettingsError`). Standardize gradually; do not rewrite every crate at once.
 - `tokio` is used where it belongs (the remote/stage servers). The operator session stays synchronous and timer-driven so it can live on the Slint thread. Do not "tokio-ify" the app shell without a reason.
 
@@ -134,9 +134,9 @@ Work toward these with measurement, not premature micro-optimization. The compos
 
 ## 5. Milestones to feature parity
 
-Milestones 1–6 in the original [`PLAN.md`](../PLAN.md) are complete (library settings, remote password, audio routing, stage item types, installers, importer media with listed gaps). The work below starts from that baseline and runs to a Sunday-ready 1.0.
+Milestones 1–6 in [`ROADMAP.md`](ROADMAP.md) are complete (library settings, remote password, audio routing, stage item types, installers, importer media with listed gaps). The work below starts from that baseline and runs to a Sunday-ready 1.0.
 
-Each milestone should leave `cargo test --workspace` green, update `PARITY.md` and `README.md` in the same commits as behavior, and be small enough to review.
+Each milestone should leave `cargo test --workspace` green, update `PARITY.md` (and `USAGE.md` when behavior is user-visible) in the same commits as behavior, and be small enough to review.
 
 ### M1. Quality gates and a honest build — in progress
 
@@ -196,7 +196,7 @@ Acceptance: the fixtures in `crates/freeshow-data/tests/fixtures` plus a documen
 
 ### M6. Packaging, signing, and the real-app test pass
 
-- [x] Locked three-platform installer workflows in `.github/workflows/{linux,windows,release}.yml` build unsigned (or ad-hoc signed) Linux, Windows, and macOS packages. Each platform's native CI verifies its package. The combined `release.yml` workflow runs on version tags or `workflow_dispatch`.
+- [x] Locked three-platform installer workflows in `.github/workflows/{release,gate,package-*}.yml` build unsigned (or ad-hoc signed) Linux, Windows, and macOS packages. Each platform's native CI verifies its package. `release.yml` is the only entry point: `v*` tags or `workflow_dispatch` (see `RELEASING.md`).
 - [ ] Developer ID signing and notarization on macOS remain documented only (`notarytool` / `stapler`); they need the owner's Apple credentials and are not done in CI. Broader OS-version coverage is still open.
 - [x] Measure the §4 performance budgets with `--check-perf` / `scripts/bench-perf.py` on a release binary (Linux workspace box, 22 Nov 2026). Measuring the same budgets on packaged Windows and macOS apps still belongs on those hosts.
 - [x] A headless "real library" pass: `--check-library` writes or opens a Sunday-style library (song, welcome, project, media, scripture, stage layout), presents the song, walks the slides, fingerprints audience and stage frames, and GETs the remote and stage pages.
@@ -223,7 +223,7 @@ Acceptance: the remaining 1.6.8 presentation path works at the configured output
 
 - Small conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`), subjects around 50–72 characters, authored as the project owner. No commit trailers required.
 - Each commit leaves the workspace testable. Prefer `cargo fmt` on touched files; after M1 the whole tree should stay rustfmt-clean.
-- Update `PARITY.md` and `README.md` in the same commit as behavior, following the existing house style (plain, specific, no marketing).
+- Update `PARITY.md` and `USAGE.md` in the same commit as behavior, following the existing house style (plain, specific, no marketing).
 - When FreeShow behavior is ambiguous, read the Electron source in `../FreeShow-upstream` (or `../FreeShow`) rather than guessing.
 - Push to `main` with rebase, never force-push.
 - Do not use Cursor Cloud agents for this work; it continues on the local Linux workspace and, when needed, on the owner's machines for signed macOS/Windows verification.
