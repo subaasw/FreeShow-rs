@@ -19,6 +19,7 @@ mod panels;
 use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
 };
+pub use library_edit::ProjectPick;
 pub use panels::{AUTOSAVE_CHOICES, STAGE_ADD_KINDS};
 
 /// Network feeds due for a refresh: weather locations and RSS URLs.

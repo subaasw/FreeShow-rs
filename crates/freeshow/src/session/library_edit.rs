@@ -38,6 +38,19 @@ pub fn show_file_name(name: &str) -> String {
     }
 }
 
+/// What clicking a project item should do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectPick {
+    /// A show is open for editing and presenting; nothing went live.
+    Opened,
+    /// Play or show this drawer row, the same as clicking it in the drawer.
+    Drawer {
+        tab: &'static str,
+        label: &'static str,
+        index: usize,
+    },
+}
+
 /// Projects newest first, the order the project picker lists them.
 fn projects_newest_first(projects: &ProjectsFile) -> Vec<ProjectEntry> {
     let mut list = projects.projects();
@@ -215,6 +228,79 @@ impl Session {
             ));
         }
         Ok(message)
+    }
+
+    /// Opens the project item at `index`. A show opens without going live, as in
+    /// FreeShow; media and audio items resolve to their drawer row.
+    pub fn pick_project_item(&mut self, index: usize) -> Result<ProjectPick, String> {
+        let item = self
+            .current_project()
+            .and_then(|project| project.shows.get(index).cloned())
+            .ok_or("that project item no longer exists")?;
+        self.project_item = index;
+        let label = self
+            .project_labels()
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let missing = || format!("“{label}” is not in this library");
+        self.search_query.clear();
+        match item.kind.as_str() {
+            "show" | "" => {
+                let show = self
+                    .shows
+                    .iter()
+                    .position(|show| show.id == item.id)
+                    .ok_or_else(missing)?;
+                self.tab = "shows".to_string();
+                if self.show_index != Some(show) {
+                    self.show_index = Some(show);
+                    self.slide_index = self.shows[show].first_enabled_slide().or(Some(0));
+                    self.item_index = 0;
+                    self.load_timeline();
+                }
+                Ok(ProjectPick::Opened)
+            }
+            "image" | "video" => {
+                let wanted = std::path::Path::new(&item.id);
+                let real = self
+                    .media
+                    .iter()
+                    .position(|entry| entry.path == wanted || entry.name == item.id)
+                    .ok_or_else(missing)?;
+                self.tab = "media".to_string();
+                let index = self.visible_drawer_index(Some(real)).ok_or_else(missing)?;
+                Ok(ProjectPick::Drawer {
+                    tab: "media",
+                    label: "Media",
+                    index,
+                })
+            }
+            "audio" => {
+                let wanted = std::path::Path::new(&item.id)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| item.id.clone());
+                let real = self
+                    .audio
+                    .iter()
+                    .position(|name| {
+                        name == &item.id
+                            || std::path::Path::new(name)
+                                .file_name()
+                                .is_some_and(|file| file.to_string_lossy() == wanted)
+                    })
+                    .ok_or_else(missing)?;
+                self.tab = "audio".to_string();
+                let index = self.visible_drawer_index(Some(real)).ok_or_else(missing)?;
+                Ok(ProjectPick::Drawer {
+                    tab: "audio",
+                    label: "Audio",
+                    index,
+                })
+            }
+            other => Err(format!("open this {other} item from its drawer tab")),
+        }
     }
 
     /// Runs one operator library action and returns the status-bar message.
@@ -643,6 +729,25 @@ mod tests {
                 .import_files(std::slice::from_ref(&outside))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn clicking_a_project_show_opens_it_without_going_live() {
+        let (_dir, mut session) = library("pick");
+        assert!(session.create_project());
+        assert!(session.create_show());
+        session.library_action("show-text", "One\n\nTwo").unwrap();
+        assert!(session.create_show());
+        session.tab = "media".into();
+        assert_eq!(session.pick_project_item(0), Ok(ProjectPick::Opened));
+        assert_eq!(session.tab, "shows");
+        assert_eq!(session.show_name(), "Untitled");
+        assert_eq!(session.slide_index, Some(0));
+        assert!(
+            session.program_content.borrow().is_none(),
+            "nothing went live"
+        );
+        assert!(session.pick_project_item(5).is_err());
     }
 
     #[test]
