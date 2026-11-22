@@ -14,6 +14,7 @@ use crate::session::Session;
 const STILL_BUDGET_FPS: f64 = 60.0;
 const VIDEO_BUDGET_FPS: f64 = 30.0;
 const NEXT_BUDGET_MS: f64 = 16.0;
+const REMOTE_BUDGET_MS: f64 = 16.0;
 const OPEN_BUDGET_MS: f64 = 1500.0;
 const SCAN_1000_BUDGET_MS: f64 = 500.0;
 const RSS_BUDGET_MB: f64 = 150.0;
@@ -274,6 +275,20 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
     let _ = audience_frame(&session);
     let next_ms = next_started.elapsed().as_secs_f64() * 1000.0;
 
+    present_song(&mut session);
+    let mut snapshot = session.to_snapshot();
+    let remote_started = Instant::now();
+    let (_, commands) = freeshow_remote::handle_message(
+        &mut snapshot,
+        &serde_json::json!({ "channel": "API:next_slide", "data": null }),
+    );
+    for command in commands {
+        session.apply_remote(command);
+    }
+    let _ = audience_frame(&session);
+    let remote_ms = remote_started.elapsed().as_secs_f64() * 1000.0;
+    let remote_advanced = session.slide_index != Some(0);
+
     let scan = bench_thousand_shows()?;
 
     let report = json!({
@@ -291,6 +306,9 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
         "next_ms": next_ms,
         "next_budget_ms": NEXT_BUDGET_MS,
         "next_advanced": moved,
+        "remote_ms": remote_ms,
+        "remote_budget_ms": REMOTE_BUDGET_MS,
+        "remote_advanced": remote_advanced,
         "scan_1000_ms": scan,
         "scan_1000_budget_ms": SCAN_1000_BUDGET_MS,
         "shows": session.shows.len(),
@@ -313,6 +331,9 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
     }
     if next_ms > NEXT_BUDGET_MS {
         missed.push("go/next latency");
+    }
+    if remote_ms > REMOTE_BUDGET_MS {
+        missed.push("remote-button latency");
     }
     if scan > SCAN_1000_BUDGET_MS {
         missed.push("1000-show scan");

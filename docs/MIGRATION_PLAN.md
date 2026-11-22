@@ -125,7 +125,7 @@ On the Linux workspace box (22 Nov 2026, Asia/Katmandu), a release `freeshow --c
 | Audience with 1080p video underlay | ≥ 30 fps, no audio underruns | GStreamer decode stays off the UI thread. |
 | Go / Next to first output pixel (still slide) | ≤ 16 ms to start the fade | The operator's "did it go?" feeling. |
 | Open a library of 1,000 shows | ≤ 500 ms to a usable show list | Scanner should not parse every slide body until a show is opened (already a trimmed list in spirit; keep it). |
-| Remote button to output (LAN) | ≤ 20 ms until the fade starts | Phone remote is a real operator path. |
+| Remote button to output (LAN) | ≤ 16 ms until the fade starts | Phone remote is a real operator path. |
 | Relocatable Linux/macOS/Windows package | `app.asar`-equivalent runtime as small as practical; already far under a bundled Electron asar | Packaging stays a first-class concern. |
 
 Work toward these with measurement, not premature micro-optimization. The compositor is already a CPU painter; profile before moving hot paths to GPU compute. The first wins are still "don't copy frames twice" and "don't decode video on the UI thread" — both of which the architecture already aims at.
@@ -212,7 +212,7 @@ Close the remaining gaps versus FreeShow 1.6.8 so a Sunday operator can run a se
 - [x] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures. `outLocked` and `lockedOverlays` also take effect; drawer and similar chrome still use the stored objects in later M7 work.
 - [ ] Operator chrome, drawer, and output extras still listed as gaps. Header Search, `resized` panel widths, `splitLines`, `customFonts`, and the metronome/timecode footer are in; first-run guide, focus mode, timeline, draw tools, undo, and the shortcut editor remain.
 - [ ] Capture and I/O gaps. PDF, project-package, and screenshot export are in; OBS also reads library `obsData`. Hardware capture and cloud credentials remain.
-- [ ] Measure remote-button latency against the ≤20 ms budget.
+- [x] Measure remote-button latency against the ≤16 ms budget and include it in `--check-perf`. A release run on this box measured `remote_ms` 15.53 and `next_ms` 15.74 at 1920×1080.
 - Cloud providers (Canva, OnStage, Amazing Life) and AI speech-to-text come last, and only if they need no credentials; otherwise they stay documented.
 
 Acceptance: the remaining 1.6.8 presentation path works at the configured output size, the listed importers and settings keys are covered by tests, and remote Go/Next latency is measured. Credential-gated cloud and STT stay documented.
