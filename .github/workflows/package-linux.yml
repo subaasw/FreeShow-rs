@@ -1,12 +1,7 @@
-name: Linux release package
+name: Package (Linux)
 
+# Reusable: called only by release.yml (tag push or manual dispatch).
 on:
-  push:
-    branches: [main]
-    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/linux.yml']
-  pull_request:
-    paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/linux.yml']
-  workflow_dispatch:
   workflow_call:
 
 permissions:

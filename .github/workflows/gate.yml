@@ -1,9 +1,10 @@
-name: Quality
+name: Gate
 
+# fmt + clippy on all three platforms. Tests run inside each package job.
+# Runs only from release.yml or by hand (Actions -> Gate -> Run workflow).
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,7 +28,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy-test:
-    name: Clippy and tests (${{ matrix.name }})
+    name: Clippy (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
@@ -105,14 +106,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: python scripts/windows/ci-run.py cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test
-        if: runner.os != 'Windows'
-        run: bash scripts/ci-run.sh cargo test --workspace --locked
-      - name: Test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: python scripts/windows/ci-run.py --timeout 720 cargo test --locked --workspace
 
       - name: Save compilation cache
         if: always() && steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
