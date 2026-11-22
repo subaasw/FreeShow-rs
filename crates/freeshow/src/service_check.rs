@@ -306,6 +306,7 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
     let scan = bench_thousand_shows()?;
 
     let report = json!({
+        "checked_at": freeshow_core::local_timestamp(),
         "library": root,
         "output_width": session.output_width,
         "output_height": session.output_height,
@@ -453,6 +454,7 @@ pub fn check_library(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
     }
 
     let report = json!({
+        "checked_at": freeshow_core::local_timestamp(),
         "library": root,
         "shows": session.shows.iter().map(ShowFile::name).collect::<Vec<_>>(),
         "bibles": session.bibles.len(),
@@ -665,6 +667,7 @@ pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
 
     let sources = session.network_sources();
     let report = json!({
+        "checked_at": freeshow_core::local_timestamp(),
         "library": root,
         "shows": names,
         "imported_shows": imported_names,
