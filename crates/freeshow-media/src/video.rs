@@ -263,7 +263,16 @@ mod gst_player {
         }
 
         pub fn next_frame(&mut self) -> Option<Raster> {
-            if let Some(frame) = self.pull() {
+            self.poll_frame(gst::ClockTime::from_mseconds(40))
+        }
+
+        /// Poll a secondary preview without waiting on the caller's event loop.
+        pub fn try_next_frame(&mut self) -> Option<Raster> {
+            self.poll_frame(gst::ClockTime::ZERO)
+        }
+
+        fn poll_frame(&mut self, wait: gst::ClockTime) -> Option<Raster> {
+            if let Some(frame) = self.pull(wait) {
                 self.rewound.set(false);
                 return Some(frame);
             }
@@ -273,7 +282,7 @@ mod gst_player {
                 && self.seek_seconds(self.start.get())
             {
                 self.rewound.set(true);
-                return self.pull();
+                return self.pull(wait);
             }
             None
         }
@@ -283,10 +292,8 @@ mod gst_player {
             !self.looping.get() && self.sink.is_eos()
         }
 
-        fn pull(&mut self) -> Option<Raster> {
-            let sample = self
-                .sink
-                .try_pull_sample(gst::ClockTime::from_mseconds(40))?;
+        fn pull(&mut self, wait: gst::ClockTime) -> Option<Raster> {
+            let sample = self.sink.try_pull_sample(wait)?;
             let buffer = sample.buffer()?;
             let caps = sample.caps()?;
             let structure = caps.structure(0)?;
@@ -1096,6 +1103,10 @@ impl VideoPlayer {
     }
 
     pub fn next_frame(&mut self) -> Option<Raster> {
+        None
+    }
+
+    pub fn try_next_frame(&mut self) -> Option<Raster> {
         None
     }
 

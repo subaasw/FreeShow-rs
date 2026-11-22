@@ -20,7 +20,7 @@ pub enum StageItemKind {
     Variable,
     /// The current slide number out of the total.
     SlideTracker,
-    /// A still image from the library.
+    /// An image or video file from the library.
     Media,
     CurrentOutput,
     QrCode,
@@ -97,6 +97,10 @@ pub struct StageItemSpec {
     pub src: Option<String>,
     pub output_source: Option<String>,
     pub show_output_label: bool,
+    pub include_media: bool,
+    pub fit: Option<String>,
+    pub flip_x: bool,
+    pub flip_y: bool,
     pub qr: Option<QrItem>,
     pub clock: StageClockOptions,
 }
@@ -271,6 +275,15 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .map(str::to_string),
             show_output_label: item_value.pointer("/currentOutput/showLabel")
                 == Some(&Value::Bool(true)),
+            include_media: kind == StageItemKind::Slide
+                && if legacy {
+                    !id.contains("_text")
+                } else {
+                    item_value["includeMedia"].as_bool() == Some(true)
+                },
+            fit: item_value["fit"].as_str().map(str::to_owned),
+            flip_x: item_value["flipped"].as_bool() == Some(true),
+            flip_y: item_value["flippedY"].as_bool() == Some(true),
             qr: QrItem::parse(item_value),
             clock: StageClockOptions {
                 seconds: item_value
@@ -320,6 +333,10 @@ fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>
         src: None,
         output_source: None,
         show_output_label: false,
+        include_media: false,
+        fit: None,
+        flip_x: false,
+        flip_y: false,
         qr: None,
         clock: StageClockOptions::default(),
     }
