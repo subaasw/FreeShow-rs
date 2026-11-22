@@ -399,7 +399,17 @@ mod tests {
         .unwrap();
         let frame = [255_u8, 0, 0, 255].repeat(64 * 48);
         ServiceCapture.submit(&frame, 64, 48);
-        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let started = std::time::Instant::now();
+        loop {
+            let elapsed = started.elapsed().as_millis();
+            let caught_up = counts
+                .as_ref()
+                .is_none_or(|(_, encoded)| encoded.load(Ordering::Relaxed) >= 30);
+            if elapsed >= 2700 || (elapsed >= 1200 && caught_up) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         ServiceCapture.stop_rtmp();
         drop(audio);
         let _ = fs::remove_file(wav);

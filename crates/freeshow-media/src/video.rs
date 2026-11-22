@@ -277,6 +277,17 @@ mod gst_player {
             self.poll_frame(gst::ClockTime::ZERO)
         }
 
+        pub fn take_error(&self) -> Option<MediaError> {
+            let message = self
+                .pipeline
+                .bus()?
+                .pop_filtered(&[gst::MessageType::Error])?;
+            match message.view() {
+                gst::MessageView::Error(error) => Some(video_error(error.error())),
+                _ => None,
+            }
+        }
+
         fn poll_frame(&mut self, wait: gst::ClockTime) -> Option<Raster> {
             if let Some(frame) = self.pull(wait) {
                 self.rewound.set(false);
@@ -1220,6 +1231,10 @@ impl VideoPlayer {
     }
 
     pub fn try_next_frame(&mut self) -> Option<Raster> {
+        None
+    }
+
+    pub fn take_error(&self) -> Option<MediaError> {
         None
     }
 

@@ -589,16 +589,19 @@ mod tests {
         };
         #[cfg(windows)]
         let pid = {
-            let shell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-            let marker = marker.to_string_lossy().replace('\'', "''");
+            let copy = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join(r"System32\robocopy.exe");
+            let source = root.join("source folder");
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(source.join("started"), "ok").unwrap();
             relaunch(
-                &shell,
+                &copy,
                 &[
-                    "-NoProfile".into(),
-                    "-NonInteractive".into(),
-                    "-Command".into(),
-                    format!("[IO.File]::WriteAllText('{marker}', 'ok')"),
+                    source.to_string_lossy().into_owned(),
+                    root.to_string_lossy().into_owned(),
+                    "started".into(),
+                    "/R:0".into(),
+                    "/W:0".into(),
                 ],
             )
             .unwrap()
