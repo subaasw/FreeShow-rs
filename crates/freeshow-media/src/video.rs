@@ -43,7 +43,7 @@ mod gst_player {
             routes: &[SpeakerRoute],
             network: &[NetworkRoute],
         ) -> Result<Self, MediaError> {
-            let location = path.to_string_lossy().replace('"', "\\\"");
+            let location = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
             Self::from_launch_network(
                 &format!(
                     "filesrc location=\"{location}\" ! decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
@@ -1131,7 +1131,7 @@ mod tests {
         gst::init().expect("gstreamer");
         let path =
             std::env::temp_dir().join(format!("freeshow-rust-loop-{}.mkv", std::process::id()));
-        let location = path.to_string_lossy().replace('"', "");
+        let location = path.to_string_lossy().replace('\\', "\\\\").replace('"', "");
         let writer = gst::parse::launch(&format!(
             "videotestsrc num-buffers=3 pattern=red ! videoconvert ! avenc_mjpeg ! matroskamux ! filesink location=\"{location}\""
         ))
@@ -1183,7 +1183,7 @@ mod tests {
         gst::init().expect("gstreamer");
         let path =
             std::env::temp_dir().join(format!("freeshow-rust-mute-{}.wav", std::process::id()));
-        let location = path.to_string_lossy().replace('"', "");
+        let location = path.to_string_lossy().replace('\\', "\\\\").replace('"', "");
         let writer = gst::parse::launch(&format!(
             "audiotestsrc num-buffers=8 ! audioconvert ! wavenc ! filesink location=\"{location}\""
         ))

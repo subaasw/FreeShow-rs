@@ -71,7 +71,7 @@ scripts/package.sh x86_64-pc-windows-msvc
 scripts/package.sh x86_64-unknown-linux-gnu
 ```
 
-The extra arguments need that Rust target installed, plus a GStreamer development package for the platform. Windows currently produces a staged folder. Linux packaging produces a runtime archive. Ubuntu 24.04 x86-64 CI verified relocation, desktop installation and removal, and H.264 playback after removing system GStreamer.
+The extra arguments need that Rust target installed, plus a GStreamer development package for the platform. For the native Windows installer, use the PowerShell build below. Linux packaging produces a runtime archive. Ubuntu 24.04 x86-64 CI verified relocation, desktop installation and removal, and H.264 playback after removing system GStreamer.
 
 On a native Mac, the script also creates `FreeShow Rust.app` and a compressed `.dmg` with an Applications shortcut and SHA-256 checksum. Building needs Python 3.11+, Xcode command-line tools, and Homebrew GStreamer. The app bundles its linked libraries, selected GStreamer plugins, and plugin scanner, so the installed app needs neither Rust nor Homebrew. The optional NDI SDK remains a separate installation. Each app records its architecture and measured minimum macOS version in `Contents/Resources/BUILD.json`. Build on a host with dependencies compatible with the macOS versions you intend to support.
 
@@ -87,7 +87,16 @@ On a native Linux build host, `scripts/package.sh` also prepares a `.tar.gz` con
 
 Extract the Linux archive into a permanent folder, run `./AppRun` to launch directly, or `./install.sh` to add a per-user application-menu entry and `~/.local/bin/freeshow-rust`. `./install.sh --uninstall` removes that desktop integration and keeps your library. Moving the extracted folder later requires running its installer again. The desktop entry uses `/usr/bin/env` to launch the quoted application path, including folders containing a literal percent sign that GLib otherwise rejects during executable validation.
 
-The Linux verifier checks relocation into a path with spaces, quotes, percent signs and Unicode; plugin discovery and H.264 decoding with an empty home/cache; the actual desktop-entry parser; and desktop removal without deleting a library sentinel. Native CI also removes system GStreamer packages and repeats decoding, then uploads the archive, checksum and reports as a workflow artifact. Windows installers and the complete three-platform workflow are still pending.
+The Linux verifier checks relocation into a path with spaces, quotes, percent signs and Unicode; plugin discovery and H.264 decoding with an empty home/cache; the actual desktop-entry parser; and desktop removal without deleting a library sentinel. Native CI also removes system GStreamer packages and repeats decoding, then uploads the archive, checksum and reports as a workflow artifact. The complete three-platform workflow is still pending.
+
+On a native x64 Windows host, build the locked release with the MSVC GStreamer SDK, then run the installer packager. It needs Python 3.11+, Visual Studio with the x64 C++ tools and redistributable files, LLVM, and Inno Setup 6. The Windows workflow installs the pinned SDK and shows the build environment variables.
+
+```powershell
+cargo build --locked --release -p freeshow
+python scripts/package-windows.py --gst C:\gstreamer\1.0\msvc_x86_64
+```
+
+The unsigned setup executable installs to the current user's Programs folder and adds a Start menu shortcut. It carries the selected GStreamer DLLs, plugins, and scanner, the app-local Visual C++ runtime, source, notices, and provenance. The Windows CI gate runs the installer, checks H.264 decoding with a cold registry while the build SDK is hidden, and exercises uninstall. Native verification is pending.
 
 Headless diagnostics also work on a development binary:
 
