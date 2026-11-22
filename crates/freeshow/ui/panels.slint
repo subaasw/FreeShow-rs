@@ -2,7 +2,7 @@
 // Settings, Inspector and Stage editor panels. Every edit calls back with one
 // key/value pair; Rust validates it, writes the library file, and refreshes `data`.
 
-import { CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, Switch, TabWidget } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, Switch, TabWidget } from "std-widgets.slint";
 import { OperatorStyle, BoxButton, HeaderButton, ListRow } from "widgets.slint";
 
 export struct SettingsData {
@@ -29,6 +29,15 @@ export struct SettingsData {
     media-transition: string,
     media-duration: int,
     addresses: string,
+    style-names: [string],
+    style-name: string,
+    style-is-default: bool,
+    style-background: string,
+    style-swatch: color,
+    style-fit: string,
+    style-blur-amount: int,
+    style-blur-opacity: int,
+    style-lines: int,
 }
 
 export struct InspectorData {
@@ -103,6 +112,20 @@ component PanelHeader inherits HorizontalLayout {
     }
 }
 
+/// Finds a value's row in a combo box model; Rust answers so Slint needs no loop.
+export global ComboIndex {
+    pure callback find([string], string) -> int;
+}
+
+/// A combo box that shows `value` and follows it when the data changes, even after the
+/// operator picked a row or the model was replaced (which resets std ComboBox to row 0).
+component ValueCombo inherits ComboBox {
+    in property <string> value;
+    current-index: ComboIndex.find(self.model, self.value);
+    changed value => { self.current-index = ComboIndex.find(self.model, self.value); }
+    changed model => { self.current-index = ComboIndex.find(self.model, self.value); }
+}
+
 global Fmt {
     public pure function flag(on: bool) -> string {
         return on ? "true" : "false";
@@ -147,17 +170,17 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Time format"; text-color: root.text-color; }
-                        ComboBox {
+                        ValueCombo {
                             model: ["24", "12"];
-                            current-value: root.data.time-format;
+                            value: root.data.time-format;
                             selected(value) => { root.apply("timeFormat", value); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Autosave"; text-color: root.text-color; }
-                        ComboBox {
+                        ValueCombo {
                             model: root.autosave-choices;
-                            current-value: root.data.autosave;
+                            value: root.data.autosave;
                             selected(value) => { root.apply("autosave", value); }
                         }
                     }
@@ -181,10 +204,10 @@ export component SettingsPanel inherits Rectangle {
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Theme"; text-color: root.text-color; }
-                        ComboBox {
+                        ValueCombo {
                             colspan: 2;
                             model: root.themes;
-                            current-value: root.data.theme;
+                            value: root.data.theme;
                             selected(value) => { root.apply("theme", value); }
                         }
                     }
@@ -250,9 +273,9 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Slide transition"; text-color: root.text-color; }
-                        ComboBox {
+                        ValueCombo {
                             model: root.transition-kinds;
-                            current-value: root.data.text-transition;
+                            value: root.data.text-transition;
                             selected(value) => { root.apply("textTransition", value); }
                         }
                         SpinBox {
@@ -265,9 +288,9 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Media transition"; text-color: root.text-color; }
-                        ComboBox {
+                        ValueCombo {
                             model: root.transition-kinds;
-                            current-value: root.data.media-transition;
+                            value: root.data.media-transition;
                             selected(value) => { root.apply("mediaTransition", value); }
                         }
                         SpinBox {
@@ -283,6 +306,124 @@ export component SettingsPanel inherits Rectangle {
                         Text {
                             colspan: 2;
                             text: "Durations are in milliseconds. A show or slide with its own transition keeps it.";
+                            color: root.text-color;
+                            opacity: 0.6;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                }
+            }
+            Tab {
+                title: "Styles";
+                VerticalLayout {
+                alignment: start;
+                GridLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Row {
+                        SettingLabel { text: "Output style"; text-color: root.text-color; }
+                        ValueCombo {
+                            model: root.data.style-names;
+                            value: root.data.style-name;
+                            selected(value) => { root.apply("outputStyle", value); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button {
+                                text: "New style";
+                                clicked => { root.apply("styleNew", ""); }
+                            }
+                            Button {
+                                text: "Delete style";
+                                enabled: !root.data.style-is-default;
+                                clicked => { root.apply("styleDelete", ""); }
+                            }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Name"; text-color: root.text-color; }
+                        LineEdit {
+                            colspan: 2;
+                            text: root.data.style-name;
+                            accepted(value) => { root.apply("styleName", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Background"; text-color: root.text-color; }
+                        LineEdit {
+                            text: root.data.style-background;
+                            placeholder-text: "#000000 (black)";
+                            accepted(value) => { root.apply("styleBackground", value); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Rectangle {
+                                width: 28px;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: root.text-color.with-alpha(0.4);
+                                background: root.data.style-swatch;
+                            }
+                            for swatch in [
+                                { fill: #000000, hex: "#000000" },
+                                { fill: #ffffff, hex: "#ffffff" },
+                                { fill: #00b140, hex: "#00b140" },
+                                { fill: #0047bb, hex: "#0047bb" },
+                                { fill: #1e1e1e, hex: "#1e1e1e" },
+                            ]: Rectangle {
+                                width: 24px;
+                                border-radius: 4px;
+                                background: swatch.fill;
+                                border-width: 1px;
+                                border-color: root.text-color.with-alpha(0.25);
+                                TouchArea { clicked => { root.apply("styleBackground", swatch.hex); } }
+                            }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Media fit"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 2;
+                            model: ["contain", "cover", "fill", "blur"];
+                            value: root.data.style-fit;
+                            selected(value) => { root.apply("styleFit", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Blur"; text-color: root.text-color; }
+                        SpinBox {
+                            enabled: root.data.style-fit == "blur";
+                            minimum: 0;
+                            maximum: 100;
+                            value: root.data.style-blur-amount;
+                            edited(value) => { root.apply("styleBlurAmount", value); }
+                        }
+                        SpinBox {
+                            enabled: root.data.style-fit == "blur";
+                            minimum: 1;
+                            maximum: 100;
+                            step-size: 5;
+                            value: root.data.style-blur-opacity;
+                            edited(value) => { root.apply("styleBlurOpacity", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Max lines"; text-color: root.text-color; }
+                        SpinBox {
+                            colspan: 2;
+                            minimum: 0;
+                            maximum: 20;
+                            value: root.data.style-lines;
+                            edited(value) => { root.apply("styleLines", value); }
+                        }
+                    }
+                    Row {
+                        Rectangle {}
+                        Text {
+                            colspan: 2;
+                            text: "A style is the look of an output. Background fills the screen behind slides and when it is cleared. Blur is the radius and the opacity (%) of the blurred fill around a contained picture. Max lines splits long slides into pages; 0 shows every line. Slides that name their own style switch the output to it.";
                             color: root.text-color;
                             opacity: 0.6;
                             font-size: 12px;
@@ -408,11 +549,11 @@ export component InspectorPanel inherits VerticalLayout {
             toggled => { root.set("italic", Fmt.flag(self.checked)); }
         }
         FieldLabel { text: "Align"; text-color: root.text-color; min-width: 40px; }
-        ComboBox {
+        ValueCombo {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
             model: ["left", "center", "right", "justify"];
-            current-value: root.data.align == "" ? "center" : root.data.align;
+            value: root.data.align == "" ? "center" : root.data.align;
             selected(value) => { root.set("align", value); }
         }
     }
@@ -504,10 +645,10 @@ export component StageEditorPanel inherits Rectangle {
                 }
                 HorizontalLayout {
                     spacing: 6px;
-                    ComboBox {
+                    ValueCombo {
                         horizontal-stretch: 1;
                         model: root.add-kinds;
-                        current-value: root.add-kind;
+                        value: root.add-kind;
                         selected(value) => { root.add-kind = value; }
                     }
                     BoxButton {

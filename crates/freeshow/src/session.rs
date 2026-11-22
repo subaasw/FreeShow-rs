@@ -235,6 +235,8 @@ pub struct Session {
     pub background_blend: String,
     pub background_blur_px: f32,
     pub background_blur_opacity: f32,
+    /// Background colour of the active output style; black when the style names none.
+    pub style_background: Option<freeshow_output::Rgba>,
     /// The next output change is a background image, so it uses the media transition.
     pub background_transition: bool,
     /// Path of the picture currently behind the slide, when one is showing.
@@ -463,6 +465,7 @@ impl Session {
             background_blend: String::new(),
             background_blur_px: 6.0,
             background_blur_opacity: 0.3,
+            style_background: None,
             background_transition: false,
             background_path: None,
             imported_foreground_active: false,
@@ -646,6 +649,7 @@ impl Session {
             background_blend: String::new(),
             background_blur_px: 6.0,
             background_blur_opacity: 0.3,
+            style_background: None,
             background_transition: false,
             background_path: None,
             imported_foreground_active: false,
@@ -701,7 +705,17 @@ impl Session {
         session.restore_watermark();
         session.apply_active_scenes();
         session.load_player_videos();
+        session.refresh_style_look();
         session
+    }
+
+    /// Re-reads the active output style's background colour after a style or output change.
+    pub fn refresh_style_look(&mut self) {
+        self.style_background = self
+            .root
+            .as_deref()
+            .and_then(|root| Library::open(root).style_background())
+            .and_then(|color| freeshow_output::parse_color(&color));
     }
 
     pub fn timer_label(&self) -> String {
@@ -3111,7 +3125,11 @@ impl Session {
         let Some(root) = self.root.clone() else {
             return;
         };
-        let _ = Library::open(&root).set_output_style(&style);
+        let library = Library::open(&root);
+        if library.output_style_id() != style {
+            let _ = library.set_output_style(&style);
+            self.refresh_style_look();
+        }
     }
 
     /// Starts the timers named by this slide. A stop action clears the one that is running.
@@ -6052,6 +6070,7 @@ impl Session {
         if let Some(preferences) = self.reload_preferences() {
             self.preferences = preferences;
         }
+        self.refresh_style_look();
         true
     }
 

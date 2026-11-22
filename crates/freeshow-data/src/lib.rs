@@ -5358,6 +5358,148 @@ impl Library {
             .unwrap_or(0) as u32
     }
 
+    fn synced_settings(&self) -> Value {
+        fs::read_to_string(self.synced_settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+    }
+
+    /// Output styles as `(id, name)`, sorted by name. FreeShow's `default` style ("Primary")
+    /// is always listed, even before anything was stored for it.
+    pub fn styles(&self) -> Vec<(String, String)> {
+        let json = self.synced_settings();
+        let mut styles: Vec<(String, String)> = json
+            .get("styles")
+            .and_then(Value::as_object)
+            .map(|styles| {
+                styles
+                    .iter()
+                    .map(|(id, style)| {
+                        let name = style
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                if id == "default" {
+                                    "Primary".into()
+                                } else {
+                                    id.clone()
+                                }
+                            });
+                        (id.clone(), name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !styles.iter().any(|(id, _)| id == "default") {
+            styles.push(("default".into(), "Primary".into()));
+        }
+        styles.sort_by_key(|style| style.1.to_lowercase());
+        styles
+    }
+
+    /// The stored JSON of one style, or an empty object.
+    pub fn style_value(&self, id: &str) -> Value {
+        self.synced_settings()
+            .pointer(&format!("/styles/{id}"))
+            .filter(|style| style.is_object())
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+    }
+
+    /// Sets one key on a style in `Config/settings_synced.json`, creating the style if needed.
+    /// A `null` value removes the key so FreeShow's default applies again.
+    pub fn patch_style(&self, id: &str, key: &str, value: Value) -> bool {
+        if id.is_empty() || key.is_empty() {
+            return false;
+        }
+        let path = self.synced_settings_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut json = self.synced_settings();
+        let root = json.as_object_mut().expect("settings object");
+        let styles = root
+            .entry("styles")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !styles.is_object() {
+            *styles = Value::Object(serde_json::Map::new());
+        }
+        let style = styles
+            .as_object_mut()
+            .expect("styles object")
+            .entry(id.to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !style.is_object() {
+            *style = Value::Object(serde_json::Map::new());
+        }
+        let style = style.as_object_mut().expect("style object");
+        if value.is_null() {
+            style.remove(key);
+        } else {
+            style.insert(key.to_string(), value);
+        }
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&json).unwrap_or_default(),
+        )
+        .is_ok()
+    }
+
+    /// Adds a style named `name` and returns its id.
+    pub fn create_style(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        let name = if name.is_empty() { "Style" } else { name };
+        let taken: Vec<String> = self.styles().into_iter().map(|(id, _)| id).collect();
+        let id = (1..)
+            .map(|n| format!("style{n}"))
+            .find(|id| !taken.contains(id))?;
+        self.patch_style(&id, "name", Value::String(name.to_string()))
+            .then_some(id)
+    }
+
+    /// Removes a style. The `default` style stays, and outputs using the removed one fall back to it.
+    pub fn delete_style(&self, id: &str) -> bool {
+        if id.is_empty() || id == "default" {
+            return false;
+        }
+        let path = self.synced_settings_path();
+        let mut json = self.synced_settings();
+        let removed = json
+            .get_mut("styles")
+            .and_then(Value::as_object_mut)
+            .and_then(|styles| styles.remove(id))
+            .is_some();
+        if !removed
+            || fs::write(
+                &path,
+                serde_json::to_string_pretty(&json).unwrap_or_default(),
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if self.output_style_id() == id {
+            let _ = self.set_output_style("default");
+        }
+        true
+    }
+
+    /// Background colour of the active output style, shown wherever nothing else is drawn.
+    pub fn style_background(&self) -> Option<String> {
+        let id = self.output_style_id();
+        self.style_value(&id)
+            .get("background")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|color| !color.is_empty())
+            .map(str::to_string)
+    }
+
     /// Text or media transition stored on the active output style.
     pub fn style_transition(&self, kind: &str) -> Option<TextTransition> {
         let id = self.output_style_id();
@@ -6917,6 +7059,36 @@ mod tests {
                 easing: "linear".into(),
             }
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn styles_can_be_listed_created_patched_and_deleted() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-style-edit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Config")).unwrap();
+        let library = Library::open(&root);
+        assert_eq!(
+            library.styles(),
+            vec![("default".to_string(), "Primary".to_string())]
+        );
+        assert_eq!(library.style_background(), None);
+        assert!(library.patch_style("default", "background", Value::from("#102030")));
+        assert_eq!(library.style_background().as_deref(), Some("#102030"));
+        let id = library.create_style("Night").unwrap();
+        assert_eq!(id, "style1");
+        assert_eq!(library.styles().len(), 2);
+        assert!(library.set_output_style(&id));
+        assert_eq!(library.style_background(), None);
+        assert!(library.patch_style(&id, "lines", Value::from(2)));
+        assert_eq!(library.style_lines(), 2);
+        assert!(library.patch_style(&id, "lines", Value::Null));
+        assert_eq!(library.style_lines(), 0);
+        assert!(!library.delete_style("default"));
+        assert!(library.delete_style(&id));
+        assert_eq!(library.output_style_id(), "default");
+        assert_eq!(library.style_background().as_deref(), Some("#102030"));
         let _ = fs::remove_dir_all(&root);
     }
 
