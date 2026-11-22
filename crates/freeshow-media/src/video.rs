@@ -55,21 +55,28 @@ mod gst_player {
         }
 
         pub fn open_camera(name: &str) -> Result<Self, MediaError> {
-            let index = cameras()
-                .iter()
-                .position(|camera| camera == name)
-                .unwrap_or(0);
-            let source = if cfg!(target_os = "macos") {
-                format!("avfvideosrc device-index={index}")
-            } else if cfg!(windows) {
-                format!("ksvideosrc device-index={index}")
-            } else {
-                format!("v4l2src device=/dev/video{index}")
-            };
-            Self::from_launch(&format!(
-                "{source} ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=false",
+            let device = camera_devices()?
+                .into_iter()
+                .find(|device| device.display_name() == name)
+                .ok_or_else(|| video_error(format!("no camera named {name}")))?;
+            Self::from_camera_source(device.create_element(None).map_err(video_error)?)
+        }
+
+        fn from_camera_source(source: gst::Element) -> Result<Self, MediaError> {
+            let pipeline = gst::parse::launch(&format!(
+                "decodebin name=dec ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=false",
                 rgba_caps()
             ))
+            .map_err(video_error)?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| video_error("camera launch did not return a pipeline"))?;
+            pipeline.add(&source).map_err(video_error)?;
+            source
+                .link(&pipeline.by_name("dec").expect("camera decoder exists"))
+                .map_err(video_error)?;
+            let player = Self::from_pipeline(pipeline, AudioBranch::new_targets(Vec::new())?)?;
+            player.set_looping(false);
+            Ok(player)
         }
 
         pub fn from_launch(description: &str) -> Result<Self, MediaError> {
@@ -126,6 +133,10 @@ mod gst_player {
             let pipeline = element
                 .downcast::<gst::Pipeline>()
                 .map_err(|_| MediaError::Video("launch did not return a pipeline".into()))?;
+            Self::from_pipeline(pipeline, audio)
+        }
+
+        fn from_pipeline(pipeline: gst::Pipeline, audio: AudioBranch) -> Result<Self, MediaError> {
             let appsink = pipeline
                 .by_name("sink")
                 .ok_or_else(|| MediaError::Video("appsink is missing".into()))?;
@@ -305,21 +316,24 @@ mod gst_player {
         }
     }
 
-    pub fn cameras() -> Vec<String> {
-        if gst::init().is_err() {
-            return Vec::new();
-        }
+    fn camera_devices() -> Result<Vec<gst::Device>, MediaError> {
+        gst::init().map_err(video_error)?;
         let monitor = gst::DeviceMonitor::new();
-        if monitor.add_filter(Some("Video/Source"), None).is_none() || monitor.start().is_err() {
-            return Vec::new();
-        }
-        let names = monitor
-            .devices()
+        monitor
+            .add_filter(Some("Video/Source"), None)
+            .ok_or_else(|| video_error("could not enumerate cameras"))?;
+        monitor.start().map_err(video_error)?;
+        let devices = monitor.devices();
+        let _ = monitor.stop();
+        Ok(devices.into_iter().collect())
+    }
+
+    pub fn cameras() -> Vec<String> {
+        camera_devices()
+            .unwrap_or_default()
             .iter()
             .map(|device| device.display_name().to_string())
-            .collect();
-        let _ = monitor.stop();
-        names
+            .collect()
     }
 
     fn video_error(error: impl std::fmt::Display) -> MediaError {
@@ -714,6 +728,48 @@ mod gst_player {
     #[cfg(test)]
     mod audio_tests {
         use super::*;
+
+        #[test]
+        fn camera_pipeline_uses_the_selected_source_without_recreating_it() {
+            gst::init().unwrap();
+            for compressed in [false, true] {
+                let description = if compressed {
+                    "videotestsrc num-buffers=1 pattern=red ! video/x-raw,format=I420 ! jpegenc"
+                } else {
+                    "videotestsrc num-buffers=1 pattern=red"
+                };
+                let source = gst::parse::bin_from_description(description, true)
+                    .unwrap()
+                    .upcast::<gst::Element>();
+                source.set_property("name", "selected-native-camera");
+                let mut player = VideoPlayer::from_camera_source(source.clone()).unwrap();
+                assert_eq!(
+                    player.pipeline.by_name("selected-native-camera"),
+                    Some(source)
+                );
+                assert!(!player.looping.get());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if let Some(frame) = player.next_frame() {
+                        let center = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
+                        let pixel = &frame.rgba[center..center + 4];
+                        // JPEG conversion can shift the color through its YUV color space.
+                        if compressed {
+                            assert!(pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40, "{pixel:?}");
+                        } else {
+                            assert_eq!(pixel, &[255, 0, 0, 255]);
+                        }
+                        assert_eq!(pixel[3], 255);
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "camera produced no frame"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
 
         fn capture_sink() -> AppSink {
             let sink = AppSink::builder().build();
