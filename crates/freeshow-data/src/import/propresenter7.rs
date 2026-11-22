@@ -560,16 +560,16 @@ fn box_fill(element: &wire::Element) -> Option<String> {
         return None;
     }
     let shape = element.path.as_ref()?.shape.as_ref()?;
-    let radius = match shape.kind() {
+    let geometry = match shape.kind() {
         wire::ShapeType::Rectangle
-        | wire::ShapeType::IsoscelesTriangle
-        | wire::ShapeType::RightTriangle
-        | wire::ShapeType::Rhombus
         | wire::ShapeType::Star
         | wire::ShapeType::Polygon
         | wire::ShapeType::Custom
         | wire::ShapeType::RightArrow
         | wire::ShapeType::DoubleArrow => String::new(),
+        wire::ShapeType::IsoscelesTriangle => "--shape-fill-polygon:0.5 0,1 1,0 1;".to_owned(),
+        wire::ShapeType::RightTriangle => "--shape-fill-polygon:0 0,1 1,0 1;".to_owned(),
+        wire::ShapeType::Rhombus => "--shape-fill-polygon:0.5 0,1 0.5,0.5 1,0 0.5;".to_owned(),
         wire::ShapeType::Ellipse => "border-radius:50%;".to_string(),
         wire::ShapeType::RoundedRectangle => {
             let size = element.bounds.as_ref().and_then(|rect| rect.size.as_ref());
@@ -592,7 +592,7 @@ fn box_fill(element: &wire::Element) -> Option<String> {
         }
         wire::ShapeType::Unknown => return None,
     };
-    Some(format!("background-color:{};{radius}", css_color(color)))
+    Some(format!("background-color:{};{geometry}", css_color(color)))
 }
 
 fn text_item(text: &wire::Text, style: &mut String) -> Option<Value> {
@@ -914,13 +914,16 @@ mod tests {
             shape(1, false, false),
             shape(1, true, true),
             shape(6, true, false),
+            shape(3, true, false),
+            shape(4, true, false),
+            shape(5, true, false),
         ]);
 
         let show = crate::import::import_show("Shapes.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
         let items = show.show["slides"][&verse.id]["items"].as_array().unwrap();
         let style = "left:160px;top:90px;width:320px;height:180px;background-color:#ff000080;";
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 8);
         assert_eq!(items[0], json!({"type":"shape","style":style,"lines":[]}));
         assert!(
             !items[1]["lines"][0]["text"][0]["value"]
@@ -930,6 +933,16 @@ mod tests {
         );
         assert_eq!(items[3]["style"], format!("{style}border-radius:50%;"));
         assert_eq!(items[4], json!({"type":"shape","style":style,"lines":[]}));
+        for (item, points) in
+            items[5..]
+                .iter()
+                .zip(["0.5 0,1 1,0 1", "0 0,1 1,0 1", "0.5 0,1 0.5,0.5 1,0 0.5"])
+        {
+            assert_eq!(
+                *item,
+                json!({"type":"shape","style":format!("{style}--shape-fill-polygon:{points};"),"lines":[]})
+            );
+        }
     }
 
     #[test]
