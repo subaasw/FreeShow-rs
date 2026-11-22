@@ -954,11 +954,11 @@ mod tests {
             .as_mut()
             .unwrap();
         text.rtf = br"{\rtf1\ansi{\fonttbl{\f0 Arial;}{\f1 Times New Roman;}}{\colortbl;\red255\green0\blue0;}
-\qc\f0\fs48 A {\f1\cf1\b0\i0\ul\strike red \u-10179?\u-8704?}\par\ql\ulnone\strike0 Last}"
+\qc\f0\fs48 A {\f1\cf1\b0\i0\ul\strike \ldblquote red\rdblquote\emdash\u-10179?\u-8704?}\par\ql\ulnone\strike0 Last}"
             .to_vec();
         let show = crate::import::import_show("Mixed.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
-        assert_eq!(verse.lines, ["A red 😀", "Last", "Another text box"]);
+        assert_eq!(verse.lines, ["A “red”—😀", "Last", "Another text box"]);
         let item = &show.show["slides"][&verse.id]["items"][0];
         let rows = &item["lines"];
         assert_eq!(rows[0]["align"], "center");
@@ -969,7 +969,7 @@ mod tests {
         );
         assert_eq!(
             rows[0]["text"][1],
-            json!({"value":"red 😀","style":"font-family:Times New Roman;font-size:24px;color:#ff0000;font-weight:normal;font-style:normal;text-decoration:underline line-through;"})
+            json!({"value":"“red”—😀","style":"font-family:Times New Roman;font-size:24px;color:#ff0000;font-weight:normal;font-style:normal;text-decoration:underline line-through;"})
         );
         assert_eq!(rows[1]["text"][0]["value"], "Last");
         assert_eq!(
@@ -989,7 +989,9 @@ mod tests {
             .presentation
             .as_mut()
             .unwrap();
-        slide.notes.as_mut().unwrap().rtf = br"{\rtf1 Note {\v backstage}for the leader}".to_vec();
+        slide.notes.as_mut().unwrap().rtf =
+            br"{\rtf1 \bullet  Note {\v backstage\emdash}for the leader\endash\lquote team\rquote}"
+                .to_vec();
         slide.slide.as_mut().unwrap().elements[0]
             .element
             .as_mut()
@@ -1002,7 +1004,7 @@ mod tests {
         let show = crate::import::import_show("Hidden.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
         assert_eq!(verse.lines, ["First line", "Second", "Another text box"]);
-        assert_eq!(verse.notes, "Note for the leader");
+        assert_eq!(verse.notes, "• Note for the leader–‘team’");
     }
 
     #[test]
