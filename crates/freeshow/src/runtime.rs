@@ -104,6 +104,9 @@ pub fn check(media: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 break;
             }
+            if let Some(error) = player.take_error() {
+                return Err(error.into());
+            }
             if std::time::Instant::now() >= deadline {
                 return Err("no video frame decoded within five seconds".into());
             }
