@@ -3,9 +3,11 @@
 //! Turns songs people already have into FreeShow `.show` files.
 
 use std::collections::HashSet;
-use std::fs;
-use std::io::{Cursor, Read};
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -13,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::{DataError, ShowFile};
 
+mod powerpoint;
 mod propresenter;
 mod propresenter7;
 
@@ -59,6 +62,9 @@ pub fn import_sources(
         }
         let found = if propresenter::is_bundle(&path) {
             propresenter::import_bundle(&bytes, media)
+        } else if extension.eq_ignore_ascii_case("pptx") || looks_like_pptx(&bytes) {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("slides");
+            powerpoint::import(name, &bytes, Some(media)).map(|show| vec![show])
         } else if extension.eq_ignore_ascii_case("pro") {
             let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("song");
             propresenter7::decode(name, &bytes).map(|mut show| {
@@ -122,7 +128,7 @@ fn import_one(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
         .unwrap_or("")
         .to_ascii_lowercase();
     if ext == "pptx" || looks_like_pptx(bytes) {
-        return powerpoint_show(file_name, bytes);
+        return powerpoint::import(file_name, bytes, None);
     }
     if ext == "pro" {
         let mut show = propresenter7::decode(file_name, bytes)?;
@@ -1130,75 +1136,6 @@ fn decode_rtf(text: &str) -> String {
     String::from_utf16_lossy(&out)
 }
 
-fn powerpoint_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|err| DataError::Scripture(err.to_string()))?;
-    let mut names = archive
-        .file_names()
-        .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    names.sort_by_key(|name| slide_number(name));
-    let mut sections = Vec::new();
-    for name in names {
-        let mut file = archive
-            .by_name(&name)
-            .map_err(|err| DataError::Scripture(err.to_string()))?;
-        let mut xml = String::new();
-        file.read_to_string(&mut xml)
-            .map_err(|err| DataError::Scripture(err.to_string()))?;
-        let lines = pptx_lines(&xml);
-        if !lines.is_empty() {
-            sections.push(Section::plain(
-                format!("Slide {}", sections.len() + 1),
-                lines,
-            ));
-        }
-    }
-    if sections.is_empty() {
-        return Err(DataError::Scripture(
-            "PowerPoint file has no slide text".into(),
-        ));
-    }
-    Ok(show_file(file_name, &file_stem_str(file_name), sections))
-}
-
-fn pptx_lines(xml: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut capture = false;
-    let mut chunk = String::new();
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(event)) => {
-                capture = local_name(event.name().as_ref()) == "t";
-                if capture {
-                    chunk.clear();
-                }
-            }
-            Ok(Event::Text(event)) if capture => {
-                if let Ok(text) = event.unescape() {
-                    chunk.push_str(&text);
-                }
-            }
-            Ok(Event::End(event)) if local_name(event.name().as_ref()) == "t" => {
-                let text = chunk.trim();
-                if !text.is_empty() {
-                    lines.push(text.to_string());
-                }
-                capture = false;
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    lines
-}
-
 fn order_sections(verses: &[LyricVerse], order: &str) -> Vec<Section> {
     let wanted: Vec<&str> = order.split_whitespace().collect();
     let chosen: Vec<&LyricVerse> = if wanted.is_empty() {
@@ -1419,14 +1356,6 @@ fn looks_like_pptx(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK") && bytes.windows(11).any(|window| window == b"ppt/slides/")
 }
 
-fn slide_number(name: &str) -> usize {
-    name.chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .unwrap_or(0)
-}
-
 fn local_name(name: &[u8]) -> String {
     let raw = String::from_utf8_lossy(name);
     raw.rsplit(':').next().unwrap_or("").to_string()
@@ -1438,6 +1367,47 @@ fn attribute(event: &quick_xml::events::BytesStart<'_>, key: &str) -> Option<Str
         .ok()
         .flatten()
         .and_then(|attr| attr.unescape_value().ok().map(|value| value.to_string()))
+}
+
+fn save_imported_media(media: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, DataError> {
+    fs::create_dir_all(media)?;
+    let media = media.canonicalize()?;
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let stem = file_stem(basename);
+    let extension = Path::new(basename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+    // Use a flat filename; archive directory components never reach the disk.
+    for suffix in 0..10_000 {
+        let suffix = if suffix == 0 {
+            String::new()
+        } else {
+            format!("-{suffix}")
+        };
+        let path = media.join(format!("{stem}{suffix}.{extension}"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let result = file.write_all(bytes).and_then(|_| file.sync_all());
+                if let Err(error) = result {
+                    let _ = fs::remove_file(&path);
+                    return Err(error.into());
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&path)?;
+                if metadata.is_file()
+                    && metadata.len() == bytes.len() as u64
+                    && fs::read(&path)? == bytes
+                {
+                    return Ok(path);
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(DataError::Scripture("too many imported media filename collisions".into()))
 }
 
 fn file_stem(name: &str) -> String {
