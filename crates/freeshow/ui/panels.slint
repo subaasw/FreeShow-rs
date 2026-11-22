@@ -87,6 +87,8 @@ export struct InspectorData {
     hue-rotate: int,
     opacity: int,
     blend: string,
+    slide-transition: string,
+    slide-transition-ms: int,
 }
 
 export struct StageRowData {
@@ -859,6 +861,19 @@ export component InspectorPanel inherits VerticalLayout {
             value: root.data.blend == "" ? "normal" : root.data.blend;
             selected(value) => { root.set("blend", value); }
         }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Slide in"; text-color: root.text-color; min-width: 48px; }
+        ValueCombo {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            model: ["default", "none", "fade", "blur", "scale", "slide", "spin"];
+            value: root.data.slide-transition;
+            selected(value) => { root.set("slide-transition", value); }
+        }
+        FieldLabel { text: "ms"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 10000; step-size: 100; value: root.data.slide-transition-ms; edited(value) => { root.set("slide-transition-ms", value); } }
     }
 }
 
