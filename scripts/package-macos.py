@@ -14,13 +14,15 @@ import subprocess
 import tempfile
 import tomllib
 
+from package_media import serve_sample
+
 ROOT = Path(__file__).resolve().parent.parent
 SYSTEM = ("/usr/lib/", "/System/Library/")
 # These cover the application's local video, camera, mixer, recording and RTMP
 # paths. Optional NDI still needs a separately installed NDI SDK runtime.
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
-avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png osxaudio applemedia
+avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png osxaudio applemedia curl
 autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc shout2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 
 
@@ -210,8 +212,10 @@ def verify(app):
         executable = relocated / "Contents/MacOS/freeshow"
         for args in (["--check-runtime"], ["--check-media", str(sample)], ["--check-perf"]):
             run(*prefix, executable, *args, env=environment, timeout=90)
+        with serve_sample(sample) as url:
+            run(*prefix, executable, "--check-media", url, env=environment, timeout=90)
         run("codesign", "--verify", "--deep", "--strict", relocated)
-        return {"relocated_path_with_spaces":True, "empty_home_and_registry":True, "homebrew_and_rust_reads_blocked":bool(prefix), "h264_decoded":True}
+        return {"relocated_path_with_spaces":True, "empty_home_and_registry":True, "homebrew_and_rust_reads_blocked":bool(prefix), "h264_decoded":True, "http_video_decoded":True}
 
 
 def main():

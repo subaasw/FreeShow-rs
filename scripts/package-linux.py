@@ -14,11 +14,14 @@ import tarfile
 import tempfile
 import tomllib
 
+from package_media import serve_sample
+
 ROOT = Path(__file__).resolve().parent.parent
+SAMPLE = ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4"
 SYSTEM = re.compile(r"^(?:linux-vdso|ld-linux|lib(?:c|m|pthread|dl|rt|resolv|util|anl|mvec|nss_[\w]+))\.so(?:\.|$)")
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
-avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png autodetect rtmp
+avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png autodetect rtmp curl
 videoparsersbad flv x264 videotestsrc audiotestsrc shout2 alsa pulseaudio video4linux2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 # Winit/wgpu can load these at runtime rather than through DT_NEEDED.
 DISPLAY_LIBS = """libxkbcommon.so.0 libX11.so.6 libXcursor.so.1 libXrandr.so.2
@@ -125,7 +128,9 @@ def verify(directory):
         environment = {"HOME":str(home), "PATH":"/usr/bin:/bin", "TMPDIR":str(temporary), "LANG":"C.UTF-8"}
         launcher = relocated / "AppRun"
         run(launcher, "--check-runtime", env=environment, timeout=60)
-        run(launcher, "--check-media", ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4", env=environment, timeout=60)
+        run(launcher, "--check-media", SAMPLE, env=environment, timeout=60)
+        with serve_sample(SAMPLE) as url:
+            run(launcher, "--check-media", url, env=environment, timeout=60)
         run(launcher, "--check-perf", env=environment, timeout=180)
         run(relocated / "install.sh", env=environment, timeout=30)
         desktop = home / ".local/share/applications/org.freeshow.rust.desktop"
@@ -144,7 +149,7 @@ def verify(directory):
         run(relocated / "install.sh", "--uninstall", env=environment, timeout=30)
         if desktop.exists() or (home / ".local/bin/freeshow-rust").is_symlink() or not sentinel.is_file():
             raise RuntimeError("desktop uninstall removed user data or left a launcher behind")
-    return {"relocated_special_character_path":True,"empty_home_and_registry":True,"h264_decoded":True,"check_perf":True,
+    return {"relocated_special_character_path":True,"empty_home_and_registry":True,"h264_decoded":True,"http_video_decoded":True,"check_perf":True,
         "desktop_entry_validated_and_launched":True,"uninstall_keeps_library":True}
 
 
