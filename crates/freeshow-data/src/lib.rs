@@ -5436,6 +5436,7 @@ pub fn default_shortcuts() -> Vec<(&'static str, &'static str)> {
         ("kiosk", "F11"),
         ("guide", "F1"),
         ("always_on_top", "Ctrl+Shift+A"),
+        ("clear", "Escape"),
     ]
 }
 
@@ -5453,7 +5454,7 @@ pub fn normalize_chord(text: &str) -> String {
     let mut shift = false;
     let mut key = String::new();
     for part in text.split('+') {
-        let part = part.trim();
+        let part = if part == " " { "space" } else { part.trim() };
         if part.is_empty() {
             continue;
         }
@@ -5485,7 +5486,9 @@ fn titled_key(key: &str) -> String {
         "left" | "arrowleft" => "Left".into(),
         "up" | "arrowup" => "Up".into(),
         "down" | "arrowdown" => "Down".into(),
-        "esc" | "escape" => "Escape".into(),
+        "esc" | "escape" | "\u{1b}" => "Escape".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
         other if other.len() == 1 => other.to_ascii_uppercase(),
         other => {
             let mut chars = other.chars();
