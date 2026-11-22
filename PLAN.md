@@ -110,7 +110,8 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Background lesson downloads with progress and cancellation.
 - [x] ProPresenter bundle backgrounds land in `Media/` and stay linked.
 - [x] PowerPoint embedded slide, layout, and master backgrounds.
-- [ ] PowerPoint theme fills, linked or tiled media, and backgrounds from other import formats.
+- [x] Solid PowerPoint theme fills and slide-level color-map overrides.
+- [ ] PowerPoint color transforms, gradients, linked or tiled media, and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
 their original backgrounds.

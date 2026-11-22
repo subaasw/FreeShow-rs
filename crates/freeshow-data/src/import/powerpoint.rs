@@ -15,6 +15,9 @@ use super::{Section, attribute, file_stem_str, local_name, show_file};
 
 use crate::{DataError, ShowFile};
 
+mod theme;
+use theme::{Color, ThemeReader};
+
 const XML_LIMIT: u64 = 8 * 1024 * 1024;
 const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
 type Archive<'a> = ZipArchive<Cursor<&'a [u8]>>;
@@ -22,6 +25,10 @@ type Archive<'a> = ZipArchive<Cursor<&'a [u8]>>;
 #[derive(Clone)]
 enum Background {
     Color(String),
+    Theme {
+        style: Option<u32>,
+        color: Option<Color>,
+    },
     Picture {
         part: String,
         crop: [f64; 4],
@@ -61,6 +68,7 @@ pub(super) fn import(
     let mut hidden = Vec::new();
     let mut slide_xml_bytes = 0;
     let mut cached = HashMap::new();
+    let mut themes = ThemeReader::default();
     let mut assets = BTreeMap::new();
     let mut image_bytes = 0_u64;
     for (index, part) in parts.iter().enumerate() {
@@ -70,7 +78,12 @@ pub(super) fn import(
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
         let (lines, disabled) = slide_text(&xml)?;
-        let fill = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
+        let fill = match find_background(&mut archive, &mut cached, part, Some(&xml), 0)? {
+            Some(Background::Theme { style, color }) => themes
+                .resolve(&mut archive, part, &xml, style, color.as_ref())?
+                .map(Background::Color),
+            fill => fill,
+        };
         if let Some(Background::Picture { part, .. }) = &fill
             && media.is_some()
             && !assets.contains_key(part)
@@ -259,6 +272,7 @@ fn find_background(
     let mut stack = Vec::new();
     let mut depth = None;
     let mut color = None;
+    let mut style = None;
     let mut picture = None;
     let mut crop = [0.0; 4];
     let mut inset = [0.0; 4];
@@ -271,12 +285,20 @@ fn find_background(
                     depth = Some(stack.len());
                 } else if depth.is_some() {
                     match (stack.last().map(String::as_str), name.as_str()) {
-                        (Some("solidFill" | "bgRef"), "srgbClr") => {
-                            color = attribute(&element, "val")
-                                .filter(|hex| {
-                                    hex.len() == 6 && hex.bytes().all(|ch| ch.is_ascii_hexdigit())
-                                })
-                                .map(|hex| format!("#{hex}"));
+                        (Some("bg"), "bgRef") => {
+                            style = attribute(&element, "idx").and_then(|idx| idx.parse().ok());
+                        }
+                        (Some("solidFill" | "bgRef"), "srgbClr" | "sysClr" | "schemeClr") => {
+                            color = Color::parse(&name, |key| attribute(&element, key));
+                        }
+                        (Some("schemeClr"), _)
+                            if stack.len() >= 2
+                                && matches!(
+                                    stack[stack.len() - 2].as_str(),
+                                    "solidFill" | "bgRef"
+                                ) =>
+                        {
+                            color = None;
                         }
                         (Some("blipFill"), "blip") => {
                             picture = relationship_attr(&element, "embed")
@@ -316,7 +338,9 @@ fn find_background(
                 inset,
             })
             .or(Some(Background::Unsupported))
-    } else if let Some(color) = color {
+    } else if style.is_some() || matches!(color, Some(Color::Scheme(_))) {
+        Some(Background::Theme { style, color })
+    } else if let Some(Color::Rgb(color)) = color {
         Some(Background::Color(color))
     } else if depth.is_some() {
         Some(Background::Unsupported)
@@ -497,8 +521,7 @@ mod tests {
         let master_rel = br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
         let media_rel = br#"<Relationships><Relationship Id="bg" Type="o/image" Target="../media/sky%20blue.png"/></Relationships>"#;
 
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let files: &[(&str, &[u8])] = &[
+        archive(&[
             ("ppt/presentation.xml", order),
             ("ppt/_rels/presentation.xml.rels", rels),
             ("ppt/slides/slide1.xml", slide1),
@@ -515,13 +538,66 @@ mod tests {
                 "ppt/media/sky blue.png",
                 include_bytes!("../../tests/fixtures/lesson-cover.png"),
             ),
-        ];
+        ])
+    }
+
+    fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, bytes) in files {
             zip.start_file(*name, zip::write::SimpleFileOptions::default())
                 .unwrap();
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn solid_theme_fills_follow_the_slide_color_map_and_style_index() {
+        let slides = [
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:clrMapOvr><a:overrideClrMapping bg1="accent2"/></p:clrMapOvr></p:sld>"#,
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#,
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></p:bgPr></p:bg></p:cSld></p:sld>"#,
+            r#"<p:sld xmlns:p="p"><p:cSld><p:bg><p:bgRef idx="1"/></p:bg></p:cSld></p:sld>"#,
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1001"><a:srgbClr val="112233"/></p:bgRef></p:bg></p:cSld></p:sld>"#,
+        ];
+        let layout_rel = br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let files = archive(&[
+            ("ppt/slides/slide1.xml", slides[0].as_bytes()),
+            ("ppt/slides/slide2.xml", slides[1].as_bytes()),
+            ("ppt/slides/slide3.xml", slides[2].as_bytes()),
+            ("ppt/slides/slide4.xml", slides[3].as_bytes()),
+            ("ppt/slides/slide5.xml", slides[4].as_bytes()),
+            ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide3.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide4.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide5.xml.rels", layout_rel),
+            ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p" xmlns:a="a"><p:clrMapOvr><a:overrideClrMapping bg1="accent1"/></p:clrMapOvr></p:sldLayout>"#),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#),
+            ("ppt/slideMasters/slideMaster1.xml", br#"<p:sldMaster xmlns:p="p" xmlns:a="a">
+                <p:cSld><p:bg><p:bgRef idx="1002"><a:schemeClr val="bg1"/></p:bgRef></p:bg></p:cSld>
+                <p:clrMap bg1="lt1"/>
+            </p:sldMaster>"#),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels", br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme1.xml"/></Relationships>"#),
+            ("ppt/theme/theme1.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
+                <a:clrScheme>
+                    <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+                    <a:accent1><a:srgbClr val="CC0000"/></a:accent1>
+                    <a:accent2><a:srgbClr val="0066AA"/></a:accent2>
+                </a:clrScheme>
+                <a:fmtScheme>
+                    <a:fillStyleLst><a:solidFill><a:srgbClr val="FF8800"/></a:solidFill></a:fillStyleLst>
+                    <a:bgFillStyleLst><a:gradFill/><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>
+                </a:fmtScheme>
+            </a:themeElements></a:theme>"#),
+        ]);
+        let show = import("Theme.pptx", &files, None).unwrap();
+        let slides = &show.show["slides"];
+        assert_eq!(slides["s1"]["settings"]["color"], "#0066AA");
+        assert_eq!(slides["s2"]["settings"]["color"], "#FFFFFF");
+        assert_eq!(slides["s3"]["settings"]["color"], "#CC0000");
+        assert_eq!(slides["s4"]["settings"]["color"], "#FF8800");
+        assert!(slides["s5"]["settings"]["color"].is_null());
     }
 
     #[test]
