@@ -11,6 +11,8 @@ struct Format {
     font: Option<i32>,
     size: Option<i32>,
     color: Option<usize>,
+    background: Option<usize>,
+    highlight: Option<usize>,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
@@ -125,6 +127,14 @@ impl Document {
             .flatten()
         {
             let _ = write!(css, "color:#{r:02x}{g:02x}{b:02x};");
+        }
+        let color_at = |index: usize| self.colors.get(index).copied().flatten();
+        if let Some([r, g, b]) = format
+            .highlight
+            .and_then(color_at)
+            .or_else(|| format.background.and_then(color_at))
+        {
+            let _ = write!(css, "background-color:#{r:02x}{g:02x}{b:02x};");
         }
         if let Some(bold) = format.bold {
             css.push_str(if bold {
@@ -366,6 +376,8 @@ impl Reader {
             "f" => format.font = number,
             "fs" => format.size = number,
             "cf" => format.color = number.and_then(|index| usize::try_from(index).ok()),
+            "cb" => format.background = number.and_then(|index| usize::try_from(index).ok()),
+            "highlight" => format.highlight = number.and_then(|index| usize::try_from(index).ok()),
             "b" => format.bold = on,
             "i" => format.italic = on,
             "ul" => format.underline = on,
@@ -380,6 +392,8 @@ impl Reader {
                     font: self.default_font,
                     size: Some(24),
                     color: Some(0),
+                    background: None,
+                    highlight: None,
                     bold: Some(false),
                     italic: Some(false),
                     underline: Some(false),
