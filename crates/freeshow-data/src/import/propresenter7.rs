@@ -117,6 +117,18 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
             ));
         }
     }
+    let mut unresolved_timer = false;
+    for node in default_order.iter_mut().chain(groups.values_mut()) {
+        unresolved_timer |= resolve_timed_cue(node, &cue_slides);
+        if let Some(children) = node.get_mut("children").and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                unresolved_timer |= resolve_timed_cue(child, &cue_slides);
+            }
+        }
+    }
+    if unresolved_timer {
+        import_warnings.push("Some timed jumps target a cue that could not be imported".into());
+    }
 
     let mut layouts = Map::new();
     let mut active = None;
@@ -212,8 +224,22 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     Ok(show)
 }
 
+fn resolve_timed_cue(node: &mut Value, cue_slides: &HashMap<String, String>) -> bool {
+    let Some(cue_id) = node.pointer("/nextTimerTarget/cue").and_then(Value::as_str) else {
+        return false;
+    };
+    if let Some(slide_id) = cue_slides.get(cue_id) {
+        node["nextTimerTarget"] = json!({"slide":slide_id});
+        return false;
+    }
+    let node = node.as_object_mut().unwrap();
+    node.remove("nextTimer");
+    node.remove("nextTimerTarget");
+    true
+}
+
 fn remove_terminal_next_timer(order: &mut [Value], slides: &Map<String, Value>) {
-    // FreeShow can advance into the next project item at the end of a layout.
+    // An implicit Next stops at the end of this presentation.
     for node in order.iter_mut().rev() {
         let id = node["id"].as_str().unwrap();
         let last_child = slides[id]["children"].as_array().and_then(|children| {
@@ -230,7 +256,7 @@ fn remove_terminal_next_timer(order: &mut [Value], slides: &Map<String, Value>) 
         } else {
             continue;
         };
-        if last["nextTimerTarget"] != "first" {
+        if last["nextTimerTarget"] == "next" {
             let last = last.as_object_mut().unwrap();
             last.remove("nextTimer");
             last.remove("nextTimerTarget");
@@ -264,6 +290,11 @@ fn add_slide(
             wire::CompletionTarget::First => {
                 node["nextTimer"] = json!(cue.completion_time);
                 node["nextTimerTarget"] = json!("first");
+            }
+            wire::CompletionTarget::Cue => {
+                node["nextTimer"] = json!(cue.completion_time);
+                node["nextTimerTarget"] =
+                    json!({"cue":id(&cue.completion_cue).unwrap_or_default()});
             }
             wire::CompletionTarget::None => {}
         }
@@ -821,6 +852,40 @@ mod tests {
         assert!(!show.ends_at(1));
         show.set_next_timers(3.0);
         assert_eq!(show.timed_cue_target_at(1), None);
+    }
+
+    #[test]
+    fn resolves_timed_jumps_to_imported_cue_ids() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        presentation.cues[1].enabled = true;
+        presentation.cues[2].completion_action = wire::CompletionAction::AfterTime as i32;
+        presentation.cues[2].completion_target = wire::CompletionTarget::Cue as i32;
+        presentation.cues[2].completion_time = 2.0;
+        presentation.cues[2].completion_cue = presentation.cues[1].uuid.clone();
+
+        let show = crate::import::import_show("Jump.pro", &presentation.encode_to_vec()).unwrap();
+        let slides = show.ordered_slides();
+        assert_eq!(show.next_timer_at(3), Some(2.0));
+        assert_eq!(
+            show.timed_cue_target_at(3),
+            Some(crate::TimedCueTarget::Slide(slides[2].id.clone()))
+        );
+        assert_eq!(
+            show.output_index_for_slide(&slides[2].id, "default", ""),
+            Some(2)
+        );
+
+        presentation.cues[2].completion_cue = Some(wire::Uuid {
+            value: "missing".into(),
+        });
+        let show = crate::import::import_show("Jump.pro", &presentation.encode_to_vec()).unwrap();
+        assert_eq!(show.next_timer_at(0), None);
+        assert_eq!(show.timed_cue_target_at(3), None);
+        assert_eq!(
+            show.show["settings"]["importWarnings"][0],
+            "Some timed jumps target a cue that could not be imported"
+        );
     }
 
     #[test]

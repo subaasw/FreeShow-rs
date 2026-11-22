@@ -115,7 +115,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter RTF hex escapes decoded with their document code page and font charset.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
 - [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
-- [x] ProPresenter 7 timed next-slide and loop-to-start cues within an arrangement, including slides with background media.
+- [x] ProPresenter 7 timed next-slide, loop-to-start, and specific-cue jumps within an arrangement, including slides with background media.
 - [x] ProPresenter 7 enabled, immediate global clear-audio and clear-background cues. Standalone cues retain the content already on audience and stage output.
 - [ ] Other ProPresenter 7 graphics, remaining RTF controls, and timeline/action parity.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.

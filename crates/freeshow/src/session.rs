@@ -4401,6 +4401,9 @@ impl Session {
             Some(TimedCueTarget::Next) => {
                 show.step_output(pending.index, 1, &output_id, &output_name)
             }
+            Some(TimedCueTarget::Slide(id)) => {
+                show.output_index_for_slide(&id, &output_id, &output_name)
+            }
             None => None,
         };
         self.pending_cue_completion = None;
@@ -7380,6 +7383,34 @@ Second line"
         let due = session.pending_cue_completion.as_ref().unwrap().due;
         assert!(session.run_due_cue_completion(due));
         assert_eq!(session.slide_index, Some(2));
+    }
+
+    #[test]
+    fn a_timed_jump_finds_the_first_eligible_occurrence_of_its_slide() {
+        let mut show = ShowFile::blank("jump", "Jump");
+        let target = show.add_slide().unwrap();
+        show.add_slide().unwrap();
+        let order = show.show["layouts"]["main"]["slides"]
+            .as_array_mut()
+            .unwrap();
+        order[1]["bindings"] = serde_json::json!(["other"]);
+        order[2]["nextTimer"] = serde_json::json!(1);
+        order[2]["nextTimerTarget"] = serde_json::json!({"slide": target});
+        order.push(serde_json::json!({"id":target}));
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        session.show_index = Some(0);
+        session.select_slide(2);
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        assert!(session.run_due_cue_completion(due));
+        assert_eq!(session.slide_index, Some(3));
+
+        session.shows[0].show["layouts"]["main"]["slides"][3]["disabled"] = serde_json::json!(true);
+        session.select_slide(2);
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        assert!(!session.run_due_cue_completion(due));
+        assert_eq!(session.slide_index, Some(2));
+        assert!(!session.has_pending_cue_completion());
     }
 
     #[test]
