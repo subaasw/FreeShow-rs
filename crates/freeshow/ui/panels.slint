@@ -28,6 +28,7 @@ export struct SettingsData {
     text-duration: int,
     media-transition: string,
     media-duration: int,
+    addresses: string,
 }
 
 export struct InspectorData {
@@ -323,6 +324,15 @@ export component SettingsPanel inherits Rectangle {
                             maximum: 10000;
                             value: root.data.max-connections;
                             edited(value) => { root.apply("maxConnections", value); }
+                        }
+                    }
+                    Row {
+                        Text {
+                            colspan: 2;
+                            text: root.data.addresses;
+                            wrap: word-wrap;
+                            color: root.text-color;
+                            font-size: 13px * OperatorStyle.font-scale;
                         }
                     }
                     Row {

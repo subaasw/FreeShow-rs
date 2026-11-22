@@ -42,6 +42,51 @@ pub struct SettingsForm {
     pub text_duration: i32,
     pub media_transition: String,
     pub media_duration: i32,
+    /// Where phones and tablets on this network open the remote and stage pages.
+    pub addresses: String,
+}
+
+/// The friendly name of a Settings key, for the "Saved …" line.
+pub fn setting_label(key: &str) -> &str {
+    match key {
+        "language" => "language",
+        "timeFormat" => "time format",
+        "autosave" => "autosave",
+        "alertUpdates" => "update alerts",
+        "autoOutput" => "open output on startup",
+        "outLocked" => "lock output",
+        "fullColors" => "full group colors",
+        "labelsDisabled" => "hide button labels",
+        "groupNumbers" => "group numbers",
+        "splitLines" => "split lines",
+        "maxConnections" => "connections",
+        "remotePort" => "remote port (applies after a restart)",
+        "stagePort" => "stage port (applies after a restart)",
+        "textTransition" | "textDuration" => "slide transition",
+        "mediaTransition" | "mediaDuration" => "media transition",
+        "outputAlwaysOnTop" => "always on top",
+        "outputKiosk" => "kiosk",
+        "theme" => "theme",
+        other => other,
+    }
+}
+
+/// This computer's address on the local network, or `localhost` when it has none.
+pub fn lan_host() -> String {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        // Connecting a UDP socket picks the outgoing interface without sending anything.
+        std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| {
+                socket.connect("192.0.2.1:80")?;
+                socket.local_addr()
+            })
+            .ok()
+            .map(|addr| addr.ip())
+            .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+            .map_or_else(|| "localhost".to_string(), |ip| ip.to_string())
+    })
+    .clone()
 }
 
 /// Transition kinds the output can draw, in the order Settings lists them.
@@ -152,6 +197,14 @@ impl Session {
             split_lines: prefs.split_lines() as i32,
             remote_port: i32::from(prefs.remote_port.unwrap_or(freeshow_remote::REMOTE_PORT)),
             stage_port: i32::from(prefs.stage_port.unwrap_or(freeshow_remote::STAGE_PORT)),
+            addresses: {
+                let host = lan_host();
+                format!(
+                    "On a phone or tablet on this network, open the remote at http://{host}:{} and the stage display at http://{host}:{}",
+                    prefs.remote_port.unwrap_or(freeshow_remote::REMOTE_PORT),
+                    prefs.stage_port.unwrap_or(freeshow_remote::STAGE_PORT)
+                )
+            },
             max_connections: prefs.max_connections.unwrap_or(10) as i32,
             theme: prefs.theme.clone().unwrap_or_else(|| "default".into()),
             themes,
