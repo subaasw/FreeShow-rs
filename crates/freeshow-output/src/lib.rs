@@ -267,23 +267,38 @@ pub(crate) fn paint(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, 
         return;
     }
     let index = ((y * width + x) * 4) as usize;
-    if color.a == 255 {
-        pixels[index] = color.r;
-        pixels[index + 1] = color.g;
-        pixels[index + 2] = color.b;
-        pixels[index + 3] = 255;
+    source_over(
+        &mut pixels[index..index + 4],
+        &[color.r, color.g, color.b, color.a],
+    );
+}
+
+/// Blends a straight-alpha RGBA pixel over another straight-alpha pixel.
+#[inline]
+pub(crate) fn source_over(dest: &mut [u8], source: &[u8]) {
+    let alpha = source[3];
+    if alpha == 0 {
         return;
     }
-    if color.a == 0 {
+    if alpha == 255 || dest[3] == 0 {
+        dest.copy_from_slice(source);
         return;
     }
-    let src_a = u32::from(color.a);
-    let dst_a = 255 - src_a;
-    for (offset, channel) in [color.r, color.g, color.b].into_iter().enumerate() {
-        let dst = u32::from(pixels[index + offset]);
-        pixels[index + offset] = ((u32::from(channel) * src_a + dst * dst_a) / 255) as u8;
+    if dest[3] == 255 {
+        let cover = u16::from(alpha);
+        let remain = 255 - cover;
+        for i in 0..3 {
+            dest[i] = ((u16::from(source[i]) * cover + u16::from(dest[i]) * remain) / 255) as u8;
+        }
+        return;
     }
-    pixels[index + 3] = 255;
+    let cover = u32::from(alpha) * 255;
+    let remain = u32::from(dest[3]) * (255 - u32::from(alpha));
+    let total = cover + remain;
+    for i in 0..3 {
+        dest[i] = ((u32::from(source[i]) * cover + u32::from(dest[i]) * remain) / total) as u8;
+    }
+    dest[3] = ((total + 127) / 255) as u8;
 }
 
 #[cfg(test)]

@@ -120,7 +120,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| Item styles, backgrounds, media, transitions, clear | done | 3 | Core Sunday path |
+| Item styles, backgrounds, media, transitions, clear | done | 3 | Shapes, text, and images retain alpha when rendered through transparent output layers |
 | Watermark, output variables, scenes, interactions | done | 2 | `activeScenes` and synced keys |
 | Draw-on-output | done | 1 | Stored `drawSettings` |
 | Live effects library | done | 1 | `effectsLibrary` washes/particles |
