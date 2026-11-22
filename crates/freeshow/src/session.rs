@@ -20,6 +20,48 @@ use freeshow_output::{
 };
 pub use panels::{AUTOSAVE_CHOICES, STAGE_ADD_KINDS};
 
+/// Network feeds due for a refresh: weather locations and RSS URLs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FeedRequest {
+    pub weather: Vec<(f64, f64)>,
+    pub rss: Vec<String>,
+}
+
+/// What a background worker fetched for a [`FeedRequest`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FeedResults {
+    pub weather: Vec<crate::feeds::WeatherReport>,
+    /// `None` when RSS was not requested or every feed failed.
+    pub rss: Option<Vec<crate::feeds::RssItem>>,
+}
+
+impl FeedRequest {
+    /// Fetch everything in this request. Blocking; run it off the UI thread.
+    pub fn fetch(
+        &self,
+        weather: impl Fn(f64, f64) -> Result<crate::feeds::WeatherReport, String>,
+        rss: impl Fn(&str) -> Result<Vec<crate::feeds::RssItem>, String>,
+    ) -> FeedResults {
+        let reports = self
+            .weather
+            .iter()
+            .filter_map(|(lat, lon)| weather(*lat, *lon).ok())
+            .collect();
+        let mut fetched = false;
+        let mut items = Vec::new();
+        for url in &self.rss {
+            if let Ok(feed) = rss(url) {
+                fetched = true;
+                items.extend(feed);
+            }
+        }
+        FeedResults {
+            weather: reports,
+            rss: fetched.then_some(items),
+        }
+    }
+}
+
 /// Linear gain from a volume action. A value above 5 is a percent. Decibels convert to gain.
 #[derive(Clone)]
 struct PendingActions {
@@ -1021,7 +1063,7 @@ impl Session {
             .position(|(index, _)| *index == real)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn slide_labels(&self) -> Vec<String> {
         self.slide_rows().into_iter().map(|row| row.text).collect()
     }
@@ -1410,7 +1452,7 @@ impl Session {
         self.draw_strokes.clear();
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn add_draw_point(&mut self, x: f32, y: f32, size: f32, color: &str) {
         self.draw_strokes.push(DrawStroke {
             x,
@@ -5138,17 +5180,17 @@ impl Session {
         self.restore_snapshot(next)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.history.is_empty()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn last_edit_label(&self) -> Option<&str> {
         self.history.last().map(|snap| snap.label.as_str())
     }
@@ -5229,7 +5271,7 @@ impl Session {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn chord_for(&self, action: &str) -> String {
         freeshow_data::normalize_chord(&self.preferences.shortcut(action))
     }
@@ -5408,31 +5450,45 @@ impl Session {
         self.chrome.update_alert.as_deref()
     }
 
-    pub fn refresh_weather_with(
-        &mut self,
-        now: std::time::Instant,
-        fetch: impl Fn(f64, f64) -> Result<crate::feeds::WeatherReport, String>,
-    ) -> usize {
-        if !crate::operator::weather_due(
+    /// Weather and RSS fetches that are due, for a background worker. Marks them fetched now
+    /// so a slow or failing network waits a full interval instead of retrying every tick.
+    pub fn take_feed_request(&mut self, now: std::time::Instant) -> Option<FeedRequest> {
+        let mut request = FeedRequest::default();
+        if crate::operator::weather_due(
             self.chrome.weather_fetched_at,
             now,
             crate::operator::weather_interval(&self.preferences),
         ) {
-            return 0;
+            self.chrome.weather_fetched_at = Some(now);
+            let items = self.current_weather_items();
+            request.weather =
+                crate::operator::weather_locations_from(&self.preferences.special, &items)
+                    .into_iter()
+                    .map(|(lat, lon, _)| (lat, lon))
+                    .collect();
         }
-        let items = self.current_weather_items();
-        let locations = crate::operator::weather_locations_from(&self.preferences.special, &items);
-        let mut refreshed = 0;
-        for (lat, lon, _) in &locations {
-            if let Ok(report) = fetch(*lat, *lon) {
-                self.chrome.store_weather(report);
-                refreshed += 1;
+        if crate::operator::weather_due(
+            self.chrome.rss_fetched_at,
+            now,
+            crate::operator::rss_interval(&self.preferences),
+        ) {
+            self.chrome.rss_fetched_at = Some(now);
+            request.rss = crate::operator::rss_urls_from(&self.preferences);
+            if request.rss.is_empty() {
+                self.chrome.rss_items.clear();
             }
         }
-        if refreshed > 0 || locations.is_empty() {
-            self.chrome.weather_fetched_at = Some(now);
+        (!request.weather.is_empty() || !request.rss.is_empty()).then_some(request)
+    }
+
+    /// Store what a background [`FeedRequest`] fetched. Failed fetches keep the old data.
+    pub fn apply_feed_results(&mut self, results: FeedResults) {
+        for report in results.weather {
+            self.chrome.store_weather(report);
         }
-        refreshed
+        if let Some(items) = results.rss {
+            self.chrome.rss_items = items;
+        }
     }
 
     fn current_weather_items(&self) -> Vec<serde_json::Value> {
@@ -5451,30 +5507,6 @@ impl Session {
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default()
-    }
-
-    pub fn refresh_rss_with(
-        &mut self,
-        now: std::time::Instant,
-        fetch: impl Fn(&str) -> Result<Vec<crate::feeds::RssItem>, String>,
-    ) -> usize {
-        if !crate::operator::weather_due(
-            self.chrome.rss_fetched_at,
-            now,
-            crate::operator::rss_interval(&self.preferences),
-        ) {
-            return 0;
-        }
-        let mut items = Vec::new();
-        for url in crate::operator::rss_urls_from(&self.preferences) {
-            if let Ok(feed) = fetch(&url) {
-                items.extend(feed);
-            }
-        }
-        let count = items.len();
-        self.chrome.rss_items = items;
-        self.chrome.rss_fetched_at = Some(now);
-        count
     }
 
     pub fn inspector_text(&self) -> String {

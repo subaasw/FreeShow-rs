@@ -90,7 +90,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Save lyric edits and project order | done | 2 | Writes the same files Electron uses |
 | Export text of the open show | done | 0.8 | `Exports/` in the text-importer shape |
 | Access-control `profiles` | done | 0.7 | Password profiles lock the session until `login_profile`; listed in the settings pane |
-| Alert-update chrome | done | 0.5 | Banner in the footer and guide when a newer GitHub Release is known |
+| Alert-update chrome | done | 0.5 | A background check at startup (when `alertUpdates` is on) puts the newer release in the status bar and a header "Get update" button |
 
 ### Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions
 
@@ -197,9 +197,9 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Folder/URL cloud backup | done | 0.3 |  |
 | OBS WebSocket 5 | done | 0.4 | Also reads library `obsData` |
 | Functions → AI via Ollama | done | 0.3 | When `FREESHOW_AI` is set |
-| GitHub Releases update check | done | 0.3 | Public API, no credentials; compares to `CARGO_PKG_VERSION` |
-| Download and install a GitHub Release | done | 0.2 | Download, SHA-256 sidecar, swap, relaunch, and rollback; refuses install without a checksum |
-| Spellcheck | done | 0.3 | Embedded word list plus an optional system dictionary |
+| GitHub Releases update check | done | 0.3 | Public API, no credentials, off the UI thread; compares to `CARGO_PKG_VERSION`; `FREESHOW_SKIP_UPDATE_CHECK` opts out |
+| Download and install a GitHub Release | done | 0.2 | Downloads the platform asset to Downloads, verifies the SHA-256 sidecar (refuses without one), then opens the dmg / shows the installer or archive; no in-place binary swap |
+| Spellcheck | done | 0.3 | Lyrics editor shows misspelled words with a suggestion (English, debounced) when a system dictionary is present; embedded list as fallback |
 | Stream Deck USB HID | done | 0.2 | Pure-Rust Linux hidraw behind feature `hid` (default off); other OS lists stay empty; no C hidapi |
 | Canva / OnStage / Amazing Life providers | not-yet | 0.3 | Credential-gated |
 | Google Drive library sync | not-yet | 0.3 | Beyond folder/URL backup; needs an account |

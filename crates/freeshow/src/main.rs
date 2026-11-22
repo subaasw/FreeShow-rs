@@ -2,7 +2,6 @@
 
 mod church_import;
 mod desktop;
-#[cfg_attr(not(test), allow(dead_code))]
 mod feeds;
 mod lang;
 mod live;
@@ -11,12 +10,10 @@ mod present;
 mod runtime;
 mod service_check;
 mod session;
-#[cfg_attr(not(test), allow(dead_code))]
 mod spell;
 mod stage;
 mod streamdeck;
 mod theme;
-#[cfg_attr(not(test), allow(dead_code))]
 mod update;
 
 use std::cell::RefCell;
@@ -251,6 +248,16 @@ fn selected(index: Option<usize>) -> i32 {
     index.map(|value| value as i32).unwrap_or(-1)
 }
 
+/// Spelling hints for the lyrics editor; English libraries only, like FreeShow's default.
+fn spelling_note(session: &Session, text: &str) -> String {
+    let language = session.preferences.language.as_deref().unwrap_or("en");
+    if language.is_empty() || language.starts_with("en") {
+        spell::report(text, 4)
+    } else {
+        String::new()
+    }
+}
+
 fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_drawer_rows(drawer_rows(session));
     ui.set_slide_grid(slide_grid(session));
@@ -258,7 +265,11 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_full_colors(session.preferences.full_colors());
     ui.set_project_names(strings(&session.project_labels()));
     ui.set_project_title(session.project_title().into());
-    ui.set_lyrics(session.lyrics().into());
+    let lyrics = session.lyrics();
+    if ui.get_lyrics().as_str() != lyrics {
+        ui.set_spelling(spelling_note(session, &lyrics).into());
+        ui.set_lyrics(lyrics.into());
+    }
     ui.set_group(session.group().into());
     ui.set_item_label(session.item_label().into());
     refresh_panels(ui, session);
@@ -3031,6 +3042,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     );
+    let spell_timer = Rc::new(slint::Timer::default());
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let spell_timer = Rc::clone(&spell_timer);
+        control.on_lyrics_edited(move |_| {
+            let ui = ui.clone();
+            let session = Rc::clone(&session);
+            spell_timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(400),
+                move || {
+                    if let Some(ui) = ui.upgrade() {
+                        let note = spelling_note(&session.borrow(), ui.get_lyrics().as_str());
+                        ui.set_spelling(note.into());
+                    }
+                },
+            );
+        });
+    }
+    let (feed_tx, feed_rx) = spawn_feed_worker();
+    let (update_tx, update_rx) = mpsc::channel::<update::ReleaseUpdate>();
+    if session.borrow().preferences.alert_updates()
+        && std::env::var_os("FREESHOW_SKIP_UPDATE_CHECK").is_none()
+    {
+        let _ = std::thread::Builder::new()
+            .name("update-check".into())
+            .spawn(move || match update::check_default() {
+                Ok(found) => {
+                    tracing::info!("latest release {} (newer: {})", found.tag, found.newer);
+                    let _ = update_tx.send(found);
+                }
+                Err(err) => tracing::info!("update check skipped: {err}"),
+            });
+    }
+    let clock_ui = control.as_weak();
+    let latest_update: Rc<RefCell<Option<update::ReleaseUpdate>>> = Rc::new(RefCell::new(None));
+    let clock_update = Rc::clone(&latest_update);
+    {
+        let ui = control.as_weak();
+        control.on_get_update(move || {
+            let Some(found) = latest_update.borrow().clone() else {
+                return;
+            };
+            if let Some(ui) = ui.upgrade() {
+                ui.set_update_label("Downloading…".into());
+            }
+            let ui = ui.clone();
+            let _ = std::thread::Builder::new()
+                .name("update-download".into())
+                .spawn(move || {
+                    let label = match update::download_update(&found, &update::download_dir())
+                        .and_then(|path| {
+                            tracing::info!("update {} saved to {}", found.tag, path.display());
+                            update::reveal(&path)
+                        }) {
+                        Ok(()) => "Update downloaded",
+                        Err(err) => {
+                            tracing::warn!("update download failed: {err}");
+                            "Update failed"
+                        }
+                    };
+                    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_update_label(label.into()));
+                });
+        });
+    }
     let mut icecast_sender: Option<freeshow_record::IcecastSender> = None;
     let mut last_icecast = None;
     clock_timer.start(
@@ -3039,11 +3116,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || {
             {
                 let mut current = clock_session.borrow_mut();
-                let now = std::time::Instant::now();
-                let _ = current.refresh_weather_with(now, |lat, lon| {
-                    crate::feeds::fetch_weather(lat, lon, crate::feeds::OPEN_METEO)
-                });
-                let _ = current.refresh_rss_with(now, crate::feeds::fetch_rss);
+                if let Some(request) = current.take_feed_request(std::time::Instant::now()) {
+                    let _ = feed_tx.send(request);
+                }
+                while let Ok(results) = feed_rx.try_recv() {
+                    current.apply_feed_results(results);
+                }
+                if let Ok(update) = update_rx.try_recv() {
+                    current.apply_update_alert(&update);
+                    if let Some(ui) = clock_ui.upgrade() {
+                        let ready = update.newer && update.download_url.is_some();
+                        ui.set_update_label(if ready { "Get update" } else { "" }.into());
+                        refresh(&ui, &current);
+                    }
+                    if update.newer {
+                        *clock_update.borrow_mut() = Some(update);
+                    }
+                }
             }
             let ran = clock_session.borrow_mut().run_due_actions();
             {
@@ -3111,4 +3200,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     freeshow_record::ServiceCapture.stop_all();
     result?;
     Ok(())
+}
+
+/// A background thread for weather and RSS fetches so a slow network never stalls the UI clock.
+fn spawn_feed_worker() -> (
+    mpsc::Sender<session::FeedRequest>,
+    mpsc::Receiver<session::FeedResults>,
+) {
+    let (request_tx, request_rx) = mpsc::channel::<session::FeedRequest>();
+    let (result_tx, result_rx) = mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("feeds".into())
+        .spawn(move || {
+            for request in request_rx {
+                let results = request.fetch(
+                    |lat, lon| feeds::fetch_weather(lat, lon, feeds::OPEN_METEO),
+                    feeds::fetch_rss,
+                );
+                if result_tx.send(results).is_err() {
+                    break;
+                }
+            }
+        });
+    (request_tx, result_rx)
 }
