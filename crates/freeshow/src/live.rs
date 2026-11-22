@@ -4,8 +4,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::session::Session;
-#[cfg(test)]
 use freeshow_data::ShowFile;
+use freeshow_output::render_styled;
 use freeshow_output::{
     Blend, Fit, Frame, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine,
     StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, crossfade,
@@ -14,7 +14,7 @@ use freeshow_output::{
     placed_image, scale_frames, slide_frames, slide_way, spin_frames,
 };
 #[cfg(test)]
-use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH, render_styled};
+use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
 
 /// One step of a slide or media transition. `t` is the raw progress from 0 to 1.
 pub fn motion_frame(
@@ -63,10 +63,59 @@ pub(crate) enum ProgramContent {
     Slide {
         show_id: String,
         slide_id: String,
+        /// Position in the show's layout, so the slide list can mark what is live.
+        index: usize,
         reveal: u32,
         clicks: bool,
         page: Option<(usize, usize)>,
     },
+}
+
+/// One slide of `show` drawn small for the slide list.
+pub fn slide_thumbnail(
+    session: &Session,
+    show: &ShowFile,
+    index: usize,
+    width: u32,
+    height: u32,
+) -> Frame {
+    frame_for_slide_at(
+        show,
+        index,
+        session.root.as_deref(),
+        false,
+        None,
+        true,
+        None,
+        &session_variables(session),
+        width,
+        height,
+    )
+}
+
+/// The selected slide on its own, for the editor preview. Unlike [`audience_frame`]
+/// it ignores Clear and does not touch what the output records as live.
+pub fn edit_frame(session: &Session) -> Frame {
+    let (width, height) = (session.output_width, session.output_height);
+    let Some((show, index)) = session
+        .show_index
+        .and_then(|slot| session.shows.get(slot))
+        .zip(session.slide_index)
+    else {
+        return clear_frame(width, height);
+    };
+    frame_for_slide_at(
+        show,
+        index,
+        session.root.as_deref(),
+        false,
+        None,
+        true,
+        None,
+        &session_variables(session),
+        width,
+        height,
+    )
 }
 
 pub fn audience_frame(session: &Session) -> Frame {
@@ -143,6 +192,7 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
         *program = Some(ProgramContent::Slide {
             show_id: show.id.clone(),
             slide_id,
+            index: session.slide_index.unwrap_or_default(),
             reveal: session.reveal_count,
             clicks: session.click_revealed,
             page: session.style_page(),
@@ -514,6 +564,7 @@ fn program_stage_slide(
             reveal,
             clicks,
             page,
+            ..
         }) => {
             if let Some(show) = session.shows.iter().find(|show| &show.id == show_id) {
                 let notes = show.show["slides"][slide_id]["notes"]
@@ -579,7 +630,6 @@ pub fn frame_for_slide(
     )
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn frame_for_slide_at(
     show: &ShowFile,
@@ -610,7 +660,6 @@ pub fn frame_for_slide_at(
     }
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn styled_slide_at(
     show: &ShowFile,
@@ -1242,6 +1291,20 @@ fn lines_slide_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slide_thumbnails_are_small_and_show_the_text() {
+        let mut show = ShowFile::blank("thumb", "Thumb");
+        assert!(show.replace_lyrics_with("Amazing grace\nhow sweet the sound", true));
+        let root = std::env::temp_dir().join(format!("freeshow-thumb-{}", std::process::id()));
+        let session = Session::open(root);
+        let thumb = slide_thumbnail(&session, &show, 0, 320, 180);
+        assert_eq!((thumb.width, thumb.height), (320, 180));
+        assert!(
+            thumb.pixels.chunks(4).any(|pixel| pixel[0] > 128),
+            "text is drawn"
+        );
+    }
     use freeshow_data::Catalog;
     use std::io::Write;
     use std::net::TcpListener;

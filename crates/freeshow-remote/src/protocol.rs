@@ -19,6 +19,10 @@ pub enum Command {
         slide: Option<usize>,
     },
     Clear,
+    /// Hide the slide text but keep background media, overlays and audio.
+    ClearSlide,
+    /// Stop the background image or video but keep the slide text.
+    ClearBackground,
     PresentVerse {
         reference: String,
         text: String,
@@ -522,11 +526,15 @@ pub fn handle_message_authenticated(
             commands.push(Command::Clear);
             vec![out_message(snapshot), out_data_message(snapshot)]
         }
-        "API:clear_slide" | "API:clear_background" => {
+        "API:clear_slide" => {
             snapshot.cleared = true;
             snapshot.scripture_lines.clear();
-            commands.push(Command::Clear);
+            commands.push(Command::ClearSlide);
             vec![out_message(snapshot), out_data_message(snapshot)]
+        }
+        "API:clear_background" => {
+            commands.push(Command::ClearBackground);
+            vec![out_data_message(snapshot)]
         }
         "GET_OVERLAYS" => vec![overlays_message(snapshot)],
         "GET_TEMPLATES" => vec![templates_message(snapshot)],
@@ -570,7 +578,7 @@ pub fn handle_message_authenticated(
         "API:pause_audio" => pause_audio(&data, &mut commands),
         "API:audio_seekto" => seek_to(true, &data, &mut commands),
         "API:video_seekto" => seek_to(false, &data, &mut commands),
-        "API:stop_audio" => {
+        "API:stop_audio" | "API:clear_audio" => {
             commands.push(Command::StopAudio);
             vec![cleared_message(snapshot)]
         }
@@ -2439,6 +2447,24 @@ mod tests {
         let (_, commands) = handle_message(&mut snapshot, &json!({ "channel": "API:clear_all" }));
         assert_eq!(commands, vec![Command::Clear]);
         assert!(snapshot.active_overlays.is_empty());
+    }
+
+    #[test]
+    fn clear_layers_are_separate_commands() {
+        let mut snapshot = sample();
+        for (channel, command) in [
+            ("API:clear_slide", Command::ClearSlide),
+            ("API:clear_background", Command::ClearBackground),
+            ("API:clear_audio", Command::StopAudio),
+            ("API:clear_overlays", Command::ClearOverlays),
+        ] {
+            let (_, commands) = handle_message(&mut snapshot, &json!({ "channel": channel }));
+            assert_eq!(commands, vec![command], "{channel}");
+        }
+        assert_eq!(
+            crate::normalize_action_channel("clear-background"),
+            "API:clear_background"
+        );
     }
 
     #[test]

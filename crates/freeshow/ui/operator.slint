@@ -2,7 +2,7 @@
 // Operator, output and stage windows. Compiled by build.rs (slint-build).
 
 import { ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
-import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow } from "widgets.slint";
+import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow, HotkeyScope, SlideCard } from "widgets.slint";
 import { SettingsPanel, SettingsData, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
 
 export { OperatorStyle, SettingsData, InspectorData, StageRowData }
@@ -18,13 +18,11 @@ export struct DrawerRowData {
 export struct SlideRowData {
     label: string,
     index: int,
+    thumb: image,
+    has-thumb: bool,
     has-color: bool,
     group-color: color,
     group-text: color,
-}
-
-export struct SlideGridRow {
-    items: [SlideRowData],
 }
 
 export component ControlWindow inherits Window {
@@ -47,7 +45,7 @@ export component ControlWindow inherits Window {
     in-out property <string> panel-title: "Shows";
     in property <string> data-path: "Data folder not set";
     in-out property <[DrawerRowData]> drawer-rows;
-    in-out property <[SlideGridRow]> slide-grid;
+    in-out property <[SlideRowData]> slide-cards;
     in-out property <int> slides-columns: 1;
     in-out property <bool> full-colors: false;
     in-out property <[string]> project-names;
@@ -57,8 +55,12 @@ export component ControlWindow inherits Window {
     in-out property <float> volume: 100;
     in-out property <int> selected-drawer: -1;
     in-out property <int> selected-slide: -1;
+    in property <int> live-slide: -1;
     in-out property <int> selected-project: -1;
     in-out property <image> preview;
+    in-out property <image> edit-preview;
+    callback edit-mode-changed();
+    changed edit-mode => { root.edit-mode-changed(); }
     in property <string> import-status;
     in-out property <string> chrome-status: "";
     in property <bool> import-running;
@@ -136,6 +138,10 @@ export component ControlWindow inherits Window {
     in property <string> show-name;
     in-out property <string> show-text;
     in-out property <bool> text-mode: false;
+    // Edit mode: clicking a slide only selects it for editing. Otherwise a click presents it.
+    in-out property <bool> edit-mode: false;
+    property <bool> editing: root.active-tab == "shows" && root.show-name != "" && root.edit-mode;
+    callback clear-output(string);
     out property <bool> text-focused: show-editor.has-focus;
     in property <string> notice;
     in property <bool> can-restore;
@@ -174,27 +180,8 @@ export component ControlWindow inherits Window {
     }
 
     forward-focus: window-keys;
-    window-keys := FocusScope {
-        key-pressed(event) => {
-            if (event.text == Key.F11) {
-                root.hotkey("F11", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else if (event.text == Key.F1) {
-                root.hotkey("F1", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else if (event.text == Key.RightArrow) {
-                root.hotkey("Right", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else if (event.text == Key.LeftArrow) {
-                root.hotkey("Left", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else if (event.text == Key.PageDown) {
-                root.hotkey("PageDown", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else if (event.text == Key.PageUp) {
-                root.hotkey("PageUp", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else if (event.text == Key.Escape) {
-                root.hotkey("Escape", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            } else {
-                root.hotkey(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-            }
-            accept
-        }
+    window-keys := HotkeyScope {
+        hotkey(text, ctrl, alt, shift) => { root.hotkey(text, ctrl, alt, shift); }
     VerticalLayout {
         spacing: 0;
         Rectangle {
@@ -298,15 +285,17 @@ export component ControlWindow inherits Window {
                         padding-right: 8px;
                         spacing: 8px;
                         alignment: center;
-                        Text {
+                        if root.active-tab != "shows" || root.show-name == "": Text {
                             text: root.panel-title;
                             color: root.text-color;
                             font-size: 16px * OperatorStyle.font-scale;
                             vertical-alignment: center;
                         }
-                        Rectangle { horizontal-stretch: 1; background: root.primary; }
+                        if root.active-tab != "shows" || root.show-name == "": Rectangle { horizontal-stretch: 1; background: root.primary; }
                         if root.active-tab == "shows" && root.show-name != "": LineEdit {
-                            width: 200px;
+                            min-width: 80px;
+                            preferred-width: 220px;
+                            horizontal-stretch: 1;
                             height: 30px;
                             text: root.show-name;
                             placeholder-text: "Show name";
@@ -317,7 +306,7 @@ export component ControlWindow inherits Window {
                             accent: root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-color;
-                            clicked => { root.create-show(); }
+                            clicked => { root.edit-mode = true; root.text-mode = false; root.create-show(); }
                         }
                         if root.active-tab == "shows" && root.show-name != "": HeaderButton {
                             label: "Duplicate";
@@ -341,14 +330,28 @@ export component ControlWindow inherits Window {
                             }
                         }
                         if root.active-tab == "shows" && root.show-name != "": HeaderButton {
+                            label: "Edit";
+                            accent: root.edit-mode ? root.accent : root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.edit-mode ? root.accent-text : root.text-color;
+                            clicked => { root.edit-mode = !root.edit-mode; root.text-mode = false; }
+                        }
+                        if root.editing: HeaderButton {
                             label: root.text-mode ? "Slide text" : "Show text";
                             accent: root.text-mode ? root.accent : root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-mode ? root.accent-text : root.text-color;
                             clicked => { root.text-mode = !root.text-mode; }
                         }
+                        Text {
+                            text: "Vol";
+                            color: root.text-color;
+                            opacity: 0.7;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            vertical-alignment: center;
+                        }
                         Slider {
-                            width: 120px;
+                            width: 80px;
                             maximum: 100;
                             value <=> root.volume;
                             changed(value) => { root.set-volume(value); }
@@ -376,33 +379,44 @@ export component ControlWindow inherits Window {
                 HorizontalLayout {
                     vertical-stretch: 1;
                     spacing: 0;
-                    VerticalLayout {
-                        width: root.slides-columns > 1 ? 360px : 280px;
+                    slides-column := VerticalLayout {
+                        // Presenting: the slides get the room. Editing: the editor does.
+                        min-width: 260px;
+                        preferred-width: root.editing || root.slides-columns < 2 ? 300px : 560px;
+                        horizontal-stretch: root.editing || root.slides-columns < 2 ? 0 : 1;
+                        max-width: root.editing || root.slides-columns < 2 ? 340px : 100000px;
                         spacing: 4px;
-                        Flickable {
+                        slides-flick := Flickable {
+                            // Fewer, larger cards while the editor shares the row.
+                            property <int> columns: root.editing ? min(2, root.slides-columns) : max(1, root.slides-columns);
+                            property <length> card-width: (self.width - 8px - (self.columns - 1) * 4px) / self.columns;
+                            property <length> card-height: root.slide-cards.length > 0 && root.slide-cards[0].has-thumb ? (self.card-width - 6px) * 9 / 16 + 28px : 36px;
                             vertical-stretch: 1;
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 2px;
-                                for row in root.slide-grid: HorizontalLayout {
-                                    spacing: 2px;
-                                    for slide in row.items: ListRow {
-                                        width: ((root.slides-columns > 1 ? 360px : 280px) / root.slides-columns);
-                                        label: slide.label;
-                                        active: root.selected-slide == slide.index;
-                                        accent: root.accent;
-                                        text-color: root.text-color;
-                                        accent-text: root.accent-text;
-                                        has-color: slide.has-color;
-                                        full-color: root.full-colors;
-                                        group-color: slide.group-color;
-                                        group-text: slide.group-text;
-                                        clicked => { root.choose-slide(slide.index); }
-                                    }
-                                }
+                            viewport-width: self.width;
+                            viewport-height: ceil(root.slide-cards.length / self.columns) * (self.card-height + 4px) + 8px;
+                            // Placed by hand: a layout here would feed card sizes back into the column width.
+                            for slide[position] in root.slide-cards: SlideCard {
+                                x: 4px + mod(position, slides-flick.columns) * (slides-flick.card-width + 4px);
+                                y: 4px + floor(position / slides-flick.columns) * (slides-flick.card-height + 4px);
+                                width: slides-flick.card-width;
+                                height: slides-flick.card-height;
+                                label: slide.label;
+                                number: slide.index + 1;
+                                thumb: slide.thumb;
+                                has-thumb: slide.has-thumb;
+                                active: root.selected-slide == slide.index;
+                                live: root.live-slide == slide.index;
+                                accent: root.accent;
+                                text-color: root.text-color;
+                                accent-text: root.accent-text;
+                                has-color: slide.has-color;
+                                full-color: root.full-colors;
+                                group-color: slide.group-color;
+                                group-text: slide.group-text;
+                                clicked => { root.choose-slide(slide.index); }
                             }
                         }
-                        if root.active-tab == "shows" && root.show-name != "": HorizontalLayout {
+                        if root.editing: HorizontalLayout {
                             padding: 4px;
                             spacing: 4px;
                             BoxButton { label: "Add"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-slide(); } }
@@ -414,6 +428,7 @@ export component ControlWindow inherits Window {
                     }
                     editor-scroll := ScrollView {
                         horizontal-stretch: 1;
+                        min-width: 360px;
                         content-width: self.visible-width;
                         content-height: max(self.visible-height, editor-column.min-height);
                     editor-column := VerticalLayout {
@@ -422,22 +437,60 @@ export component ControlWindow inherits Window {
                         padding: 12px;
                         spacing: 8px;
                         alignment: start;
+                        Text {
+                            text: root.editing ? "Editing this slide. The audience sees it after you press Go." : "Live output";
+                            color: root.text-color;
+                            opacity: 0.7;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
+                        }
                         Rectangle {
-                            height: 180px;
+                            height: root.editing ? 180px : max(120px, min((editor-scroll.width - 40px) * 9 / 16, editor-scroll.height - 110px));
                             background: black;
                             Image {
-                                source: root.preview;
+                                source: root.editing ? root.edit-preview : root.preview;
                                 width: 100%;
                                 height: 100%;
                                 image-fit: contain;
                             }
                         }
-                        LineEdit {
+                        HorizontalLayout {
+                            spacing: 6px;
+                            BoxButton { label: "Clear all"; accent: #c0392b; text-color: #ffffff; accent-text: #ffffff; clicked => { root.clear-output("all"); } }
+                            BoxButton { label: "Slide"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.clear-output("slide"); } }
+                            BoxButton { label: "Background"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.clear-output("background"); } }
+                            BoxButton { label: "Overlays"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.clear-output("overlays"); } }
+                            BoxButton { label: "Audio"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.clear-output("audio"); } }
+                        }
+                        if root.editing && !root.text-mode: LineEdit {
                             text <=> root.group;
-                            placeholder-text: "Group";
+                            placeholder-text: "Group name, e.g. Verse 1 or Chorus";
                             edited(value) => { root.save-group(value); }
                         }
-                        HorizontalLayout {
+                        if root.editing && !root.text-mode: TextEdit {
+                            text <=> root.lyrics;
+                            min-height: 140px;
+                            vertical-stretch: 1;
+                            wrap: word-wrap;
+                            edited(text) => { root.lyrics-edited(text); }
+                        }
+                        show-editor := TextEdit {
+                            visible: root.editing && root.text-mode;
+                            max-height: root.editing && root.text-mode ? 100000px : 0px;
+                            text <=> root.show-text;
+                            min-height: root.editing && root.text-mode ? 260px : 0px;
+                            vertical-stretch: root.editing && root.text-mode ? 1 : 0;
+                            wrap: word-wrap;
+                            edited(text) => { root.show-text-edited(text); }
+                        }
+                        if root.editing && root.text-mode: Text {
+                            text: "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
+                            color: root.text-color;
+                            opacity: 0.7;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
+                        }
+                        if root.editing && !root.text-mode: HorizontalLayout {
                             spacing: 6px;
                             Text {
                                 text: root.item-label;
@@ -450,35 +503,12 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Add box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-item(); } }
                             BoxButton { label: "Remove"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.remove-item(); } }
                         }
-                        InspectorPanel {
+                        if root.editing && !root.text-mode: InspectorPanel {
                             data: root.inspector-data;
                             text-color: root.text-color;
                             set(key, value) => { root.inspector-set(key, value); }
                         }
-                        if !root.text-mode: TextEdit {
-                            text <=> root.lyrics;
-                            min-height: 160px;
-                            vertical-stretch: 1;
-                            wrap: word-wrap;
-                            edited(text) => { root.lyrics-edited(text); }
-                        }
-                        show-editor := TextEdit {
-                            visible: root.text-mode;
-                            max-height: root.text-mode ? 100000px : 0px;
-                            text <=> root.show-text;
-                            min-height: root.text-mode ? 260px : 0px;
-                            vertical-stretch: root.text-mode ? 1 : 0;
-                            wrap: word-wrap;
-                            edited(text) => { root.show-text-edited(text); }
-                        }
-                        if root.text-mode: Text {
-                            text: "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
-                            color: root.text-color;
-                            opacity: 0.7;
-                            font-size: 12px * OperatorStyle.font-scale;
-                            wrap: word-wrap;
-                        }
-                        if root.spelling != "": Text {
+                        if root.editing && root.spelling != "": Text {
                             text: root.spelling;
                             color: root.text-color;
                             opacity: 0.75;
@@ -840,6 +870,12 @@ export component ControlWindow inherits Window {
 
 export component OutputWindow inherits Window {
     in-out property <image> frame;
+    // Clicker and keyboard shortcuts work while this window has focus.
+    callback hotkey(string, bool, bool, bool);
+    forward-focus: keys;
+    keys := HotkeyScope {
+        hotkey(text, ctrl, alt, shift) => { root.hotkey(text, ctrl, alt, shift); }
+    }
     title: "FreeShow Output";
     background: #000;
     preferred-width: 960px;
@@ -854,6 +890,12 @@ export component OutputWindow inherits Window {
 
 export component StageWindow inherits Window {
     in-out property <image> frame;
+    // Clicker and keyboard shortcuts work while this window has focus.
+    callback hotkey(string, bool, bool, bool);
+    forward-focus: keys;
+    keys := HotkeyScope {
+        hotkey(text, ctrl, alt, shift) => { root.hotkey(text, ctrl, alt, shift); }
+    }
     title: "FreeShow Stage";
     background: #000;
     preferred-width: 960px;
