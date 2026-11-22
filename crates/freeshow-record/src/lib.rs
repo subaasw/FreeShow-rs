@@ -122,6 +122,16 @@ fn start_slot(
     let Some((pipeline, appsrc)) = open_pipeline(&pipelines) else {
         return false;
     };
+    start_pipeline(slot, pipeline, appsrc, width, height)
+}
+
+fn start_pipeline(
+    slot: &fn() -> &'static Slot,
+    pipeline: gstreamer::Pipeline,
+    appsrc: AppSrc,
+    width: u32,
+    height: u32,
+) -> bool {
     let (jobs, rx) = mpsc::sync_channel(2);
     let thread = std::thread::Builder::new()
         .name("freeshow-record".into())
@@ -291,10 +301,23 @@ fn serve(pipeline: gstreamer::Pipeline, appsrc: AppSrc, jobs: Receiver<Job>) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    fn routed_capture(path: &Path, url: Option<&str>) {
+    fn count_buffers(pad: gstreamer::Pad) -> Arc<AtomicUsize> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let probe_count = count.clone();
+        pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            probe_count.fetch_add(1, Ordering::Relaxed);
+            gstreamer::PadProbeReturn::Ok
+        })
+        .unwrap();
+        count
+    }
+
+    fn routed_capture(path: &Path, url: Option<&str>) -> (usize, usize) {
         let id = format!("record-network-{}", std::process::id());
         let wav = path.with_extension("wav");
         gstreamer::init().unwrap();
@@ -311,6 +334,7 @@ mod tests {
             .unwrap();
         assert_eq!(message.type_(), gstreamer::MessageType::Eos);
         writer.set_state(gstreamer::State::Null).unwrap();
+        let mut counts = None;
         if let Some(url) = url {
             assert!(ServiceCapture.start_rtmp_routed(url, 64, 48, &id));
         } else {
@@ -319,7 +343,11 @@ mod tests {
                     .into_iter()
                     .map(|pipeline| pipeline.replace("rtmpsink location=", "filesink location="))
                     .collect();
-            assert!(start_slot(&RTMP, descriptions, 64, 48));
+            let (pipeline, appsrc) = open_pipeline(&descriptions).unwrap();
+            let raw = count_buffers(appsrc.static_pad("src").unwrap());
+            let encoded = count_buffers(pipeline.by_name("mux").unwrap().static_pad("video").unwrap());
+            counts = Some((raw, encoded));
+            assert!(start_pipeline(&RTMP, pipeline, appsrc, 64, 48));
         }
         let audio = freeshow_media::AudioOutput::play_file_with_network(
             &wav,
@@ -336,6 +364,9 @@ mod tests {
         ServiceCapture.stop_rtmp();
         drop(audio);
         let _ = fs::remove_file(wav);
+        counts.map_or((0, 0), |(raw, encoded)| {
+            (raw.load(Ordering::Relaxed), encoded.load(Ordering::Relaxed))
+        })
     }
 
     fn flv_tags(bytes: &[u8]) -> Vec<(u8, u32, Vec<u8>)> {
@@ -397,7 +428,7 @@ mod tests {
     fn the_stream_mux_contains_routed_audio_and_repeats_a_static_picture() {
         let path =
             std::env::temp_dir().join(format!("freeshow-stream-audio-{}.flv", std::process::id()));
-        routed_capture(&path, None);
+        let (raw_frames, encoded_frames) = routed_capture(&path, None);
         let tags = flv_tags(&fs::read(&path).unwrap());
         let audio: Vec<_> = tags
             .iter()
@@ -470,7 +501,11 @@ mod tests {
                 *kind == 9 && data.len() > 5 && data[0] & 0xf == 7 && data[1] == 1
             })
             .collect();
-        assert!(video.len() >= 20, "only {} static video frames", video.len());
+        assert!(
+            video.len() >= 20,
+            "only {} static video frames in FLV ({raw_frames} raw, {encoded_frames} at the mux)",
+            video.len()
+        );
         let first_video = video.first().unwrap().1;
         let last_video = video.last().unwrap().1;
         assert!(
