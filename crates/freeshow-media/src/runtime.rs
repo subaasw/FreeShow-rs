@@ -19,6 +19,7 @@ pub fn check_runtime() -> Result<RuntimeStatus, MediaError> {
         "decodebin",
         "videoconvert",
         "videoscale",
+        "videorate",
         "audioconvert",
         "audioresample",
         "audiomixer",
