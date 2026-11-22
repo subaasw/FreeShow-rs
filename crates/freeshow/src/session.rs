@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use freeshow_data::{
     AUDIO_DIR, BibleFile, Catalog, DrawStroke, EffectSpec, FreeShowPreferences, Library, MEDIA_DIR,
     MediaEntry, MixStep, OutlinedBook, PlayerVideo, ProjectsFile, ShowFile, SlideBackdrop,
-    SlideJump, StageLayout, TimelineCue, TimerStep, VerseHit, default_stage, new_id,
-    parse_timeline_text, timeline_cues_from_show, timeline_text_from,
+    SlideJump, StageLayout, TimedCueTarget, TimelineCue, TimerStep, VerseHit, default_stage,
+    new_id, parse_timeline_text, timeline_cues_from_show, timeline_text_from,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 use freeshow_output::{
@@ -24,6 +24,13 @@ struct PendingActions {
     show_id: String,
     slide_index: usize,
     actions: Vec<serde_json::Value>,
+}
+
+struct PendingCueCompletion {
+    due: Instant,
+    show_id: String,
+    layout_id: String,
+    index: usize,
 }
 
 /// An index in `0..count` that is not `current`.
@@ -209,6 +216,7 @@ pub struct Session {
     pending_actions: Option<PendingActions>,
     /// Countdown captured when this slide was shown. A later timer action does not change it.
     timed_seconds: Option<f64>,
+    pending_cue_completion: Option<PendingCueCompletion>,
     pub stage: StageLayout,
     pub stage_media: std::cell::RefCell<crate::stage::StageMedia>,
     pub timer_left: u64,
@@ -403,6 +411,7 @@ impl Session {
             random_hops: 0,
             pending_actions: None,
             timed_seconds: None,
+            pending_cue_completion: None,
             stage: default_stage(),
             stage_media: Default::default(),
             timer_left: 300,
@@ -575,6 +584,7 @@ impl Session {
             random_hops: 0,
             pending_actions: None,
             timed_seconds: None,
+            pending_cue_completion: None,
             stage,
             stage_media: Default::default(),
             timer_left: 300,
@@ -1165,6 +1175,7 @@ impl Session {
             return;
         }
         self.program_content.get_mut().take();
+        self.pending_cue_completion = None;
         self.replace_underlay(None);
         self.reset_background_look();
         self.playing_audio = None;
@@ -2221,6 +2232,17 @@ impl Session {
             self.timed_seconds = self
                 .current_show()
                 .and_then(|show| self.slide_index.and_then(|index| show.next_timer_at(index)));
+            self.pending_cue_completion = self.current_show().and_then(|show| {
+                let index = self.slide_index?;
+                show.timed_cue_target_at(index)?;
+                let duration = Duration::try_from_secs_f64(self.timed_seconds?).ok()?;
+                Some(PendingCueCompletion {
+                    due: Instant::now().checked_add(duration)?,
+                    show_id: show.id.clone(),
+                    layout_id: show.active_layout(),
+                    index,
+                })
+            });
             let backdrop = self
                 .current_show()
                 .and_then(|show| self.slide_index.map(|index| show.backdrop_at(index)));
@@ -2586,8 +2608,12 @@ impl Session {
         let show_index = self.show_index;
         for step in steps {
             match step {
-                TimerStep::Clear => self.timed_seconds = None,
+                TimerStep::Clear => {
+                    self.timed_seconds = None;
+                    self.pending_cue_completion = None;
+                }
                 TimerStep::Set(seconds) => {
+                    self.pending_cue_completion = None;
                     if let Some(index) = show_index
                         && let Some(show) = self.shows.get_mut(index)
                     {
@@ -4347,6 +4373,44 @@ impl Session {
         self.timed_seconds.filter(|seconds| *seconds > 0.0)
     }
 
+    pub fn has_pending_cue_completion(&self) -> bool {
+        self.pending_cue_completion.is_some()
+    }
+
+    pub fn run_due_cue_completion(&mut self, now: Instant) -> bool {
+        let Some(pending) = &self.pending_cue_completion else {
+            return false;
+        };
+        let matching_show = self.current_show().filter(|show| {
+            self.tab == "shows"
+                && !self.blanked
+                && self.slide_index == Some(pending.index)
+                && show.id == pending.show_id
+                && show.active_layout() == pending.layout_id
+        });
+        let Some(show) = matching_show else {
+            self.pending_cue_completion = None;
+            return false;
+        };
+        if now < pending.due {
+            return false;
+        }
+        let (output_id, output_name) = self.audience();
+        let next = match show.timed_cue_target_at(pending.index) {
+            Some(TimedCueTarget::First) => show.first_output(&output_id, &output_name),
+            Some(TimedCueTarget::Next) => {
+                show.step_output(pending.index, 1, &output_id, &output_name)
+            }
+            None => None,
+        };
+        self.pending_cue_completion = None;
+        let Some(next) = next.filter(|_| !self.preferences.out_locked()) else {
+            return false;
+        };
+        self.select_slide(next);
+        true
+    }
+
     /// The next slide in this song, the next picture in a folder, or the next project item.
     pub fn advance_show(&mut self) -> bool {
         if self.preferences.out_locked() {
@@ -4509,6 +4573,7 @@ impl Session {
         let Some(first) = files.first().cloned() else {
             return false;
         };
+        self.pending_cue_completion = None;
         self.folder_paths = files;
         self.folder_index = 0;
         self.show_folder_file(first)
@@ -7279,6 +7344,42 @@ Second line"
         assert!(!session.slide_hidden);
         assert_eq!(session.current_show().unwrap().id, show_id);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_the_timer_restarts_an_imported_loop_cue() {
+        let mut show = ShowFile::blank("loop", "Loop");
+        for _ in 0..3 {
+            show.add_slide().unwrap();
+        }
+        let order = &mut show.show["layouts"]["main"]["slides"];
+        order[0]["disabled"] = serde_json::json!(true);
+        order[1]["nextTimer"] = serde_json::json!(2.0);
+        order[1]["nextTimerTarget"] = serde_json::json!("next");
+        order[2]["nextTimer"] = serde_json::json!(1.25);
+        order[2]["nextTimerTarget"] = serde_json::json!("first");
+        order[2]["background"] = serde_json::json!("video");
+        show.show["media"]["video"] = serde_json::json!({"path":"loop.mp4"});
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        session.show_index = Some(0);
+        session.select_slide(2);
+        assert_eq!(session.next_timer_seconds(), Some(1.25));
+        assert!(session.background_transition);
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        assert!(!session.run_due_cue_completion(due - Duration::from_millis(1)));
+        assert!(session.advance_show());
+        assert_eq!(session.slide_index, Some(3));
+        assert!(!session.run_due_cue_completion(due));
+
+        session.select_slide(2);
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        assert!(session.run_due_cue_completion(due));
+        assert_eq!(session.slide_index, Some(1));
+        assert_eq!(session.next_timer_seconds(), Some(2.0));
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        assert!(session.run_due_cue_completion(due));
+        assert_eq!(session.slide_index, Some(2));
     }
 
     #[test]

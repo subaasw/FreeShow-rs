@@ -138,7 +138,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
         if order.is_empty() {
             continue;
         }
-        remove_terminal_timer(&mut order, &slides);
+        remove_terminal_next_timer(&mut order, &slides);
         if (layouts.len() + 2).saturating_mul(document.notes.len()) > 32 * 1024 * 1024 {
             return Err(invalid("arrangement notes exceed the import size limit"));
         }
@@ -158,7 +158,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
             .iter()
             .any(|node| !covered.contains(node["id"].as_str().unwrap()))
     {
-        remove_terminal_timer(&mut default_order, &slides);
+        remove_terminal_next_timer(&mut default_order, &slides);
         layouts.insert(
             "main".into(),
             json!({"name":"All slides","notes":document.notes,"slides":default_order}),
@@ -212,7 +212,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     Ok(show)
 }
 
-fn remove_terminal_timer(order: &mut [Value], slides: &Map<String, Value>) {
+fn remove_terminal_next_timer(order: &mut [Value], slides: &Map<String, Value>) {
     // FreeShow can advance into the next project item at the end of a layout.
     for node in order.iter_mut().rev() {
         let id = node["id"].as_str().unwrap();
@@ -223,17 +223,19 @@ fn remove_terminal_timer(order: &mut [Value], slides: &Map<String, Value>) {
                 .filter_map(Value::as_str)
                 .find(|id| node["children"][*id]["disabled"] == false)
         });
-        if let Some(child) = last_child {
-            node["children"][child]
-                .as_object_mut()
-                .unwrap()
-                .remove("nextTimer");
-            return;
+        let last = if let Some(child) = last_child {
+            &mut node["children"][child]
+        } else if node["disabled"] == false {
+            node
+        } else {
+            continue;
+        };
+        if last["nextTimerTarget"] != "first" {
+            let last = last.as_object_mut().unwrap();
+            last.remove("nextTimer");
+            last.remove("nextTimerTarget");
         }
-        if node["disabled"] == false {
-            node.as_object_mut().unwrap().remove("nextTimer");
-            return;
-        }
+        return;
     }
 }
 
@@ -251,11 +253,20 @@ fn add_slide(
     }
     let mut node = json!({"id": slide_id, "disabled": !cue.enabled});
     if cue.enabled
-        && cue.completion_target() == wire::CompletionTarget::Next
         && cue.completion_action() == wire::CompletionAction::AfterTime
         && (0.001..=3600.0).contains(&cue.completion_time)
     {
-        node["nextTimer"] = json!(cue.completion_time);
+        match cue.completion_target() {
+            wire::CompletionTarget::Next => {
+                node["nextTimer"] = json!(cue.completion_time);
+                node["nextTimerTarget"] = json!("next");
+            }
+            wire::CompletionTarget::First => {
+                node["nextTimer"] = json!(cue.completion_time);
+                node["nextTimerTarget"] = json!("first");
+            }
+            wire::CompletionTarget::None => {}
+        }
     }
     let label = group.map_or(cue.name.as_str(), |group| group.name.as_str());
     let mut settings = json!({});
@@ -796,6 +807,20 @@ mod tests {
         assert!(show.set_active_layout("arrangement-3"));
         assert_eq!(show.next_timer_at(0), None);
         assert_eq!(show.next_timer_at(1), None);
+
+        presentation.cues[1].enabled = true;
+        presentation.cues[1].completion_target = wire::CompletionTarget::First as i32;
+        let mut show =
+            crate::import::import_show("Timed.pro", &presentation.encode_to_vec()).unwrap();
+        assert!(show.set_active_layout("arrangement-3"));
+        assert_eq!(show.next_timer_at(1), Some(2.5));
+        assert_eq!(
+            show.timed_cue_target_at(1),
+            Some(crate::TimedCueTarget::First)
+        );
+        assert!(!show.ends_at(1));
+        show.set_next_timers(3.0);
+        assert_eq!(show.timed_cue_target_at(1), None);
     }
 
     #[test]

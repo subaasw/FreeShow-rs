@@ -662,6 +662,12 @@ pub enum SlideBackdrop {
     Picture { path: String, foreground: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimedCueTarget {
+    Next,
+    First,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShowFile {
     pub id: String,
@@ -1384,6 +1390,16 @@ impl ShowFile {
                 .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
         })?;
         (seconds > 0.0).then_some(seconds)
+    }
+
+    /// Explicit timed completion. Ordinary FreeShow next-slide timers omit a target.
+    pub fn timed_cue_target_at(&self, index: usize) -> Option<TimedCueTarget> {
+        let node = self.layout_node_at(index)?;
+        match node["nextTimerTarget"].as_str()? {
+            "next" => Some(TimedCueTarget::Next),
+            "first" => Some(TimedCueTarget::First),
+            _ => None,
+        }
     }
 
     /// The picture behind this slide: its own background, a picture carried from
@@ -2162,6 +2178,7 @@ impl ShowFile {
                 continue;
             };
             target.insert("nextTimer".to_string(), serde_json::json!(seconds));
+            target.remove("nextTimerTarget");
             if lone_end && step.ended {
                 target.remove("end");
             }

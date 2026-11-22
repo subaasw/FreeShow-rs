@@ -1738,7 +1738,7 @@ fn schedule_next_slide(
     playback: &LivePlayback,
 ) {
     timer.stop();
-    let Some(seconds) = seconds else {
+    let Some(seconds) = seconds.filter(|_| !session.borrow().has_pending_cue_completion()) else {
         return;
     };
     let delay = (seconds * 1000.0).round().clamp(1.0, 3_600_000.0) as u64;
@@ -1757,7 +1757,7 @@ fn schedule_next_slide(
         std::time::Duration::from_millis(delay),
         move || {
             let mut current = session.borrow_mut();
-            if !current.advance_show() {
+            if current.has_pending_cue_completion() || !current.advance_show() {
                 return;
             }
             let plays = current.take_plays();
@@ -3509,12 +3509,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .borrow_mut()
                     .start_due_events(chrono::Utc::now());
                 sample_audio(&remote_session, &remote_audio);
-                let moved = remote_session.borrow().refresh_output;
+                let moved = {
+                    let mut session = remote_session.borrow_mut();
+                    session.run_due_cue_completion(std::time::Instant::now())
+                        || session.refresh_output
+                };
                 if started || moved {
                     remote_session.borrow_mut().refresh_output = false;
                     if moved {
+                        remote_next_slide.stop();
                         let plays = remote_session.borrow_mut().take_plays();
                         let fades = picture_fades_in(&plays[0], &remote_session.borrow());
+                        if !fades && remote_session.borrow().background_transition {
+                            stop_video(&remote_video_timer, &remote_video);
+                        }
                         start_plays(
                             plays,
                             &remote_session,
@@ -3575,20 +3583,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let clear = matches!(batch.last(), Some(freeshow_remote::Command::Clear));
             sample_audio(&remote_session, &remote_audio);
             remote_session.borrow_mut().refresh_output = false;
-            let (audience, stage) = {
+            let (audience, stage, timed_move) = {
                 let mut session = remote_session.borrow_mut();
                 for command in batch {
                     session.apply_remote(command);
                 }
+                let timed_move = session.run_due_cue_completion(std::time::Instant::now());
                 let audience = audience_frame(&session);
                 let stage = stage_frame(&session);
                 if let Ok(mut stored) = snapshot.lock() {
                     *stored = session.to_snapshot();
                 }
-                (audience, stage)
+                (audience, stage, timed_move)
             };
             let plays = remote_session.borrow_mut().take_plays();
             let fades = picture_fades_in(&plays[0], &remote_session.borrow());
+            if timed_move {
+                remote_next_slide.stop();
+                if !fades && remote_session.borrow().background_transition {
+                    stop_video(&remote_video_timer, &remote_video);
+                }
+            }
             start_plays(
                 plays,
                 &remote_session,
