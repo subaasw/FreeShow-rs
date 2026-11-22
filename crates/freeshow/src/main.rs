@@ -354,6 +354,38 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     ui.set_stage_add_kinds(strings(&session::STAGE_ADD_KINDS.map(str::to_string)));
 }
 
+/// Closing an output or stage window with its title-bar button hides it and
+/// remembers that it is closed, like pressing its header button.
+fn remember_window_close(
+    window: &slint::Window,
+    ui: slint::Weak<ControlWindow>,
+    settings: Rc<RefCell<AppSettings>>,
+    settings_path: PathBuf,
+    stage: bool,
+) {
+    window.on_close_requested(move || {
+        {
+            let mut settings = settings.borrow_mut();
+            if stage {
+                settings.show_stage = false;
+            } else {
+                settings.show_output = false;
+            }
+            if let Err(err) = settings.save(&settings_path) {
+                tracing::error!("could not save settings: {err}");
+            }
+        }
+        if let Some(ui) = ui.upgrade() {
+            if stage {
+                ui.set_stage_open(false);
+            } else {
+                ui.set_output_open(false);
+            }
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+}
+
 fn publish(slot: &FrameSlot, frame: Frame) {
     slot.publish(frame);
 }
@@ -1547,10 +1579,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    control.set_output_open(output.window().is_visible());
+    control.set_stage_open(stage.window().is_visible());
+    remember_window_close(
+        output.window(),
+        control.as_weak(),
+        Rc::clone(&settings),
+        settings_path.clone(),
+        false,
+    );
+    remember_window_close(
+        stage.window(),
+        control.as_weak(),
+        Rc::clone(&settings),
+        settings_path.clone(),
+        true,
+    );
     let output_toggle = output.as_weak();
     let settings_for_output = Rc::clone(&settings);
     let session_for_output_flags = Rc::clone(&session);
     let settings_path_for_output = settings_path.clone();
+    let ui_for_output = control.as_weak();
     control.on_open_output(move || {
         let Some(output) = output_toggle.upgrade() else {
             return;
@@ -1569,6 +1618,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             apply_window_behavior(output.window(), on_top, kiosk);
         }
         settings_for_output.borrow_mut().show_output = !visible;
+        if let Some(ui) = ui_for_output.upgrade() {
+            ui.set_output_open(output.window().is_visible());
+        }
         if let Err(err) = settings_for_output.borrow().save(&settings_path_for_output) {
             tracing::error!("could not save settings: {err}");
         }
@@ -1605,6 +1657,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stage_toggle = stage.as_weak();
     let settings_for_stage = Rc::clone(&settings);
     let settings_path_for_stage = settings_path.clone();
+    let ui_for_stage = control.as_weak();
     control.on_open_stage(move || {
         let Some(stage) = stage_toggle.upgrade() else {
             return;
@@ -1623,6 +1676,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         settings_for_stage.borrow_mut().show_stage = !visible;
+        if let Some(ui) = ui_for_stage.upgrade() {
+            ui.set_stage_open(stage.window().is_visible());
+        }
         if let Err(err) = settings_for_stage.borrow().save(&settings_path_for_stage) {
             tracing::error!("could not save settings: {err}");
         }
@@ -3191,6 +3247,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage.window(),
         &settings.borrow(),
     );
+    {
+        // Closing the operator window quits FreeShow even while an output is open,
+        // after saving slide text the operator typed but has not saved yet.
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.window().on_close_requested(move || {
+            if let Some(ui) = ui.upgrade() {
+                let mut session = session.borrow_mut();
+                let lyrics = ui.get_lyrics();
+                if session.tab == "shows" && session.lyrics() != lyrics.as_str() {
+                    session.save_lyrics(lyrics.as_str());
+                }
+            }
+            let _ = slint::quit_event_loop();
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
     tracing::info!("control window ready");
     let result = control.run();
     freeshow_record::ServiceCapture.stop_all();
