@@ -331,17 +331,18 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            crate::lessons::plan_media_show(
-                &library,
-                "stream",
-                "Stream",
-                "",
-                &[json!({"streamUrl":"https://vimeo.com/123","fileType":"video"})],
-                &Default::default(),
-            )
-            .unwrap_err()
-            .contains("downloadable")
+        let streamed = crate::lessons::plan_media_show(
+            &library,
+            "stream",
+            "Stream",
+            "",
+            &[json!({"streamUrl":"https://vimeo.com/123","fileType":"video"})],
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            streamed.show["media"]["m1"]["path"],
+            "https://vimeo.com/123"
         );
         fs::remove_dir_all(root).unwrap();
     }

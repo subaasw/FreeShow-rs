@@ -177,7 +177,7 @@ Acceptance: a `stage.json` from Electron renders every box type the Sunday opera
 - Remaining network transports: OMT, WebRTC.
 - [x] Multiple independent NDI pictures and stage NDI. Grouped NDI stays disabled because ndisink has no discovery-group property.
 - Keep Icecast / RTMP / stereo network routes working; add tests for any new transport at the crate that owns it.
-- Stream-only Lessons.church pages that have no direct media URL (today: not-yet).
+- [x] Stream-only Lessons.church pages with no direct media URL are published as remote media paths (YouTube, Vimeo, HLS/DASH). Direct HTTP clips play through uridecodebin; player pages are imported but not downloaded.
 
 Acceptance: a church that already routes a stereo mix to NDI/RTMP/Icecast can also send a second picture or a documented new transport without breaking Main.
 
