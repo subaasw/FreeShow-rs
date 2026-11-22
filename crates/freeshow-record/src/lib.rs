@@ -188,7 +188,7 @@ fn rtmp_pipeline_audio(url: &str, width: u32, height: u32, output: &str) -> Vec<
         .into_iter()
         .map(|encoder| {
             format!(
-                "appsrc name=src is-live=true format=time block=false caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! videoconvert ! {encoder} ! h264parse ! mux.video flvmux name=mux streamable=true ! rtmpsink location=\"{location}\"{audio}"
+                "appsrc name=src is-live=true format=time block=false caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! videoconvert ! {encoder} ! h264parse ! mux.video flvmux name=mux streamable=true latency=100000000 ! rtmpsink location=\"{location}\"{audio}"
             )
         })
         .collect()
@@ -257,10 +257,16 @@ fn serve(pipeline: gstreamer::Pipeline, appsrc: AppSrc, jobs: Receiver<Job>) {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        if std::time::Instant::now() < next {
+        let now = std::time::Instant::now();
+        if now < next {
             continue;
         }
-        next = std::time::Instant::now() + period;
+        // Stay on the frame cadence when a timer wakes slightly late. Skip
+        // missed ticks after a stall so we never send a burst to catch up.
+        next += period;
+        if next <= now {
+            next = now + period;
+        }
         if let Some(frame) = &last {
             if appsrc.current_level_bytes() >= (frame.len() as u64).saturating_mul(2) {
                 continue;
@@ -458,15 +464,18 @@ mod tests {
             rms > 0.1 && rms < 0.3,
             "routed gain was not preserved: RMS {rms}"
         );
-        let frames = tags
+        let video: Vec<_> = tags
             .iter()
             .filter(|(kind, _, data)| {
                 *kind == 9 && data.len() > 5 && data[0] & 0xf == 7 && data[1] == 1
             })
-            .count();
+            .collect();
+        assert!(video.len() >= 20, "only {} static video frames", video.len());
+        let first_video = video.first().unwrap().1;
+        let last_video = video.last().unwrap().1;
         assert!(
-            frames >= 20,
-            "a static picture must retain wall-clock duration, got {frames} frames"
+            last_video.saturating_sub(first_video) >= 900,
+            "the static video only covered {first_video}..{last_video}ms"
         );
         let last_audio = audio
             .iter()
