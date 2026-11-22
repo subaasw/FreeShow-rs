@@ -1,56 +1,254 @@
 # Parity with FreeShow 1.6.8
 
-Status words: done, partial, not-yet. The service path is not done until a user can edit a project, present songs and scripture, run a stage layout, play media, open an existing FreeShow library, and control the show from the remote page.
+Status words for every feature: **done**, **partial**, **not-yet**. A feature is done only when an operator can use it in a Sunday service (or it soft-fails cleanly when an optional runtime is missing). The service path is not done until a user can edit a project, present songs and scripture, run a stage layout, play media, open an existing FreeShow library, and control the show from the remote page.
 
-| Area | Status | Notes |
-| --- | --- | --- |
-| Cargo workspace, GPL-3.0, README | done | `freeshow-rust` beside the Electron repo |
-| Slint operator window | partial | Drawer, show list, slide list, lyric editor, project order, preview |
-| Output and stage windows | partial | Go fades the current slide to output and the next slide to stage. The header Screen button cycles monitors and remembers the choice. With no choice, a second monitor receives the output window. Slide text uses the item `font-family` when that face is installed (fontconfig on Unix, then the DirectWrite/Core Text font folders), and falls back to bundled DejaVu Sans |
-| Theme colors | partial | All eleven built-in FreeShow themes (`default`, `dark`, `light`, `white`, `black`, `blue`, `sea`, `aqua`, `charcoal`, `papyrus`, `terminal`) match `defaultThemes.ts`. The library `settings.json` theme is used when this app has no explicit choice. Custom theme colors, font family, and font size load from `Config/themes.json`; an explicit app theme still takes precedence. Selected controls use the theme's secondary text color. Hover and focus washes follow each theme (`hover` / `focus`, including custom colors from `Config/themes.json`). Operator buttons, rail tabs, and list rows use those washes, and `border.radius` from a custom theme sets their corner radius (4px when unset) |
-| Settings file and logging | done | App config, plus the library theme, remote password, remote/stage ports, language, `timeFormat`, autosave, `labelsDisabled`, `groupNumbers`, `formatNewShow`, `autoOutput`, `maxConnections`, and outputs from FreeShow `settings.json`, and custom theme definitions from `Config/themes.json`. Stage clocks follow `timeFormat`. Repeated slide groups are numbered unless `groupNumbers` is false. `autoOutput` opens the audience window at startup. `maxConnections` limits remote and stage sockets (default 10). `formatNewShow` turns `[Verse]` / `Chorus:` headers into groups when creating a show. `labelsDisabled` switches the operator rail and header to compact letters. `language` translates the drawer tabs (en, es, de, fr, nb). Active output names appear on the Screen button. It also reads `outLocked`, `splitLines`, `fullColors`, `customFonts`, `lockedOverlays`, `activeScenes`, `alertUpdates`, `resized`, `slidesOptions`, `drawer`, `metronome`, `audioEffects`, `effectsLibrary`, `timeline`, `timecode`, `cloudSyncData`, `driveData`, `contentProviderData`, `obsData`, and `ai`, plus synced `drawSettings`, `profiles`, `scenes`, and `interactions`. Locked overlays stay on the matching output when the library opens, and `outLocked` blocks Go/Next, slide selection, and clear. `splitLines` splits imported and edited lyric pages, `customFonts` files are used when painting item typography, and `resized` left/right panel widths size the operator lists. The header Search box filters the current drawer tab. `fullColors` fills group-colored slide labels, and `slidesOptions` columns/mode lay out the slide list as a grid (list and lyrics modes stay one column) |
-| Shows, projects, templates, overlays, scripture storage | partial | Shows, projects, templates, overlays, events, synced settings, and `.fsb` Bibles load. Lyric edits and project order save back. Functions → Export text writes the open show as plain text under `Exports/` in the same shape the text importer reads |
-| Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions | partial | Each tab lists library entries. A calendar action whose time has just arrived starts its show, including an older event stored as type `show`. Choosing a template copies its text box onto the open song and keeps the lyrics. Scripture search works on `.fsb` text. Media files include path, kind, image size, duration for common audio/video headers (WAV, MP4/MOV/M4A, FLAC, MP3 Xing), and a missing badge. `mediaFolders` paths are listed with the folder name. The media drawer shows still thumbnails and kind icons for video, audio, cameras, and missing files. Functions includes Clear, Next, Previous, Timer, Record, Planning Center, ChurchApps, Backup, Restore, OBS, AI, Icecast, and Export text, Export PDF, Export package, and Screenshot, which write the open show as `[Group]` lyrics or a PDF, a `.project` zip, and a PNG of the audience frame to `Exports/` |
-| Slide editing, project order, go to slide | partial | Show creates an Untitled `.show` with one empty slide and adds it to the open project. Slide appends another empty slide. Plain-text lyrics and the slide group save back to the `.show` file. The slide list numbers repeated groups the same way FreeShow does (`Verse 1`, `Verse 2`) unless `groupNumbers` is false. Operators can select, add, and remove text boxes, and set font size, bold, and font family on the selected box. Left, Right, Up, Down, Wider, Narrow, Taller, and Shorter move the selected text box by 40px in the 1920×1080 slide space and save the CSS style. Project New stores a dated project. Up/down/add and Go publish the slide. A random-slide action opens a different slide in the same show, and that slide's own actions run. A wait action holds the later slide actions for its number of seconds, and leaving the slide cancels them |
-| Audience compositor: styles, backgrounds, media, transitions, clear | partial | Item box, font size, color, alignment, item background, still images from `src`, and saved QR boxes are painted. Lyrics use DejaVu Sans at the item font size, with gray edges, centered or aligned in the item box. A chord stored on a line is painted above that lyric, in the chord color and at the item chord size (half the lyric when size is omitted), when the item has chords enabled. `chords.offsetY` lifts that chord without moving the lyric. A line wider than its box wraps at a space, and `white-space: nowrap` keeps it on one line. `text-align: justify` spreads the words on a wrapped row. A word wider than the box breaks onto the next row, and that row keeps the line background. The item `font-family` and bold weight use a matching system face when it is installed (fontconfig on Unix, then the platform font folders), including Arial, and fall back to bundled DejaVu Sans. Crossfade runs on Go, Next, and Previous over the duration stored in `settings.json`. A stored slide transition moves both layers along that direction, and `none` cuts. A layout slide transition overrides that. The active output style's transition is used when the slide does not set one. A new background image uses the slide's media transition, then that style, then the library media transition, which fades for 800ms unless `settings.json` says otherwise, and the stage stays put. The picture uses the fit and flip stored for that file in `media.json`, or the output style's fit. A stored filter and blend on that file are applied to the picture. A stored cropping cuts that many pixels off each side of a still before it is fitted. `fit: "blur"` keeps the picture contained and paints a blurred cover copy behind it, using the output style's blur amount and opacity. An audio file plays at its stored volume times the main gain, repeats when that file's `loop` flag is set, and a stored fromTime and toTime play only that part of the file. A stored tempo plays that file faster or slower, and the pitch moves with that rate. A stored video speed plays that clip faster or slower. A background video loops without sound. Any other video plays once at its stored volume, and unmuting restores that volume. A stored fromTime and toTime play only that part of a video, and a loop returns to fromTime. A project video row can force that clip to loop or stay silent. A picture or a one-shot video hides the song on the audience screen. The first video frame fades in from the previous picture using the media transition. A picture stored on a slide, or carried from an earlier slide, sits behind the lyrics until a slide clears it. An audio file listed on the slide starts with that slide, and showing the slide again does not restart it. Overlays listed on the slide turn on with it, and a clear-overlays action turns the current overlays off. A clear-audio action stops the track that is playing, and a track listed on that same slide still starts. A slide can open another song instead of itself, at that song's first enabled slide. A slide can start a saved countdown, including a timer item when the slide asks for its timers, and a stop-timers action clears the countdown that is running. A pause-timers action holds that countdown where it is. A slide marked to continue after its media goes to the next slide when that video or audio finishes, and the same ending does not advance twice. A video set as a slide background starts with that slide, loops and stays muted unless the show says otherwise, and keeps the lyrics unless it is a foreground clip. The same video is not started again while it is already behind the slide. A slide that also lists an audio file starts that file as well as the video. A slide can switch the active output style, and the next frame uses that style's transition. A slide can start a saved audio stream when that stream points at an audio file. A web address is left unplayed. Next and Previous skip a slide marked disabled, and a slide bound to other outputs. A line-reveal item shows one more line on each Next, and hides one on Previous, before the slide changes. The audience starts with those lines hidden. A click-reveal item stays off the audience until Next, and Previous hides it again before leaving the slide. An output style with a line count shows that many lyric lines, and Next turns to the next group of lines before it leaves the slide. A slide action can open a named group, the second copy of that group, a global group, or a slide by index. Next and previous slide actions move within the song. A clear-next-timer action keeps this slide from advancing on its own. A set-next-timer action writes that duration onto every slide and marks the last slide as the loop, while the slide that set it keeps the countdown it already had. A clear-overlay action removes that one overlay and leaves the others showing. A change-transition action stores the new text or media transition for the next frame. A change-volume action sets the main channel, treating a number above 5 as a percent and a decibel value as gain. A mute action silences that channel until a slide turns it back on. A start-camera action opens that camera behind the slide and keeps a listed audio file playing with it. A set-template action copies that template onto the song. An overlay action turns that overlay on, and a play/pause action toggles the media that is already playing. A slide marked as the end sends Next back to the first enabled slide. A clear-slide action hides the lyrics and leaves the picture. A clear-all action hides the lyrics, removes the picture and the overlays, and stops the audio. A background video keeps the song, and a folder picture keeps it too. A video inside a folder plays once with sound. A folder project item shows its pictures in name order and moves to the next one after the row's timer, or after 10 seconds. Previous steps back through that folder and wraps to the last picture. An audio file placed immediately before a picture starts with that picture. A layout slide `nextTimer` advances to the next slide after that many seconds, and the last slide opens the next project item. `special.nextItemOnLastSlide` set to false keeps that last slide on screen. An image item in the project becomes the background, and a missing file is skipped so the next song still opens. A video or audio item is queued to play. An overlay item is added on top of the current song. Next on the last slide and Previous on the first slide open the neighboring project item. Scale grows the next slide from the center while the current one shrinks. The stored easing follows Svelte's in-out curve for sine, back, circ, cubic, elastic, and bounce. Any other name, including linear, stays linear. Blur softens the outgoing slide as the next one sharpens. Spin turns the slide a full turn as it fades. Clear blanks the frame. Other family names fall back to DejaVu. A media picture or video is letterboxed with contain, the FreeShow default. The video pipeline adds black bars instead of stretching the picture. Cover crops to the frame. Item pictures use the fit stored on the item: contain by default, or fill or cover when the item says so. `flipped` mirrors a picture left to right, and `flippedY` mirrors it top to bottom. An overlay with `placeUnderSlide` is painted under the slide, and the other overlays stay on top. A `text-shadow` on the text is painted behind the letters. An item line background, corner radius, and line gap paint behind each lyric line. Lines sit in the middle of the text box unless `align-items` says top or bottom. A `line-height` on the text, as a multiplier, a percent, or a pixel size, sets the height of each lyric line. `font-style: italic` leans the letters to the right. `text-decoration: underline` draws a line under the letters. `letter-spacing` opens a gap between the letters. `text-transform` paints the line in upper case, lower case, or with each word capitalized. A text stroke outlines the letters in the stroke color. `word-spacing` opens a gap between words. `line-through` draws a line through the letters. An item `filter` of `opacity()` fades the whole box, and `grayscale()` removes its color. `invert()` flips each color channel. `sepia()` warms the color toward brown. `brightness()` multiplies the color, so `0` turns it black. `contrast(0)` flattens the color to gray. `saturate(0)` drains the color to gray. `hue-rotate(180deg)` spins red toward cyan. `blur()` spreads the item by that radius. A blend mode such as `multiply` composites the item over the slide. Cropping percentages hide that edge of an item picture. A `box-shadow` on the item (offset, blur, spread, color, and inset) is painted around or inside the box. A pixel `border-radius` rounds the item background; `50%` still draws an ellipse. A `backdrop-filter` on the item style (blur, invert, brightness, contrast, saturate, grayscale, sepia, hue-rotate, and opacity) is applied to the picture behind that box |
-| Preview matches output | partial | Preview and output share the same styled frame, including each fade step |
-| Images, video, audio, cameras | partial | A media image becomes the layer under the slide. Audio files follow the saved source/channel/speaker graph, with per-channel gains and mute. Chromium speaker IDs map to native device names through the app settings. An explicit disconnected route is silent. `API:pause_audio` holds the current file, and playing that file again continues from the same place. `API:audio_seekto` and `API:video_seekto` move the playhead to a time in seconds. Video files and cameras open a GStreamer pipeline and paint frames on that layer. Camera selection uses the discovered native source instead of its list index, and a disconnected selection returns an error. Compressed camera feeds use a software decoder to produce CPU-readable frames. Raw and JPEG camera-source decoding has a synthetic frame test; physical-camera playback remains unverified. A background video loops until `API:toggle_media_loop` or `data.loop: false` on `API:play_media` turns that off. It starts muted, and `API:toggle_media_mute` or `data.muted: false` turns its sound on. `API:get_playing_video_state` reports the playhead and the length in seconds. `API:get_playing_audio_data` and `API:get_playing_audio_time` do the same for the current audio file. A slide can start an audio playlist from synced settings: the songs play in order, shuffle mode uses one shuffled order, the list loops unless loop is false, and its volume scales the main output. The next song starts when the current file ends, and a playlist-next action steps it immediately. The same playlist already running is not restarted. A sound-effect action plays that audio file, and a playlist song starts again when the effect ends. Drawer, slide audio, and playlists route to physical speaker devices. Video sound uses `output_window` and the active `output_win_sub_<id>` routes, keeps the clip volume, and follows the same per-channel mute and gain controls through GStreamer speaker sinks. Audio files and videos honor individual hardware speaker ports: a single connection receives the mono mix, multiple connections preserve source channels, and explicit source selections stay on their selected destination. CPAL uses one stream per device, and GStreamer uses the same channel matrix and applies the latest route update on the active audio branch when the next buffer arrives. Malformed or out-of-range indices are ignored. Stereo audio-file and video feeds reach saved `network_sub_<output-id>` routes. The existing NDI and RTMP senders mix those two feeds, including channel gain and mute. Network-only audio plays without opening a hardware output. Icecast sends a routed stereo Ogg Opus stream and follows the saved enable setting, slide actions, and remote toggle. OMT, effects, and delays are not-yet; audio-file and network clocks are independent |
-| Scripture import and search | partial | `.fsb`, USFM, OSIS, Zefania, Beblia, and OpenSong Bibles in `Bibles/` load. Search by words or a reference such as `John 3:16`, then Go sends the verse. A missing Beblia book name falls back to the English name |
-| Stage layouts | partial | The stage window draws every box in `Config/stage.json`: current and offset slide text, notes, a clock, a named timer, custom text boxes, variables, a slide tracker, media, web previews, charts, and a labeled placeholder for item types this app does not draw yet. Current Output boxes mirror the active audience composition, including its media and overlays. An explicit source must match the active audience output. Stage text honors saved box numbers and inverted order. Items bound away from the stage are omitted, and reveal steps preserve box numbering. Legacy next-slide text and notes boxes use their saved item IDs to select the next slide. Clock boxes honor the stored seconds and date format, including the legacy clock date flag, and a media box shows the file when it can be decoded and its label otherwise. Local video files play silently in stage media boxes. A slide-text box with `includeMedia` mirrors the current audience background or shows the still background of its offset slide. Functions → Timer starts and pauses a 5:00 countdown. A counter saved in synced settings can be started, paused, and stopped from the phone, and that countdown replaces the stage timer while it runs. The current slide follows the audience line reveal, click reveal, and style line page. The next slide hides those reveal lines. `{variable_name}` and `{$name}` in lyrics and notes show the value stored in synced settings, and an empty value uses the fallback written after a bar or a question mark. A change-variable action increments, decrements, or sets that stored value. A slide can switch the stage window to another layout in `stage.json`, and that choice is stored on the stage output. QR boxes render their stored text and colors. The built-in browser stage page displays the native stage composition with the active layout. Saved `camera` boxes play the live feed from the discovered device that matches the stored name (case-insensitive), and show a label when that device is missing. Web boxes show a stored still when `src` is an image, otherwise a preview card with the page address; a live browser is not embedded. Chart boxes paint bar, line, and pie or doughnut charts from the stored `chart` data and type, and show a label when that data is empty |
-| Show importers | partial | `Imports/` files become `Shows/*.show` for ChordPro, OpenLyrics, OpenSong, SongBeamer, plain text, EasyWorship RTF, ProPresenter 4–6 XML, ProPresenter 7 protobuf, and `.proBundle` archives, PowerPoint text and embedded backgrounds, and an OpenLP `songs.sqlite` database. MediaShout XML/SSC and JSON table dumps, Quelea XML/`qsp`, SoftProjector `.sps` SQLite, EasySlides, VerseView, VideoPsalm `.vpc`/JSON, CSV, image-only shows, and FreeShow project packages (JSON or zip) also import; native MediaShout `.mdb` and Canva presentations do not. A native `.mdb` reader is not viable in pure Rust (Jet/Access); XML/SSC and JSON dumps remain the import path. Local AI speech-to-text is not bundled: there is no offline model or engine, and cloud STT would need an account. Verse order, page breaks, and the words author are kept. ChordPro chords, OpenSong chord lines, a plain-text chord line above a lyric, SongBeamer `#Chords`, OpenLP `[G]` marks, and OpenLyrics `<chord name="G"/>` tags are stored on that lyric and shown when chords are enabled. OpenSong `<backgrounds>` JPEG data and SongBeamer `#BackgroundImage=` pictures (safe local paths only) are copied into `Media/` and attached to the first layout slide. ProPresenter imports keep group children, disabled slides, notes, and slide backgrounds. Bundled backgrounds are copied into `Media/` without overwriting existing files; all bundled media references must resolve uniquely before the import proceeds. Base64 plain text and RTF lyrics are decoded with line breaks and Unicode. ProPresenter 7 layouts preserve arrangements, slide resolution, separate text boxes, and box-level formatting. PowerPoint keeps declared slide order, hidden slides, solid RGB backgrounds, and inherited embedded PNG/JPEG backgrounds with stretch and crop. PowerPoint resolves solid theme fills through the referenced style and the slide, layout, or master color map. Solid fills preserve tint, shade, luminance, saturation, hue, channel, invert, gray, and complement adjustments in document order. Alpha and unknown transforms are skipped without dropping the fill. Linear gradients, including theme `gradFill` styles and scheme-color stops, become a full-slide shape with CSS `linear-gradient`; the first stop is stored as `settings.color`. Empty theme `gradFill` entries stay unresolved. Tiled backgrounds use fit `tile` and repeat the picture at its source size. Linked http(s) images are stored as remote paths and fetched when presented; other URL schemes and path traversal stay rejected. Positioned shapes and pictures keep their EMU bounds, fills, and rounded or elliptical geometry. Tables and charts are omitted and recorded as import warnings. ProPresenter 7 RTF preserves mixed fonts, sizes, colors, emphasis, paragraph alignment, all caps, and letter spacing within each text box. Solid rectangles and ellipses keep their bounds and fill color. Rotation is stored as CSS `transform`. Rounded rectangles use `border-radius`; other preset shapes occupy their bounding box. Presentation timelines are stored on the active layout. Timed next-slide cues advance within the selected arrangement. Unsupported cue actions such as timers, clears, and macros are recorded as import warnings and never retargeted as media |
-| Remote and stage web servers | partial | Axum serves a phone remote and a stage page on the library's `ports.remote` and `ports.stage`, or 5510 and 5511. WebSocket and Socket.IO messages use FreeShow channel names (`PASSWORD`, `SHOWS`, `OUT`, `API:next_slide`, `LAYOUTS`). `SCRIPTURE`, `GET_SCRIPTURE`, `SEARCH_SCRIPTURE`, and `API:start_scripture` open a local Bible and put a verse on the audience. `API:scripture_next` and `API:scripture_previous` step through that Bible. Connect also sends `PROJECTS`, `FOLDERS`, and `PROJECT`. `SEARCH_SHOWS`, `API:get_plain_text`, `API:set_plain_text`, `API:create_show`, `API:add_to_project`, and `API:get_cleared` cover the service list and lyric edit. Phone lyric edit stores one slide per blank line and keeps the group name on each existing slide. `API:get_groups`, `API:rearrange_groups`, and `API:add_group` list, reorder, and copy verse and chorus groups. `API:rename_project`, `API:delete_project`, and `API:remove_project_item` change the service list. `API:change_layout` switches the song to another layout and the phone receives that layout's slides. `API:create_project` adds a project in the open folder and makes it current. `GET_OVERLAYS`, `API:id_select_overlay`, `API:clear_overlay`, and `API:clear_overlays` put an overlay's text and pictures on top of the audience, including a cleared slide. `placeUnderSlide` overlays are painted under the slide. The Overlays drawer toggles the same layer. `API:play_media` and `API:play_audio` start a library file, `API:toggle_media_loop` turns background looping on or off, `API:change_volume` sets the main output gain, and `API:toggle_playing_media` pauses the video. `API:next_slide` on the last lyric opens the next project item, and `API:previous_slide` on the first lyric opens the earlier one. A section row is skipped. An image, video, audio, or overlay row is played from that item. An overlay stays over the current song. `special.nextItemOnLastSlide` set to false keeps the remote on that last lyric. The phone page at port 5510 lists those files. `GET_AUDIO_MIXER`, `AUDIO_ROUTING`, and `AUDIO_CHANNELS_DATA` expose saved channels. `API:change_volume` accepts `channelId`; `API:mute` keeps mute separate from the stored volume. The phone page selects and controls each channel. Audio-file and video speaker routing use those gains. The stage port supports layout and output reads. HTTP, WebSocket, and Socket.IO show-control messages on that port are ignored. The Electron remote's full page is not served. A password from `serverData.remote.password` gates both servers: `PASSWORD` reports that one is required, `ACCESS` accepts it, a wrong value returns `ERROR` `wrongPass`, and unauthenticated channels are ignored |
-| MIDI, OSC, NDI, timecode, recording, Planning Center, ChurchApps, cloud, OBS, AI | partial | OSC input on UDP 5505 accepts `/freeshow/slide/next`, `/slide/previous`, `/slide/<index>`, `/clear/all`, and `/show/<id>/start`. MIDI input uses FreeShow's default notes: channel 1 note 0 next, note 1 previous, channel 3 note 0 clear, channel 5 note 2 select by velocity. Each enabled, ungrouped NDI output sends UYVY frames and routed stereo sound with the stored source name, or `FreeShow NDI - <output name>`. Audience outputs send the audience picture; stage outputs send the stage picture. No enabled NDI output means no broadcast. Without the SDK runtime the sender logs that and the show continues. Grouped NDI outputs stay disabled because the installed ndisink has no discovery-group property. Enabled OMT outputs expose a source name from `omtData.name`, or `FreeShow OMT - <output name>`, including stage pictures; the Open Media Transport runtime is not bundled, so nothing is broadcast yet. Enabled WebRTC outputs with a `webrtcData.url` (and optional token) encode H.264 through webrtcbin and publish over WHIP, including stage pictures. The client posts an `application/sdp` offer with a Bearer token when one is stored, then applies the endpoint's answer. The encode path is compiled behind the default `webrtc` cargo feature when `gstreamer-webrtc-1.0` is installed. A missing encoder, plugin, or handshake is logged and the show continues. MIDI timecode quarter-frames and full frames, and linear timecode audio, replace the stage clock with `HH:MM:SS:FF`. Functions → Record writes a video-only fragmented MP4 in the library `Recordings` folder. `FREESHOW_RTMP` sends the picture and routed AAC stereo audio from the first enabled RTMP output (or output ID `default`). Static pictures repeat at 30 fps, with bounded frame duplication across short RTMP source gaps. Recording files close on app exit. Saved RTMP destinations are not started automatically. The RTMP path has a loopback receiver smoke test; the NDI combiner is checked without the SDK, while SDK receiver playback remains unverified. A Planning Center plan becomes shows and a project when `FREESHOW_PCO_TOKEN` and `FREESHOW_PCO_PLAN` are set, or when `FREESHOW_PCO_FILE` points at a saved plan. A ChurchApps presenter plan becomes shows and a project when `FREESHOW_CHURCHAPPS_TOKEN` is set, or when `FREESHOW_CHURCHAPPS_FILE` points at a saved plan. Lessons.church OLP/OLF and lesson JSON documents in `Imports/` (or `FREESHOW_CHURCHAPPS_FILE`) download grouped media to `Media/Lessons/`, then publish a show into the `Lessons.church` project. Video loop flags, audible playback, and end-of-video progression are retained. Completed media is cached for offline reuse and repeated imports preserve operator edits. Truncated transfers and HTTP errors leave that lesson unpublished. A loopback test downloads a real PNG and H.264 clip, then decodes them through the application presentation path. Service-plan lesson sections/actions/add-ons resolve public venue feeds and uncached add-on metadata, download local media, and keep service order, loop flags, and scheduled durations. Empty custom venue orders fall back to playable feed actions. Lookup/download failures keep existing service and show files. Saved plan documents need resolved lesson `files` arrays. These paths have loopback API/CDN tests, including account-token isolation; a signed-in production account has not been tested. The operator footer shows background download progress and lets the operator cancel before shows and projects are published. A partial transfer is discarded and completed media remains cached. Stream-only pages without a direct download URL (YouTube, Vimeo, and HLS/DASH streams) are published with that remote URL as the media path and are not downloaded. Direct HTTP video files play through GStreamer uridecodebin. YouTube and Vimeo pages are imported, but playback still needs a playable media file rather than the website itself. Functions → Backup writes a FreeShow-style zip in `Backups` and copies it to `FREESHOW_CLOUD_DIR` or PUTs it to `FREESHOW_CLOUD_URL` when one of those is set. Functions → Restore reads the newest zip back. OBS WebSocket 5 selects `FREESHOW_OBS_SCENE` and toggles stream and record from Functions, using `FREESHOW_OBS` / `FREESHOW_OBS_PASSWORD` when set, otherwise a stored `obsData` host, port, and password. A closed OBS is logged and the show continues. Functions → AI rewrites the selected slide through Ollama when `FREESHOW_AI` is set, and leaves the slide unchanged when it is not. |
-| Installers and crash-safe autosave | partial | Show, project, and Bible saves flush a temporary file and rename it into place. The previous file is copied into `Backups` and the newest eight copies are kept. The library autosave interval (default 15 minutes, or `never`) saves the open shows and the project file again, and an unchanged file is skipped. `scripts/package.sh` stages a locked release folder for the host, or for a Windows or Linux target triple when that Rust target is installed. Native macOS packaging creates an app/DMG with relocated GStreamer libraries/plugins/scanner, signing, source/provenance, and third-party notices. It audits library paths and tests the relocated app and mounted DMG with a cold plugin registry and H.264 decoding; Homebrew/Rust reads are denied when sandbox-exec is available. Native macOS 26 CI verified the Apple Silicon app and mounted disk image. Default signing is ad-hoc. Linux packaging code builds an ELF/runtime tarball with AppRun and per-user desktop installation/removal; Ubuntu 24.04 x86-64 CI verified relocation, desktop installation and removal, and H.264 decoding after system GStreamer removal. The Windows x86-64 per-user installer bundles the app-local DLLs and records source provenance. Native Windows CI verified installation, H.264 decoding with a cold registry and the build SDK hidden, and uninstall. The locked three-platform installer workflows in `.github/workflows/{linux,windows,release}.yml` build and verify unsigned (or ad-hoc signed) Linux, Windows, and macOS packages. Developer ID notarization remains documented only; it needs the owner's Apple credentials |
+## Score
 
+- **Feature-weighted parity: 92.4%**
+- Sub-features: **77 done / 9 partial / 12 not-yet** (98 leaves).
+- Area rows (derived from leaves): **6 done / 11 partial / 0 not-yet** (17 areas).
+- Scoring: each leaf has a weight (Sunday-operator impact). `done` scores 1, `partial` scores 1/2, `not-yet` scores 0. The percentage is `100 × Σ(weight × score) / Σ(weight)`. Credential-gated work is included as `not-yet` so the number stays honest about 1.6.8.
 
-## Remaining gaps versus FreeShow 1.6.8
+## Areas
 
-Audited against upstream `1.6.8-beta.5` by walking `src/frontend` and `src/electron`. Items already described in the table above are not repeated. These are still missing, stubbed, or only documented as not-yet:
+| Area | Status | Area % | Notes |
+| --- | --- | ---: | --- |
+| Cargo workspace, GPL-3.0, README | done | 100% | 1 done |
+| Slint operator window | partial | 93% | 10 done, 1 partial |
+| Output and stage windows | partial | 92% | 5 done, 2 partial |
+| Theme colors | done | 100% | 3 done |
+| Settings file and logging | done | 100% | 1 done |
+| Shows, projects, templates, overlays, scripture storage | partial | 89% | 4 done, 1 partial, 1 not-yet |
+| Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions | partial | 92% | 8 done, 1 not-yet |
+| Slide editing, project order, go to slide | partial | 93% | 4 done, 1 partial |
+| Audience compositor | partial | 90% | 5 done, 2 partial |
+| Preview matches output | done | 100% | 1 done |
+| Images, video, audio, cameras | partial | 92% | 6 done, 1 not-yet |
+| Scripture import and search | done | 100% | 1 done |
+| Stage layouts | partial | 95% | 3 done, 1 partial |
+| Show importers | partial | 94% | 2 done, 1 not-yet |
+| Remote and stage web servers | done | 100% | 4 done |
+| MIDI, OSC, NDI, timecode, recording, Planning Center, ChurchApps, cloud, OBS, AI | partial | 79% | 16 done, 1 partial, 7 not-yet |
+| Installers and crash-safe autosave | partial | 85% | 3 done, 1 not-yet |
 
-### Operator chrome
-- First-run guide (shown until `special.guideSeen` is set; Functions → Guide or F1), focus/presenter mode (Ctrl+Shift+F hides the drawer and project list), undo/redo (Ctrl+Z / Ctrl+Y, also Functions), and a shortcut editor (Functions → Shortcuts, stored as `settings.json` `shortcuts`). Header Search filters the current drawer tab.
-- Always-on-top (default on for the audience window, Ctrl+Shift+A or Functions), kiosk/fullscreen (F11), and named window-layout profiles (Functions → Save layout / Window layouts) stored in app `settings.json` and applied on open. Synced library `profiles` stay access-control accounts, not window layouts. Draw-on-output paints stored `drawSettings` strokes (Functions → Clear drawing). The Player tab lists synced `playerVideos` (local paths play; YouTube/Vimeo ids are listed, not streamed). Functions → Timeline edits and plays show-timeline cues. Live effects from `effectsLibrary` paint a light output wash or particles (Functions → Effects). `audioEffects` stacks report in the footer and contribute a combined gain; a full WebAudio DSP graph (reverb, limiter, and the rest) is not ported. PDFs in `Imports/` become a show with one slide per page (`pdftoppm` when installed, otherwise lettered pages). Spellcheck and a self-updater remain.
+## Sub-features
 
-### Drawer and output extras
-- The effects library and live output effects/delays, the media player tab, a live-input tab beyond cameras, and audio effects. Functions → Metronome runs a click track from the stored `tempo`/`beats` and shows the beat in the footer; a stored `timecode` mode appears there too.
-- PDF-as-show, embedded PowerPoint playback, output variables/scenes/interactions, watermark, weather/RSS, and HTML/webview boxes beyond the current preview card.
+### Cargo workspace, GPL-3.0, README
 
-### Capture, I/O, and control
-- Blackmagic I/O, NDI/OMT receive, virtual camera, Spout/Syphon, Stream Deck/HID, Bitfocus Companion, and a general webhook/REST control API (OSC/MIDI/the phone remote already exist).
-- Saved RTMP destinations are not started automatically. OMT broadcast still needs the unbundled runtime. Grouped NDI outputs stay disabled. Physical camera and NDI SDK receiver playback remain unverified.
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Workspace, license, and README | done | 2 | `freeshow-rust` beside the Electron repo |
 
-### Cloud and content providers
-- Canva, OnStage, and Amazing Life providers; Google Drive library sync (backup to a folder or URL already works); ChurchApps cloud sync beyond plan/lesson import; Spotify lyric search.
+### Slint operator window
 
-### AI
-- Speech-to-text and the built-in model manager. Functions → AI already rewrites a slide through Ollama when `FREESHOW_AI` is set.
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Drawer, show list, and slide list | done | 1.5 | All library drawer tabs list entries |
+| Lyric editor and text-box typography | done | 1.5 | Edits save back to the `.show` file |
+| Project order and Go/Next chrome | done | 1.5 | New project, reorder, publish the slide |
+| Operator preview | done | 1 | Preview follows the audience picture |
+| Undo/redo of lyric edits | done | 0.8 | History is 40 steps |
+| Shortcut editor and bindings | done | 0.8 | Stored in `settings.json` and honored |
+| Focus/presenter mode, first-run guide | done | 0.6 | `special.focusMode` / `guideSeen` |
+| Drawer height, always-on-top, kiosk | done | 0.6 | Bottom drawer height and window flags |
+| Named window-layout profiles | done | 0.7 | Stored placements for operator/output/stage |
+| Header Search and panel widths | done | 0.5 | `resized` left/right widths |
+| Full Electron settings/editor suite | partial | 1.5 | Not every 1.6.8 settings pane or inspector field is cloned |
 
-### Import and export
-- Canva presentations are not imported (they need a Canva account). MediaShout (XML/SSC and JSON table dumps; native `.mdb` is not read), Quelea (XML/`qsp` zips), SoftProjector (`.sps` SQLite), EasySlides, VerseView, VideoPsalm (`.vpc`/JSON), CSV, image-only shows, and FreeShow project packages (JSON or zip) now import through `Imports/`.
-- Functions → Export text, Export PDF, Export package, and Screenshot write the open show as lyrics text or a simple Helvetica PDF, the open project as a `.project` zip (`project.json` with shows and overlays, the same shape the importer reads), and a PNG of the current audience frame under `Exports/`.
+### Output and stage windows
 
-### Settings stored but not yet used in the operator UI
-- Parsed and used in the operator UI or import path: `splitLines`, `customFonts`, `resized` panel widths, header Search, `fullColors`, `slidesOptions` columns/mode, `drawer` height (bottom drawer), `shortcuts`, `special.guideSeen` / `special.focusMode` / `special.watermark` / `special.outputDelayMs` (footer only unless a later pass holds frames), `activeScenes`, synced `scenes` / `interactions` / `drawSettings` / `playerVideos`, output variables, `effectsLibrary` live effects, `audioEffects` gain/names, and `timeline` zoom plus show-timeline cues. Still stored but not fully used in chrome: `alertUpdates`, `cloudSyncData`, `driveData`, `contentProviderData`, and `ai`. `metronome` and `timecode` drive the footer; `obsData` is used for OBS when `FREESHOW_OBS` is unset. Synced `profiles` remain stored access-control accounts. Cloud provider accounts and AI speech-to-text stay documented until they can run without credentials.
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Go/Next fade to output and stage | done | 2 | Configured text transition |
+| Screen/monitor picker and memory | done | 1.2 | Header Screen cycles and remembers |
+| Second-monitor auto placement | done | 0.8 | Used when no stored choice |
+| Installed item font-family | done | 1.2 | fontconfig / DirectWrite / Core Text, DejaVu fallback |
+| Output delay frame buffer | done | 1.5 | `special.outputDelayMs`, default 0 so perf stays clean |
+| Always-on-top / kiosk on output windows | partial | 0.8 | Flags exist on the operator; not every output-window Electron option |
+| Pixel-perfect Electron window chrome | partial | 0.5 | Native windows, not the Electron shell |
+
+### Theme colors
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Eleven built-in themes | done | 1.2 | Match `defaultThemes.ts` |
+| Library and custom themes.json | done | 1.2 | Colors, font, size, hover, focus, radius |
+| Operator washes and radius | done | 0.6 | Buttons, tabs, list rows |
+
+### Settings file and logging
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| App config, logging, and library keys | done | 4 | Used keys are listed in this file's settings section |
+
+### Shows, projects, templates, overlays, scripture storage
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Load shows, projects, templates, overlays, events, synced settings | done | 2.5 | Existing FreeShow libraries open |
+| Load `.fsb` Bibles | done | 1 | Scripture tab and search |
+| Save lyric edits and project order | done | 2 | Writes the same files Electron uses |
+| Export text of the open show | done | 0.8 | `Exports/` in the text-importer shape |
+| Access-control `profiles` | partial | 0.7 | Synced accounts are stored, not a full login UI |
+| Alert-update chrome | not-yet | 0.5 | `alertUpdates` is stored but not shown |
+
+### Drawer content: shows, media, audio, overlays, templates, scripture, calendar, functions
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Shows, media, audio, overlays, templates, scripture, calendar, functions tabs | done | 2 | Each tab lists library entries |
+| Calendar auto-start of a due show | done | 0.6 | Including older type `show` events |
+| Apply template onto the open song | done | 0.6 | Keeps lyrics |
+| Scripture search on `.fsb` | done | 0.6 |  |
+| Media metadata and thumbnails | done | 1 | Size, duration, missing badge, still thumbs |
+| Player tab | done | 0.8 | Stored `playerVideos` |
+| Functions: Clear/Next/Previous/Timer/Record/Export/Screenshot | done | 1 | PDF, package, and PNG exports included |
+| Functions: Planning Center, ChurchApps, Backup, Restore, OBS, AI, Icecast | done | 0.8 | No-credential paths only |
+| RSS ticker/drawer | not-yet | 0.6 | Parse/fetch helpers exist; no operator RSS list yet |
+
+### Slide editing, project order, go to slide
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Create show/slide and save lyrics plus group | done | 1.5 | Untitled `.show` and empty slides |
+| Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space |
+| Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
+| Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
+| Every Electron inspector control | partial | 1 | Common typography and box moves; not every 1.6.8 inspector field |
+
+### Audience compositor
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Item styles, backgrounds, media, transitions, clear | done | 3 | Core Sunday path |
+| Watermark, output variables, scenes, interactions | done | 2 | `activeScenes` and synced keys |
+| Draw-on-output | done | 1 | Stored `drawSettings` |
+| Live effects library | done | 1 | `effectsLibrary` washes/particles |
+| HTML / web / website boxes | done | 1 | URL preview or stripped HTML snippet |
+| Weather boxes | partial | 0.8 | Card from stored values; Open-Meteo fetch is implemented but not auto-refreshed on a timer |
+| Item box-shadow, pixel radius, backdrop-filter | partial | 1.2 | Called out from M3; some typography extras still differ from Electron |
+
+### Preview matches output
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Operator preview uses the audience frame | done | 3 | Same compositor |
+
+### Images, video, audio, cameras
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Still images, including remote HTTP | done | 1.5 |  |
+| Local and direct-URL video | done | 2 | GStreamer uridecodebin |
+| YouTube/Vimeo via yt-dlp | done | 1.5 | Resolves `yt-dlp -g` when the binary is present, then plays the URL |
+| Audio playback and routing | done | 1.5 | cpal + network routes |
+| Audio-effects DSP chain | done | 1.5 | Gain, peaking EQ, delay, compressor, limiter on decoded PCM |
+| Cameras as underlay/stage sources | done | 1 | GStreamer device list |
+| Embedded live PowerPoint playback | not-yet | 0.8 | Import exists; a running PPT process is not hosted |
+
+### Scripture import and search
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Import and search `.fsb` plus other scripture importers | done | 4 | See the importers row for file types |
+
+### Stage layouts
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Load and paint stage layouts | done | 2 | Includes next-slide, notes, clock, timer |
+| Stage cameras, web, and chart boxes | done | 1.5 |  |
+| Stage as a second NDI/WebRTC picture | done | 1 |  |
+| Every Electron stage-item editor pane | partial | 0.5 | Layouts paint; not every stage editor field is cloned |
+
+### Show importers
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | See M5 / M7 importer list |
+| MediaShout XML/SSC/JSON, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only, project packages | done | 1.2 | Fixture tests for each |
+| Native MediaShout `.mdb` | not-yet | 0.3 | Not a viable pure-Rust path |
+
+### Remote and stage web servers
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Remote page, WebSocket, and Socket.IO | done | 2 | Password via header or Bearer |
+| Stage page with native frames | done | 1.5 |  |
+| Webhook/REST API | done | 1 | `/api/*`, `/webhook`; short names map to `API:` channels |
+| Stream Deck / Bitfocus Companion over HTTP+WS | done | 0.5 | Same remote port, `/companion` |
+
+### MIDI, OSC, NDI, timecode, recording, Planning Center, ChurchApps, cloud, OBS, AI
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| MIDI and OSC input | done | 0.6 |  |
+| Timecode (MTC/LTC) | done | 0.4 |  |
+| NDI send, including stage and groups | done | 0.8 | One sender per (group, stage); source name `{name} [{group}]` |
+| NDI/OMT receive | done | 0.6 | Soft-fails when the GStreamer plugin is missing |
+| OMT broadcast | partial | 0.3 | Configured, but the runtime is not bundled |
+| WebRTC/WHIP send | done | 0.5 |  |
+| Auto-started RTMP | done | 0.5 | From `rtmpData` destinations or `special.autoRtmp`, plus `FREESHOW_RTMP` |
+| File recording and Icecast | done | 0.4 |  |
+| Virtual camera | done | 0.4 | Linux `v4l2sink`; soft-fail without a loopback device |
+| Spout/Syphon | done | 0.3 | Platform-gated; no-ops on Linux |
+| Blackmagic Decklink | done | 0.4 | GStreamer decklink sink, no vendor SDK; soft-fail without a card |
+| Planning Center plans and ChurchApps plan/lesson import | done | 0.5 |  |
+| Folder/URL cloud backup | done | 0.3 |  |
+| OBS WebSocket 5 | done | 0.4 | Also reads library `obsData` |
+| Functions → AI via Ollama | done | 0.3 | When `FREESHOW_AI` is set |
+| GitHub Releases update check | done | 0.3 | Public API, no credentials; compares to `CARGO_PKG_VERSION` |
+| Download and install a GitHub Release | not-yet | 0.2 | Check only; the running binary is not replaced |
+| Spellcheck | done | 0.3 | Embedded word list plus an optional system dictionary |
+| Stream Deck USB HID | not-yet | 0.2 | Companion/HTTP+WS is the supported path |
+| Canva / OnStage / Amazing Life providers | not-yet | 0.3 | Credential-gated |
+| Google Drive library sync | not-yet | 0.3 | Beyond folder/URL backup; needs an account |
+| ChurchApps cloud sync beyond import | not-yet | 0.2 | Needs an account |
+| Spotify lyric search | not-yet | 0.2 | Needs an account |
+| Cloud or bundled speech-to-text | not-yet | 0.3 | Local model is not bundled; cloud STT needs credentials |
+
+### Installers and crash-safe autosave
+
+| Feature | Status | Weight | Notes |
+| --- | --- | ---: | --- |
+| Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{linux,windows,release}.yml` |
+| Crash-safe autosave | done | 0.5 | Library autosave setting is honored |
+| `--check-perf` and `--check-library` budgets | done | 0.4 | Including remote-button latency ≤16 ms |
+| Apple Developer ID signing and notarization | not-yet | 0.3 | Needs Apple credentials; CI stays unsigned/ad-hoc |
+
+## Remaining
+
+M7 is **not** complete. The lists below are the honest leftovers after groups 4 and 5 and the output-delay / audio-DSP / YouTube-Vimeo pass.
+
+### No-credential leftovers
+
+- Apply a GitHub Release (download and replace the running binary). The public Releases check is in.
+- Auto-refresh weather boxes from Open-Meteo on a timer (parse, fetch, and stored-value cards are in).
+- An operator RSS drawer or ticker (parse/fetch helpers are in).
+- OMT broadcast, which still needs the unbundled Open Media Transport runtime.
+- NDI/OMT source discovery lists (receive-by-name works when the GStreamer plugin is present; this box has no `ndisrc`).
+- Stream Deck USB HID (Companion/HTTP+WS on the remote port is the supported path).
+- Native MediaShout `.mdb` (not a viable pure-Rust path; XML/SSC/JSON dumps import).
+- Embedded live PowerPoint playback (import already works).
+- A bundled local speech-to-text model (Functions → AI already rewrites a slide through Ollama when `FREESHOW_AI` is set).
+- A full clone of every Electron settings/inspector/stage-editor pane, `alertUpdates` chrome, and access-control profile login UI.
+- Measuring the same `--check-perf` budgets on packaged Windows and macOS apps (Linux release budgets already run here).
+
+### Credential-gated leftovers
+
+- Apple Developer ID signing and notarization (`notarytool` / a Developer ID certificate). CI stays unsigned or ad-hoc.
+- Canva presentations and the Canva content provider.
+- OnStage and Amazing Life providers.
+- Google Drive library sync, beyond backup to a folder or URL.
+- ChurchApps cloud sync beyond plan/lesson import.
+- Spotify lyric search.
+- Cloud speech-to-text.
+
+### Settings stored but not fully used in chrome
+
+- Used in the operator UI or import path: `splitLines`, `customFonts`, `resized` panel widths, header Search, `fullColors`, `slidesOptions` columns/mode, `drawer` height, `shortcuts`, `special.guideSeen` / `special.focusMode` / `special.watermark` / `special.outputDelayMs` (real frame buffer, default 0), `activeScenes`, synced `scenes` / `interactions` / `drawSettings` / `playerVideos`, output variables, `effectsLibrary` live effects, `audioEffects` (gain plus the PCM DSP chain), and `timeline` zoom plus show-timeline cues.
+- Still stored but not fully used in chrome: `alertUpdates`, `cloudSyncData`, `driveData`, `contentProviderData`, and `ai`. `metronome` and `timecode` drive the footer; `obsData` is used for OBS when `FREESHOW_OBS` is unset. Synced `profiles` remain stored access-control accounts.
 
 ### Packaging
-- Public-distribution Developer ID signing and notarization stay documented and unsigned/ad-hoc in CI, because they need Apple credentials (`notarytool` / a Developer ID certificate). The locked three-platform installer workflows (Linux tarball, Windows per-user installer, macOS app/DMG) already exist in `.github/workflows/{linux,windows,release}.yml` and package scripts; CI verifies unsigned/ad-hoc artifacts. `--check-perf` and `--check-library` measure the plan budgets, including remote-button latency (handle `API:next_slide`, apply it, and paint the audience frame) against a ≤16 ms budget, and run a headless Sunday-library pass (present, output fingerprints, remote/stage HTTP). A 22 Nov 2026 release run on this box measured Go/Next at 4.10 ms and remote-button at 3.56 ms (1920×1080), with stills at ~349 fps. The compositor paints at 1920×1080 by default, or the active output's stored `bounds` (width is snapped to a multiple of 64 for wgpu row alignment). Slide layout stays 1920×1080.
+
+- Public-distribution Developer ID signing and notarization stay documented and unsigned/ad-hoc in CI, because they need Apple credentials. The locked three-platform installer workflows already exist in `.github/workflows/{linux,windows,release}.yml`. `--check-perf` and `--check-library` measure the plan budgets, including remote-button latency (handle `API:next_slide`, apply it, and paint the audience frame) against a ≤16 ms budget. The compositor paints at 1920×1080 by default, or the active output's stored `bounds` (width is snapped to a multiple of 64 for wgpu row alignment). Slide layout stays 1920×1080.
