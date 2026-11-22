@@ -5554,23 +5554,35 @@ impl Session {
             .shortcut_list()
             .into_iter()
             .find(|(_, bound)| freeshow_data::normalize_chord(bound) == chord)
-            .map(|(action, _)| action);
+            .map(|(action, _)| action)
+            .or_else(|| match chord.as_str() {
+                // Presentation clickers send page keys.
+                "PageDown" => Some("next".to_string()),
+                "PageUp" => Some("previous".to_string()),
+                _ => None,
+            });
         let Some(action) = action else {
             return false;
         };
+        let live = match action.as_str() {
+            "next" => self.advance_show(),
+            "previous" => self.retreat_show(),
+            "go" => self.slide_index.is_some() || self.open_first_show(),
+            "clear" => {
+                self.apply_remote(freeshow_remote::Command::Clear);
+                true
+            }
+            _ => false,
+        };
+        if live {
+            self.blanked &= action == "clear";
+            self.refresh_output = true;
+            return true;
+        }
         match action.as_str() {
             "undo" => self.undo(),
             "redo" => self.redo(),
             "focus" => self.toggle_focus_mode(),
-            "next" => self.advance_show(),
-            "previous" => self.retreat_show(),
-            "go" => {
-                if self.slide_index.is_some() {
-                    true
-                } else {
-                    self.open_first_show()
-                }
-            }
             "kiosk" => self.toggle_kiosk(),
             "guide" => {
                 if self.guide_visible {
@@ -6660,6 +6672,32 @@ mod tests {
         assert!(session.can_redo());
         assert!(session.redo());
         assert_eq!(session.lyrics(), "second");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn live_shortcuts_ask_for_an_output_refresh() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-live-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with("song", "Song", "One\n\nTwo\n\nThree"));
+        session.select_slide(0);
+        session.refresh_output = false;
+        assert!(session.perform_shortcut("Right"));
+        assert_eq!(session.slide_index, Some(1));
+        assert!(session.refresh_output);
+        session.refresh_output = false;
+        assert!(session.perform_shortcut("PageDown"));
+        assert_eq!(session.slide_index, Some(2));
+        assert!(session.perform_shortcut("PageUp"));
+        assert_eq!(session.slide_index, Some(1));
+        assert!(session.perform_shortcut("Escape"));
+        assert!(session.blanked);
+        assert!(session.perform_shortcut(" "));
+        assert!(!session.blanked);
+        assert!(session.refresh_output);
         let _ = std::fs::remove_dir_all(&root);
     }
 

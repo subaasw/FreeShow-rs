@@ -184,6 +184,12 @@ export component ControlWindow inherits Window {
                 root.hotkey("Right", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
             } else if (event.text == Key.LeftArrow) {
                 root.hotkey("Left", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.PageDown) {
+                root.hotkey("PageDown", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.PageUp) {
+                root.hotkey("PageUp", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.Escape) {
+                root.hotkey("Escape", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
             } else {
                 root.hotkey(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
             }
