@@ -483,6 +483,24 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         style_blur_opacity: settings.style_blur_opacity,
         style_lines: settings.style_lines,
         output_names: strings(&settings.output_names),
+        theme_colors: slint::ModelRc::new(slint::VecModel::from(
+            settings
+                .theme_colors
+                .iter()
+                .map(|(key, label, hex)| ThemeColorRow {
+                    key: key.as_str().into(),
+                    label: label.as_str().into(),
+                    hex: hex.as_str().into(),
+                    swatch: parse_color(hex).map_or(slint::Color::from_rgb_u8(0, 0, 0), |color| {
+                        slint::Color::from_rgb_u8(color.r, color.g, color.b)
+                    }),
+                })
+                .collect::<Vec<_>>(),
+        )),
+        theme_font: settings.theme_font.into(),
+        theme_font_size: settings.theme_font_size,
+        theme_radius: settings.theme_radius,
+        theme_edited: settings.theme_edited,
     });
     ui.set_theme_names(strings(&settings.themes));
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
@@ -1953,7 +1971,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let (on_top, kiosk) = current.output_window_flags();
                         apply_window_behavior(output.window(), on_top, kiosk);
                     }
-                    if key == "theme" {
+                    if key.starts_with("theme") {
                         let theme = theme::operator_theme(
                             settings.borrow().theme.as_deref(),
                             &current.preferences,

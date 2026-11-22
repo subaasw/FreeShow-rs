@@ -55,7 +55,26 @@ pub struct SettingsForm {
     pub style_lines: i32,
     /// Audience outputs by name; `output_name` is the one the output window shows.
     pub output_names: Vec<String>,
+    /// The theme editor: `(key, label, #hex)` per colour, font, size (%) and corner radius.
+    pub theme_colors: Vec<(String, String, String)>,
+    pub theme_font: String,
+    pub theme_font_size: i32,
+    pub theme_radius: i32,
+    /// The theme has edits stored in `Config/themes.json` that Reset would drop.
+    pub theme_edited: bool,
 }
+
+/// Theme colours the editor shows, as FreeShow's `themes.json` keys and plain labels.
+pub const THEME_COLORS: [(&str, &str); 8] = [
+    ("primary", "Panels"),
+    ("primary-lighter", "Buttons"),
+    ("primary-darker", "Header"),
+    ("primary-darkest", "Deepest"),
+    ("text", "Text"),
+    ("textInvert", "Text on light"),
+    ("secondary", "Accent"),
+    ("secondary-text", "Text on accent"),
+];
 
 /// How a style fits background pictures and videos (Settings → Styles).
 pub const STYLE_FITS: [&str; 4] = ["contain", "cover", "fill", "blur"];
@@ -93,6 +112,12 @@ pub fn setting_label(key: &str) -> &str {
         "outputNew" => "new output",
         "outputDelete" => "output removal",
         "outputName" => "output name",
+        "themeFont" => "theme font",
+        "themeFontSize" => "theme text size",
+        "themeRadius" => "corner radius",
+        "themeDuplicate" => "theme copy",
+        "themeReset" => "theme reset",
+        key if key.starts_with("themeColor.") => "theme colour",
         other => other,
     }
 }
@@ -260,6 +285,18 @@ impl Session {
                 .into_iter()
                 .map(|(_, name)| name)
                 .collect(),
+            ..self.style_and_theme_form()
+        }
+    }
+
+    fn style_and_theme_form(&self) -> SettingsForm {
+        let theme = self.theme_form();
+        SettingsForm {
+            theme_colors: theme.theme_colors,
+            theme_font: theme.theme_font,
+            theme_font_size: theme.theme_font_size,
+            theme_radius: theme.theme_radius,
+            theme_edited: theme.theme_edited,
             ..self.style_form()
         }
     }
@@ -464,6 +501,12 @@ impl Session {
             "outputPick" | "outputNew" | "outputDelete" | "outputName" => {
                 return self.apply_output_setting(key, value);
             }
+            "themeFont" | "themeFontSize" | "themeRadius" | "themeDuplicate" | "themeReset" => {
+                return self.apply_theme_setting(key, value);
+            }
+            key if key.starts_with("themeColor.") => {
+                return self.apply_theme_setting(key, value);
+            }
             "theme" => {
                 let Some(theme) = self
                     .settings_form()
@@ -493,6 +536,151 @@ impl Session {
         } else {
             Err("could not write settings.json".into())
         }
+    }
+
+    fn theme_id(&self) -> String {
+        self.preferences
+            .theme
+            .clone()
+            .unwrap_or_else(|| "default".into())
+    }
+
+    /// The theme editor's view of the library theme, with built-in values where none is stored.
+    fn theme_form(&self) -> SettingsForm {
+        let theme = crate::theme::operator_theme(None, &self.preferences);
+        let palette = &theme.palette;
+        let hex = |c: freeshow_core::Rgb| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        let value = |key: &str| match key {
+            "primary" => hex(palette.primary),
+            "primary-lighter" => hex(palette.primary_lighter),
+            "primary-darker" => hex(palette.primary_darker),
+            "primary-darkest" => hex(palette.primary_darkest),
+            "text" => hex(palette.text),
+            "textInvert" => hex(palette.text_invert),
+            "secondary" => hex(palette.secondary),
+            _ => hex(palette.secondary_text),
+        };
+        SettingsForm {
+            theme_colors: THEME_COLORS
+                .iter()
+                .map(|(key, label)| (key.to_string(), label.to_string(), value(key)))
+                .collect(),
+            theme_font: theme.font_family.clone(),
+            theme_font_size: (theme.font_scale * 100.0).round() as i32,
+            theme_radius: theme.border_radius.round() as i32,
+            theme_edited: self.preferences.themes.get(self.theme_id()).is_some(),
+            ..SettingsForm::default()
+        }
+    }
+
+    /// Edits the library theme in `Config/themes.json`, or copies or resets it.
+    fn apply_theme_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        use serde_json::{Value, json};
+        let root = self.root.clone().ok_or("choose a library folder first")?;
+        let id = self.theme_id();
+        let path = root.join("Config").join("themes.json");
+        let mut themes: Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        let built_in = freeshow_core::BUILT_IN_THEMES
+            .iter()
+            .any(|theme| theme.name.eq_ignore_ascii_case(&id));
+        let mut switch_to = None;
+        let entry = |themes: &mut Value, id: &str| -> Value {
+            if !themes[id].is_object() {
+                themes[id] = json!({ "name": id });
+            }
+            themes[id].clone()
+        };
+        if let Some(color_key) = key.strip_prefix("themeColor.") {
+            if !THEME_COLORS.iter().any(|(known, _)| *known == color_key) {
+                return Err(format!("unknown theme colour {color_key:?}"));
+            }
+            if freeshow_output::parse_color(value).is_none() {
+                return Err(format!("{value:?} is not a colour like #242832"));
+            }
+            entry(&mut themes, &id);
+            if !themes[&id]["colors"].is_object() {
+                themes[&id]["colors"] = json!({});
+            }
+            themes[&id]["colors"][color_key] = json!(value);
+        } else {
+            match key {
+                "themeFont" => {
+                    entry(&mut themes, &id);
+                    if !themes[&id]["font"].is_object() {
+                        themes[&id]["font"] = json!({});
+                    }
+                    themes[&id]["font"]["family"] = if value.is_empty() {
+                        json!("sans-serif")
+                    } else {
+                        json!(value)
+                    };
+                }
+                "themeFontSize" => {
+                    let percent = parse_int(value, 50, 200)?;
+                    entry(&mut themes, &id);
+                    if !themes[&id]["font"].is_object() {
+                        themes[&id]["font"] = json!({});
+                    }
+                    themes[&id]["font"]["size"] = json!(format!("{}em", percent as f64 / 100.0));
+                }
+                "themeRadius" => {
+                    let radius = parse_int(value, 0, 24)?;
+                    entry(&mut themes, &id);
+                    themes[&id]["border"] = json!({ "radius": format!("{radius}px") });
+                }
+                "themeDuplicate" => {
+                    let form = self.theme_form();
+                    let base = format!("{id}-copy");
+                    let taken = self.settings_form().themes;
+                    let copy = std::iter::once(base.clone())
+                        .chain((2..).map(|n| format!("{base}-{n}")))
+                        .find(|name| !taken.contains(name))
+                        .ok_or("could not name the copy")?;
+                    let colors: serde_json::Map<String, Value> = form
+                        .theme_colors
+                        .iter()
+                        .map(|(key, _, hex)| (key.clone(), json!(hex)))
+                        .collect();
+                    themes[&copy] = json!({
+                        "name": copy,
+                        "colors": colors,
+                        "font": {
+                            "family": if form.theme_font.is_empty() { "sans-serif".to_string() } else { form.theme_font.clone() },
+                            "size": format!("{}em", form.theme_font_size as f64 / 100.0),
+                        },
+                        "border": { "radius": format!("{}px", form.theme_radius) },
+                    });
+                    switch_to = Some(copy);
+                }
+                "themeReset" => {
+                    if let Some(all) = themes.as_object_mut() {
+                        all.remove(&id);
+                    }
+                    if !built_in {
+                        switch_to = Some("default".to_string());
+                    }
+                }
+                other => return Err(format!("unknown setting {other:?}")),
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let bytes = serde_json::to_vec_pretty(&themes).map_err(|err| err.to_string())?;
+        std::fs::write(&path, bytes)
+            .map_err(|err| format!("could not write themes.json: {err}"))?;
+        if let Some(theme) = switch_to {
+            if !self.patch_settings(|settings| settings["theme"] = json!(theme)) {
+                return Err("could not write settings.json".into());
+            }
+        } else if let Some(preferences) = self.reload_preferences() {
+            self.preferences = preferences;
+        }
+        Ok(())
     }
 
     /// Audience outputs (not stage displays) as `(id, shown name)`.
@@ -921,6 +1109,53 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn the_theme_editor_edits_copies_and_resets_the_library_theme() {
+        let (dir, mut session) = library("theme-editor");
+        let form = session.settings_form();
+        assert_eq!(form.theme, "dark");
+        assert_eq!(form.theme_colors.len(), THEME_COLORS.len());
+        assert!(!form.theme_edited);
+        session
+            .apply_setting("themeColor.secondary", "#2ecc71")
+            .unwrap();
+        assert!(
+            session
+                .apply_setting("themeColor.secondary", "green-ish")
+                .is_err()
+        );
+        assert!(
+            session
+                .apply_setting("themeColor.bogus", "#000000")
+                .is_err()
+        );
+        session.apply_setting("themeFontSize", "120").unwrap();
+        session.apply_setting("themeRadius", "8").unwrap();
+        let form = session.settings_form();
+        assert!(form.theme_edited);
+        assert_eq!(form.theme_font_size, 120);
+        assert_eq!(form.theme_radius, 8);
+        let accent = form
+            .theme_colors
+            .iter()
+            .find(|(key, _, _)| key == "secondary")
+            .unwrap();
+        assert_eq!(accent.2, "#2ecc71");
+        session.apply_setting("themeDuplicate", "").unwrap();
+        let form = session.settings_form();
+        assert_eq!(form.theme, "dark-copy");
+        assert!(form.themes.contains(&"dark-copy".to_string()));
+        session.apply_setting("themeReset", "").unwrap();
+        assert_eq!(session.settings_form().theme, "default");
+        session.apply_setting("theme", "dark").unwrap();
+        session.apply_setting("themeReset", "").unwrap();
+        let form = session.settings_form();
+        assert_eq!(form.theme, "dark");
+        assert!(!form.theme_edited);
+        let saved = std::fs::read_to_string(dir.path().join("Config/themes.json")).unwrap();
+        assert!(!saved.contains("dark-copy") && !saved.contains("\"dark\""));
     }
 
     #[test]
