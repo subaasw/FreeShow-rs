@@ -158,6 +158,8 @@ export component ControlWindow inherits Window {
     callback remove-item();
     callback go-slide(string);
     callback move-project(int);
+    // Moves the project item at the first index to the second, from a drag in the list.
+    callback drop-project(int, int);
     callback choose-project(int);
     callback add-to-project();
     callback create-show();
@@ -638,6 +640,9 @@ export component ControlWindow inherits Window {
                     }
                     if root.project-names.length > 0: project-flick := Flickable {
                         // Long services scroll instead of running off the panel.
+                        // Dragging moves items, so only the wheel scrolls the list.
+                        property <int> drop-at: -1;
+                        interactive: false;
                         vertical-stretch: 1;
                         min-height: min(root.project-names.length * 36px, 108px);
                         content-height: root.project-names.length * 36px;
@@ -681,12 +686,29 @@ export component ControlWindow inherits Window {
                                 accent: root.accent;
                                 text-color: root.text-color;
                                 accent-text: root.accent-text;
+                                draggable: true;
                                 clicked => {
                                     window-keys.focus();
                                     root.selected-project = index;
                                     root.choose-project(index);
                                 }
+                                drag-moved(offset) => {
+                                    project-flick.drop-at = clamp(index + round(offset / 36px), 0, root.project-names.length - 1);
+                                }
+                                dropped(offset) => {
+                                    project-flick.drop-at = -1;
+                                    root.drop-project(index, clamp(index + round(offset / 36px), 0, root.project-names.length - 1));
+                                }
                             }
+                        }
+                        // Where a dragged item will land.
+                        if project-flick.drop-at >= 0: Rectangle {
+                            y: project-flick.drop-at * 36px;
+                            height: 36px;
+                            width: project-flick.width;
+                            border-width: 2px;
+                            border-color: root.accent;
+                            border-radius: OperatorStyle.chrome-radius;
                         }
                     }
                     if root.now-playing != "": Rectangle {

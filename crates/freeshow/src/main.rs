@@ -3088,6 +3088,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        control.on_drop_project(move |from, to| {
+            if !session
+                .borrow_mut()
+                .drop_project_item(from.max(0) as usize, to.max(0) as usize)
+            {
+                tracing::debug!("project item stayed in place");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
         control.on_add_to_project(move || {
             if !session.borrow_mut().add_current_show() {
                 tracing::error!("could not add the show to the project");
