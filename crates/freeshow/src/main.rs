@@ -470,6 +470,18 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         media_transition: settings.media_transition.into(),
         media_duration: settings.media_duration,
         addresses: settings.addresses.into(),
+        style_names: strings(&settings.style_names),
+        style_name: settings.style_name.into(),
+        style_is_default: settings.style_is_default,
+        style_swatch: parse_color(&settings.style_background)
+            .map_or(slint::Color::from_rgb_u8(0, 0, 0), |color| {
+                slint::Color::from_argb_u8(color.a, color.r, color.g, color.b)
+            }),
+        style_background: settings.style_background.into(),
+        style_fit: settings.style_fit.into(),
+        style_blur_amount: settings.style_blur_amount,
+        style_blur_opacity: settings.style_blur_opacity,
+        style_lines: settings.style_lines,
     });
     ui.set_theme_names(strings(&settings.themes));
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
@@ -1595,6 +1607,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let control = ControlWindow::new()?;
+    control.global::<ComboIndex>().on_find(|model, value| {
+        use slint::Model;
+        model
+            .iter()
+            .position(|row| row == value)
+            .map_or(0, |index| index as i32)
+    });
     let startup_import = session
         .root
         .clone()

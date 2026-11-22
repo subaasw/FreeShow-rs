@@ -135,10 +135,10 @@ pub fn audience_frame(session: &Session) -> Frame {
                 session.background_blur_opacity,
             )
         } else {
-            clear_frame(session.output_width, session.output_height)
+            style_blank(session)
         }
     } else {
-        clear_frame(session.output_width, session.output_height)
+        style_blank(session)
     };
     paint_overlays(&mut frame, session, true);
     paint_program_content(&mut frame, session);
@@ -147,6 +147,21 @@ pub fn audience_frame(session: &Session) -> Frame {
     paint_drawing(&mut frame, session);
     paint_effects(&mut frame, session);
     delayed_audience_frame(frame, session.preferences.output_delay_ms())
+}
+
+/// An empty audience picture in the active output style's background colour.
+fn style_blank(session: &Session) -> Frame {
+    match session.style_background {
+        Some(color) => render_styled(&StyledSlide {
+            output_width: session.output_width,
+            output_height: session.output_height,
+            source_width: SOURCE_WIDTH,
+            source_height: SOURCE_HEIGHT,
+            background: color,
+            items: Vec::new(),
+        }),
+        None => clear_frame(session.output_width, session.output_height),
+    }
 }
 
 fn paint_program_content(frame: &mut Frame, session: &Session) {

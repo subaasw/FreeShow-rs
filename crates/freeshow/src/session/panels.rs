@@ -15,7 +15,7 @@ pub const STAGE_ADD_KINDS: [&str; 7] = [
 ];
 
 /// Library `settings.json` values shown in Settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsForm {
     pub language: String,
     pub time_format: String,
@@ -44,7 +44,19 @@ pub struct SettingsForm {
     pub media_duration: i32,
     /// Where phones and tablets on this network open the remote and stage pages.
     pub addresses: String,
+    /// Output styles by name, and the look of the one the active output uses.
+    pub style_names: Vec<String>,
+    pub style_name: String,
+    pub style_is_default: bool,
+    pub style_background: String,
+    pub style_fit: String,
+    pub style_blur_amount: i32,
+    pub style_blur_opacity: i32,
+    pub style_lines: i32,
 }
+
+/// How a style fits background pictures and videos (Settings → Styles).
+pub const STYLE_FITS: [&str; 4] = ["contain", "cover", "fill", "blur"];
 
 /// The friendly name of a Settings key, for the "Saved …" line.
 pub fn setting_label(key: &str) -> &str {
@@ -67,6 +79,14 @@ pub fn setting_label(key: &str) -> &str {
         "outputAlwaysOnTop" => "always on top",
         "outputKiosk" => "kiosk",
         "theme" => "theme",
+        "outputStyle" => "output style",
+        "styleNew" => "new style",
+        "styleDelete" => "style removal",
+        "styleName" => "style name",
+        "styleBackground" => "style background",
+        "styleFit" => "media fit",
+        "styleBlurAmount" | "styleBlurOpacity" => "blur",
+        "styleLines" => "max lines",
         other => other,
     }
 }
@@ -229,7 +249,128 @@ impl Session {
             text_duration: self.library_transition(false).duration_ms as i32,
             media_transition: self.library_transition(true).kind,
             media_duration: self.library_transition(true).duration_ms as i32,
+            ..self.style_form()
         }
+    }
+
+    /// The Styles tab: every style's name and the active output style's look.
+    fn style_form(&self) -> SettingsForm {
+        use serde_json::Value;
+        let mut form = SettingsForm::default();
+        let Some(root) = self.root.as_deref() else {
+            return form;
+        };
+        let library = freeshow_data::Library::open(root);
+        let id = library.output_style_id();
+        let styles = library.styles();
+        form.style_names = styles.iter().map(|(_, name)| name.clone()).collect();
+        form.style_name = styles
+            .iter()
+            .find(|(style, _)| *style == id)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| id.clone());
+        form.style_is_default = id == "default";
+        let style = library.style_value(&id);
+        let text = |key: &str| {
+            style
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        form.style_background = text("background");
+        form.style_fit = Some(text("fit"))
+            .filter(|fit| STYLE_FITS.contains(&fit.as_str()))
+            .unwrap_or_else(|| "contain".into());
+        let (amount, opacity) = library.style_blur();
+        form.style_blur_amount = amount.round() as i32;
+        form.style_blur_opacity = (opacity * 100.0).round() as i32;
+        form.style_lines = library.style_lines() as i32;
+        form
+    }
+
+    /// Writes one Styles-tab value to the active output's style and repaints the output.
+    fn apply_style_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        use serde_json::{Value, json};
+        let root = self.root.clone().ok_or("choose a library folder first")?;
+        let library = freeshow_data::Library::open(&root);
+        let id = library.output_style_id();
+        let wrote = match key {
+            "outputStyle" => {
+                let (style, _) = library
+                    .styles()
+                    .into_iter()
+                    .find(|(_, name)| name == value)
+                    .ok_or_else(|| format!("no style named {value:?}"))?;
+                library.set_output_style(&style)
+            }
+            "styleNew" => {
+                let count = library.styles().len();
+                let style = library
+                    .create_style(&format!("Style {}", count + 1))
+                    .ok_or("could not add a style")?;
+                library.set_output_style(&style)
+            }
+            "styleDelete" => {
+                if id == "default" {
+                    return Err("The Primary style stays; pick another style to remove it".into());
+                }
+                library.delete_style(&id)
+            }
+            "styleName" => {
+                if value.is_empty() || value.chars().count() > 60 {
+                    return Err("a style name is 1–60 characters".into());
+                }
+                library.patch_style(&id, "name", json!(value))
+            }
+            "styleBackground" => {
+                if value.is_empty() {
+                    library.patch_style(&id, "background", Value::Null)
+                } else if freeshow_output::parse_color(value).is_some() {
+                    library.patch_style(&id, "background", json!(value))
+                } else {
+                    return Err(format!("{value:?} is not a colour like #000000"));
+                }
+            }
+            "styleFit" => {
+                if !STYLE_FITS.contains(&value) {
+                    return Err(format!("media fit must be one of {STYLE_FITS:?}"));
+                }
+                library.patch_style(&id, "fit", json!(value))
+            }
+            "styleBlurAmount" => {
+                library.patch_style(&id, "blurAmount", json!(parse_int(value, 0, 100)?))
+            }
+            "styleBlurOpacity" => {
+                let percent = parse_int(value, 1, 100)?;
+                library.patch_style(&id, "blurOpacity", json!(percent as f64 / 100.0))
+            }
+            "styleLines" => {
+                let lines = parse_int(value, 0, 20)?;
+                library.patch_style(
+                    &id,
+                    "lines",
+                    if lines == 0 {
+                        Value::Null
+                    } else {
+                        json!(lines)
+                    },
+                )
+            }
+            other => return Err(format!("unknown setting {other:?}")),
+        };
+        if !wrote {
+            return Err("could not write the style".into());
+        }
+        self.refresh_style_look();
+        if let Some(path) = self.background_path.clone() {
+            self.remember_background(&path);
+        }
+        if !self.blanked {
+            self.live_edited = true;
+        }
+        Ok(())
     }
 
     /// Writes one Settings value into the library `settings.json`.
@@ -304,6 +445,10 @@ impl Session {
                     "alwaysOnTop"
                 };
                 return self.patch_output(&id, field, json!(parse_bool(value)?));
+            }
+            "outputStyle" | "styleNew" | "styleDelete" | "styleName" | "styleBackground"
+            | "styleFit" | "styleBlurAmount" | "styleBlurOpacity" | "styleLines" => {
+                return self.apply_style_setting(key, value);
             }
             "theme" => {
                 let Some(theme) = self
