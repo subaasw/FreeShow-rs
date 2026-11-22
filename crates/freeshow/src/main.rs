@@ -323,8 +323,13 @@ fn busy_ports_notice(remote: u16, stage: u16) -> Option<String> {
         .map(|(name, port)| format!("{name} port {port}"))
         .collect();
     (!names.is_empty()).then(|| {
+        let (verb, pages) = if names.len() > 1 {
+            ("are", "those pages are")
+        } else {
+            ("is", "that page is")
+        };
         format!(
-            "The {} is in use by another program, so that page is off. Close the other program or pick another port in Settings, Connection, then restart.",
+            "The {} {verb} in use by another program, so {pages} off. Close the other program or pick another port in Settings, Connection, then restart.",
             names.join(" and ")
         )
     })
