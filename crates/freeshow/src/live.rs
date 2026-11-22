@@ -228,6 +228,14 @@ pub fn stage_frame(session: &Session) -> Frame {
         .chain(still_backgrounds.values().map(String::as_str));
     let mut media = session.stage_media.borrow_mut();
     media.update(root, sources);
+    media.update_cameras(
+        session
+            .stage
+            .items
+            .iter()
+            .filter(|item| item.kind == freeshow_data::StageItemKind::Camera)
+            .filter_map(|item| item.device_name.as_deref()),
+    );
     crate::stage::paint_stage(
         &slides,
         index,

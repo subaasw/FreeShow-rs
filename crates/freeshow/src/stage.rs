@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use freeshow_data::{StageClockOptions, StageItemKind, StageItemSpec, StageLayout, fill_variables};
 use freeshow_output::{
@@ -17,6 +18,9 @@ pub struct StageSlide {
 #[derive(Default)]
 pub struct StageMedia {
     files: HashMap<String, StageFile>,
+    cameras: HashMap<String, StageFile>,
+    camera_names: Vec<String>,
+    camera_names_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -61,9 +65,67 @@ impl StageMedia {
         }
     }
 
+    pub fn update_cameras<'a>(&mut self, names: impl Iterator<Item = &'a str>) {
+        let names: HashSet<String> = names
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        self.cameras.retain(|name, _| names.contains(name));
+        let missing = names.iter().any(|name| {
+            self.cameras
+                .get(name)
+                .is_none_or(|file| file.video.is_none())
+        });
+        if missing
+            && self
+                .camera_names_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+        {
+            self.camera_names = freeshow_media::cameras();
+            self.camera_names_at = Some(Instant::now());
+        }
+        for name in &names {
+            let file = self.cameras.entry(name.clone()).or_default();
+            if file.video.is_none()
+                && let Some(device) = resolve_camera_name(name, &self.camera_names)
+                && let Ok(video) = freeshow_media::VideoPlayer::open_camera(&device)
+            {
+                file.video = Some(video);
+            }
+            if let Some(frame) = file
+                .video
+                .as_mut()
+                .and_then(|player| player.try_next_frame())
+            {
+                file.picture = Some(frame);
+            }
+        }
+    }
+
     fn picture(&self, src: &str) -> Option<Raster> {
         self.files.get(src)?.picture.clone()
     }
+
+    fn camera(&self, name: &str) -> Option<Raster> {
+        self.cameras.iter().find_map(|(stored, file)| {
+            stored
+                .eq_ignore_ascii_case(name)
+                .then(|| file.picture.clone())
+                .flatten()
+        })
+    }
+}
+
+fn resolve_camera_name(requested: &str, available: &[String]) -> Option<String> {
+    available
+        .iter()
+        .find(|name| name.as_str() == requested)
+        .or_else(|| {
+            available
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(requested))
+        })
+        .cloned()
 }
 
 /// Values the stage boxes need that are not part of the layout.
@@ -125,6 +187,10 @@ pub fn paint_stage(
                         .src
                         .as_deref()
                         .and_then(|src| context.media?.picture(src)),
+                    StageItemKind::Camera => item
+                        .device_name
+                        .as_deref()
+                        .and_then(|name| context.media?.camera(name)),
                     StageItemKind::QrCode => {
                         fit = Fit::Contain;
                         item.qr.as_ref().and_then(|qr| {
@@ -617,5 +683,77 @@ mod tests {
             lines_for(&no_seconds, &[], None, "00:05:09", "05:00", &context),
             vec!["12:05 AM".to_string()]
         );
+    }
+
+    #[test]
+    fn a_live_camera_frame_fills_the_box_and_a_missing_device_keeps_its_label() {
+        let slides = vec![StageSlide {
+            text_boxes: vec![vec!["line".into()]],
+            notes: String::new(),
+        }];
+        let mut live = spec(StageItemKind::Camera);
+        live.label = String::new();
+        live.device_name = Some("PTZ Front".into());
+        live.style = "left:0px;top:0px;width:400px;height:300px;".into();
+        let mut missing = spec(StageItemKind::Camera);
+        missing.label = String::new();
+        missing.device_name = Some("Hall Rear".into());
+        missing.style =
+            "left:500px;top:0px;width:400px;height:120px;color:#ffffff;font-size:40px;".into();
+        let layout = StageLayout {
+            name: "Cameras".into(),
+            background: "#000000".into(),
+            items: vec![live, missing],
+        };
+        let mut media = StageMedia::default();
+        media.cameras.insert(
+            "PTZ Front".into(),
+            StageFile {
+                picture: Some(Raster {
+                    width: 8,
+                    height: 8,
+                    rgba: {
+                        let mut pixels = Vec::new();
+                        for _ in 0..64 {
+                            pixels.extend_from_slice(&[255, 0, 0, 255]);
+                        }
+                        pixels
+                    },
+                }),
+                video: None,
+            },
+        );
+        let context = StageContext {
+            media: Some(&media),
+            ..StageContext::default()
+        };
+        let frame = paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00", &context);
+        let red = frame
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| px[0] > 200 && px[1] < 40 && px[2] < 40)
+            .count();
+        assert!(red > 100, "live camera pixels={red}");
+        // The missing camera still paints its device name, which is not a red fill.
+        let lit = frame
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| px.iter().any(|b| *b > 0))
+            .count();
+        assert!(lit > red, "missing camera should keep a label");
+    }
+
+    #[test]
+    fn camera_names_match_discovered_devices_without_regard_to_case() {
+        let available = vec!["PTZ Front".into(), "Hall Rear".into()];
+        assert_eq!(
+            resolve_camera_name("PTZ Front", &available).as_deref(),
+            Some("PTZ Front")
+        );
+        assert_eq!(
+            resolve_camera_name("ptz front", &available).as_deref(),
+            Some("PTZ Front")
+        );
+        assert_eq!(resolve_camera_name("Lobby", &available), None);
     }
 }
