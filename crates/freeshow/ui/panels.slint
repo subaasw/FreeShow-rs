@@ -77,6 +77,16 @@ export struct InspectorData {
     shadow-y: int,
     shadow-blur: int,
     shadow-color: string,
+    blur: int,
+    grayscale: int,
+    sepia: int,
+    invert: int,
+    brightness: int,
+    contrast: int,
+    saturate: int,
+    hue-rotate: int,
+    opacity: int,
+    blend: string,
 }
 
 export struct StageRowData {
@@ -808,6 +818,47 @@ export component InspectorPanel inherits VerticalLayout {
         SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; value: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
         FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
         SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; value: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Blur"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; value: root.data.blur; edited(value) => { root.set("blur", value); } }
+        FieldLabel { text: "Gray %"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; value: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Bright %"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.brightness; edited(value) => { root.set("brightness", value); } }
+        FieldLabel { text: "Contr %"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.contrast; edited(value) => { root.set("contrast", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Satur %"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.saturate; edited(value) => { root.set("saturate", value); } }
+        FieldLabel { text: "Hue °"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 360; step-size: 5; value: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Sepia %"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; value: root.data.sepia; edited(value) => { root.set("sepia", value); } }
+        FieldLabel { text: "Invert %"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; value: root.data.invert; edited(value) => { root.set("invert", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Opacity"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; value: root.data.opacity; edited(value) => { root.set("opacity", value); } }
+        FieldLabel { text: "Blend"; text-color: root.text-color; min-width: 32px; }
+        ValueCombo {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            model: ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference", "exclusion", "color-dodge"];
+            value: root.data.blend == "" ? "normal" : root.data.blend;
+            selected(value) => { root.set("blend", value); }
+        }
     }
 }
 

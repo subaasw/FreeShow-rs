@@ -17,7 +17,7 @@ mod scripture;
 mod show_edit;
 mod stage_layout;
 
-pub use item_edit::{ItemBox, ItemTypography, TextShadow, css_px, css_set, css_value};
+pub use item_edit::{ItemBox, ItemFilters, ItemTypography, TextShadow, css_px, css_set, css_value};
 pub use media_library::{
     MediaEntry, MediaEntryKind, image_dimensions, media_duration, media_entry_kind,
 };
