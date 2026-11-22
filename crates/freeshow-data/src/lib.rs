@@ -662,10 +662,11 @@ pub enum SlideBackdrop {
     Picture { path: String, foreground: bool },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimedCueTarget {
     Next,
     First,
+    Slide(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1395,10 +1396,13 @@ impl ShowFile {
     /// Explicit timed completion. Ordinary FreeShow next-slide timers omit a target.
     pub fn timed_cue_target_at(&self, index: usize) -> Option<TimedCueTarget> {
         let node = self.layout_node_at(index)?;
-        match node["nextTimerTarget"].as_str()? {
-            "next" => Some(TimedCueTarget::Next),
-            "first" => Some(TimedCueTarget::First),
-            _ => None,
+        match node["nextTimerTarget"].as_str() {
+            Some("next") => Some(TimedCueTarget::Next),
+            Some("first") => Some(TimedCueTarget::First),
+            _ => node["nextTimerTarget"]["slide"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| TimedCueTarget::Slide(id.to_owned())),
         }
     }
 
@@ -2285,6 +2289,22 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return false;
         };
+        Self::can_output_node(node, output_id, output_name)
+    }
+
+    /// First eligible occurrence of a slide in the active arrangement.
+    pub fn output_index_for_slide(
+        &self,
+        slide_id: &str,
+        output_id: &str,
+        output_name: &str,
+    ) -> Option<usize> {
+        self.layout_steps().iter().position(|(id, node)| {
+            id == slide_id && Self::can_output_node(node, output_id, output_name)
+        })
+    }
+
+    fn can_output_node(node: &Value, output_id: &str, output_name: &str) -> bool {
         if node.get("disabled").and_then(Value::as_bool) == Some(true) {
             return false;
         }

@@ -102,6 +102,8 @@ pub(super) struct Cue {
     pub name: String,
     #[prost(enumeration = "CompletionTarget", tag = "3")]
     pub completion_target: i32,
+    #[prost(message, optional, tag = "4")]
+    pub completion_cue: Option<Uuid>,
     #[prost(enumeration = "CompletionAction", tag = "5")]
     pub completion_action: i32,
     #[prost(message, repeated, tag = "10")]
@@ -116,6 +118,7 @@ pub(super) struct Cue {
 pub(super) enum CompletionTarget {
     None = 0,
     Next = 1,
+    Cue = 3,
     First = 4,
 }
 
