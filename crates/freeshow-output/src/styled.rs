@@ -957,6 +957,38 @@ pub fn qr_image(text: &str, foreground: &str, background: &str) -> Option<Raster
     })
 }
 
+pub fn fit_raster(image: &Raster, max_width: u32, max_height: u32) -> Raster {
+    if image.width == 0 || image.height == 0 || max_width == 0 || max_height == 0 {
+        return Raster {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        };
+    }
+    if image.width <= max_width && image.height <= max_height {
+        return image.clone();
+    }
+    let scale =
+        (max_width as f32 / image.width as f32).min(max_height as f32 / image.height as f32);
+    let width = (image.width as f32 * scale).round().max(1.0) as u32;
+    let height = (image.height as f32 * scale).round().max(1.0) as u32;
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height {
+        let src_y = (y as u64 * image.height as u64 / height as u64) as u32;
+        for x in 0..width {
+            let src_x = (x as u64 * image.width as u64 / width as u64) as u32;
+            let src = ((src_y * image.width + src_x) * 4) as usize;
+            let dest = ((y * width + x) * 4) as usize;
+            rgba[dest..dest + 4].copy_from_slice(&image.rgba[src..src + 4]);
+        }
+    }
+    Raster {
+        width,
+        height,
+        rgba,
+    }
+}
+
 pub fn decode_image(bytes: &[u8]) -> Option<Raster> {
     let image = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (width, height) = image.dimensions();
@@ -3686,6 +3718,23 @@ mod tests {
         let covered = render_styled(&slide);
         assert_ne!(covered.pixel(0, 0), Rgba::BLACK);
         assert_eq!(covered.pixel(0, 0).a, 255);
+    }
+
+    #[test]
+    fn fit_raster_keeps_aspect_and_shrinks() {
+        let mut rgba = vec![0u8; 8 * 4 * 4];
+        rgba[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        let fitted = fit_raster(
+            &Raster {
+                width: 8,
+                height: 4,
+                rgba,
+            },
+            4,
+            4,
+        );
+        assert_eq!((fitted.width, fitted.height), (4, 2));
+        assert_eq!(&fitted.rgba[0..4], &[255, 0, 0, 255]);
     }
 
     fn fingerprint_of(frame: &crate::Frame) -> u64 {
