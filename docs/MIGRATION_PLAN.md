@@ -165,7 +165,7 @@ Acceptance: a volunteer can open their existing library, recognize the theme and
 
 ### M3. Compositor, fonts, and stage sources
 
-- System fonts beyond DejaVu / optional Arial: use the item's `font-family` through fontconfig / DirectWrite / Core Text, with a documented fallback chain.
+- [x] System fonts beyond DejaVu / optional Arial: use the item's `font-family` through fontconfig (`fc-match`) on Unix, then a scan of the DirectWrite and Core Text font folders, with bundled DejaVu Sans as the last fallback.
 - Remaining typography and effects called out as partial in `PARITY.md` (filters and blends on stills are started; keep going from the highest-impact gaps).
 - Live camera, web, and chart boxes on the native stage (today: labeled placeholders). Camera should use the saved `device` name/type against `freeshow-media` discovery.
 - Current Output / local stage video already work; do not regress them.
