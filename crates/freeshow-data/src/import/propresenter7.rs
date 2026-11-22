@@ -331,14 +331,7 @@ fn add_slide(
     match background(cue) {
         Some(CueBackground::Clear) => clear.push("clear_background"),
         Some(CueBackground::Media(media_action, path)) => {
-            let media_id = format!("m{}", media.len() + 1);
-            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-            let mut item = json!({"name":name,"path":path});
-            if let Some(video) = &media_action.video {
-                item["loop"] = json!(video.playback == 1);
-            }
-            media.insert(media_id.clone(), item);
-            node["background"] = json!(media_id);
+            node["background"] = json!(insert_media(media, media_action, path));
         }
         None => {}
     }
@@ -426,12 +419,26 @@ fn layout_timeline(
             continue;
         }
         let (kind, data) = if let Some(action) = &cue.action {
-            let kind = match clear_target(action) {
-                Some(wire::ClearTarget::Audio) => "clear_audio",
-                Some(wire::ClearTarget::Background) => "clear_background",
-                _ => continue,
-            };
-            (kind, json!({}))
+            if let Some(target) = clear_target(action) {
+                let kind = match target {
+                    wire::ClearTarget::Audio => "clear_audio",
+                    wire::ClearTarget::Background => "clear_background",
+                    _ => continue,
+                };
+                (kind, json!({}))
+            } else if action.enabled
+                && action.delay == 0.0
+                && action.kind() != wire::ActionType::ForegroundMedia
+                && let Some((background, path)) = background_media(action)
+            {
+                let id = insert_media(media, background, path);
+                if background.always_retrigger {
+                    media[&id]["retrigger"] = json!(true);
+                }
+                ("background", json!({"id": id}))
+            } else {
+                continue;
+            }
         } else {
             let Some(occurrences) = id(&cue.cue_id)
                 .and_then(|cue_id| cue_slides.get(cue_id))
@@ -458,10 +465,7 @@ fn layout_timeline(
             return None;
         }
         let path = media_source(audio)?;
-        let key = format!("m{}", media.len() + 1);
-        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-        media.insert(key.clone(), json!({"name": name, "path": path}));
-        Some(key)
+        Some(insert_media(media, audio, path))
     });
     if actions.is_empty() && soundtrack.is_none() {
         return None;
@@ -503,13 +507,29 @@ fn background(cue: &wire::Cue) -> Option<CueBackground<'_>> {
         if clear_target(action) == Some(wire::ClearTarget::Background) {
             return Some(CueBackground::Clear);
         }
-        action_carries_media(action)?;
-        let media = action
-            .media
-            .as_ref()
-            .filter(|media| media.layer == 0 && media.audio.is_none())?;
-        Some(CueBackground::Media(media, media_source(media)?))
+        let (media, path) = background_media(action)?;
+        Some(CueBackground::Media(media, path))
     })
+}
+
+fn background_media(action: &wire::Action) -> Option<(&wire::MediaAction, &str)> {
+    action_carries_media(action)?;
+    let media = action
+        .media
+        .as_ref()
+        .filter(|media| media.layer == 0 && media.audio.is_none())?;
+    Some((media, media_source(media)?))
+}
+
+fn insert_media(media: &mut Map<String, Value>, action: &wire::MediaAction, path: &str) -> String {
+    let id = format!("m{}", media.len() + 1);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let mut entry = json!({"name": name, "path": path});
+    if let Some(video) = &action.video {
+        entry["loop"] = json!(video.playback == 1);
+    }
+    media.insert(id.clone(), entry);
+    id
 }
 
 fn media_source(media: &wire::MediaAction) -> Option<&str> {
@@ -1335,6 +1355,27 @@ mod tests {
             }),
             ..Default::default()
         };
+        let timed_video = wire::TimelineCue {
+            trigger_time: 1.75,
+            name: "Motion".into(),
+            action: Some(wire::Action {
+                enabled: true,
+                kind: wire::ActionType::BackgroundMedia as i32,
+                media: Some(wire::MediaAction {
+                    element: Some(wire::Media {
+                        url: Some(wire::Url {
+                            relative: "Loop.mp4".into(),
+                            ..Default::default()
+                        }),
+                    }),
+                    video: Some(wire::Video { playback: 1 }),
+                    always_retrigger: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         presentation.timeline = Some(wire::Timeline {
             cues_v2: vec![
                 wire::TimelineCue {
@@ -1343,6 +1384,7 @@ mod tests {
                     name: "Verse".into(),
                     ..Default::default()
                 },
+                timed_video,
                 timed_clear(2.0, wire::ClearTarget::Background, 0),
                 timed_clear(2.5, wire::ClearTarget::Audio, 0),
                 timed_clear(2.75, wire::ClearTarget::Audio, 1),
@@ -1390,16 +1432,24 @@ mod tests {
         assert_eq!(timeline["actions"][0]["type"], "slide");
         assert_eq!(timeline["actions"][0]["data"]["id"], "s1");
         let cues = crate::timeline_cues_from_show(&show.show);
-        assert_eq!(cues.len(), 3);
+        assert_eq!(cues.len(), 4);
         assert_eq!(cues[0].time_ms, 1500);
         assert_eq!(cues[0].slide_index, Some(1));
-        assert_eq!(cues[1].time_ms, 2000);
-        assert_eq!(cues[1].kind, "clear_background");
-        assert_eq!(cues[2].time_ms, 2500);
-        assert_eq!(cues[2].kind, "clear_audio");
+        assert_eq!(cues[1].time_ms, 1750);
+        assert_eq!(cues[1].kind, "background");
+        let background = cues[1].data.as_deref().unwrap();
+        assert_eq!(show.show["media"][background]["path"], "Loop.mp4");
+        assert_eq!(show.show["media"][background]["loop"], true);
+        assert_eq!(show.show["media"][background]["retrigger"], true);
+        assert_eq!(cues[2].time_ms, 2000);
+        assert_eq!(cues[2].kind, "clear_background");
+        assert_eq!(cues[3].time_ms, 2500);
+        assert_eq!(cues[3].kind, "clear_audio");
         assert_eq!(
             crate::timeline_text_from(&cues),
-            "1.500 slide:s1\n2.000 clear_background\n2.500 clear_audio"
+            format!(
+                "1.500 slide:s1\n1.750 background:{background}\n2.000 clear_background\n2.500 clear_audio"
+            )
         );
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
         let text = warnings

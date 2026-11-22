@@ -453,6 +453,8 @@ pub(super) struct MediaAction {
     pub audio: Option<Audio>,
     #[prost(int32, tag = "10")]
     pub layer: i32,
+    #[prost(bool, tag = "11")]
+    pub always_retrigger: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
