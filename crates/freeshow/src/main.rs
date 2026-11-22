@@ -546,6 +546,8 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             timer: row.timer.into(),
             src: row.src.into(),
             fit: row.fit.into(),
+            tracker_type: row.tracker_type.into(),
+            tracker_accent: row.tracker_accent.into(),
         })
         .collect();
     ui.set_stage_rows(Rc::new(slint::VecModel::from(rows)).into());

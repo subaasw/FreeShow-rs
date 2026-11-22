@@ -192,6 +192,10 @@ pub struct StageRow {
     pub src: String,
     /// How a media item fills its box: contain, cover or fill.
     pub fit: String,
+    /// A slide tracker's look: `number` or `bar`.
+    pub tracker_type: String,
+    /// A slide tracker bar's colour; empty uses the theme accent.
+    pub tracker_accent: String,
 }
 
 /// Date formats a stage clock can show, as FreeShow stores them; `none` hides the date.
@@ -1044,6 +1048,8 @@ impl Session {
                     timer: item.timer_id.clone().unwrap_or_default(),
                     src: item.src.clone().unwrap_or_default(),
                     fit: item.fit.clone().unwrap_or_else(|| "contain".into()),
+                    tracker_type: item.tracker.kind.clone(),
+                    tracker_accent: item.tracker.accent.clone(),
                 }
             })
             .collect()
@@ -1062,6 +1068,8 @@ impl Session {
                 | "timer"
                 | "src"
                 | "fit"
+                | "tracker-type"
+                | "tracker-accent"
         ) {
             return self.stage_set_option(id, key, value);
         }
@@ -1151,6 +1159,19 @@ impl Session {
             "src" => {
                 let src = value.trim();
                 item.src = (!src.is_empty()).then(|| src.to_string());
+            }
+            "tracker-type" => {
+                if !matches!(value.trim(), "number" | "bar") {
+                    return Err(format!("unknown tracker look {value:?}"));
+                }
+                item.tracker.kind = value.trim().to_string();
+            }
+            "tracker-accent" => {
+                let accent = value.trim();
+                if !accent.is_empty() && !valid_css_color(accent) {
+                    return Err(format!("invalid color {accent:?}"));
+                }
+                item.tracker.accent = accent.to_string();
             }
             "fit" => {
                 if !matches!(value.trim(), "contain" | "cover" | "fill") {

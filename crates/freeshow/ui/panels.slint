@@ -88,6 +88,8 @@ export struct StageRowData {
     timer: string,
     src: string,
     fit: string,
+    tracker-type: string,
+    tracker-accent: string,
 }
 
 component FieldLabel inherits Text {
@@ -936,6 +938,20 @@ export component StageEditorPanel inherits Rectangle {
                             model: ["contain", "cover", "fill"];
                             value: root.current.fit;
                             selected(value) => { root.set(root.current.id, "fit", value); }
+                        }
+                    }
+                    if root.current.kind == "tracker": Row {
+                        FieldLabel { text: "Look"; text-color: root.text-color; }
+                        ValueCombo {
+                            model: ["Slide number", "Progress bar"];
+                            value: root.current.tracker-type == "bar" ? "Progress bar" : "Slide number";
+                            selected(value) => { root.set(root.current.id, "tracker-type", self.current-index == 1 ? "bar" : "number"); }
+                        }
+                        FieldLabel { text: "Bar color"; text-color: root.text-color; }
+                        LineEdit {
+                            placeholder-text: "Theme accent";
+                            text: root.current.tracker-accent;
+                            accepted(value) => { root.set(root.current.id, "tracker-accent", value); }
                         }
                     }
                     if root.current.kind == "text": Row {
