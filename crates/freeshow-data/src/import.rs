@@ -23,10 +23,20 @@ mod rtf;
 
 pub(super) const ITEM_STYLE: &str = "top:88px;left:50px;height:904px;width:1820px;";
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn import_sources(
     imports: &Path,
     shows: &Path,
     media: &Path,
+) -> Result<Vec<String>, DataError> {
+    import_sources_split(imports, shows, media, 0)
+}
+
+pub fn import_sources_split(
+    imports: &Path,
+    shows: &Path,
+    media: &Path,
+    split_lines: u32,
 ) -> Result<Vec<String>, DataError> {
     if !imports.exists() {
         return Ok(Vec::new());
@@ -121,6 +131,7 @@ pub fn import_sources(
                 &bytes,
                 Some(&path),
                 Some(media),
+                split_lines,
             )
         };
         match found {
@@ -157,7 +168,16 @@ pub fn import_show(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataError>
 }
 
 pub fn import_shows(file_name: &str, bytes: &[u8]) -> Result<Vec<ShowFile>, DataError> {
-    import_shows_from(file_name, bytes, None, None)
+    import_shows_from(file_name, bytes, None, None, 0)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn import_shows_split(
+    file_name: &str,
+    bytes: &[u8],
+    split_lines: u32,
+) -> Result<Vec<ShowFile>, DataError> {
+    import_shows_from(file_name, bytes, None, None, split_lines)
 }
 
 fn import_shows_from(
@@ -165,6 +185,7 @@ fn import_shows_from(
     bytes: &[u8],
     source: Option<&Path>,
     media: Option<&Path>,
+    split_lines: u32,
 ) -> Result<Vec<ShowFile>, DataError> {
     if propresenter::is_bundle(Path::new(file_name)) {
         return propresenter::bundle_shows(bytes)
@@ -181,7 +202,13 @@ fn import_shows_from(
     if let Some(shows) = community::import_shows(file_name, bytes, source, media)? {
         return Ok(shows);
     }
-    Ok(vec![import_one(file_name, bytes, source, media)?])
+    Ok(vec![import_one(
+        file_name,
+        bytes,
+        source,
+        media,
+        split_lines,
+    )?])
 }
 
 fn import_one(
@@ -189,6 +216,7 @@ fn import_one(
     bytes: &[u8],
     source: Option<&Path>,
     media: Option<&Path>,
+    split_lines: u32,
 ) -> Result<ShowFile, DataError> {
     let ext = Path::new(file_name)
         .extension()
@@ -229,6 +257,7 @@ fn import_one(
     } else {
         plain(&text)
     };
+    let sections = split_imported_sections(sections, split_lines);
     let name = if name.trim().is_empty() {
         file_stem_str(file_name)
     } else {
@@ -1201,6 +1230,35 @@ fn plain(text: &str) -> (String, Vec<Section>) {
     (name, sections)
 }
 
+fn split_imported_sections(sections: Vec<Section>, split_lines: u32) -> Vec<Section> {
+    if split_lines == 0 {
+        return sections;
+    }
+    let mut split = Vec::new();
+    for section in sections {
+        if section.lines.len() as u32 <= split_lines {
+            split.push(section);
+            continue;
+        }
+        let group = section.group;
+        let chords = section.chords;
+        for (index, lines) in section.lines.chunks(split_lines as usize).enumerate() {
+            let start = index * split_lines as usize;
+            let end = (start + lines.len()).min(chords.len());
+            split.push(Section {
+                group: group.clone(),
+                lines: lines.to_vec(),
+                chords: if start < chords.len() {
+                    chords[start..end].to_vec()
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+    }
+    split
+}
+
 fn decode_rtf(text: &str) -> String {
     rtf::decode(text).plain_text()
 }
@@ -1595,6 +1653,29 @@ how sweet</lines></verse></lyrics></song>"#;
             .unwrap();
         assert_eq!(marks[0]["key"], "G");
         assert_eq!(marks[0]["pos"], 0);
+    }
+
+    #[test]
+    fn plain_text_import_honors_split_lines() {
+        let text = "Title: Split\n\n[Verse]\nOne\nTwo\nThree\nFour\nFive";
+        let show = import_show("song.txt", text.as_bytes()).unwrap();
+        assert_eq!(show.ordered_slides().len(), 1);
+        let show = import_shows_split("song.txt", text.as_bytes(), 2).unwrap();
+        let show = show.into_iter().next().unwrap();
+        assert_eq!(show.name(), "Split");
+        let slides = show.ordered_slides();
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[0].lines, vec!["One".to_string(), "Two".to_string()]);
+        assert_eq!(
+            slides[1].lines,
+            vec!["Three".to_string(), "Four".to_string()]
+        );
+        assert_eq!(slides[2].lines, vec!["Five".to_string()]);
+        assert!(
+            slides
+                .iter()
+                .all(|slide| slide.group.as_deref() == Some("Verse"))
+        );
     }
 
     #[test]

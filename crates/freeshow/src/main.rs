@@ -244,7 +244,11 @@ slint::slint! {
         callback open-stage();
         callback choose-screen();
         in-out property <string> screen-label: "Screen";
+        in-out property <string> search-query: "";
+        in-out property <int> drawer-width: 240;
+        in-out property <int> project-width: 260;
         in property <bool> show-labels: true;
+        callback set-search(string);
         callback select-tab(string);
         callback choose-drawer(int);
         callback choose-slide(int);
@@ -303,6 +307,13 @@ slint::slint! {
                         font-weight: 700;
                         vertical-alignment: center;
                     }
+                    LineEdit {
+                        width: 220px;
+                        height: 28px;
+                        text <=> root.search-query;
+                        placeholder-text: "Search";
+                        edited(value) => { root.set-search(value); }
+                    }
                     Rectangle { horizontal-stretch: 1; background: root.primary-darker; }
                     HeaderButton {
                         label: root.screen-label;
@@ -351,7 +362,7 @@ slint::slint! {
                     }
                 }
                 Rectangle {
-                    width: 240px;
+                    width: root.drawer-width * 1px;
                     background: root.primary;
                     Flickable {
                         VerticalLayout {
@@ -521,7 +532,7 @@ slint::slint! {
                     }
                 }
                 Rectangle {
-                    width: 260px;
+                    width: root.project-width * 1px;
                     background: root.primary;
                     VerticalLayout {
                         padding: 12px;
@@ -774,10 +785,10 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_font_family(typography.family.into());
     ui.set_item_bold(typography.bold);
     ui.set_selected_drawer(match session.tab.as_str() {
-        "shows" => selected(session.show_index),
-        "scripture" => selected(session.bible_index),
-        "media" => selected(session.media_index),
-        "audio" => selected(session.audio_index),
+        "shows" => selected(session.visible_drawer_index(session.show_index)),
+        "scripture" => selected(session.visible_drawer_index(session.bible_index)),
+        "media" => selected(session.visible_drawer_index(session.media_index)),
+        "audio" => selected(session.visible_drawer_index(session.audio_index)),
         _ => -1,
     });
     ui.set_volume(session.volume * 100.0);
@@ -1449,6 +1460,8 @@ fn screen_label(index: Option<usize>, outputs: &[freeshow_data::OutputPreference
 fn apply_chrome(ui: &ControlWindow, session: &Session, output_screen: Option<usize>) {
     ui.set_show_labels(!session.preferences.labels_disabled());
     ui.set_screen_label(screen_label(output_screen, &session.preferences.outputs).into());
+    ui.set_drawer_width(session.preferences.left_panel_width() as i32);
+    ui.set_project_width(session.preferences.right_panel_width() as i32);
     let tabs: Vec<DrawerTab> = lang::drawer_tabs(session.preferences.language.as_deref())
         .into_iter()
         .map(|(id, label, short)| DrawerTab {
@@ -1836,6 +1849,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        control.on_set_search(move |query| {
+            session.borrow_mut().set_search(query.to_string());
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
         let output_slot = Rc::clone(&output_slot);
         let stage_slot = Rc::clone(&stage_slot);
         let preview_slot = Rc::clone(&preview_slot);
@@ -1854,7 +1878,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 video: Rc::clone(&video_player),
                 timer: Rc::clone(&video_timer),
             };
-            let index = index.max(0) as usize;
+            let index = session.borrow().drawer_real_index(index.max(0) as usize);
             if session.borrow().tab == "functions" {
                 let mut current = session.borrow_mut();
                 match index {

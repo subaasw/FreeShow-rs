@@ -4,7 +4,7 @@
 
 //! Proportional text for slide items.
 //!
-//! Face lookup, in order: the hardcoded Arial paths when the family is Arial;
+//! Face lookup, in order: library `customFonts` files; the hardcoded Arial paths when the family is Arial;
 //! fontconfig (`fc-match`) on Unix, rejecting a fallback family that does not
 //! match; a scan of the font folders DirectWrite and Core Text use
 //! (`%WINDIR%\\Fonts`, macOS Library and System fonts, Linux
@@ -196,8 +196,8 @@ fn resolve_family(family: &str, bold: bool) -> Option<PathBuf> {
     if let Some(path) = cache.get(&key) {
         return path.clone();
     }
-    let path = family_file(family, bold)
-        .map(PathBuf::from)
+    let path = custom_font_file(family)
+        .or_else(|| family_file(family, bold).map(PathBuf::from))
         .or_else(|| fontconfig_match(family, bold))
         .or_else(|| scan_system_fonts(family, bold));
     cache.insert(key, path.clone());
@@ -207,6 +207,43 @@ fn resolve_family(family: &str, bold: bool) -> Option<PathBuf> {
 fn resolved_paths() -> &'static Mutex<HashMap<String, Option<PathBuf>>> {
     static PATHS: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
     PATHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn custom_font_paths() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static FONTS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    FONTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Install library `customFonts` files so item `font-family` can use them.
+pub fn register_custom_fonts(fonts: &[(String, PathBuf)]) {
+    {
+        let mut map = custom_font_paths()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        map.clear();
+        for (name, path) in fonts {
+            if path.is_file() {
+                map.insert(normalize_family(name), path.clone());
+            }
+        }
+    }
+    resolved_paths()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clear();
+    named_faces()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clear();
+}
+
+fn custom_font_file(family: &str) -> Option<PathBuf> {
+    let map = custom_font_paths()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    map.get(&normalize_family(family))
+        .cloned()
+        .filter(|path| path.is_file())
 }
 
 fn family_file(family: &str, bold: bool) -> Option<&'static str> {
@@ -496,5 +533,22 @@ mod tests {
         assert!(family_matches("DejaVu Sans", "dejavu sans"));
         assert!(family_matches("Liberation Sans", "LiberationSans"));
         assert!(!family_matches("Noto Sans", "Noto"));
+    }
+
+    #[test]
+    fn custom_font_files_override_system_lookup() {
+        let dir = std::env::temp_dir().join(format!("freeshow-custom-font-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Display.ttf");
+        std::fs::write(&path, FACE).unwrap();
+        register_custom_fonts(&[("Sunday Display".into(), path.clone())]);
+        assert_eq!(
+            resolve_family("Sunday Display", false).as_deref(),
+            Some(path.as_path())
+        );
+        register_custom_fonts(&[]);
+        assert!(resolve_family("Sunday Display", false).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
