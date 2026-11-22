@@ -60,6 +60,11 @@ fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     ui.set_text_color(color(palette.text));
     ui.set_accent(color(palette.secondary));
     ui.set_accent_text(color(palette.secondary_text));
+    let primary = palette.primary;
+    let luma = 0.2126 * f32::from(primary.r)
+        + 0.7152 * f32::from(primary.g)
+        + 0.0722 * f32::from(primary.b);
+    ui.set_dark_chrome(luma < 128.0);
     let style = ui.global::<OperatorStyle>();
     style.set_hover(color_rgba(palette.hover));
     style.set_focus_fill(color_rgba(palette.focus));
@@ -256,9 +261,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_lyrics(session.lyrics().into());
     ui.set_group(session.group().into());
     ui.set_item_label(session.item_label().into());
-    let typography = session.item_typography();
-    ui.set_font_family(typography.family.into());
-    ui.set_item_bold(typography.bold);
+    refresh_panels(ui, session);
     ui.set_selected_drawer(match session.tab.as_str() {
         "shows" => selected(session.visible_drawer_index(session.show_index)),
         "scripture" => selected(session.visible_drawer_index(session.bible_index)),
@@ -278,6 +281,63 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         selected(session.slide_index)
     });
     ui.set_selected_project(session.project_item as i32);
+}
+
+/// Settings, Inspector and Stage editor data.
+fn refresh_panels(ui: &ControlWindow, session: &Session) {
+    let settings = session.settings_form();
+    ui.set_settings_data(SettingsData {
+        language: settings.language.into(),
+        time_format: settings.time_format.into(),
+        autosave: settings.autosave.into(),
+        alert_updates: settings.alert_updates,
+        auto_output: settings.auto_output,
+        out_locked: settings.out_locked,
+        full_colors: settings.full_colors,
+        labels_disabled: settings.labels_disabled,
+        group_numbers: settings.group_numbers,
+        split_lines: settings.split_lines,
+        remote_port: settings.remote_port,
+        stage_port: settings.stage_port,
+        max_connections: settings.max_connections,
+        theme: settings.theme.into(),
+        profiles: settings.profiles.into(),
+    });
+    ui.set_theme_names(strings(&settings.themes));
+    ui.set_autosave_choices(strings(&session::AUTOSAVE_CHOICES.map(str::to_string)));
+    let inspector = session.inspector_form();
+    ui.set_inspector_data(InspectorData {
+        has_item: inspector.has_item,
+        family: inspector.typography.family.into(),
+        font_px: inspector.typography.font_px,
+        bold: inspector.typography.bold,
+        italic: inspector.typography.italic,
+        color: inspector.typography.color.into(),
+        align: inspector.typography.align.into(),
+        x: inspector.item_box.left,
+        y: inspector.item_box.top,
+        w: inspector.item_box.width,
+        h: inspector.item_box.height,
+        background: inspector.item_box.background.into(),
+        radius: inspector.item_box.radius,
+    });
+    ui.set_stage_layout_name(session.stage.name.clone().into());
+    let rows: Vec<StageRowData> = session
+        .stage_rows()
+        .into_iter()
+        .map(|row| StageRowData {
+            id: row.id.into(),
+            kind: row.kind.into(),
+            x: row.left,
+            y: row.top,
+            w: row.width,
+            h: row.height,
+            font_px: row.font_px,
+            color: row.color.into(),
+        })
+        .collect();
+    ui.set_stage_rows(Rc::new(slint::VecModel::from(rows)).into());
+    ui.set_stage_add_kinds(strings(&session::STAGE_ADD_KINDS.map(str::to_string)));
 }
 
 fn publish(slot: &FrameSlot, frame: Frame) {
@@ -1588,6 +1648,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        let settings = Rc::clone(&settings);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_apply_setting(move |key, value| {
+            let result = session.borrow_mut().apply_setting(&key, &value);
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(()) => {
+                    ui.set_settings_status(format!("Saved {key}").into());
+                    let current = session.borrow();
+                    if key == "theme" {
+                        let theme = theme::operator_theme(
+                            settings.borrow().theme.as_deref(),
+                            &current.preferences,
+                        );
+                        apply_theme(&ui, &theme);
+                    }
+                    refresh(&ui, &current);
+                    publish(&preview_slot, audience_frame(&current));
+                }
+                Err(err) => {
+                    tracing::warn!("setting {key} not saved: {err}");
+                    ui.set_settings_status(err.into());
+                    refresh_panels(&ui, &session.borrow());
+                }
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let preview_slot = Rc::clone(&preview_slot);
+        control.on_inspector_set(move |key, value| {
+            let result = session.borrow_mut().inspector_set(&key, &value);
+            if let Err(err) = &result {
+                tracing::warn!("inspector {key} not applied: {err}");
+            }
+            if let Some(ui) = ui.upgrade() {
+                let current = session.borrow();
+                refresh(&ui, &current);
+                if result.is_ok() {
+                    publish(&preview_slot, audience_frame(&current));
+                }
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let stage_session = Rc::clone(&session);
+        let stage_slot = Rc::clone(&stage_slot);
+        let after_stage_edit = move |result: Result<String, String>| {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            let current = stage_session.borrow();
+            match result {
+                Ok(message) => {
+                    ui.set_stage_status(message.into());
+                    publish_stage(&stage_slot, stage_frame(&current));
+                }
+                Err(err) => {
+                    tracing::warn!("stage editor: {err}");
+                    ui.set_stage_status(err.into());
+                }
+            }
+            refresh_panels(&ui, &current);
+        };
+        let after_stage_edit = Rc::new(after_stage_edit);
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
+            control.on_stage_set(move |id, key, value| {
+                let result = session.borrow_mut().stage_set(&id, &key, &value);
+                done(result.map(|()| format!("Saved {id} {key}")));
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
+            let ui = control.as_weak();
+            control.on_stage_add(move |kind| {
+                let style = "left:60px;top:60px;width:600px;height:200px;font-size:80px;";
+                let added = session.borrow_mut().add_stage_item(&kind, style);
+                if let (Some(ui), Some(_)) = (ui.upgrade(), added.as_ref()) {
+                    ui.set_stage_selected(session.borrow().stage.items.len() as i32 - 1);
+                }
+                done(
+                    added
+                        .map(|id| format!("Added {id}"))
+                        .ok_or_else(|| "could not save stage.json".to_string()),
+                );
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
+            control.on_stage_remove(move |id| {
+                let removed = session.borrow_mut().remove_stage_item(&id);
+                done(if removed {
+                    Ok(format!("Removed {id}"))
+                } else {
+                    Err(format!("could not remove {id}"))
+                });
+            });
+        }
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
         control.on_save_shortcuts(move |text| {
             session.borrow_mut().save_shortcuts(&text);
             if let Some(ui) = ui.upgrade() {
@@ -2355,63 +2526,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 refresh(&ui, &session.borrow());
                 publish(&preview_slot, audience_frame(&session.borrow()));
             }
-        });
-    }
-    {
-        let ui = control.as_weak();
-        let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
-        control.on_adjust_font(move |delta| {
-            if !session.borrow_mut().adjust_font(delta) {
-                tracing::error!("could not change the font size");
-            }
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
-            }
-        });
-    }
-    {
-        let ui = control.as_weak();
-        let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
-        control.on_toggle_bold(move || {
-            if !session.borrow_mut().toggle_bold() {
-                tracing::error!("could not change bold");
-            }
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
-            }
-        });
-    }
-    {
-        let ui = control.as_weak();
-        let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
-        control.on_set_font_family(move |family| {
-            if session.borrow().item_typography().family == family.as_str() {
-                return;
-            }
-            if !session.borrow_mut().set_font_family(family.as_str()) {
-                tracing::error!("could not change the font family");
-            }
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
-            }
-        });
-    }
-
-    {
-        let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
-        control.on_nudge_box(move |dx, dy, dw, dh| {
-            if !session.borrow_mut().nudge_box(dx, dy, dw, dh) {
-                tracing::error!("could not move the text box");
-                return;
-            }
-            publish(&preview_slot, audience_frame(&session.borrow()));
         });
     }
 

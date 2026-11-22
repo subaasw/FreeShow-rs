@@ -16,7 +16,7 @@ mod media_library;
 mod scripture;
 mod stage_layout;
 
-pub use item_edit::ItemTypography;
+pub use item_edit::{ItemBox, ItemTypography, css_px, css_set, css_value};
 pub use media_library::{
     MediaEntry, MediaEntryKind, image_dimensions, media_duration, media_entry_kind,
 };

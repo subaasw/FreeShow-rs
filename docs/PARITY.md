@@ -53,7 +53,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Drawer height, always-on-top, kiosk | done | 0.6 | Bottom drawer height and window flags |
 | Named window-layout profiles | done | 0.7 | Stored placements for operator/output/stage |
 | Header Search and panel widths | done | 0.5 | `resized` left/right widths |
-| Full Electron settings/editor suite | partial | 1.5 | Text settings/inspector/stage-editor panes and `alertUpdates` chrome are in; not every 1.6.8 GUI control is cloned |
+| Full Electron settings/editor suite | partial | 1.5 | Settings page with General/Display/Connection/Profiles tabs (switches, combo boxes, spin boxes) writes validated keys to `settings.json`; Styles, Outputs and the theme editor are not cloned yet |
 
 ### Output and stage windows
 
@@ -114,7 +114,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space |
 | Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
 | Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
-| Every Electron inspector control | partial | 1 | Typography now includes color and align plus an inspector text pane; not every 1.6.8 field |
+| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, color, align, X/Y/W/H, background and radius; shadows, line height, letter spacing, filters and transitions still use stored CSS |
 
 ### Audience compositor
 
@@ -159,7 +159,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Load and paint stage layouts | done | 2 | Includes next-slide, notes, clock, timer |
 | Stage cameras, web, and chart boxes | done | 1.5 |  |
 | Stage as a second NDI/WebRTC picture | done | 1 |  |
-| Every Electron stage-item editor pane | partial | 0.5 | Text stage editor can add items, edit styles, and save `Config/stage.json`; not every field is cloned |
+| Every Electron stage-item editor pane | partial | 0.5 | Stage editor page lists items, edits position, size, font size and color, adds/removes items, and saves `Config/stage.json` without dropping other layouts or unknown fields; per-type options (timer, clock, media) are not cloned |
 
 ### Show importers
 

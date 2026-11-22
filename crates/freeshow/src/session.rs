@@ -13,9 +13,12 @@ use freeshow_data::{
     new_id, parse_timeline_text, timeline_cues_from_show, timeline_text_from,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
+
+mod panels;
 use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
 };
+pub use panels::{AUTOSAVE_CHOICES, STAGE_ADD_KINDS};
 
 /// Linear gain from a volume action. A value above 5 is a percent. Decibels convert to gain.
 #[derive(Clone)]
@@ -3458,38 +3461,6 @@ impl Session {
         ok
     }
 
-    pub fn nudge_box(&mut self, dx: i32, dy: i32, dw: i32, dh: i32) -> bool {
-        if self.tab != "shows" {
-            return false;
-        }
-        let Some(slide_index) = self.slide_index else {
-            return false;
-        };
-        let Some(show_index) = self.show_index else {
-            return false;
-        };
-        let Some(show) = self.shows.get_mut(show_index) else {
-            return false;
-        };
-        let Some(slide_id) = show
-            .ordered_slides()
-            .get(slide_index)
-            .map(|slide| slide.id.clone())
-        else {
-            return false;
-        };
-        let item = self
-            .item_index
-            .min(show.item_count(&slide_id).saturating_sub(1));
-        if !show.nudge_item_at(&slide_id, item, dx, dy, dw, dh) {
-            return false;
-        }
-        let Some(path) = show.path.clone() else {
-            return true;
-        };
-        show.save(&path).is_ok()
-    }
-
     fn current_item(&self, show: &freeshow_data::ShowFile) -> usize {
         let Some(slide_index) = self.slide_index else {
             return 0;
@@ -3529,6 +3500,7 @@ impl Session {
                 font_px: 100,
                 family: String::new(),
                 bold: false,
+                italic: false,
                 color: String::new(),
                 align: String::new(),
             };
@@ -3636,16 +3608,6 @@ impl Session {
             self.item_index = index.saturating_sub(1);
         }
         removed
-    }
-
-    pub fn adjust_font(&mut self, delta: i32) -> bool {
-        self.edit_current_item(|show, slide_id, item| {
-            show.adjust_item_font_size(slide_id, item, delta)
-        })
-    }
-
-    pub fn toggle_bold(&mut self) -> bool {
-        self.edit_current_item(|show, slide_id, item| show.toggle_item_bold(slide_id, item))
     }
 
     pub fn set_font_family(&mut self, family: &str) -> bool {
@@ -5209,7 +5171,7 @@ impl Session {
 
     pub fn guide_text(&self) -> String {
         let mut text = String::from(
-            "Welcome to FreeShow\n\n1. Pick a show from the drawer.\n2. Choose a slide and press Go.\n3. Open Output for the audience and Stage for the foldback.\n\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
+            "Welcome to FreeShow\n1. Pick a show from the drawer.\n2. Choose a slide and press Go.\n3. Open Output for the audience and Stage for the foldback.\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
         );
         if let Some(alert) = self.alert_banner() {
             text = format!("{alert}\n\n{text}");
@@ -5217,12 +5179,9 @@ impl Session {
         if self.chrome.profile_locked {
             text.push_str("\n\nProfile login required.");
         }
-        text.push_str("\n\nSettings\n");
-        text.push_str(&self.settings_text());
-        text.push_str("\n\nInspector\n");
-        text.push_str(&self.inspector_text());
-        text.push_str("\n\nStage editor\n");
-        text.push_str(&self.stage_editor_text());
+        text.push_str(
+            "\n\nSettings and Stage edit are in the header; the Inspector sits beside the preview.",
+        );
         text
     }
 
@@ -5328,31 +5287,43 @@ impl Session {
         })
     }
 
+    /// Edits the library `settings.json` in place, keeping every key this app does not know.
+    ///
+    /// A file that exists but does not parse is left untouched (returns false) so a
+    /// hand-edited or newer-format file is never replaced by a near-empty one. The
+    /// write goes through a temp file and rename so a crash cannot truncate it.
     fn patch_settings(&mut self, edit: impl FnOnce(&mut serde_json::Value)) -> bool {
         let Some(root) = self.root.clone() else {
             return false;
         };
         let path = root.join("settings.json");
-        let mut settings = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        if !settings.is_object() {
-            settings = serde_json::json!({});
-        }
+        let mut settings = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(value) if value.is_object() => value,
+                _ => {
+                    tracing::error!("{} is not a JSON object; not changing it", path.display());
+                    return false;
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(err) => {
+                tracing::error!("could not read {}: {err}", path.display());
+                return false;
+            }
+        };
         edit(&mut settings);
         let Ok(bytes) = serde_json::to_vec_pretty(&settings) else {
             return false;
         };
-        if std::fs::write(&path, bytes).is_err() {
+        let staging = path.with_extension("json.tmp");
+        if std::fs::write(&staging, bytes).is_err() || std::fs::rename(&staging, &path).is_err() {
+            let _ = std::fs::remove_file(&staging);
             return false;
         }
         if let Some(preferences) = self.reload_preferences() {
             self.preferences = preferences;
-            true
-        } else {
-            true
         }
+        true
     }
 
     fn reload_preferences(&self) -> Option<FreeShowPreferences> {
@@ -5531,22 +5502,6 @@ impl Session {
         )
     }
 
-    pub fn stage_editor_text(&self) -> String {
-        let mut lines = vec![format!("layout={}", self.stage.name)];
-        for item in &self.stage.items {
-            lines.push(format!(
-                "{id}: {kind:?} {style}",
-                id = item.id,
-                kind = item.kind,
-                style = item.style
-            ));
-        }
-        lines.join(
-            "
-",
-        )
-    }
-
     pub fn set_stage_item_style(&mut self, id: &str, style: &str) -> bool {
         let Some(item) = self.stage.items.iter_mut().find(|item| item.id == id) else {
             return false;
@@ -5556,23 +5511,27 @@ impl Session {
     }
 
     pub fn add_stage_item(&mut self, kind: &str, style: &str) -> Option<String> {
-        let id = format!("{kind}{}", self.stage.items.len() + 1);
-        let kind = match kind {
+        let (kind_name, offset) = match kind {
+            "next" => ("slide", 1),
+            other => (other, 0),
+        };
+        let id = (1..)
+            .map(|n| format!("{kind}{n}"))
+            .find(|id| self.stage.items.iter().all(|item| &item.id != id))?;
+        let kind = match kind_name {
             "notes" => freeshow_data::StageItemKind::Notes,
             "clock" => freeshow_data::StageItemKind::Clock,
             "timer" => freeshow_data::StageItemKind::Timer,
-            "slide" => freeshow_data::StageItemKind::Slide,
-            other => {
-                let _ = other;
-                freeshow_data::StageItemKind::Slide
-            }
+            "text" => freeshow_data::StageItemKind::Text,
+            "tracker" => freeshow_data::StageItemKind::SlideTracker,
+            _ => freeshow_data::StageItemKind::Slide,
         };
         self.stage.items.push(freeshow_data::StageItemSpec {
             kind,
             id: id.clone(),
             style: style.to_string(),
             align: String::new(),
-            offset: 0,
+            offset,
             line_count: None,
             text_box: None,
             invert_items: false,
@@ -6759,13 +6718,28 @@ Second line"
         assert!(session.add_item_box());
         assert_eq!(session.item_label(), "Box 2 of 2");
         assert!(session.save_lyrics("Caption"));
-        assert!(session.adjust_font(20));
-        assert!(session.toggle_bold());
-        assert!(session.set_font_family("Georgia"));
-        let typography = session.item_typography();
-        assert_eq!(typography.font_px, 120);
-        assert!(typography.bold);
-        assert_eq!(typography.family, "Georgia");
+        session.inspector_set("font-size", "120").unwrap();
+        session.inspector_set("bold", "true").unwrap();
+        session.inspector_set("italic", "true").unwrap();
+        session.inspector_set("font-family", "Georgia").unwrap();
+        session.inspector_set("color", "#ff0000").unwrap();
+        session.inspector_set("left", "300").unwrap();
+        session.inspector_set("width", "900").unwrap();
+        session.inspector_set("border-radius", "24").unwrap();
+        session
+            .inspector_set("background-color", "#00000080")
+            .unwrap();
+        assert!(session.inspector_set("color", "red;top:0").is_err());
+        assert!(session.inspector_set("width", "0").is_err());
+        let form = session.inspector_form();
+        assert!(form.has_item);
+        assert_eq!(form.typography.font_px, 120);
+        assert!(form.typography.bold && form.typography.italic);
+        assert_eq!(form.typography.family, "Georgia");
+        assert_eq!(form.typography.color, "#ff0000");
+        assert_eq!((form.item_box.left, form.item_box.width), (300, 900));
+        assert_eq!(form.item_box.radius, 24);
+        assert_eq!(form.item_box.background, "#00000080");
         assert!(session.select_item(0));
         assert_eq!(session.lyrics(), "Hello");
         assert!(session.select_item(1));

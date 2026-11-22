@@ -7,11 +7,23 @@ use crate::ShowFile;
 const DEFAULT_BOX: &str = "top:88px;left:50px;height:904px;width:1820px;";
 const DEFAULT_FONT_PX: i32 = 100;
 
+/// Geometry and fill of one slide item box, in 1920×1080 slide pixels.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ItemBox {
+    pub left: i32,
+    pub top: i32,
+    pub width: i32,
+    pub height: i32,
+    pub background: String,
+    pub radius: i32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemTypography {
     pub font_px: i32,
     pub family: String,
     pub bold: bool,
+    pub italic: bool,
     pub color: String,
     pub align: String,
 }
@@ -136,9 +148,80 @@ impl ShowFile {
             family: css_value(&style, "font-family").unwrap_or_default(),
             bold: css_value(&style, "font-weight")
                 .is_some_and(|value| value.eq_ignore_ascii_case("bold") || value == "700"),
+            italic: css_value(&style, "font-style")
+                .is_some_and(|value| value.eq_ignore_ascii_case("italic")),
             color: css_value(&style, "color").unwrap_or_default(),
             align: css_value(&style, "text-align").unwrap_or_default(),
         }
+    }
+
+    /// Position, size and box fill of an item, from its `style` (FreeShow's default box when unset).
+    pub fn item_box(&self, slide_id: &str, index: usize) -> ItemBox {
+        let style = self
+            .item(slide_id, index)
+            .and_then(|item| item.get("style"))
+            .and_then(Value::as_str)
+            .filter(|style| !style.trim().is_empty())
+            .unwrap_or(DEFAULT_BOX);
+        let fallback = |key| css_px(DEFAULT_BOX, key).unwrap_or(0);
+        ItemBox {
+            left: css_px(style, "left").unwrap_or_else(|| fallback("left")),
+            top: css_px(style, "top").unwrap_or_else(|| fallback("top")),
+            width: css_px(style, "width").unwrap_or_else(|| fallback("width")),
+            height: css_px(style, "height").unwrap_or_else(|| fallback("height")),
+            background: css_value(style, "background-color")
+                .or_else(|| css_value(style, "background"))
+                .unwrap_or_default(),
+            radius: css_px(style, "border-radius").unwrap_or(0),
+        }
+    }
+
+    /// Sets one declaration on the item box `style` (not the text runs). An empty value removes it.
+    pub fn set_item_box_css(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        key: &str,
+        value: &str,
+    ) -> bool {
+        let style = self
+            .item(slide_id, index)
+            .and_then(|item| item.get("style"))
+            .and_then(Value::as_str)
+            .filter(|style| !style.trim().is_empty())
+            .unwrap_or(DEFAULT_BOX)
+            .to_string();
+        let Some(item) = self.item_mut(slide_id, index) else {
+            return false;
+        };
+        item.insert(
+            "style".to_string(),
+            Value::String(css_set(&style, key, value)),
+        );
+        true
+    }
+
+    pub fn set_item_font_size(&mut self, slide_id: &str, index: usize, px: i32) -> bool {
+        let size = px.clamp(12, 400);
+        self.set_item_css(slide_id, index, "font-size", &format!("{size}px"))
+    }
+
+    pub fn set_item_italic(&mut self, slide_id: &str, index: usize, italic: bool) -> bool {
+        self.set_item_css(
+            slide_id,
+            index,
+            "font-style",
+            if italic { "italic" } else { "" },
+        )
+    }
+
+    pub fn set_item_bold(&mut self, slide_id: &str, index: usize, bold: bool) -> bool {
+        self.set_item_css(
+            slide_id,
+            index,
+            "font-weight",
+            if bold { "bold" } else { "" },
+        )
     }
 
     pub fn set_item_color(&mut self, slide_id: &str, index: usize, color: &str) -> bool {
@@ -147,20 +230,6 @@ impl ShowFile {
 
     pub fn set_item_align(&mut self, slide_id: &str, index: usize, align: &str) -> bool {
         self.set_item_css(slide_id, index, "text-align", align)
-    }
-
-    pub fn adjust_item_font_size(&mut self, slide_id: &str, index: usize, delta: i32) -> bool {
-        let typography = self.item_typography(slide_id, index);
-        let size = (typography.font_px + delta).clamp(12, 400);
-        self.set_item_css(slide_id, index, "font-size", &format!("{size}px"))
-    }
-
-    pub fn toggle_item_bold(&mut self, slide_id: &str, index: usize) -> bool {
-        if self.item_typography(slide_id, index).bold {
-            self.set_item_css(slide_id, index, "font-weight", "")
-        } else {
-            self.set_item_css(slide_id, index, "font-weight", "bold")
-        }
     }
 
     pub fn set_item_font_family(&mut self, slide_id: &str, index: usize, family: &str) -> bool {
@@ -282,7 +351,8 @@ fn offset_box(style: &str, dx: i32, dy: i32) -> String {
     crate::adjust_box(style, dx, dy, 0, 0)
 }
 
-fn css_value(style: &str, key: &str) -> Option<String> {
+/// The value of `key` in an inline CSS declaration list.
+pub fn css_value(style: &str, key: &str) -> Option<String> {
     for decl in style.split(';') {
         let decl = decl.trim();
         let Some((name, value)) = decl.split_once(':') else {
@@ -302,7 +372,8 @@ fn css_value(style: &str, key: &str) -> Option<String> {
     None
 }
 
-fn css_px(style: &str, key: &str) -> Option<i32> {
+/// `key` as whole pixels (`px`/`pt` suffix optional).
+pub fn css_px(style: &str, key: &str) -> Option<i32> {
     let value = css_value(style, key)?;
     let number = value
         .trim()
@@ -312,7 +383,8 @@ fn css_px(style: &str, key: &str) -> Option<i32> {
     number.parse().ok()
 }
 
-fn css_set(style: &str, key: &str, value: &str) -> String {
+/// `style` with `key` replaced by `value`; an empty value removes the declaration.
+pub fn css_set(style: &str, key: &str, value: &str) -> String {
     let mut rest = Vec::new();
     for decl in style.split(';') {
         let decl = decl.trim();
@@ -351,8 +423,8 @@ mod tests {
         assert_eq!(show.item_count("s1"), 1);
         assert!(show.set_item_text("s1", 0, "Hello\nWorld"));
         assert_eq!(show.item_text("s1", 0).as_deref(), Some("Hello\nWorld"));
-        assert!(show.adjust_item_font_size("s1", 0, 20));
-        assert!(show.toggle_item_bold("s1", 0));
+        assert!(show.set_item_font_size("s1", 0, 120));
+        assert!(show.set_item_bold("s1", 0, true));
         assert!(show.set_item_font_family("s1", 0, "Georgia"));
         let typography = show.item_typography("s1", 0);
         assert_eq!(typography.font_px, 120);

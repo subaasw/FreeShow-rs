@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Shared operator chrome: style tokens and buttons.
+
+export global OperatorStyle {
+    in-out property <float> font-scale: 1;
+    in-out property <color> hover: rgba(255, 255, 255, 0.05);
+    in-out property <color> focus-fill: rgba(255, 255, 255, 0.1);
+    in-out property <length> chrome-radius: 4px;
+}
+
+export component RailButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <color> primary;
+    in property <color> accent;
+    in property <color> text-color;
+    in property <color> accent-text;
+    callback clicked();
+    height: 58px;
+    border-radius: OperatorStyle.chrome-radius;
+    background: root.active ? root.accent : root.primary;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: root.active ? transparent : pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
+    }
+    Text {
+        text: root.label;
+        color: root.active ? root.accent-text : root.text-color;
+        font-size: 12px * OperatorStyle.font-scale;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width - 8px;
+    }
+    key-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+    }
+    pointer := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            key-focus.focus();
+            root.clicked();
+        }
+    }
+}
+
+export component BoxButton inherits Rectangle {
+    in property <string> label;
+    in property <color> accent;
+    in property <color> text-color;
+    in property <color> accent-text;
+    callback clicked();
+    horizontal-stretch: 1;
+    height: 28px;
+    border-radius: OperatorStyle.chrome-radius;
+    background: root.accent;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
+    }
+    Text {
+        text: root.label;
+        color: root.accent-text;
+        font-size: 12px * OperatorStyle.font-scale;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    key-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+    }
+    pointer := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            key-focus.focus();
+            root.clicked();
+        }
+    }
+}
+
+export component HeaderButton inherits Rectangle {
+    in property <string> label;
+    in property <color> accent;
+    in property <color> text-color;
+    in property <color> accent-text;
+    callback clicked();
+    width: 88px;
+    height: 32px;
+    border-radius: OperatorStyle.chrome-radius;
+    background: root.accent;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
+    }
+    Text {
+        text: root.label;
+        color: root.accent-text;
+        font-size: 13px * OperatorStyle.font-scale;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    key-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+    }
+    pointer := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            key-focus.focus();
+            root.clicked();
+        }
+    }
+}
+
+export component ListRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <image> thumb;
+    in property <bool> show-thumb;
+    in property <color> accent;
+    in property <color> text-color;
+    in property <color> accent-text;
+    in property <bool> has-color: false;
+    in property <bool> full-color: false;
+    in property <color> group-color: #00000000;
+    in property <color> group-text: #f0f0ff;
+    callback clicked();
+    height: root.show-thumb ? 48px : 36px;
+    border-radius: OperatorStyle.chrome-radius;
+    background: root.active ? root.accent : (root.full-color && root.has-color ? root.group-color : (pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent)));
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        alignment: center;
+        if root.show-thumb: Image {
+            source: root.thumb;
+            width: 56px;
+            height: 40px;
+            image-fit: contain;
+        }
+        Text {
+            text: root.label;
+            color: root.active ? root.accent-text : (root.has-color ? root.group-text : root.text-color);
+            font-size: 13px * OperatorStyle.font-scale;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+    if root.has-color && !root.full-color && !root.active: Rectangle {
+        y: parent.height - 2px;
+        height: 2px;
+        width: 100%;
+        background: root.group-color;
+    }
+    key-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+    }
+    pointer := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            key-focus.focus();
+            root.clicked();
+        }
+    }
+}
