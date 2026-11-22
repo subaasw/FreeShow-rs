@@ -1921,11 +1921,21 @@ fn blend_rect(
                 painted[1] = green.round().clamp(0.0, 255.0) as u8;
                 painted[2] = blue.round().clamp(0.0, 255.0) as u8;
             }
-            for channel in 0..4 {
+            if opacity == 1.0 {
+                pixels[dst..dst + 4].copy_from_slice(&painted);
+                continue;
+            }
+            let old_weight = f32::from(before[src + 3]) * (1.0 - opacity);
+            let new_weight = f32::from(painted[3]) * opacity;
+            let alpha = old_weight + new_weight;
+            let scale = if alpha > 0.0 { alpha.recip() } else { 0.0 };
+            for channel in 0..3 {
                 let old = f32::from(before[src + channel]);
                 let new = f32::from(painted[channel]);
-                pixels[dst + channel] = (old * (1.0 - opacity) + new * opacity).round() as u8;
+                pixels[dst + channel] =
+                    ((old * old_weight + new * new_weight) * scale).round() as u8;
             }
+            pixels[dst + 3] = alpha.round() as u8;
         }
     }
 }
@@ -4138,6 +4148,21 @@ mod tests {
         assert!(brightest(&faded) < brightest(&full));
         assert!(brightest(&faded) > 20);
         assert!((filter_opacity("blur(2px) opacity(40%)") - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn item_opacity_fades_coverage_without_darkening_transparent_layers() {
+        let mut slide =
+            style_slide("left:0px;top:0px;width:1920px;height:1080px;background-color:#FF0000;");
+        slide.background = Rgba::TRANSPARENT;
+        slide.items[0].opacity = 0.5;
+        let overlay = render_styled(&slide);
+        assert_eq!(overlay.pixel(0, 0), parse_color("#FF000080").unwrap());
+
+        slide.items.clear();
+        slide.background = parse_color("#00FF00").unwrap();
+        let output = over(&render_styled(&slide), &overlay);
+        assert_eq!(output.pixel(0, 0), parse_color("#807F00").unwrap());
     }
 
     #[test]
