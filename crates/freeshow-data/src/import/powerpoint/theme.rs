@@ -15,6 +15,12 @@ pub(super) struct Color {
 
 type Rgb = [f64; 3];
 
+#[derive(Clone, Copy)]
+struct ResolvedColor {
+    rgb: Rgb,
+    alpha: f64,
+}
+
 #[derive(Clone)]
 enum ColorValue {
     Rgb(Rgb),
@@ -42,6 +48,12 @@ enum Transform {
         scale: f64,
         offset: f64,
     },
+    Alpha {
+        scale: f64,
+        offset: f64,
+    },
+    Gamma,
+    InverseGamma,
     Invert,
     Gray,
     Complement,
@@ -72,38 +84,42 @@ impl Color {
             color.attribute(key).map(str::to_owned)
         })?;
         for transform in color.children().filter(Node::is_element) {
-            if !parsed.add_transform(transform.tag_name().name(), transform.attribute("val")) {
-                return None;
-            }
+            parsed.add_transform(transform.tag_name().name(), transform.attribute("val"));
         }
         Some(parsed)
     }
 
-    pub(super) fn add_transform(&mut self, kind: &str, value: Option<&str>) -> bool {
-        let Some(transform) = parse_transform(kind, value) else {
-            return true;
-        };
-        self.transforms.push(transform);
-        true
+    pub(super) fn add_transform(&mut self, kind: &str, value: Option<&str>) {
+        if let Some(transform) = parse_transform(kind, value) {
+            self.transforms.push(transform);
+        }
     }
 
     pub(super) fn literal(&self) -> Option<String> {
         self.hex_in(|_| None)
     }
 
-    pub(super) fn hex_in(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<String> {
+    fn hex_in(&self, scheme: impl Fn(&str) -> Option<ResolvedColor>) -> Option<String> {
         self.resolve(scheme).map(hex)
     }
 
-    fn resolve(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<Rgb> {
-        let mut rgb = match &self.value {
-            ColorValue::Rgb(rgb) => *rgb,
+    fn resolve(&self, scheme: impl Fn(&str) -> Option<ResolvedColor>) -> Option<ResolvedColor> {
+        let mut color = match &self.value {
+            ColorValue::Rgb(rgb) => ResolvedColor {
+                rgb: *rgb,
+                alpha: 1.0,
+            },
             ColorValue::Scheme(slot) => scheme(slot)?,
         };
         for transform in &self.transforms {
-            rgb = transform.apply(rgb);
+            match *transform {
+                Transform::Alpha { scale, offset } => {
+                    color.alpha = (color.alpha * scale + offset).clamp(0.0, 1.0);
+                }
+                other => color.rgb = other.apply_rgb(color.rgb),
+            }
         }
-        Some(rgb)
+        Some(color)
     }
 }
 
@@ -111,7 +127,11 @@ impl Color {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ResolvedFill {
     Color(String),
-    Gradient { css: String, first: String },
+    Gradient {
+        css: String,
+        first: String,
+        transparent: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -157,7 +177,7 @@ impl GradientFill {
         })
     }
 
-    pub(super) fn resolve(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<ResolvedFill> {
+    fn resolve(&self, scheme: impl Fn(&str) -> Option<ResolvedColor>) -> Option<ResolvedFill> {
         let mut resolved = Vec::new();
         for (pos, color) in &self.stops {
             resolved.push((*pos, color.hex_in(&scheme)?));
@@ -174,6 +194,7 @@ impl GradientFill {
         Some(ResolvedFill::Gradient {
             css,
             first: resolved[0].1.clone(),
+            transparent: resolved.iter().any(|(_, color)| color.len() == 9),
         })
     }
 }
@@ -186,13 +207,18 @@ fn percentage(value: &str) -> Option<f64> {
     parsed.is_finite().then(|| parsed / divisor)
 }
 
-fn hex(rgb: Rgb) -> String {
+fn hex(ResolvedColor { rgb, alpha }: ResolvedColor) -> String {
     let [r, g, b] = rgb.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8);
-    format!("#{r:02X}{g:02X}{b:02X}")
+    let a = (alpha * 255.0).round() as u8;
+    if a == 255 {
+        format!("#{r:02X}{g:02X}{b:02X}")
+    } else {
+        format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
+    }
 }
 
 impl Transform {
-    fn apply(self, rgb: Rgb) -> Rgb {
+    fn apply_rgb(self, rgb: Rgb) -> Rgb {
         match self {
             // DrawingML tint and shade mix with white or black in linear RGB.
             Self::Tint(factor) => rgb.map(|c| to_srgb(1.0 - (1.0 - to_linear(c)) * factor)),
@@ -224,6 +250,9 @@ impl Transform {
                 let (hue, sat, light) = to_hsl(rgb);
                 from_hsl((hue + 180.0).rem_euclid(360.0), sat, light)
             }
+            Self::Alpha { .. } => rgb,
+            Self::Gamma => rgb.map(to_srgb),
+            Self::InverseGamma => rgb.map(to_linear),
         }
     }
 }
@@ -233,7 +262,20 @@ fn parse_transform(kind: &str, value: Option<&str>) -> Option<Transform> {
         "inv" | "invClr" => Some(Transform::Invert),
         "gray" | "grayClr" => Some(Transform::Gray),
         "comp" => Some(Transform::Complement),
-        "alpha" | "alphaMod" | "alphaOff" | "gamma" | "invGamma" => None,
+        "alpha" => percentage_opt(value).map(|percent| Transform::Alpha {
+            scale: 0.0,
+            offset: percent,
+        }),
+        "alphaMod" => percentage_opt(value).map(|percent| Transform::Alpha {
+            scale: percent,
+            offset: 0.0,
+        }),
+        "alphaOff" => percentage_opt(value).map(|percent| Transform::Alpha {
+            scale: 1.0,
+            offset: percent,
+        }),
+        "gamma" => Some(Transform::Gamma),
+        "invGamma" => Some(Transform::InverseGamma),
         "tint" => percentage_opt(value)
             .filter(|percent| (0.0..=1.0).contains(percent))
             .map(Transform::Tint),
@@ -387,7 +429,7 @@ type ColorMap = HashMap<String, String>;
 
 #[derive(Default)]
 struct Theme {
-    colors: HashMap<String, Rgb>,
+    colors: HashMap<String, ResolvedColor>,
     fills: Vec<Option<StyleFill>>,
     backgrounds: Vec<Option<StyleFill>>,
 }
@@ -629,7 +671,7 @@ mod tests {
     fn color(hex: &str, transforms: &[(&str, Option<&str>)]) -> String {
         let mut color = Color::parse("srgbClr", |_| Some(hex[1..].into())).unwrap();
         for (kind, value) in transforms {
-            assert!(color.add_transform(kind, *value));
+            color.add_transform(kind, *value);
         }
         color.literal().unwrap()
     }
@@ -646,6 +688,24 @@ mod tests {
             color("#FF0000", &[("unknown", Some("1")), ("inv", None)]),
             "#00FFFF"
         );
-        assert_eq!(color("#FF0000", &[("alpha", Some("50000"))]), "#FF0000");
+        assert_eq!(
+            color("#808080", &[("gamma", None), ("alpha", Some("50000"))]),
+            "#BCBCBC80"
+        );
+        assert_eq!(
+            color("#808080", &[("gamma", None), ("invGamma", None)]),
+            "#808080"
+        );
+        assert_eq!(
+            color(
+                "#FF0000",
+                &[
+                    ("alpha", Some("50%")),
+                    ("alphaMod", Some("50000")),
+                    ("alphaOff", Some("10000"))
+                ]
+            ),
+            "#FF000059"
+        );
     }
 }

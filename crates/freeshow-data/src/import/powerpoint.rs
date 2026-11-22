@@ -40,6 +40,7 @@ enum Background {
     CssGradient {
         css: String,
         first: String,
+        transparent: bool,
     },
     Unsupported,
 }
@@ -205,8 +206,15 @@ pub(super) fn import(
                     "cropping":{"type":"ppt","left":crop[0],"top":crop[1],"right":crop[2],"bottom":crop[3]}
                 }));
             }
-            Some(Background::CssGradient { css, first }) => {
+            Some(Background::CssGradient {
+                css,
+                first,
+                transparent,
+            }) => {
                 apply_solid_color(slide, &first)?;
+                if transparent {
+                    slide["settings"]["color"] = json!("#00000000");
+                }
                 slide["items"].as_array_mut().unwrap().insert(
                     0,
                     json!({
@@ -663,18 +671,13 @@ fn find_background(
                                     "solidFill" | "bgRef" | "gs"
                                 ) =>
                         {
-                            let value = attribute(&element, "val");
-                            let apply = |color: Option<Color>| {
-                                color.and_then(|mut color| {
-                                    color
-                                        .add_transform(&name, value.as_deref())
-                                        .then_some(color)
-                                })
-                            };
-                            if stack.iter().any(|name| name == "gs") {
-                                gs_color = apply(gs_color);
+                            let target = if stack[stack.len() - 2] == "gs" {
+                                &mut gs_color
                             } else {
-                                color = apply(color);
+                                &mut color
+                            };
+                            if let Some(color) = target {
+                                color.add_transform(&name, attribute(&element, "val").as_deref());
                             }
                         }
                         (Some("gsLst") | Some("gradFill"), "gs") => {
@@ -923,18 +926,30 @@ fn realize_background(
         Some(Background::Theme { style, color }) => {
             match themes.resolve(archive, part, xml, style, color.as_ref())? {
                 Some(ResolvedFill::Color(color)) => Some(Background::Color(color)),
-                Some(ResolvedFill::Gradient { css, first }) => {
-                    Some(Background::CssGradient { css, first })
-                }
+                Some(ResolvedFill::Gradient {
+                    css,
+                    first,
+                    transparent,
+                }) => Some(Background::CssGradient {
+                    css,
+                    first,
+                    transparent,
+                }),
                 None => None,
             }
         }
         Some(Background::Gradient(fill)) => {
             match themes.resolve_gradient(archive, part, xml, &fill)? {
                 Some(ResolvedFill::Color(color)) => Some(Background::Color(color)),
-                Some(ResolvedFill::Gradient { css, first }) => {
-                    Some(Background::CssGradient { css, first })
-                }
+                Some(ResolvedFill::Gradient {
+                    css,
+                    first,
+                    transparent,
+                }) => Some(Background::CssGradient {
+                    css,
+                    first,
+                    transparent,
+                }),
                 None => None,
             }
         }
@@ -943,11 +958,16 @@ fn realize_background(
 }
 
 fn apply_solid_color(slide: &mut serde_json::Value, color: &str) -> Result<(), DataError> {
-    let channels = u32::from_str_radix(&color[1..], 16).map_err(invalid)?;
+    let channels = u32::from_str_radix(&color[1..7], 16).map_err(invalid)?;
+    let alpha = if color.len() == 9 {
+        u32::from_str_radix(&color[7..], 16).map_err(invalid)?
+    } else {
+        255
+    };
     let luminance =
         299 * ((channels >> 16) & 255) + 587 * ((channels >> 8) & 255) + 114 * (channels & 255);
     slide["settings"]["color"] = json!(color);
-    if luminance >= 155_000 {
+    if luminance * alpha >= 155_000 * 255 {
         let items = slide["items"]
             .as_array_mut()
             .ok_or_else(|| invalid("slide items"))?;
@@ -1183,7 +1203,7 @@ mod tests {
                 br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill>
                     <a:gsLst>
                         <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
-                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"><a:alpha val="0"/></a:srgbClr></a:gs>
                     </a:gsLst>
                     <a:path path="circle"/>
                 </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Radial</a:t></a:r></a:p></p:cSld></p:sld>"#,
@@ -1247,8 +1267,9 @@ mod tests {
             show.show["slides"]["s3"]["items"][0]["style"]
                 .as_str()
                 .unwrap()
-                .contains("radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)")
+                .contains("radial-gradient(circle at center, #FF0000 0%, #0000FF00 100%)")
         );
+        assert_eq!(show.show["slides"]["s3"]["settings"]["color"], "#00000000");
     }
 
     #[test]

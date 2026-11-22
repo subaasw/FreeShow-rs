@@ -3260,16 +3260,22 @@ fn interpolate_stops(stops: &[(f32, Rgba)], t: f32) -> Rgba {
 }
 
 fn lerp_rgba(from: Rgba, to: Rgba, t: f32) -> Rgba {
-    let mix = |a: u8, b: u8| {
-        ((a as f32) * (1.0 - t) + (b as f32) * t)
-            .round()
-            .clamp(0.0, 255.0) as u8
+    let (t, alpha) = if from.a == to.a {
+        (t, from.a)
+    } else {
+        let to_alpha = f32::from(to.a) * t;
+        let alpha = f32::from(from.a) * (1.0 - t) + to_alpha;
+        if alpha == 0.0 {
+            return Rgba::TRANSPARENT;
+        }
+        (to_alpha / alpha, alpha.round() as u8)
     };
+    let mix = |a: u8, b: u8| (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8;
     Rgba {
         r: mix(from.r, to.r),
         g: mix(from.g, to.g),
         b: mix(from.b, to.b),
-        a: mix(from.a, to.a),
+        a: alpha,
     }
 }
 
@@ -3522,6 +3528,24 @@ mod tests {
         assert!(center.r > 245 && center.b < 10, "{center:?}");
         assert!(edge.r > 120 && edge.b > 120, "{edge:?}");
         assert!(corner.r < 10 && corner.b > 245, "{corner:?}");
+    }
+
+    #[test]
+    fn transparent_gradient_stops_blend_without_an_invisible_tint() {
+        let mut slide = style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:linear-gradient(90deg, #FF0000 0%, #0000FF00 100%);",
+        );
+        slide.background = Rgba::TRANSPARENT;
+        let mut base = render_styled(&StyledSlide {
+            background: parse_color("#00FF00").unwrap(),
+            items: Vec::new(),
+            ..slide.clone()
+        });
+        composite_styled(&mut base, &slide);
+        let pixel = base.pixel(479, 270);
+        assert!((125..=130).contains(&pixel.r), "{pixel:?}");
+        assert!((125..=130).contains(&pixel.g), "{pixel:?}");
+        assert_eq!(pixel.b, 0);
     }
 
     #[test]
