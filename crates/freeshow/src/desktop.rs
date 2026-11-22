@@ -36,7 +36,9 @@ fn executable(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
         quoted.push(ch);
     }
     // String-value unescaping happens before Exec argument unquoting.
-    Ok(format!("\"{}\"", value(Path::new(&quoted))?))
+    // GLib checks that argv[0] exists before expanding %% field codes.
+    // Use env so installation folders containing a literal percent still launch.
+    Ok(format!("/usr/bin/env \"{}\"", value(Path::new(&quoted))?))
 }
 
 pub fn install(uninstall: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -150,10 +152,10 @@ mod tests {
     fn desktop_exec_paths_escape_both_string_and_argument_levels() {
         assert_eq!(
             executable(Path::new("/tmp/My App/AppRun")).unwrap(),
-            "\"/tmp/My App/AppRun\""
+            "/usr/bin/env \"/tmp/My App/AppRun\""
         );
         let quoted = executable(Path::new("/tmp/a\\b\"$`%/AppRun")).unwrap();
-        assert_eq!(quoted, r#""/tmp/a\\\\b\\"\\$\\`%%/AppRun""#);
+        assert_eq!(quoted, r#"/usr/bin/env "/tmp/a\\\\b\\"\\$\\`%%/AppRun""#);
         assert!(executable(Path::new("/tmp/a=b/AppRun")).is_err());
         assert!(executable(Path::new("/tmp/a\nb/AppRun")).is_err());
     }
