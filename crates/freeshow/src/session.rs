@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeshow_data::{
-    AUDIO_DIR, BibleFile, Catalog, FreeShowPreferences, Library, MEDIA_DIR, MixStep, OutlinedBook,
-    ProjectsFile, ShowFile, SlideBackdrop, SlideJump, StageLayout, TimerStep, VerseHit,
-    default_stage, new_id,
+    AUDIO_DIR, BibleFile, Catalog, FreeShowPreferences, Library, MEDIA_DIR, MediaEntry, MixStep,
+    OutlinedBook, ProjectsFile, ShowFile, SlideBackdrop, SlideJump, StageLayout, TimerStep,
+    VerseHit, default_stage, new_id,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 use freeshow_output::{Fit, Raster, crop_raster, decode_image};
@@ -105,7 +105,7 @@ pub struct Session {
     pub active_overlays: Vec<String>,
     pub bibles: Vec<BibleFile>,
     pub scripture: Arc<Vec<freeshow_remote::RemoteBible>>,
-    pub media: Vec<String>,
+    pub media: Vec<MediaEntry>,
     pub audio: Vec<String>,
     pub events: Vec<String>,
     pub event_catalog: Catalog,
@@ -301,13 +301,9 @@ impl Session {
         let shows = take(library.list_shows(), &mut warnings).unwrap_or_default();
         let bibles = take(library.list_bibles(), &mut warnings).unwrap_or_default();
         let scripture = scripture_catalog(&bibles);
-        let mut media = take(
-            library.list_media_files(&library.media_dir()),
-            &mut warnings,
-        )
-        .unwrap_or_default();
+        let mut media = take(library.list_media_entries(), &mut warnings).unwrap_or_default();
         for camera in cameras() {
-            media.push(format!("Camera: {camera}"));
+            media.push(MediaEntry::camera(&camera));
         }
         let audio = take(
             library.list_media_files(&library.audio_dir()),
@@ -615,7 +611,7 @@ impl Session {
     pub fn drawer(&self) -> Vec<String> {
         match self.tab.as_str() {
             "shows" => self.shows.iter().map(ShowFile::name).collect(),
-            "media" => self.media.clone(),
+            "media" => self.media.iter().map(MediaEntry::label).collect(),
             "audio" => self.audio.clone(),
             "overlays" => self.overlays.clone(),
             "templates" => self.templates.clone(),
@@ -820,19 +816,20 @@ impl Session {
     }
 
     fn choose_media(&mut self, index: usize) -> DrawerAction {
-        let Some(name) = self.media.get(index).cloned() else {
+        let Some(entry) = self.media.get(index).cloned() else {
             return DrawerAction::None;
         };
         self.media_index = Some(index);
-        if let Some(camera) = name.strip_prefix("Camera: ") {
+        if let Some(camera) = entry.name.strip_prefix("Camera: ") {
             self.underlay = None;
             self.reset_background_look();
             self.background_transition = true;
             return DrawerAction::PlayCamera(camera.to_string());
         }
-        let Some(path) = self.file_in(MEDIA_DIR, &name) else {
+        if !entry.exists {
             return DrawerAction::None;
-        };
+        }
+        let path = entry.path;
         match media_kind(&path) {
             MediaKind::Image => {
                 self.remember_background(&path);
@@ -899,6 +896,15 @@ impl Session {
         if let Some(path) = self
             .file_in(MEDIA_DIR, name)
             .or_else(|| self.file_in(AUDIO_DIR, name))
+            .or_else(|| {
+                self.media.iter().find_map(|entry| {
+                    (entry.exists
+                        && (entry.name == name
+                            || entry.path.to_string_lossy() == name
+                            || entry.label() == name))
+                        .then(|| entry.path.clone())
+                })
+            })
         {
             return self.play_path(path);
         }
@@ -2429,7 +2435,11 @@ impl Session {
             },
             overlays: overlay_views(&self.overlay_catalog),
             active_overlays: self.active_overlays.clone(),
-            media: self.media.iter().map(|name| file_view(name)).collect(),
+            media: self
+                .media
+                .iter()
+                .map(|entry| file_view(&entry.name))
+                .collect(),
             audio: self.audio.iter().map(|name| file_view(name)).collect(),
             timers: self
                 .timers
@@ -6392,6 +6402,30 @@ mod tests {
         session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 250 });
         assert_eq!(session.volume, 0.25);
         assert_eq!(session.to_snapshot().media[0].kind, "video");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_media_drawer_labels_library_pictures() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-media-drawer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Media")).unwrap();
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&48u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+        std::fs::write(root.join("Media/bg.png"), png).unwrap();
+        std::fs::write(root.join("Media/clip.mp4"), b"not a real video").unwrap();
+        let mut session = Session::open(root.clone());
+        session.tab = "media".into();
+        assert_eq!(
+            session.drawer(),
+            vec!["bg.png  64x48".to_string(), "clip.mp4".to_string()]
+        );
+        assert_eq!(session.to_snapshot().media[0].kind, "image");
         let _ = std::fs::remove_dir_all(&root);
     }
 
