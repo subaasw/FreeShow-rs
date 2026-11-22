@@ -283,8 +283,10 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "text-align" => style.align = parse_align(value),
             "font-family" => style.font_family = font_family(value),
             "font-weight" => style.bold = value.trim() == "bold" || value.trim() == "700",
-            "font-style" => style.italic = value.trim().eq_ignore_ascii_case("italic")
-                || value.trim().eq_ignore_ascii_case("oblique"),
+            "font-style" => {
+                style.italic = value.trim().eq_ignore_ascii_case("italic")
+                    || value.trim().eq_ignore_ascii_case("oblique")
+            }
             "text-decoration" | "text-decoration-line" => {
                 style.underline = value.split_whitespace().any(|part| part == "underline");
                 style.strike = value.split_whitespace().any(|part| part == "line-through");
@@ -699,7 +701,14 @@ fn paint_blurred(dest: &mut [u8], source: &crate::Frame, blur_amount: f32, opaci
         let height = source.height as i32;
         let clamped = radius.clamp(1, 16);
         let mut horizontal = vec![0u8; source.pixels.len()];
-        box_blur_axis(&source.pixels, &mut horizontal, width, height, clamped, true);
+        box_blur_axis(
+            &source.pixels,
+            &mut horizontal,
+            width,
+            height,
+            clamped,
+            true,
+        );
         let mut vertical = vec![0u8; source.pixels.len()];
         box_blur_axis(&horizontal, &mut vertical, width, height, clamped, false);
         vertical
@@ -755,7 +764,18 @@ pub fn crossfade(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Frame
 }
 
 pub fn image_frame(image: &Raster, width: u32, height: u32) -> crate::Frame {
-    placed_image(image, width, height, Fit::Contain, false, false, "", "", 6.0, 0.3)
+    placed_image(
+        image,
+        width,
+        height,
+        Fit::Contain,
+        false,
+        false,
+        "",
+        "",
+        6.0,
+        0.3,
+    )
 }
 
 pub fn placed_image(
@@ -1045,8 +1065,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
                 run.style.clone(),
             )
         };
-        let font_px =
-            scale(height_px, slide.output_height, slide.source_height).max(1) as f32;
+        let font_px = scale(height_px, slide.output_height, slide.source_height).max(1) as f32;
         let line_face = text::Typeface {
             family: height_family.as_str(),
             bold: height_bold,
@@ -1135,7 +1154,11 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
         let font_line = text::line_height(font_px, line_face) as f32;
         let leading = (bar_h as f32 - font_line).max(0.0) / 2.0;
         let baseline = cursor_y as f32 + leading + text::ascent(font_px, line_face)
-            - scale(line.shift_y as f32, slide.output_height, slide.source_height) as f32;
+            - scale(
+                line.shift_y as f32,
+                slide.output_height,
+                slide.source_height,
+            ) as f32;
         for (run, run_style) in &runs {
             let size =
                 scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
@@ -1550,8 +1573,7 @@ fn blend_rect(
                     + 0.0722 * f32::from(painted[2]);
                 for channel in 0..3 {
                     let color = f32::from(painted[channel]);
-                    painted[channel] =
-                        (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
+                    painted[channel] = (color * (1.0 - grayscale) + luma * grayscale).round() as u8;
                 }
             }
             if invert > 0.0 {
@@ -1632,7 +1654,14 @@ fn blend_rect(
     }
 }
 
-fn clipped_rect(frame_w: u32, frame_h: u32, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+fn clipped_rect(
+    frame_w: u32,
+    frame_h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> (i32, i32, i32, i32) {
     let x0 = x.max(0);
     let y0 = y.max(0);
     let x1 = x.saturating_add(w).min(frame_w as i32).max(x0);
@@ -1737,7 +1766,10 @@ pub fn filter_blur(filter: &str) -> f32 {
         let Some(end) = rest.find(')') else {
             break;
         };
-        let token = rest[..end].trim().strip_suffix("px").unwrap_or(rest[..end].trim());
+        let token = rest[..end]
+            .trim()
+            .strip_suffix("px")
+            .unwrap_or(rest[..end].trim());
         radius = token.trim().parse().unwrap_or(0.0);
         rest = &rest[end + 1..];
     }
@@ -1796,7 +1828,14 @@ fn blur_item(
     }
 }
 
-fn box_blur_axis(src: &[u8], dst: &mut [u8], width: i32, height: i32, radius: i32, horizontal: bool) {
+fn box_blur_axis(
+    src: &[u8],
+    dst: &mut [u8],
+    width: i32,
+    height: i32,
+    radius: i32,
+    horizontal: bool,
+) {
     for y in 0..height {
         for x in 0..width {
             let mut red = 0u32;
@@ -1879,17 +1918,30 @@ fn css_value<'a>(css: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn wrap_lines(lines: &[StyledLine], item_style: &str, slide: &StyledSlide, max_width: i32) -> Vec<StyledLine> {
+fn wrap_lines(
+    lines: &[StyledLine],
+    item_style: &str,
+    slide: &StyledSlide,
+    max_width: i32,
+) -> Vec<StyledLine> {
     lines
         .iter()
         .flat_map(|line| split_line(line, item_style, slide, max_width))
         .collect()
 }
 
-fn split_line(line: &StyledLine, item_style: &str, slide: &StyledSlide, max_width: i32) -> Vec<StyledLine> {
+fn split_line(
+    line: &StyledLine,
+    item_style: &str,
+    slide: &StyledSlide,
+    max_width: i32,
+) -> Vec<StyledLine> {
     if max_width <= 8
         || item_style.contains("nowrap")
-        || line.runs.iter().any(|run| run.place_on.is_some() || !run.paint || run.style.contains("nowrap"))
+        || line
+            .runs
+            .iter()
+            .any(|run| run.place_on.is_some() || !run.paint || run.style.contains("nowrap"))
     {
         return vec![line.clone()];
     }
@@ -1988,7 +2040,11 @@ fn merge_words(words: Vec<(String, String)>) -> Vec<TextRun> {
     let mut runs = Vec::new();
     for (text, style) in words {
         if let Some(last) = runs.last_mut() {
-            let TextRun { style: last_style, text: last_text, .. } = last;
+            let TextRun {
+                style: last_style,
+                text: last_text,
+                ..
+            } = last;
             if last_style == &style {
                 last_text.push_str(&text);
                 continue;
@@ -2043,7 +2099,10 @@ fn vertical_offset(
         }
     }
     if counted > 0 {
-        let bars = lines.iter().filter(|line| line.line_bar && !line.runs.is_empty()).count();
+        let bars = lines
+            .iter()
+            .filter(|line| line.line_bar && !line.runs.is_empty())
+            .count();
         if bars > 0 {
             content -= gap;
         }
@@ -2090,7 +2149,8 @@ fn line_box(
     slide: &StyledSlide,
 ) -> i32 {
     let font_line = text::line_height(font_px, face);
-    let Some(value) = css_value(run_css, "line-height").or_else(|| css_value(item_css, "line-height"))
+    let Some(value) =
+        css_value(run_css, "line-height").or_else(|| css_value(item_css, "line-height"))
     else {
         return font_line;
     };
@@ -2246,8 +2306,7 @@ fn parse_shadow(value: &str) -> Option<TextShadow> {
 fn shadow_offsets(shadow: TextShadow, slide: &StyledSlide) -> Vec<(f32, f32)> {
     let ox = scale(shadow.x, slide.output_width, slide.source_width) as f32;
     let oy = scale(shadow.y, slide.output_height, slide.source_height) as f32;
-    let radius = scale(shadow.blur, slide.output_height, slide.source_height)
-        .clamp(0, 8) as i32;
+    let radius = scale(shadow.blur, slide.output_height, slide.source_height).clamp(0, 8) as i32;
     let mut offsets = Vec::new();
     for dy in -radius..=radius {
         for dx in -radius..=radius {
@@ -2549,9 +2608,9 @@ mod tests {
                 align: String::new(),
                 lines: vec![StyledLine {
                     align: "text-align: left;".into(),
-            line_bar: true,
-            wrapped: false,
-            shift_y: 0,
+                    line_bar: true,
+                    wrapped: false,
+                    shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
                         style: "font-size: 80px;color: #FFFFFF;".into(),
@@ -2564,19 +2623,19 @@ mod tests {
                 line_bg: None,
                 line_gap: 0.0,
                 line_radius: 0.0,
-            flip_x: false,
-            flip_y: false,
-            opacity: 1.0,
-            grayscale: 0.0,
-            invert: 0.0,
-            sepia: 0.0,
-            brightness: 1.0,
-            contrast: 1.0,
-            saturate: 1.0,
-            hue_rotate: 0.0,
-            blur: 0.0,
-            blend: Blend::Normal,
-            crop: Crop::default(),
+                flip_x: false,
+                flip_y: false,
+                opacity: 1.0,
+                grayscale: 0.0,
+                invert: 0.0,
+                sepia: 0.0,
+                brightness: 1.0,
+                contrast: 1.0,
+                saturate: 1.0,
+                hue_rotate: 0.0,
+                blur: 0.0,
+                blend: Blend::Normal,
+                crop: Crop::default(),
             }],
         }
     }
@@ -2599,13 +2658,16 @@ mod tests {
         let faded = parse_color("rgb(255 0 0 / 0.5)").unwrap();
         assert_eq!(faded.r, 255);
         assert_eq!(faded.a, 128);
-        let shadow = parse_style("text-shadow: 2px 2px 10px #000000;").shadow.unwrap();
+        let shadow = parse_style("text-shadow: 2px 2px 10px #000000;")
+            .shadow
+            .unwrap();
         assert_eq!(shadow.x, 2.0);
         assert_eq!(shadow.y, 2.0);
         assert_eq!(shadow.blur, 10.0);
         assert_eq!(shadow.color, Rgba::BLACK);
-        let faded_shadow =
-            parse_style("text-shadow: 2px 2px 4px rgb(0 0 0 / 80%);").shadow.unwrap();
+        let faded_shadow = parse_style("text-shadow: 2px 2px 4px rgb(0 0 0 / 80%);")
+            .shadow
+            .unwrap();
         assert_eq!(faded_shadow.color.a, 204);
         assert!(parse_style("text-shadow: none;").shadow.is_none());
     }
@@ -2632,9 +2694,9 @@ mod tests {
                 align: "align-items: flex-start;".into(),
                 lines: vec![StyledLine {
                     align: "left".into(),
-            line_bar: true,
-            wrapped: false,
-            shift_y: 0,
+                    line_bar: true,
+                    wrapped: false,
+                    shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
                         style: run.into(),
@@ -2644,22 +2706,22 @@ mod tests {
                 }],
                 image: None,
                 fit: Fit::Contain,
-            line_bg: None,
-            line_gap: 0.0,
-            line_radius: 0.0,
-            flip_x: false,
-            flip_y: false,
-            opacity: 1.0,
-            grayscale: 0.0,
-            invert: 0.0,
-            sepia: 0.0,
-            brightness: 1.0,
-            contrast: 1.0,
-            saturate: 1.0,
-            hue_rotate: 0.0,
-            blur: 0.0,
-            blend: Blend::Normal,
-            crop: Crop::default(),
+                line_bg: None,
+                line_gap: 0.0,
+                line_radius: 0.0,
+                flip_x: false,
+                flip_y: false,
+                opacity: 1.0,
+                grayscale: 0.0,
+                invert: 0.0,
+                sepia: 0.0,
+                brightness: 1.0,
+                contrast: 1.0,
+                saturate: 1.0,
+                hue_rotate: 0.0,
+                blur: 0.0,
+                blend: Blend::Normal,
+                crop: Crop::default(),
             }],
         }
     }
@@ -2675,7 +2737,11 @@ mod tests {
         });
         slide.items[0].line_radius = 12.0;
         let frame = render_styled(&slide);
-        assert_eq!(frame.pixel(0, 0), Rgba::BLACK, "the rounded corner stays clear");
+        assert_eq!(
+            frame.pixel(0, 0),
+            Rgba::BLACK,
+            "the rounded corner stays clear"
+        );
         assert_eq!(frame.pixel(20, 4).r, 255, "the line bar is red");
     }
 
@@ -2690,12 +2756,23 @@ mod tests {
             a: 255,
         });
         let centered = render_styled(&slide);
-        assert_ne!(centered.pixel(4, 2).r, 255, "the bar is not pinned to the top");
-        assert_eq!(centered.pixel(4, 40).r, 255, "the bar sits in the middle of the item");
+        assert_ne!(
+            centered.pixel(4, 2).r,
+            255,
+            "the bar is not pinned to the top"
+        );
+        assert_eq!(
+            centered.pixel(4, 40).r,
+            255,
+            "the bar sits in the middle of the item"
+        );
         slide.items[0].align = "align-items: flex-end;".into();
         let bottom = render_styled(&slide);
         assert_eq!(bottom.pixel(4, 2).r, 0);
-        assert!(bottom.pixel(4, 70).r > 200, "flex-end keeps the bar at the bottom");
+        assert!(
+            bottom.pixel(4, 70).r > 200,
+            "flex-end keeps the bar at the bottom"
+        );
     }
 
     #[test]
@@ -2827,7 +2904,9 @@ mod tests {
         let wide = Raster {
             width: 4,
             height: 1,
-            rgba: vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255],
+            rgba: vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
         };
         let contained = placed_image(&wide, 4, 4, Fit::Contain, false, false, "", "", 6.0, 0.3);
         let blurred = placed_image(&wide, 4, 4, Fit::Blur, false, false, "", "", 6.0, 0.3);
@@ -2989,8 +3068,7 @@ mod tests {
         slide.items[0].style = "left:0px;top:0px;width:70px;height:80px;".into();
         slide.items[0].lines[0].runs[0].text = "ABCDEFGHIJKLMNOP".into();
         let broken = render_styled(&slide);
-        slide.items[0].style =
-            "left:0px;top:0px;width:70px;height:80px;white-space:nowrap;".into();
+        slide.items[0].style = "left:0px;top:0px;width:70px;height:80px;white-space:nowrap;".into();
         let single = render_styled(&slide);
         assert!(lowest_ink(&broken) > lowest_ink(&single));
     }
@@ -3007,7 +3085,11 @@ mod tests {
             a: 255,
         });
         let frame = render_styled(&slide);
-        assert_eq!(frame.pixel(4, 4).r, 255, "the first row has the line background");
+        assert_eq!(
+            frame.pixel(4, 4).r,
+            255,
+            "the first row has the line background"
+        );
         assert!(
             frame.pixel(4, 40).r > 200,
             "the wrapped row keeps the line background"
@@ -3076,13 +3158,19 @@ mod tests {
     }
 
     fn brightest(frame: &crate::Frame) -> u8 {
-        frame.pixels.chunks(4).map(|pixel| pixel[0]).max().unwrap_or(0)
+        frame
+            .pixels
+            .chunks(4)
+            .map(|pixel| pixel[0])
+            .max()
+            .unwrap_or(0)
     }
 
     fn frame_has_red(frame: &crate::Frame) -> bool {
-        frame.pixels.chunks(4).any(|pixel| {
-            pixel[0] > 180 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] > 200
-        })
+        frame
+            .pixels
+            .chunks(4)
+            .any(|pixel| pixel[0] > 180 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] > 200)
     }
 
     fn channel_ink(frame: &crate::Frame, channel: usize) -> u8 {
@@ -3149,8 +3237,16 @@ mod tests {
         assert_eq!(flipped.pixel(0, 0).b, 255, "flipped swaps left and right");
         assert_eq!(flipped.pixel(1, 0).r, 255);
         let vertical = render_styled(&picture_slide(false, true));
-        assert_eq!(vertical.pixel(1, 0).g, 255, "flippedY brings the bottom row to the top");
-        assert_eq!(vertical.pixel(0, 1).r, 255, "the top row moves to the bottom");
+        assert_eq!(
+            vertical.pixel(1, 0).g,
+            255,
+            "flippedY brings the bottom row to the top"
+        );
+        assert_eq!(
+            vertical.pixel(0, 1).r,
+            255,
+            "the top row moves to the bottom"
+        );
     }
 
     #[test]
@@ -3176,9 +3272,7 @@ mod tests {
                 image: Some(Raster {
                     width: 2,
                     height: 2,
-                    rgba: vec![
-                        255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255, 0, 255, 0, 255,
-                    ],
+                    rgba: vec![255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255, 0, 255, 0, 255],
                 }),
                 fit: Fit::Fill,
                 line_bg: None,
@@ -3187,16 +3281,16 @@ mod tests {
                 flip_x,
                 flip_y,
                 opacity: 1.0,
-            grayscale: 0.0,
-            invert: 0.0,
-            sepia: 0.0,
-            brightness: 1.0,
-            contrast: 1.0,
-            saturate: 1.0,
-            hue_rotate: 0.0,
-            blur: 0.0,
-            blend: Blend::Normal,
-            crop: Crop::default(),
+                grayscale: 0.0,
+                invert: 0.0,
+                sepia: 0.0,
+                brightness: 1.0,
+                contrast: 1.0,
+                saturate: 1.0,
+                hue_rotate: 0.0,
+                blur: 0.0,
+                blend: Blend::Normal,
+                crop: Crop::default(),
             }],
         }
     }
@@ -3213,11 +3307,29 @@ mod tests {
             height: 2,
             pixels: [255, 0, 0, 255].repeat(8),
         };
-        assert_eq!(slide_frames(&from, &to, 0.0, SlideWay::LeftRight).pixel(0, 0).b, 255);
+        assert_eq!(
+            slide_frames(&from, &to, 0.0, SlideWay::LeftRight)
+                .pixel(0, 0)
+                .b,
+            255
+        );
         let mid = slide_frames(&from, &to, 0.5, SlideWay::LeftRight);
-        assert_eq!(mid.pixel(0, 0).r, 255, "the incoming slide covers the leading edge");
-        assert_eq!(mid.pixel(3, 0), Rgba::BLACK, "the trailing edge stays clear");
-        assert_eq!(slide_frames(&from, &to, 1.0, SlideWay::LeftRight).pixel(3, 0).r, 255);
+        assert_eq!(
+            mid.pixel(0, 0).r,
+            255,
+            "the incoming slide covers the leading edge"
+        );
+        assert_eq!(
+            mid.pixel(3, 0),
+            Rgba::BLACK,
+            "the trailing edge stays clear"
+        );
+        assert_eq!(
+            slide_frames(&from, &to, 1.0, SlideWay::LeftRight)
+                .pixel(3, 0)
+                .r,
+            255
+        );
         assert_eq!(slide_way("right_left"), SlideWay::RightLeft);
     }
 
@@ -3235,23 +3347,41 @@ mod tests {
         };
         assert_eq!(scale_frames(&from, &to, 0.0).pixel(0, 0).b, 255);
         let mid = scale_frames(&from, &to, 0.5);
-        assert_eq!(mid.pixel(0, 0), Rgba::BLACK, "the corner stays outside the scaled slides");
-        assert!(mid.pixel(1, 1).r > 40, "the next slide is growing in the center");
+        assert_eq!(
+            mid.pixel(0, 0),
+            Rgba::BLACK,
+            "the corner stays outside the scaled slides"
+        );
+        assert!(
+            mid.pixel(1, 1).r > 40,
+            "the next slide is growing in the center"
+        );
         assert_eq!(scale_frames(&from, &to, 1.0).pixel(3, 3).r, 255);
         let eased = ease_progress("sine", 0.25);
         assert!(eased < 0.2, "sine eases in slower than linear, got {eased}");
         assert_eq!(ease_progress("linear", 0.25), 0.25);
-        assert!(ease_progress("back", 0.25) < 0.0, "back overshoots behind the start");
+        assert!(
+            ease_progress("back", 0.25) < 0.0,
+            "back overshoots behind the start"
+        );
         assert!(ease_progress("cubic", 0.25) < 0.1);
         assert!(ease_progress("circ", 0.25) < 0.1);
-        assert!(ease_progress("elastic", 0.25) < 0.0, "elastic swings behind the start");
+        assert!(
+            ease_progress("elastic", 0.25) < 0.0,
+            "elastic swings behind the start"
+        );
         assert!(
             ease_progress("bounce", 0.9) < ease_progress("bounce", 0.85),
             "bounce steps backward before it settles"
         );
         assert_eq!(ease_progress("nope", 0.25), 0.25);
-        for name in ["sine", "back", "circ", "cubic", "elastic", "bounce", "linear"] {
-            assert!(ease_progress(name, 0.0).abs() < 0.001, "{name} starts at rest");
+        for name in [
+            "sine", "back", "circ", "cubic", "elastic", "bounce", "linear",
+        ] {
+            assert!(
+                ease_progress(name, 0.0).abs() < 0.001,
+                "{name} starts at rest"
+            );
             assert!(
                 (ease_progress(name, 1.0) - 1.0).abs() < 0.001,
                 "{name} finishes at the next slide"
@@ -3530,22 +3660,22 @@ mod tests {
                 lines: Vec::new(),
                 image: Some(image),
                 fit: Fit::Contain,
-            line_bg: None,
-            line_gap: 0.0,
-            line_radius: 0.0,
-            flip_x: false,
-            flip_y: false,
-            opacity: 1.0,
-            grayscale: 0.0,
-            invert: 0.0,
-            sepia: 0.0,
-            brightness: 1.0,
-            contrast: 1.0,
-            saturate: 1.0,
-            hue_rotate: 0.0,
-            blur: 0.0,
-            blend: Blend::Normal,
-            crop: Crop::default(),
+                line_bg: None,
+                line_gap: 0.0,
+                line_radius: 0.0,
+                flip_x: false,
+                flip_y: false,
+                opacity: 1.0,
+                grayscale: 0.0,
+                invert: 0.0,
+                sepia: 0.0,
+                brightness: 1.0,
+                contrast: 1.0,
+                saturate: 1.0,
+                hue_rotate: 0.0,
+                blur: 0.0,
+                blend: Blend::Normal,
+                crop: Crop::default(),
             }],
         };
         let contained = render_styled(&slide);

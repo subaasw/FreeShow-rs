@@ -9,9 +9,12 @@ mod text;
 
 pub use styled::qr_image;
 pub use styled::{
-    Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine, StyledSlide, TextRun,
-    blend_mode, blur_frames, clear_frame, crossfade, decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, crop_raster, image_frame, over, parse_color, parse_style, placed_image,
-    render_styled, scale_frames, slide_frames, slide_way, spin_frames, with_underlay, SlideWay,
+    Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, SlideWay, StyledItem, StyledLine,
+    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, crop_raster, crossfade,
+    decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
+    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, image_frame,
+    over, parse_color, parse_style, placed_image, render_styled, scale_frames, slide_frames,
+    slide_way, spin_frames, with_underlay,
 };
 
 use font8x8::{BASIC_FONTS, LATIN_FONTS, UnicodeFonts};
@@ -81,7 +84,6 @@ impl Frame {
         )?;
         Ok(bytes)
     }
-
 
     pub fn pixel(&self, x: u32, y: u32) -> Rgba {
         let index = ((y * self.width + x) * 4) as usize;

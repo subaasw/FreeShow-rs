@@ -14,15 +14,14 @@ use axum::routing::{get, post};
 use axum::{Router, serve};
 use freeshow_output::Frame;
 use serde_json::Value;
-use tokio::sync::oneshot;
 use socketioxide::SocketIo;
 use socketioxide::extract::{Data, SocketRef};
+use tokio::sync::oneshot;
 
 pub use protocol::{
     Command, RemoteBible, RemoteBook, RemoteChapter, RemoteFile, RemoteFolder, RemoteLayout,
-    RemoteOverlay, RemoteProject, RemoteTemplate, RemoteTimer,
-    RemoteProjectItem, RemoteShow, RemoteSlide, RemoteVerse, ShowSnapshot,
-    handle_message, handle_message_authenticated,
+    RemoteOverlay, RemoteProject, RemoteProjectItem, RemoteShow, RemoteSlide, RemoteTemplate,
+    RemoteTimer, RemoteVerse, ShowSnapshot, handle_message, handle_message_authenticated,
 };
 
 pub const REMOTE_PORT: u16 = 5510;
@@ -466,19 +465,18 @@ mod tests {
         let app = remote_router(state);
         let unauthorized = app
             .clone()
-            .oneshot(Request::builder().uri("/state").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(unauthorized.status(), 401);
-        let body: Value = serde_json::from_slice(
-            &unauthorized
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes(),
-        )
-        .unwrap();
+        let body: Value =
+            serde_json::from_slice(&unauthorized.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
         assert_eq!(body["channel"], "PASSWORD");
         assert!(body.get("lines").is_none(), "no lyrics before access");
 
@@ -494,15 +492,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), 200);
-        let body: Value = serde_json::from_slice(
-            &authorized
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes(),
-        )
-        .unwrap();
+        let body: Value =
+            serde_json::from_slice(&authorized.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
         assert_eq!(body["lines"][0], "Amazing grace");
 
         let blocked = app
@@ -563,9 +555,7 @@ mod tests {
 
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                json!({ "channel": "API:next_slide" })
-                    .to_string()
-                    .into(),
+                json!({ "channel": "API:next_slide" }).to_string().into(),
             ))
             .await
             .unwrap();
@@ -609,9 +599,7 @@ mod tests {
 
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                json!({ "channel": "API:next_slide" })
-                    .to_string()
-                    .into(),
+                json!({ "channel": "API:next_slide" }).to_string().into(),
             ))
             .await
             .unwrap();
@@ -701,7 +689,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
         }
 
         let producer = std::thread::spawn(move || {

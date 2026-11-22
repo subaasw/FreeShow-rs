@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::path::{Path, PathBuf};
 use freeshow_core::{NetworkRoute, SpeakerRoute};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeshow_data::{
-    AUDIO_DIR, BibleFile, Catalog, FreeShowPreferences, Library, MEDIA_DIR, OutlinedBook, ProjectsFile,     MixStep, ShowFile, SlideBackdrop, SlideJump, TimerStep,
-    StageLayout, VerseHit, default_stage, new_id,
+    AUDIO_DIR, BibleFile, Catalog, FreeShowPreferences, Library, MEDIA_DIR, MixStep, OutlinedBook,
+    ProjectsFile, ShowFile, SlideBackdrop, SlideJump, StageLayout, TimerStep, VerseHit,
+    default_stage, new_id,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 use freeshow_output::{Fit, Raster, crop_raster, decode_image};
@@ -473,7 +474,11 @@ impl Session {
     }
 
     pub fn stop_named_timer(&mut self, id: &str) -> bool {
-        if self.running.as_ref().is_some_and(|running| running.id == id) {
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.id == id)
+        {
             self.running = None;
             return true;
         }
@@ -637,7 +642,8 @@ impl Session {
                     Some((_, true)) => "Disable Icecast",
                     Some((_, false)) => "Enable Icecast",
                     None => "Icecast (not routed)",
-                }.to_string(),
+                }
+                .to_string(),
             ],
             _ => Vec::new(),
         }
@@ -992,9 +998,10 @@ impl Session {
 
     /// Loop and mute stored on the current project row when that row is this video.
     fn project_video_flags(&self, path: &Path) -> (Option<bool>, Option<bool>) {
-        let Some(item) = self.current_project().and_then(|project| {
-            project.shows.get(self.project_item).cloned()
-        }) else {
+        let Some(item) = self
+            .current_project()
+            .and_then(|project| project.shows.get(self.project_item).cloned())
+        else {
             return (None, None);
         };
         if item.kind != "video" || item.id != path.to_string_lossy() {
@@ -1047,16 +1054,19 @@ impl Session {
         if show_type.is_some() {
             self.slide_hidden = show_type.as_deref() == Some("foreground");
         } else {
-            self.slide_hidden = self.root.as_deref().is_some_and(|root| {
-                Library::open(root).media_video_type(path) == "foreground"
-            });
+            self.slide_hidden = self
+                .root
+                .as_deref()
+                .is_some_and(|root| Library::open(root).media_video_type(path) == "foreground");
         }
         self.pending_also = None;
         self.pending_play = Some(PendingPlay::Video(path.to_path_buf()));
     }
 
     fn load_still(&self, path: &Path) -> Option<Raster> {
-        let image = std::fs::read(path).ok().and_then(|bytes| decode_image(&bytes))?;
+        let image = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| decode_image(&bytes))?;
         let (left, right, top, bottom) = self
             .root
             .as_deref()
@@ -1088,9 +1098,9 @@ impl Session {
         if depth >= 8 {
             return;
         }
-        let jump = self.current_show().and_then(|show| {
-            self.slide_index.and_then(|index| show.slide_jump_at(index))
-        });
+        let jump = self
+            .current_show()
+            .and_then(|show| self.slide_index.and_then(|index| show.slide_jump_at(index)));
         let Some(jump) = jump else {
             return;
         };
@@ -1108,9 +1118,7 @@ impl Session {
                 self.jump_to_slide(index, depth);
             }
             SlideJump::Name(name) => {
-                let Some(index) = self
-                    .current_show()
-                    .and_then(|show| show.group_index(&name))
+                let Some(index) = self.current_show().and_then(|show| show.group_index(&name))
                 else {
                     return;
                 };
@@ -1134,9 +1142,10 @@ impl Session {
     fn jump_output(&mut self, delta: isize, depth: u8) {
         let current = self.slide_index.unwrap_or(0);
         let (output_id, output_name) = self.audience();
-        let Some(next) = self.current_show().and_then(|show| {
-            show.step_output(current, delta, &output_id, &output_name)
-        }) else {
+        let Some(next) = self
+            .current_show()
+            .and_then(|show| show.step_output(current, delta, &output_id, &output_name))
+        else {
             return;
         };
         self.jump_to_slide(next, depth);
@@ -1176,9 +1185,9 @@ impl Session {
     fn apply_action_slice(&mut self, replacement: Option<Vec<serde_json::Value>>) {
         let show_index = self.show_index;
         let slide_index = self.slide_index;
-        let real = self.current_show().and_then(|show| {
-            slide_index.map(|index| show.actions_at(index))
-        });
+        let real = self
+            .current_show()
+            .and_then(|show| slide_index.map(|index| show.actions_at(index)));
         let using = replacement.unwrap_or_else(|| real.clone().unwrap_or_default());
         let pause = freeshow_data::pause_in_actions(&using);
         let run = pause
@@ -1231,7 +1240,9 @@ impl Session {
             return false;
         }
         self.pending_actions = None;
-        let same = self.current_show().is_some_and(|show| show.id == pending.show_id)
+        let same = self
+            .current_show()
+            .is_some_and(|show| show.id == pending.show_id)
             && self.slide_index == Some(pending.slide_index);
         if !same {
             return false;
@@ -1244,9 +1255,9 @@ impl Session {
     fn apply_saved_actions(&mut self, actions: Vec<serde_json::Value>) {
         let show_index = self.show_index;
         let slide_index = self.slide_index;
-        let real = self.current_show().and_then(|show| {
-            slide_index.map(|index| show.actions_at(index))
-        });
+        let real = self
+            .current_show()
+            .and_then(|show| slide_index.map(|index| show.actions_at(index)));
         let pause = freeshow_data::pause_in_actions(&actions);
         let run = pause
             .as_ref()
@@ -1258,8 +1269,7 @@ impl Session {
             }
         }
         self.apply_slide_actions_now(true);
-        if let (Some(show_index), Some(slide_index), Some(real)) = (show_index, slide_index, real)
-        {
+        if let (Some(show_index), Some(slide_index), Some(real)) = (show_index, slide_index, real) {
             if let Some(show) = self.shows.get_mut(show_index) {
                 let _ = show.set_actions_at(slide_index, &real);
             }
@@ -1296,50 +1306,51 @@ impl Session {
             return;
         }
         if !continuation {
-        self.effect_playing = None;
-        self.effect_return = None;
-        self.timed_seconds = self.current_show().and_then(|show| {
-            self.slide_index
-                .and_then(|index| show.next_timer_at(index))
-        });
-        let backdrop = self.current_show().and_then(|show| {
-            self.slide_index.map(|index| show.backdrop_at(index))
-        });
-        if let Some(backdrop) = backdrop {
-            match backdrop {
-                SlideBackdrop::Unchanged => {}
-                SlideBackdrop::Clear => {
-                    self.underlay = None;
-                    self.reset_background_look();
-                    self.slide_hidden = false;
-                    self.background_transition = true;
-                }
-                SlideBackdrop::Picture { path, foreground } => {
-                    let path = PathBuf::from(path);
-                    if media_kind(&path) == MediaKind::Video {
-                        self.play_slide_video(&path);
-                    } else if media_kind(&path) == MediaKind::Image {
-                        let file_foreground = self.root.as_deref().is_some_and(|root| {
-                            Library::open(root).media_video_type(&path) == "foreground"
-                        });
-                        let foreground = foreground || file_foreground;
-                        if self.background_path.as_ref() == Some(&path) && self.underlay.is_some() {
-                            self.slide_hidden = foreground;
-                            self.background_transition = false;
-                        } else {
-                            self.remember_background(&path);
-                            self.underlay = self.load_still(&path);
-                            if self.underlay.is_some() {
-                                self.background_path = Some(path);
-                                self.background_transition = true;
-                                self.blanked = false;
+            self.effect_playing = None;
+            self.effect_return = None;
+            self.timed_seconds = self
+                .current_show()
+                .and_then(|show| self.slide_index.and_then(|index| show.next_timer_at(index)));
+            let backdrop = self
+                .current_show()
+                .and_then(|show| self.slide_index.map(|index| show.backdrop_at(index)));
+            if let Some(backdrop) = backdrop {
+                match backdrop {
+                    SlideBackdrop::Unchanged => {}
+                    SlideBackdrop::Clear => {
+                        self.underlay = None;
+                        self.reset_background_look();
+                        self.slide_hidden = false;
+                        self.background_transition = true;
+                    }
+                    SlideBackdrop::Picture { path, foreground } => {
+                        let path = PathBuf::from(path);
+                        if media_kind(&path) == MediaKind::Video {
+                            self.play_slide_video(&path);
+                        } else if media_kind(&path) == MediaKind::Image {
+                            let file_foreground = self.root.as_deref().is_some_and(|root| {
+                                Library::open(root).media_video_type(&path) == "foreground"
+                            });
+                            let foreground = foreground || file_foreground;
+                            if self.background_path.as_ref() == Some(&path)
+                                && self.underlay.is_some()
+                            {
                                 self.slide_hidden = foreground;
+                                self.background_transition = false;
+                            } else {
+                                self.remember_background(&path);
+                                self.underlay = self.load_still(&path);
+                                if self.underlay.is_some() {
+                                    self.background_path = Some(path);
+                                    self.background_transition = true;
+                                    self.blanked = false;
+                                    self.slide_hidden = foreground;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
         }
         self.stop_slide_audio();
         self.start_slide_audio();
@@ -1538,12 +1549,16 @@ impl Session {
             .unwrap_or_default();
         for action in actions {
             if action["triggers"].as_array().is_some_and(|triggers| {
-                triggers.iter().any(|trigger| trigger.as_str() == Some("toggle_icecast"))
+                triggers
+                    .iter()
+                    .any(|trigger| trigger.as_str() == Some("toggle_icecast"))
             }) {
                 match action.pointer("/actionValues/toggle_icecast/value") {
                     None | Some(serde_json::Value::Null) => self.toggle_icecast(None),
                     Some(serde_json::Value::Bool(value)) => self.toggle_icecast(Some(*value)),
-                    Some(serde_json::Value::String(value)) if value == "true" || value == "false" => {
+                    Some(serde_json::Value::String(value))
+                        if value == "true" || value == "false" =>
+                    {
                         self.toggle_icecast(Some(value == "true"));
                     }
                     _ => {}
@@ -1618,7 +1633,10 @@ impl Session {
     fn apply_cleared_overlays(&mut self) {
         let ids = self
             .current_show()
-            .and_then(|show| self.slide_index.map(|index| show.cleared_overlays_at(index)))
+            .and_then(|show| {
+                self.slide_index
+                    .map(|index| show.cleared_overlays_at(index))
+            })
             .unwrap_or_default();
         for id in ids {
             self.active_overlays.retain(|active| active != &id);
@@ -1739,9 +1757,8 @@ impl Session {
         let (clear, ids) = self
             .current_show()
             .and_then(|show| {
-                self.slide_index.map(|index| {
-                    (show.clears_overlays_at(index), show.overlays_at(index))
-                })
+                self.slide_index
+                    .map(|index| (show.clears_overlays_at(index), show.overlays_at(index)))
             })
             .unwrap_or((false, Vec::new()));
         if clear {
@@ -1787,9 +1804,9 @@ impl Session {
     fn start_slide_audio(&mut self) {
         let path = self.current_show().and_then(|show| {
             self.slide_index.and_then(|index| {
-                show.audio_at(index).into_iter().find(|path| {
-                    media_kind(Path::new(path)) == MediaKind::Audio
-                })
+                show.audio_at(index)
+                    .into_iter()
+                    .find(|path| media_kind(Path::new(path)) == MediaKind::Audio)
             })
         });
         let Some(path) = path else {
@@ -1838,9 +1855,10 @@ impl Session {
 
     /// Copies the named template onto this show's lyric boxes.
     fn apply_template_action(&mut self) {
-        let Some(id) = self.current_show().and_then(|show| {
-            self.slide_index.and_then(|index| show.template_at(index))
-        }) else {
+        let Some(id) = self
+            .current_show()
+            .and_then(|show| self.slide_index.and_then(|index| show.template_at(index)))
+        else {
             return;
         };
         let _ = self.apply_template_id(&id);
@@ -1848,14 +1866,13 @@ impl Session {
 
     /// Starts the camera this slide names, and keeps a queued audio file beside it.
     fn apply_camera(&mut self) {
-        let camera = self.current_show().and_then(|show| {
-            self.slide_index.and_then(|index| show.camera_at(index))
-        });
+        let camera = self
+            .current_show()
+            .and_then(|show| self.slide_index.and_then(|index| show.camera_at(index)));
         let Some(camera) = camera else {
             return;
         };
-        if matches!(&self.pending_play, Some(PendingPlay::Camera(current)) if current == &camera)
-        {
+        if matches!(&self.pending_play, Some(PendingPlay::Camera(current)) if current == &camera) {
             return;
         }
         let audio = match self.pending_play.take() {
@@ -2200,8 +2217,8 @@ impl Session {
         {
             self.slide_index = Some(index);
             self.reveal_count = 0;
-        self.click_revealed = false;
-        self.line_index = 0;
+            self.click_revealed = false;
+            self.line_index = 0;
             self.apply_slide_background();
         }
     }
@@ -2430,11 +2447,7 @@ impl Session {
             },
             overlays: overlay_views(&self.overlay_catalog),
             active_overlays: self.active_overlays.clone(),
-            media: self
-                .media
-                .iter()
-                .map(|name| file_view(name))
-                .collect(),
+            media: self.media.iter().map(|name| file_view(name)).collect(),
             audio: self.audio.iter().map(|name| file_view(name)).collect(),
             timers: self
                 .timers
@@ -2586,17 +2599,10 @@ impl Session {
             freeshow_remote::Command::ToggleMedia => {
                 self.pending_play = Some(PendingPlay::ToggleMedia);
             }
-            freeshow_remote::Command::RearrangeGroups {
-                show_id,
-                from,
-                to,
-            } => {
+            freeshow_remote::Command::RearrangeGroups { show_id, from, to } => {
                 self.edit_show(&show_id, |show| show.reorder_groups(from, to));
             }
-            freeshow_remote::Command::AddGroup {
-                show_id,
-                group_id,
-            } => {
+            freeshow_remote::Command::AddGroup { show_id, group_id } => {
                 self.edit_show(&show_id, |show| show.duplicate_slide(&group_id).is_some());
             }
             freeshow_remote::Command::PresentVerse { reference, text } => {
@@ -2645,10 +2651,7 @@ impl Session {
                     let _ = self.save_projects();
                 }
             }
-            freeshow_remote::Command::ChangeLayout {
-                show_id,
-                layout_id,
-            } => {
+            freeshow_remote::Command::ChangeLayout { show_id, layout_id } => {
                 self.edit_show(&show_id, |show| show.set_active_layout(&layout_id));
                 if self
                     .shows
@@ -2662,7 +2665,8 @@ impl Session {
             }
             freeshow_remote::Command::RemoveProjectItem { project_id, index } => {
                 if self.projects.remove_show_at(&project_id, index) {
-                    if self.project_id.as_deref() == Some(project_id.as_str()) && index < self.project_item
+                    if self.project_id.as_deref() == Some(project_id.as_str())
+                        && index < self.project_item
                     {
                         self.project_item -= 1;
                     }
@@ -2684,9 +2688,10 @@ impl Session {
         }
         let current = self.slide_index.unwrap_or(0);
         let (output_id, output_name) = self.audience();
-        let Some(next) = self.current_show().and_then(|show| {
-            show.step_output(current, delta, &output_id, &output_name)
-        }) else {
+        let Some(next) = self
+            .current_show()
+            .and_then(|show| show.step_output(current, delta, &output_id, &output_name))
+        else {
             return;
         };
         self.slide_index = Some(next);
@@ -2877,7 +2882,9 @@ impl Session {
         if let Ok(mut shows) = library.list_shows() {
             if let Some(show) = self.current_show() {
                 let previous_slide = self.slide_index.and_then(|index| {
-                    show.ordered_slides().get(index).map(|slide| slide.id.clone())
+                    show.ordered_slides()
+                        .get(index)
+                        .map(|slide| slide.id.clone())
                 });
                 let index = shows
                     .iter()
@@ -2900,22 +2907,31 @@ impl Session {
             tracing::error!("could not reload shows after ChurchApps import");
         }
         if let Ok(projects) = library.load_projects() {
-            let active_item = self
-                .current_project()
-                .and_then(|project| project.shows.get(self.project_item).map(|item| item.id.clone()));
+            let active_item = self.current_project().and_then(|project| {
+                project
+                    .shows
+                    .get(self.project_item)
+                    .map(|item| item.id.clone())
+            });
             self.projects = projects;
             match self.current_project() {
                 Some(project) => {
                     let previous_index = self.project_item;
                     self.project_item = active_item
                         .and_then(|id| {
-                            if project.shows.get(previous_index).is_some_and(|item| item.id == id) {
+                            if project
+                                .shows
+                                .get(previous_index)
+                                .is_some_and(|item| item.id == id)
+                            {
                                 Some(previous_index)
                             } else {
                                 project.shows.iter().position(|item| item.id == id)
                             }
                         })
-                        .unwrap_or_else(|| previous_index.min(project.shows.len().saturating_sub(1)));
+                        .unwrap_or_else(|| {
+                            previous_index.min(project.shows.len().saturating_sub(1))
+                        });
                 }
                 None => {
                     self.project_id = imported_project;
@@ -3107,17 +3123,17 @@ impl Session {
                 self.slide_hidden = false;
                 self.slide_index = Some(first);
                 self.reveal_count = 0;
-        self.click_revealed = false;
-        self.line_index = 0;
+                self.click_revealed = false;
+                self.line_index = 0;
                 self.apply_slide_background();
             }
             return true;
         }
         let index = self.slide_index.unwrap_or(0);
         let (output_id, output_name) = self.audience();
-        let next = self.current_show().and_then(|show| {
-            show.step_output(index, 1, &output_id, &output_name)
-        });
+        let next = self
+            .current_show()
+            .and_then(|show| show.step_output(index, 1, &output_id, &output_name));
         if let Some(next) = next {
             self.step_slide(1);
             return self.slide_index == Some(next);
@@ -3146,7 +3162,10 @@ impl Session {
         let mut cursor = self.project_item;
         loop {
             let Some(next) = Self::next_project_index(
-                &items.iter().map(|(_, kind)| kind.as_str()).collect::<Vec<_>>(),
+                &items
+                    .iter()
+                    .map(|(_, kind)| kind.as_str())
+                    .collect::<Vec<_>>(),
                 cursor,
             ) else {
                 return false;
@@ -3322,9 +3341,9 @@ impl Session {
         }
         let index = self.slide_index.unwrap_or(0);
         let (output_id, output_name) = self.audience();
-        let previous = self.current_show().and_then(|show| {
-            show.step_output(index, -1, &output_id, &output_name)
-        });
+        let previous = self
+            .current_show()
+            .and_then(|show| show.step_output(index, -1, &output_id, &output_name));
         if let Some(previous) = previous {
             self.step_slide(-1);
             if self.slide_index == Some(previous) {
@@ -3386,35 +3405,35 @@ impl Session {
         }
     }
 
-fn folder_file_order(left: &Path, right: &Path) -> std::cmp::Ordering {
-    let name = |file: &Path| {
-        file.file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-            .unwrap_or_default()
-    };
-    name(left).cmp(&name(right))
-}
+    fn folder_file_order(left: &Path, right: &Path) -> std::cmp::Ordering {
+        let name = |file: &Path| {
+            file.file_name()
+                .map(|name| name.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        name(left).cmp(&name(right))
+    }
 
-fn previous_project_index(kinds: &[&str], index: usize) -> Option<usize> {
-    kinds
-        .iter()
-        .enumerate()
-        .take(index)
-        .rev()
-        .find(|(_, kind)| **kind != "section")
-        .map(|(previous, _)| previous)
-}
+    fn previous_project_index(kinds: &[&str], index: usize) -> Option<usize> {
+        kinds
+            .iter()
+            .enumerate()
+            .take(index)
+            .rev()
+            .find(|(_, kind)| **kind != "section")
+            .map(|(previous, _)| previous)
+    }
 
-fn next_project_index(kinds: &[&str], index: usize) -> Option<usize> {
-    kinds
-        .iter()
-        .enumerate()
-        .skip(index.saturating_add(1))
-        .find(|(_, kind)| **kind != "section")
-        .map(|(next, _)| next)
-}
+    fn next_project_index(kinds: &[&str], index: usize) -> Option<usize> {
+        kinds
+            .iter()
+            .enumerate()
+            .skip(index.saturating_add(1))
+            .find(|(_, kind)| **kind != "section")
+            .map(|(next, _)| next)
+    }
 
-fn current_project(&self) -> Option<freeshow_data::ProjectEntry> {
+    fn current_project(&self) -> Option<freeshow_data::ProjectEntry> {
         let project_id = self.project_id.as_ref()?;
         self.projects
             .projects()
@@ -3464,7 +3483,10 @@ impl RunningTimer {
 }
 
 fn scheduled_show(event: &serde_json::Value) -> Option<String> {
-    let kind = event.get("type").and_then(|value| value.as_str()).unwrap_or("");
+    let kind = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     if kind == "show" {
         return event
             .get("show")
@@ -3502,7 +3524,13 @@ fn named_timers(settings: &Catalog) -> Vec<NamedTimer> {
     };
     let mut timers: Vec<NamedTimer> = timers
         .iter()
-        .filter(|(_, value)| value.get("type").and_then(|kind| kind.as_str()).unwrap_or("counter") == "counter")
+        .filter(|(_, value)| {
+            value
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .unwrap_or("counter")
+                == "counter"
+        })
         .map(|(id, value)| NamedTimer {
             id: id.clone(),
             name: value
@@ -3510,7 +3538,10 @@ fn named_timers(settings: &Catalog) -> Vec<NamedTimer> {
                 .and_then(|name| name.as_str())
                 .unwrap_or(id)
                 .to_string(),
-            start: value.get("start").and_then(|start| start.as_u64()).unwrap_or(0),
+            start: value
+                .get("start")
+                .and_then(|start| start.as_u64())
+                .unwrap_or(0),
             end: value.get("end").and_then(|end| end.as_u64()).unwrap_or(0),
         })
         .collect();
@@ -3667,7 +3698,8 @@ mod tests {
     #[test]
     fn downloaded_lesson_media_presents_from_the_local_library() {
         use std::io::{Read, Write};
-        let root = std::env::temp_dir().join(format!("freeshow-present-lesson-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-present-lesson-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -3743,7 +3775,9 @@ mod tests {
             assert!(Instant::now() < deadline, "downloaded video did not decode");
         };
         let center = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
-        assert!(frame.rgba[center] < 15 && frame.rgba[center + 1] > 240 && frame.rgba[center + 2] < 15);
+        assert!(
+            frame.rgba[center] < 15 && frame.rgba[center + 1] > 240 && frame.rgba[center + 2] < 15
+        );
         drop(player);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3847,11 +3881,12 @@ mod tests {
         let path = root.join("settings.json");
         let mut settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        settings["outputs"]["ndi"]["ndiData"] = serde_json::json!({"name":"My NDI","groups":"Private"});
+        settings["outputs"]["ndi"]["ndiData"] =
+            serde_json::json!({"name":"My NDI","groups":"Private"});
         std::fs::write(&path, settings.to_string()).unwrap();
         assert!(session.ndi_output().is_none());
-        settings["outputs"]["ndi"]["ndiData"]["groups"]=serde_json::json!(["Private"]);
-        std::fs::write(&path,settings.to_string()).unwrap();
+        settings["outputs"]["ndi"]["ndiData"]["groups"] = serde_json::json!(["Private"]);
+        std::fs::write(&path, settings.to_string()).unwrap();
         assert!(session.ndi_output().is_none());
         settings["outputs"]["ndi"]["ndiData"]["groups"] = serde_json::json!("");
         std::fs::write(&path, settings.to_string()).unwrap();
@@ -3882,10 +3917,16 @@ mod tests {
             .audio_device_map
             .insert("speaker_sub_stage".into(), "Stage Speakers".into());
         session.video_volume = 0.4;
-        assert_eq!(session.audio_routes(), vec![SpeakerRoute::stereo(None, 0.8)]);
+        assert_eq!(
+            session.audio_routes(),
+            vec![SpeakerRoute::stereo(None, 0.8)]
+        );
         assert_eq!(
             session.video_audio_routes(),
-            vec![SpeakerRoute { output_channel:Some(0), ..SpeakerRoute::stereo(Some("Stage Speakers".into()), 0.2) }]
+            vec![SpeakerRoute {
+                output_channel: Some(0),
+                ..SpeakerRoute::stereo(Some("Stage Speakers".into()), 0.2)
+            }]
         );
         session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 0 });
         assert_eq!(session.video_audio_routes()[0].gain, 0.2);
@@ -3906,7 +3947,10 @@ mod tests {
         let mut no_library = Session::empty();
         no_library.volume = 0.5;
         no_library.video_volume = 0.4;
-        assert_eq!(no_library.video_audio_routes(), vec![SpeakerRoute::stereo(None, 0.2)]);
+        assert_eq!(
+            no_library.video_audio_routes(),
+            vec![SpeakerRoute::stereo(None, 0.2)]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]
@@ -3933,7 +3977,10 @@ mod tests {
             .insert("speaker_sub_hash".into(), "Stage Speakers".into());
         assert_eq!(
             session.audio_routes(),
-            vec![SpeakerRoute { output_channel:Some(0), ..SpeakerRoute::stereo(Some("Stage Speakers".into()), 0.5) }]
+            vec![SpeakerRoute {
+                output_channel: Some(0),
+                ..SpeakerRoute::stereo(Some("Stage Speakers".into()), 0.5)
+            }]
         );
         session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 0 });
         assert_eq!(session.audio_routes()[0].gain, 0.5);
@@ -3996,10 +4043,8 @@ mod tests {
 
     #[test]
     fn the_last_slide_opens_the_next_project_item() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-advance-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-advance-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4029,10 +4074,7 @@ mod tests {
 
     #[test]
     fn a_disabled_setting_keeps_the_last_slide() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-stay-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("freeshow-rust-stay-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4055,10 +4097,8 @@ mod tests {
 
     #[test]
     fn a_slide_picture_stays_behind_the_lyrics() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-slide-bg-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-slide-bg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4071,9 +4111,9 @@ mod tests {
             &picture,
             [
                 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248,
-                207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
-                96, 130,
+                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99,
+                248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68,
+                174, 66, 96, 130,
             ],
         )
         .unwrap();
@@ -4117,10 +4157,8 @@ mod tests {
 
     #[test]
     fn a_slide_video_starts_behind_the_lyrics() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-slide-video-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-slide-video-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4213,10 +4251,8 @@ mod tests {
 
     #[test]
     fn a_slide_can_stop_the_playing_audio() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-slide-audio-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-slide-audio-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4257,10 +4293,8 @@ mod tests {
 
     #[test]
     fn a_slide_starts_its_countdown() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-slide-timer-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-slide-timer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4281,8 +4315,16 @@ mod tests {
             });
         }
         assert!(session.present_show_id(&show_id));
-        assert_eq!(session.running.as_ref().map(|timer| timer.id.as_str()), Some("default"));
-        assert!(session.running.as_ref().is_some_and(|timer| timer.since.is_some()));
+        assert_eq!(
+            session.running.as_ref().map(|timer| timer.id.as_str()),
+            Some("default")
+        );
+        assert!(
+            session
+                .running
+                .as_ref()
+                .is_some_and(|timer| timer.since.is_some())
+        );
         session.select_slide(1);
         assert!(session.running.is_none());
         let _ = std::fs::remove_dir_all(&root);
@@ -4290,10 +4332,8 @@ mod tests {
 
     #[test]
     fn a_slide_pauses_its_countdown() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-pause-timer-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-pause-timer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4314,19 +4354,27 @@ mod tests {
             });
         }
         assert!(session.present_show_id(&show_id));
-        assert!(session.running.as_ref().is_some_and(|timer| timer.since.is_some()));
+        assert!(
+            session
+                .running
+                .as_ref()
+                .is_some_and(|timer| timer.since.is_some())
+        );
         session.select_slide(1);
-        assert!(session.running.as_ref().is_some_and(|timer| timer.since.is_none()));
+        assert!(
+            session
+                .running
+                .as_ref()
+                .is_some_and(|timer| timer.since.is_none())
+        );
         assert_eq!(session.running.as_ref().map(|timer| timer.mark), Some(300));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_slide_moves_on_when_its_audio_ends() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-after-media-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-after-media-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4356,10 +4404,8 @@ mod tests {
 
     #[test]
     fn a_slide_opens_another_song() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-start-show-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-start-show-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4378,10 +4424,9 @@ mod tests {
             .iter()
             .position(|show| show.id == first)
             .unwrap();
-        session.shows[first_index].show["layouts"]["main"]["slides"][0]["actions"] =
-            serde_json::json!({
-                "slideActions": [{ "actionValues": { "start_show": { "id": second } } }]
-            });
+        session.shows[first_index].show["layouts"]["main"]["slides"][0]["actions"] = serde_json::json!({
+            "slideActions": [{ "actionValues": { "start_show": { "id": second } } }]
+        });
         assert!(session.present_show_id(&first));
         assert_eq!(session.current_show().unwrap().id, second);
         assert_eq!(session.slide_index, Some(1));
@@ -4390,10 +4435,8 @@ mod tests {
 
     #[test]
     fn a_clear_slide_hides_the_lyrics_and_keeps_the_picture() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-clear-slide-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-clear-slide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         session.overlay_catalog = Catalog::parse(r#"{"logo":{"name":"Logo"}}"#).unwrap();
@@ -4405,9 +4448,9 @@ mod tests {
             &picture,
             [
                 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248,
-                207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
-                96, 130,
+                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99,
+                248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68,
+                174, 66, 96, 130,
             ],
         )
         .unwrap();
@@ -4444,10 +4487,8 @@ mod tests {
 
     #[test]
     fn an_image_project_item_becomes_the_background() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-image-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-image-item-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4458,18 +4499,18 @@ mod tests {
             &picture,
             [
                 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248,
-                207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
-                96, 130,
+                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99,
+                248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68,
+                174, 66, 96, 130,
             ],
         )
         .unwrap();
         let project_id = session.project_id.clone().unwrap();
-        assert!(session.projects.append_item(
-            &project_id,
-            &picture.to_string_lossy(),
-            "image"
-        ));
+        assert!(
+            session
+                .projects
+                .append_item(&project_id, &picture.to_string_lossy(), "image")
+        );
         assert!(session.present_show_id(&show_id));
         session.project_item = 0;
         session.slide_index = Some(0);
@@ -4484,10 +4525,8 @@ mod tests {
 
     #[test]
     fn a_missing_project_item_opens_the_following_show() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-skip-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-skip-item-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4512,10 +4551,8 @@ mod tests {
 
     #[test]
     fn a_video_project_item_is_ready_to_play() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-video-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-video-item-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4524,11 +4561,11 @@ mod tests {
         let clip = root.join("clip.mp4");
         std::fs::write(&clip, b"not a real movie").unwrap();
         let project_id = session.project_id.clone().unwrap();
-        assert!(session.projects.append_item(
-            &project_id,
-            &clip.to_string_lossy(),
-            "video"
-        ));
+        assert!(
+            session
+                .projects
+                .append_item(&project_id, &clip.to_string_lossy(), "video")
+        );
         assert!(session.present_show_id(&show_id));
         let store = serde_json::json!({
             clip.to_string_lossy().as_ref(): { "speed": 2 }
@@ -4570,7 +4607,11 @@ mod tests {
             clip.to_string_lossy().as_ref(): { "videoType": "background" }
         });
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
-        assert!(session.projects.set_item_playback(&project_id, 1, false, false));
+        assert!(
+            session
+                .projects
+                .set_item_playback(&project_id, 1, false, false)
+        );
         assert!(session.play_named(&clip.to_string_lossy()));
         assert!(!session.media_loop);
         assert!(!session.media_muted);
@@ -4581,10 +4622,8 @@ mod tests {
 
     #[test]
     fn a_folder_project_item_shows_its_pictures_in_order() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-folder-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-folder-item-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4603,11 +4642,11 @@ mod tests {
         std::fs::write(folder.join("notes.txt"), b"skip").unwrap();
         std::fs::write(folder.join("a.mp3"), b"not a real song").unwrap();
         let project_id = session.project_id.clone().unwrap();
-        assert!(session.projects.append_item(
-            &project_id,
-            &folder.to_string_lossy(),
-            "folder"
-        ));
+        assert!(
+            session
+                .projects
+                .append_item(&project_id, &folder.to_string_lossy(), "folder")
+        );
         assert!(session.present_show_id(&show_id));
         session.project_item = 0;
         session.slide_index = Some(0);
@@ -4639,10 +4678,8 @@ mod tests {
 
     #[test]
     fn a_folder_video_plays_once_with_sound() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-folder-video-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-folder-video-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4657,11 +4694,11 @@ mod tests {
         });
         std::fs::write(root.join("media.json"), store.to_string()).unwrap();
         let project_id = session.project_id.clone().unwrap();
-        assert!(session.projects.append_item(
-            &project_id,
-            &folder.to_string_lossy(),
-            "folder"
-        ));
+        assert!(
+            session
+                .projects
+                .append_item(&project_id, &folder.to_string_lossy(), "folder")
+        );
         assert!(session.present_show_id(&show_id));
         session.project_item = 0;
         session.slide_index = Some(0);
@@ -4677,10 +4714,8 @@ mod tests {
 
     #[test]
     fn an_audio_project_item_is_ready_to_play() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-audio-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-audio-item-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4689,11 +4724,11 @@ mod tests {
         let song = root.join("song.mp3");
         std::fs::write(&song, b"not a real song").unwrap();
         let project_id = session.project_id.clone().unwrap();
-        assert!(session.projects.append_item(
-            &project_id,
-            &song.to_string_lossy(),
-            "audio"
-        ));
+        assert!(
+            session
+                .projects
+                .append_item(&project_id, &song.to_string_lossy(), "audio")
+        );
         assert!(session.present_show_id(&show_id));
         session.project_item = 0;
         session.slide_index = Some(0);
@@ -4709,10 +4744,8 @@ mod tests {
 
     #[test]
     fn a_remote_command_opens_the_project_row() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-remote-row-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-remote-row-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4734,10 +4767,8 @@ mod tests {
 
     #[test]
     fn an_overlay_project_item_stays_on_the_song() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-overlay-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-overlay-item-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         session.overlay_catalog = Catalog::parse(r#"{"logo":{"name":"Logo"}}"#).unwrap();
@@ -4763,10 +4794,8 @@ mod tests {
 
     #[test]
     fn previous_on_the_first_slide_opens_the_earlier_song() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-retreat-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-retreat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -4787,10 +4816,8 @@ mod tests {
 
     #[test]
     fn a_slide_plays_a_sound_effect() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-effect-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-effect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Config")).unwrap();
         std::fs::write(
@@ -4819,13 +4846,19 @@ mod tests {
         }
         assert!(session.present_show_id(&show_id));
         let plays = session.take_plays();
-        assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("hit.mp3")));
+        assert!(
+            matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("hit.mp3"))
+        );
         assert!(session.finish_media("hit.mp3", true) == false);
         let plays = session.take_plays();
-        assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3")));
+        assert!(
+            matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3"))
+        );
         assert!(session.finish_media("one.mp3", true) == false);
         let plays = session.take_plays();
-        assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("two.mp3")));
+        assert!(
+            matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("two.mp3"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4862,29 +4895,36 @@ mod tests {
         }
         assert!(session.present_show_id(&show_id));
         let values = Library::open(&root).variables();
-        assert!(values.iter().any(|(name, value)| name == "mark" && value == "now"));
-        assert!(!session.run_due_actions());
-        assert_eq!(
-            session.current_show().unwrap().actions_at(0).len(),
-            3
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "mark" && value == "now")
         );
+        assert!(!session.run_due_actions());
+        assert_eq!(session.current_show().unwrap().actions_at(0).len(), 3);
         session.select_slide(1);
         assert!(!session.finish_waits());
         let values = Library::open(&root).variables();
-        assert!(values.iter().any(|(name, value)| name == "mark" && value == "now"));
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "mark" && value == "now")
+        );
         session.select_slide(0);
         assert!(session.finish_waits());
         let values = Library::open(&root).variables();
-        assert!(values.iter().any(|(name, value)| name == "mark" && value == "after"));
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "mark" && value == "after")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_slide_opens_a_random_other_slide() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-random-slide-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-random-slide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Config")).unwrap();
         std::fs::write(
@@ -4922,16 +4962,18 @@ mod tests {
         let index = session.slide_index.unwrap();
         assert!(index == 1 || index == 2);
         let values = Library::open(&root).variables();
-        assert!(values.iter().any(|(name, value)| name == "mark" && value == "landed"));
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "mark" && value == "landed")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_slide_switches_the_stage_layout() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-stage-layout-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-stage-layout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Config")).unwrap();
         std::fs::write(
@@ -4984,16 +5026,18 @@ mod tests {
 
     #[test]
     fn a_slide_plays_its_audio_playlist() {
-        let songs = vec!["one.mp3".to_string(), "two.mp3".to_string(), "three.mp3".to_string()];
+        let songs = vec![
+            "one.mp3".to_string(),
+            "two.mp3".to_string(),
+            "three.mp3".to_string(),
+        ];
         let shuffled = freeshow_data::shuffled_songs(&songs, "bed");
         assert_eq!(shuffled.len(), 3);
         assert!(shuffled.iter().all(|song| songs.contains(song)));
         assert_ne!(shuffled, songs);
 
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-playlist-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-playlist-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Config")).unwrap();
         std::fs::write(
@@ -5023,13 +5067,17 @@ mod tests {
         }
         assert!(session.present_show_id(&show_id));
         let plays = session.take_plays();
-        assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3")));
+        assert!(
+            matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3"))
+        );
         assert!((session.audio_routes()[0].gain - 0.5).abs() < 0.001);
         assert!(!session.finish_media("other.mp3", true));
         assert!(session.take_plays()[0].is_none());
         assert!(session.finish_media("one.mp3", true) == false);
         let plays = session.take_plays();
-        assert!(matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("two.mp3")));
+        assert!(
+            matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("two.mp3"))
+        );
         session.select_slide(0);
         assert!(session.take_plays()[0].is_none());
         session.select_slide(1);
@@ -5091,13 +5139,25 @@ mod tests {
         assert!(session.present_show_id(&show_id));
         let library = Library::open(&root);
         let values = library.variables();
-        assert!(values.iter().any(|(name, value)| name == "count" && value == "3"));
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "count" && value == "3")
+        );
         session.select_slide(1);
         let values = Library::open(&root).variables();
-        assert!(values.iter().any(|(name, value)| name == "speaker" && value == "Bo"));
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "speaker" && value == "Bo")
+        );
         session.select_slide(2);
         let values = Library::open(&root).variables();
-        assert!(values.iter().any(|(name, value)| name == "speaker" && value.is_empty()));
+        assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "speaker" && value.is_empty())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5113,7 +5173,10 @@ mod tests {
             "Hello Ada"
         );
         assert_eq!(
-            freeshow_data::fill_variables("Hello {$speaker|Guest}", &[("speaker".into(), String::new())]),
+            freeshow_data::fill_variables(
+                "Hello {$speaker|Guest}",
+                &[("speaker".into(), String::new())]
+            ),
             "Hello Guest"
         );
         assert_eq!(
@@ -5121,10 +5184,8 @@ mod tests {
             "3"
         );
 
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-variable-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-variable-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Config")).unwrap();
         std::fs::write(
@@ -5156,10 +5217,8 @@ mod tests {
 
     #[test]
     fn the_stage_follows_the_audience_reveal() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-stage-reveal-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-stage-reveal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5259,7 +5318,10 @@ mod tests {
             session.current_show().unwrap().show["slides"]["s1"]["items"][0]["style"],
             "color:red;"
         );
-        assert!(matches!(session.pending_play, Some(PendingPlay::ToggleMedia)));
+        assert!(matches!(
+            session.pending_play,
+            Some(PendingPlay::ToggleMedia)
+        ));
         let _ = session.take_plays();
         session.select_slide(1);
         assert_eq!(
@@ -5272,10 +5334,8 @@ mod tests {
 
     #[test]
     fn a_slide_starts_its_camera() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-camera-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-camera-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5325,10 +5385,8 @@ mod tests {
 
     #[test]
     fn a_slide_sets_the_main_volume_and_mute() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-volume-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-volume-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5465,10 +5523,8 @@ mod tests {
 
     #[test]
     fn a_slide_can_hold_or_rewrite_its_countdown() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-next-timer-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-next-timer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5522,10 +5578,8 @@ mod tests {
 
     #[test]
     fn a_slide_opens_its_named_group() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-group-jump-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-group-jump-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5615,10 +5669,8 @@ mod tests {
 
     #[test]
     fn next_turns_the_style_line_page() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-style-lines-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-style-lines-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5670,10 +5722,8 @@ mod tests {
 
     #[test]
     fn next_shows_a_click_reveal_item() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-click-reveal-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-click-reveal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5711,10 +5761,8 @@ mod tests {
 
     #[test]
     fn next_reveals_one_more_line() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-line-reveal-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-line-reveal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5731,10 +5779,7 @@ mod tests {
             }]);
             assert!(show.add_slide().is_some());
         }
-        assert_eq!(
-            session.shows[show_index].line_reveal_lines(0),
-            Some(2)
-        );
+        assert_eq!(session.shows[show_index].line_reveal_lines(0), Some(2));
         assert!(session.present_show_id(&show_id));
         assert_eq!(session.reveal_count, 0);
         assert_eq!(session.slide_index, Some(0));
@@ -5788,10 +5833,8 @@ mod tests {
 
     #[test]
     fn next_skips_a_slide_bound_to_another_output() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-bound-slide-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-bound-slide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5801,8 +5844,7 @@ mod tests {
             let show = &mut session.shows[show_index];
             assert!(show.add_slide().is_some());
             assert!(show.add_slide().is_some());
-            show.show["layouts"]["main"]["slides"][1]["bindings"] =
-                serde_json::json!(["stage"]);
+            show.show["layouts"]["main"]["slides"][1]["bindings"] = serde_json::json!(["stage"]);
         }
         assert!(session.present_show_id(&show_id));
         assert!(session.advance_show());
@@ -5814,10 +5856,8 @@ mod tests {
 
     #[test]
     fn an_end_slide_returns_to_the_first() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-end-slide-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-end-slide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5869,10 +5909,8 @@ mod tests {
 
     #[test]
     fn a_slide_starts_a_saved_audio_stream() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-audio-stream-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-audio-stream-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5922,10 +5960,8 @@ mod tests {
 
     #[test]
     fn a_slide_switches_the_output_style() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-slide-style-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-slide-style-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -5942,13 +5978,12 @@ mod tests {
         .unwrap();
         let show_id = session.current_show().unwrap().id.clone();
         let show_index = session.show_index.unwrap();
-        session.shows[show_index].show["layouts"]["main"]["slides"][0]["actions"] =
-            serde_json::json!({
-                "slideActions": [{
-                    "triggers": ["change_output_style"],
-                    "actionValues": { "change_output_style": { "outputStyle": "night" } }
-                }]
-            });
+        session.shows[show_index].show["layouts"]["main"]["slides"][0]["actions"] = serde_json::json!({
+            "slideActions": [{
+                "triggers": ["change_output_style"],
+                "actionValues": { "change_output_style": { "outputStyle": "night" } }
+            }]
+        });
         assert!(session.present_show_id(&show_id));
         assert_eq!(
             freeshow_data::Library::open(&root).output_style_id(),
@@ -5963,10 +5998,8 @@ mod tests {
 
     #[test]
     fn an_output_style_transition_fills_a_plain_slide() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-style-motion-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-style-motion-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -6001,10 +6034,8 @@ mod tests {
 
     #[test]
     fn a_background_uses_the_stored_fit_and_flip() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-media-fit-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-media-fit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         std::fs::create_dir_all(root.join("Config")).unwrap();
@@ -6013,9 +6044,9 @@ mod tests {
             &picture,
             [
                 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248,
-                207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
-                96, 130,
+                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99,
+                248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68,
+                174, 66, 96, 130,
             ],
         )
         .unwrap();
@@ -6072,10 +6103,8 @@ mod tests {
 
     #[test]
     fn an_audio_file_uses_its_stored_volume() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-audio-gain-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-audio-gain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let mut session = Session::open(root.clone());
@@ -6124,12 +6153,18 @@ mod tests {
         let mut session = Session::open(root.clone());
         let (configured, enabled) = session.icecast.as_ref().unwrap();
         assert!(*enabled);
-        assert_eq!((configured.port, configured.mount.as_str()), (8123, "/live.opus"));
+        assert_eq!(
+            (configured.port, configured.mount.as_str()),
+            (8123, "/live.opus")
+        );
         let mut show = ShowFile::blank("test", "Test");
-        show.set_actions_at(0, &[serde_json::json!({
-            "triggers": ["toggle_icecast"],
-            "actionValues": {"toggle_icecast":{"value":"false"}}
-        })]);
+        show.set_actions_at(
+            0,
+            &[serde_json::json!({
+                "triggers": ["toggle_icecast"],
+                "actionValues": {"toggle_icecast":{"value":"false"}}
+            })],
+        );
         session.shows = vec![show];
         session.show_index = Some(0);
         session.slide_index = Some(0);
@@ -6138,7 +6173,10 @@ mod tests {
         session.apply_remote(freeshow_remote::Command::ToggleIcecast(Some(true)));
         let (saved, enabled) = library.icecast().unwrap();
         assert!(enabled);
-        assert_eq!((saved.host.as_str(), saved.password.as_str()), ("stream.local", "test"));
+        assert_eq!(
+            (saved.host.as_str(), saved.password.as_str()),
+            ("stream.local", "test")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6185,7 +6223,9 @@ mod tests {
         let path = session.shows[0].path.clone().unwrap();
         session.shows[0].show["name"] = serde_json::json!("Changed");
         let backups = root.join("Backups");
-        let before = std::fs::read_dir(&backups).map(|dir| dir.count()).unwrap_or(0);
+        let before = std::fs::read_dir(&backups)
+            .map(|dir| dir.count())
+            .unwrap_or(0);
         assert!(session.autosave() >= 1);
         assert_eq!(ShowFile::load(&path).unwrap().name(), "Changed");
         let after = std::fs::read_dir(&backups).unwrap().count();
@@ -6209,15 +6249,16 @@ mod tests {
                 "For God so loved the world".to_string()
             ]
         );
-        assert_eq!(session.to_snapshot().scripture_lines, session.output_lines());
+        assert_eq!(
+            session.to_snapshot().scripture_lines,
+            session.output_lines()
+        );
     }
 
     #[test]
     fn an_imported_bible_is_on_the_remote_snapshot() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-scripture-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-scripture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Bibles")).unwrap();
         let bible = BibleFile::from_document(
@@ -6248,7 +6289,8 @@ mod tests {
 
     #[test]
     fn a_remote_lyric_edit_is_saved_in_the_project() {
-        let root = std::env::temp_dir().join(format!("freeshow-rust-remote-show-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-remote-show-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_project());
@@ -6257,17 +6299,18 @@ mod tests {
         assert_eq!(session.project_labels().last().unwrap(), "Call to worship");
         assert!(session.set_show_text("song1", "Verse one\n\nChorus"));
         let again = Session::open(root.clone());
-        assert_eq!(again.shows[0].ordered_slides()[1].lines, vec!["Chorus".to_string()]);
+        assert_eq!(
+            again.shows[0].ordered_slides()[1].lines,
+            vec!["Chorus".to_string()]
+        );
         assert_eq!(again.to_snapshot().projects[0].shows[0].kind, "show");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_remote_play_finds_the_library_file() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-remote-media-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-remote-media-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Media")).unwrap();
         std::fs::write(root.join("Media/clip.mp4"), b"not a real video").unwrap();
@@ -6287,10 +6330,8 @@ mod tests {
 
     #[test]
     fn pausing_audio_keeps_the_file_so_play_can_resume() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-remote-audio-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-remote-audio-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Audio")).unwrap();
         std::fs::write(root.join("Audio/song.wav"), b"RIFF").unwrap();
@@ -6305,7 +6346,10 @@ mod tests {
             name: "song.wav".into(),
         });
         assert!(session.audio_paused);
-        assert!(matches!(session.pending_play, Some(PendingPlay::PauseAudio)));
+        assert!(matches!(
+            session.pending_play,
+            Some(PendingPlay::PauseAudio)
+        ));
         assert!(session.play_named("song.wav"));
         assert!(!session.audio_paused);
         assert!(matches!(
@@ -6322,10 +6366,8 @@ mod tests {
 
     #[test]
     fn a_template_from_the_library_restyles_the_open_show() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-template-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-template-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let library = freeshow_data::Library::open(&root);
         std::fs::create_dir_all(library.templates_path().parent().unwrap()).unwrap();
@@ -6337,9 +6379,7 @@ mod tests {
         let mut session = Session::open(root.clone());
         assert_eq!(session.templates, vec!["Big".to_string()]);
         assert!(session.create_show_with("song1", "Call", "Hello"));
-        session.apply_remote(freeshow_remote::Command::SetTemplate {
-            id: "big".into(),
-        });
+        session.apply_remote(freeshow_remote::Command::SetTemplate { id: "big".into() });
         assert_eq!(
             session.shows[0]
                 .show
@@ -6394,7 +6434,9 @@ mod tests {
     #[test]
     fn a_calendar_action_starts_its_show_when_the_time_arrives() {
         let mut session = Session::empty();
-        session.shows.push(ShowFile::blank("grace", "Amazing Grace"));
+        session
+            .shows
+            .push(ShowFile::blank("grace", "Amazing Grace"));
         let now = chrono::Utc::now();
         session.event_catalog = Catalog::parse(&format!(
             r#"{{"sunday":{{"name":"Sunday","type":"action","from":"{}","action":{{"id":"start_show","data":{{"id":"grace"}}}}}},"later":{{"name":"Later","type":"show","from":"{}","show":"grace"}},"old":{{"name":"Old","type":"action","from":"{}","action":{{"id":"start_show","data":{{"id":"grace"}}}}}}}}"#,

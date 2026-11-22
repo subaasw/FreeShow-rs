@@ -3,10 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use freeshow_data::{fill_variables, StageClockOptions, StageItemKind, StageItemSpec, StageLayout};
+use freeshow_data::{StageClockOptions, StageItemKind, StageItemSpec, StageLayout, fill_variables};
 use freeshow_output::{
-    parse_color, render_styled, Blend, Fit, Raster, Rgba, StyledItem, StyledLine, StyledSlide,
-    TextRun, OUTPUT_HEIGHT, OUTPUT_WIDTH, SOURCE_HEIGHT, SOURCE_WIDTH,
+    Blend, Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
+    StyledLine, StyledSlide, TextRun, parse_color, render_styled,
 };
 
 pub struct StageSlide {
@@ -398,7 +398,7 @@ fn format_date(format: &str, now: &chrono::DateTime<chrono::Local>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use freeshow_data::{default_stage, StageClockOptions};
+    use freeshow_data::{StageClockOptions, default_stage};
     use freeshow_output::fingerprint;
 
     fn spec(kind: StageItemKind) -> StageItemSpec {

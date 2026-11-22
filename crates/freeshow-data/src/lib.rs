@@ -133,9 +133,9 @@ fn active_output_key(outputs: &serde_json::Map<String, Value>) -> Option<String>
         .iter()
         .find(|(_, output)| output.get("active").and_then(Value::as_bool) == Some(true))
         .or_else(|| {
-            outputs.iter().find(|(_, output)| {
-                output.get("enabled").and_then(Value::as_bool) != Some(false)
-            })
+            outputs
+                .iter()
+                .find(|(_, output)| output.get("enabled").and_then(Value::as_bool) != Some(false))
         })
         .map(|(key, _)| key.clone())
 }
@@ -207,7 +207,11 @@ fn action_trigger(node: &Value, name: &str) -> bool {
                 action
                     .get("triggers")
                     .and_then(Value::as_array)
-                    .is_some_and(|triggers| triggers.iter().any(|trigger| trigger.as_str() == Some(name)))
+                    .is_some_and(|triggers| {
+                        triggers
+                            .iter()
+                            .any(|trigger| trigger.as_str() == Some(name))
+                    })
             })
         })
 }
@@ -223,7 +227,9 @@ fn label_id(label: &str) -> String {
     let mut index = 0;
     while index < chars.len() {
         if chars[index] == 'x'
-            && chars.get(index + 1).is_some_and(|next| next.is_ascii_digit())
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_digit())
         {
             index += 2;
             continue;
@@ -242,7 +248,10 @@ fn label_id(label: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlideJump {
     /// A layout index, optionally in another show.
-    Index { show_id: Option<String>, index: usize },
+    Index {
+        show_id: Option<String>,
+        index: usize,
+    },
     /// A group label, such as Chorus or Verse_2.
     Name(String),
     /// A global group id.
@@ -273,7 +282,10 @@ pub enum MixStep {
         use_db: bool,
     },
     /// `muted` is missing when the action toggles the channel.
-    Mute { channel: String, muted: Option<bool> },
+    Mute {
+        channel: String,
+        muted: Option<bool>,
+    },
 }
 
 /// Actions before a wait, the wait in seconds, and the actions after it.
@@ -299,7 +311,11 @@ fn action_is_wait(action: &Value) -> bool {
     action
         .get("triggers")
         .and_then(Value::as_array)
-        .is_some_and(|triggers| triggers.iter().any(|trigger| trigger.as_str() == Some("wait")))
+        .is_some_and(|triggers| {
+            triggers
+                .iter()
+                .any(|trigger| trigger.as_str() == Some("wait"))
+        })
 }
 
 fn wait_seconds(action: &Value) -> f64 {
@@ -540,9 +556,9 @@ impl ShowFile {
         let Some(layouts) = layouts.as_object_mut() else {
             return false;
         };
-        let layout = layouts.entry(layout_id).or_insert_with(|| {
-            serde_json::json!({ "name": "Default", "notes": "", "slides": [] })
-        });
+        let layout = layouts
+            .entry(layout_id)
+            .or_insert_with(|| serde_json::json!({ "name": "Default", "notes": "", "slides": [] }));
         let Some(layout) = layout.as_object_mut() else {
             return false;
         };
@@ -660,11 +676,7 @@ impl ShowFile {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let Some(slides) = self
-            .show
-            .get_mut("slides")
-            .and_then(Value::as_object_mut)
-        else {
+        let Some(slides) = self.show.get_mut("slides").and_then(Value::as_object_mut) else {
             return true;
         };
         for slide in slides.values_mut() {
@@ -745,14 +757,12 @@ impl ShowFile {
     /// Seconds until FreeShow advances, from the layout slide's `nextTimer`.
     pub fn next_timer_at(&self, index: usize) -> Option<f64> {
         let node = self.layout_node_at(index)?;
-        let seconds = node
-            .get("nextTimer")
-            .and_then(|value| {
-                value
-                    .as_f64()
-                    .or_else(|| value.as_u64().map(|number| number as f64))
-                    .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
-            })?;
+        let seconds = node.get("nextTimer").and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_u64().map(|number| number as f64))
+                .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        })?;
         (seconds > 0.0).then_some(seconds)
     }
 
@@ -854,7 +864,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         actions
@@ -891,11 +904,7 @@ impl ShowFile {
             .and_then(Value::as_array)
             .map(|ids| {
                 ids.iter()
-                    .filter_map(|id| {
-                        id.as_str()
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_string)
-                    })
+                    .filter_map(|id| id.as_str().filter(|id| !id.is_empty()).map(str::to_string))
                     .collect()
             })
             .unwrap_or_default()
@@ -962,7 +971,10 @@ impl ShowFile {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if triggers.iter().any(|trigger| *trigger == "index_select_slide") {
+            if triggers
+                .iter()
+                .any(|trigger| *trigger == "index_select_slide")
+            {
                 let value = action.pointer("/actionValues/index_select_slide");
                 let index = value.and_then(|value| {
                     value
@@ -979,7 +991,10 @@ impl ShowFile {
                     return Some(SlideJump::Index { show_id, index });
                 }
             }
-            if triggers.iter().any(|trigger| *trigger == "name_select_slide") {
+            if triggers
+                .iter()
+                .any(|trigger| *trigger == "name_select_slide")
+            {
                 let value = action.pointer("/actionValues/name_select_slide");
                 let name = value.and_then(|value| {
                     value
@@ -1019,7 +1034,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         let mut ids = Vec::new();
@@ -1134,7 +1152,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         let mut ids = Vec::new();
@@ -1212,7 +1233,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         let mut found = Vec::new();
@@ -1253,7 +1277,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         let mut found = Vec::new();
@@ -1273,11 +1300,17 @@ impl ShowFile {
                 found.push(PlaylistStep::Next);
             }
             let start = triggers.iter().any(|trigger| trigger == "start_playlist");
-            let named = triggers.iter().any(|trigger| trigger == "name_start_playlist");
+            let named = triggers
+                .iter()
+                .any(|trigger| trigger == "name_start_playlist");
             if !start && !named {
                 continue;
             }
-            let key = if named { "name_start_playlist" } else { "start_playlist" };
+            let key = if named {
+                "name_start_playlist"
+            } else {
+                "start_playlist"
+            };
             let value = action.pointer(&format!("/actionValues/{key}"));
             let id = value
                 .and_then(|value| value.get("id"))
@@ -1292,7 +1325,10 @@ impl ShowFile {
                 .unwrap_or("")
                 .to_string();
             if start && !id.is_empty() {
-                found.push(PlaylistStep::Start { id, name: String::new() });
+                found.push(PlaylistStep::Start {
+                    id,
+                    name: String::new(),
+                });
             } else if !name.is_empty() || !id.is_empty() {
                 found.push(PlaylistStep::Start { id, name });
             }
@@ -1306,7 +1342,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         actions
@@ -1331,7 +1370,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         let mut steps = Vec::new();
@@ -1353,7 +1395,9 @@ impl ShowFile {
                     .and_then(Value::as_str)
                     .filter(|channel| !channel.is_empty())
                     .unwrap_or("main");
-                let volume = value.and_then(|value| value.get("volume")).and_then(json_f64);
+                let volume = value
+                    .and_then(|value| value.get("volume"))
+                    .and_then(json_f64);
                 let use_db = value
                     .and_then(|value| value.get("useDB"))
                     .and_then(Value::as_bool)
@@ -1392,7 +1436,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return Vec::new();
         };
-        let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) else {
+        let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        else {
             return Vec::new();
         };
         let mut steps = Vec::new();
@@ -1407,10 +1454,16 @@ impl ShowFile {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if triggers.iter().any(|trigger| *trigger == "clear_next_timer") {
+            if triggers
+                .iter()
+                .any(|trigger| *trigger == "clear_next_timer")
+            {
                 steps.push(TimerStep::Clear);
             }
-            if triggers.iter().any(|trigger| *trigger == "set_next_slide_timer") {
+            if triggers
+                .iter()
+                .any(|trigger| *trigger == "set_next_slide_timer")
+            {
                 let value = action.pointer("/actionValues/set_next_slide_timer");
                 let seconds = value.and_then(|value| {
                     value
@@ -1448,11 +1501,7 @@ impl ShowFile {
             let Some(parent_id) = entry.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if self
-                .show
-                .pointer(&format!("/slides/{parent_id}"))
-                .is_none()
-            {
+            if self.show.pointer(&format!("/slides/{parent_id}")).is_none() {
                 continue;
             }
             steps.push(Step {
@@ -1471,11 +1520,7 @@ impl ShowFile {
                 let Some(child_id) = child.as_str() else {
                     continue;
                 };
-                if self
-                    .show
-                    .pointer(&format!("/slides/{child_id}"))
-                    .is_none()
-                {
+                if self.show.pointer(&format!("/slides/{child_id}")).is_none() {
                     continue;
                 }
                 steps.push(Step {
@@ -1701,9 +1746,9 @@ impl ShowFile {
             .pointer(&format!("/slides/{slide_id}/items"))
             .and_then(Value::as_array)
             .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("clickReveal").and_then(Value::as_bool) == Some(true)
-                })
+                items
+                    .iter()
+                    .any(|item| item.get("clickReveal").and_then(Value::as_bool) == Some(true))
             })
     }
 
@@ -1766,7 +1811,9 @@ impl ShowFile {
                     .and_then(Value::as_array)
                     .is_some_and(|bindings| {
                         !bindings.is_empty()
-                            && !bindings.iter().any(|target| target.as_str() == Some("stage"))
+                            && !bindings
+                                .iter()
+                                .any(|target| target.as_str() == Some("stage"))
                     })
             {
                 continue;
@@ -1831,9 +1878,9 @@ impl ShowFile {
 
     /// The first layout slide that is not disabled.
     pub fn first_enabled_slide(&self) -> Option<usize> {
-        self.layout_steps().iter().position(|(_, node)| {
-            node.get("disabled").and_then(Value::as_bool) != Some(true)
-        })
+        self.layout_steps()
+            .iter()
+            .position(|(_, node)| node.get("disabled").and_then(Value::as_bool) != Some(true))
     }
 
     /// Timer ids this slide starts, from `id_start_timer` and timer items.
@@ -1843,7 +1890,10 @@ impl ShowFile {
             return Vec::new();
         };
         let mut ids = Vec::new();
-        if let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) {
+        if let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        {
             for action in actions {
                 let id = action
                     .pointer("/actionValues/id_start_timer/id")
@@ -1891,7 +1941,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return None;
         };
-        if let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) {
+        if let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        {
             for action in actions {
                 let chosen = action
                     .get("triggers")
@@ -1924,7 +1977,10 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return None;
         };
-        if let Some(actions) = node.pointer("/actions/slideActions").and_then(Value::as_array) {
+        if let Some(actions) = node
+            .pointer("/actions/slideActions")
+            .and_then(Value::as_array)
+        {
             for action in actions {
                 let chosen = action
                     .get("triggers")
@@ -1969,7 +2025,9 @@ impl ShowFile {
         let Some((_, node)) = steps.get(index) else {
             return false;
         };
-        node.pointer("/actions/nextAfterMedia").and_then(Value::as_bool) == Some(true)
+        node.pointer("/actions/nextAfterMedia")
+            .and_then(Value::as_bool)
+            == Some(true)
     }
 
     /// The file that just ended belongs to this slide, and the slide is waiting for it.
@@ -2347,7 +2405,10 @@ impl ShowFile {
         else {
             return false;
         };
-        let mut grouped: Vec<Value> = positions.iter().map(|index| order[*index].clone()).collect();
+        let mut grouped: Vec<Value> = positions
+            .iter()
+            .map(|index| order[*index].clone())
+            .collect();
         let item = grouped.remove(from);
         grouped.insert(to, item);
         for (index, value) in positions.into_iter().zip(grouped) {
@@ -2358,10 +2419,7 @@ impl ShowFile {
 
     /// Appends a copy of a group slide to the active layout.
     pub fn duplicate_slide(&mut self, slide_id: &str) -> Option<String> {
-        let mut slide = self
-            .show
-            .pointer(&format!("/slides/{slide_id}"))?
-            .clone();
+        let mut slide = self.show.pointer(&format!("/slides/{slide_id}"))?.clone();
         if let Some(object) = slide.as_object_mut() {
             object.remove("children");
         }
@@ -2537,7 +2595,8 @@ fn variable_key(
         let mut exact = None;
         let mut contains = None;
         for (key, variable) in map {
-            let stored = variable_name_id(variable.get("name").and_then(Value::as_str).unwrap_or(""));
+            let stored =
+                variable_name_id(variable.get("name").and_then(Value::as_str).unwrap_or(""));
             if stored == query && exact.is_none() {
                 exact = Some(key.clone());
             }
@@ -2728,8 +2787,13 @@ impl ProjectsFile {
     }
 
     pub fn project_matches(&self, other: &Self, id: &str) -> bool {
-        self.document.get("projects").and_then(|projects| projects.get(id))
-            == other.document.get("projects").and_then(|projects| projects.get(id))
+        self.document
+            .get("projects")
+            .and_then(|projects| projects.get(id))
+            == other
+                .document
+                .get("projects")
+                .and_then(|projects| projects.get(id))
     }
 
     pub fn projects(&self) -> Vec<ProjectEntry> {
@@ -3683,18 +3747,15 @@ impl Library {
                 serde_json::json!(next)
             };
             entry.insert("number".to_string(), stored);
-        } else if command == "text" || value.and_then(Value::as_str).is_some() && command != "enabled"
+        } else if command == "text"
+            || value.and_then(Value::as_str).is_some() && command != "enabled"
         {
             let text = value.and_then(Value::as_str).unwrap_or("");
             entry.insert("text".to_string(), Value::String(text.to_string()));
         } else {
             let enabled = value
                 .and_then(Value::as_bool)
-                .or_else(|| {
-                    value
-                        .and_then(Value::as_str)
-                        .map(|flag| flag != "false")
-                })
+                .or_else(|| value.and_then(Value::as_str).map(|flag| flag != "false"))
                 .unwrap_or_else(|| entry.get("enabled").and_then(Value::as_bool) != Some(true));
             entry.insert("enabled".to_string(), Value::Bool(enabled));
         }
@@ -3760,23 +3821,37 @@ impl Library {
             return None;
         }
         let value = &settings["special"]["icecast"];
-        let host = value["host"].as_str().filter(|host| !host.is_empty()).unwrap_or("localhost");
-        let mount = value["mount"].as_str().filter(|mount| !mount.is_empty()).unwrap_or("/stream.opus");
+        let host = value["host"]
+            .as_str()
+            .filter(|host| !host.is_empty())
+            .unwrap_or("localhost");
+        let mount = value["mount"]
+            .as_str()
+            .filter(|mount| !mount.is_empty())
+            .unwrap_or("/stream.opus");
         let password = value["password"].as_str().unwrap_or("hackme");
         let port = if value["port"].is_null() {
             8000
         } else {
-            u16::try_from(json_u64(value.get("port"))?).ok().filter(|port| *port != 0)?
+            u16::try_from(json_u64(value.get("port"))?)
+                .ok()
+                .filter(|port| *port != 0)?
         };
         if host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
             || host.contains(['/', '@', '?', '#', '\\'])
-            || mount.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            || mount
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace())
             || mount.contains(['?', '#'])
             || password.contains('\0')
         {
             return None;
         }
-        let mount = if mount.starts_with('/') { mount.to_owned() } else { format!("/{mount}") };
+        let mount = if mount.starts_with('/') {
+            mount.to_owned()
+        } else {
+            format!("/{mount}")
+        };
         Some((
             freeshow_core::IcecastDestination {
                 host: host.to_owned(),
@@ -3792,9 +3867,13 @@ impl Library {
         let path = self.settings_path();
         let mut settings: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
         let root = settings.as_object_mut().ok_or(DataError::ShowShape)?;
-        let special = root.entry("special").or_insert_with(|| serde_json::json!({}));
+        let special = root
+            .entry("special")
+            .or_insert_with(|| serde_json::json!({}));
         let special = special.as_object_mut().ok_or(DataError::ShowShape)?;
-        let icecast = special.entry("icecast").or_insert_with(|| serde_json::json!({}));
+        let icecast = special
+            .entry("icecast")
+            .or_insert_with(|| serde_json::json!({}));
         let icecast = icecast.as_object_mut().ok_or(DataError::ShowShape)?;
         icecast.insert("enabled".into(), Value::Bool(enabled));
         atomic_write(&path, &serde_json::to_vec_pretty(&settings)?)
@@ -4145,7 +4224,10 @@ impl Library {
         let Some(entry) = json.get(path.to_string_lossy().as_ref()) else {
             return (0.0, 0.0);
         };
-        (stored_seconds(entry, "fromTime"), stored_seconds(entry, "toTime"))
+        (
+            stored_seconds(entry, "fromTime"),
+            stored_seconds(entry, "toTime"),
+        )
     }
 
     /// Playback speed stored for one audio file. A missing or non-positive tempo stays at 1.
@@ -4177,11 +4259,9 @@ impl Library {
         else {
             return 1.0;
         };
-        let number = speed.as_f64().or_else(|| {
-            speed
-                .as_str()
-                .and_then(|text| text.parse::<f64>().ok())
-        });
+        let number = speed
+            .as_f64()
+            .or_else(|| speed.as_str().and_then(|text| text.parse::<f64>().ok()));
         match number {
             Some(value) if value > 0.0 => value,
             _ => 1.0,
@@ -4219,17 +4299,19 @@ impl Library {
             return 0;
         };
         if let Some(layers) = style.get("layers").and_then(Value::as_array) {
-            if !layers
-                .iter()
-                .any(|layer| layer.as_str() == Some("slide"))
-            {
+            if !layers.iter().any(|layer| layer.as_str() == Some("slide")) {
                 return 0;
             }
         }
         style
             .get("lines")
             .and_then(Value::as_u64)
-            .or_else(|| style.get("lines").and_then(Value::as_f64).map(|lines| lines as u64))
+            .or_else(|| {
+                style
+                    .get("lines")
+                    .and_then(Value::as_f64)
+                    .map(|lines| lines as u64)
+            })
             .unwrap_or(0) as u32
     }
 
@@ -4810,7 +4892,9 @@ mod tests {
         });
         assert!(show.apply_template("big", &template));
         assert_eq!(
-            show.show.pointer("/settings/template").and_then(Value::as_str),
+            show.show
+                .pointer("/settings/template")
+                .and_then(Value::as_str),
             Some("big")
         );
         assert_eq!(
@@ -4989,7 +5073,8 @@ mod tests {
 
     #[test]
     fn text_transition_reads_the_stored_slide() {
-        let root = std::env::temp_dir().join(format!("freeshow-rust-transition-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-transition-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let library = Library::open(&root);
@@ -5050,10 +5135,7 @@ mod tests {
                 easing: "back".into(),
             })
         );
-        assert_eq!(
-            library.style_transition("media").unwrap().kind,
-            "spin"
-        );
+        assert_eq!(library.style_transition("media").unwrap().kind, "spin");
         fs::write(
             library.settings_path(),
             r#"{"outputs":{"default":{"active":true,"style":"missing"}}}"#,
@@ -5065,10 +5147,8 @@ mod tests {
 
     #[test]
     fn media_look_reads_the_file_fit_and_flip() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-media-look-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-media-look-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("Config")).unwrap();
         let library = Library::open(&root);
@@ -5089,10 +5169,7 @@ mod tests {
             picture.to_string_lossy().as_ref(): { "fit": "cover", "flipped": true, "flippedY": true }
         });
         fs::write(library.media_store_path(), store.to_string()).unwrap();
-        assert_eq!(
-            library.media_look(&picture),
-            ("cover".into(), true, true)
-        );
+        assert_eq!(library.media_look(&picture), ("cover".into(), true, true));
         assert_eq!(library.media_volume(&picture), 1.0);
         let store = serde_json::json!({
             picture.to_string_lossy().as_ref(): { "volume": 0.4 }
@@ -5122,7 +5199,10 @@ mod tests {
         });
         fs::write(library.media_store_path(), store.to_string()).unwrap();
         assert!((library.media_tempo(&picture) - 1.5).abs() < 0.001);
-        assert_eq!(library.media_effect(&picture), (String::new(), String::new()));
+        assert_eq!(
+            library.media_effect(&picture),
+            (String::new(), String::new())
+        );
         let store = serde_json::json!({
             picture.to_string_lossy().as_ref(): { "filter": "grayscale(1)", "blend": "multiply" }
         });
@@ -5314,7 +5394,10 @@ mod tests {
         assert!(timed.can_output(2, "other", "Stage"));
         assert_eq!(timed.step_output(0, 1, "default", ""), Some(1));
         assert_eq!(timed.audio_stream_at(1).as_deref(), Some("/chapel/bed.mp3"));
-        assert_eq!(timed.audio_stream_at(2).as_deref(), Some("https://example.com/live"));
+        assert_eq!(
+            timed.audio_stream_at(2).as_deref(),
+            Some("https://example.com/live")
+        );
         assert_eq!(timed.output_style_at(0).as_deref(), Some("night"));
         assert_eq!(timed.output_style_at(1).as_deref(), Some("day"));
         assert_eq!(timed.output_style_at(2), None);
@@ -5323,7 +5406,10 @@ mod tests {
         assert!(timed.waits_for_ended(0, "/audio/bed.mp3", true));
         assert!(!timed.waits_for_ended(0, "/other.mp4", false));
         assert!(!timed.nexts_after_media_at(1));
-        assert_eq!(timed.timer_ids_at(0), vec!["welcome".to_string(), "sermon".to_string()]);
+        assert_eq!(
+            timed.timer_ids_at(0),
+            vec!["welcome".to_string(), "sermon".to_string()]
+        );
         assert!(!timed.stops_timers_at(0));
         assert!(timed.timer_ids_at(1).is_empty());
         assert!(timed.stops_timers_at(1));
@@ -5353,10 +5439,8 @@ mod tests {
 
     #[test]
     fn next_item_on_last_slide_defaults_on() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-next-item-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-next-item-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let library = Library::open(&root);
@@ -5372,10 +5456,8 @@ mod tests {
 
     #[test]
     fn library_preferences_read_theme_and_remote_password() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-preferences-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-preferences-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let library = Library::open(&root);
@@ -5403,7 +5485,10 @@ mod tests {
         fs::write(&themes_path, themes.to_string()).unwrap();
         assert_eq!(library.preferences().themes, themes);
         // Reading compatibility settings must not rewrite the Electron files.
-        assert_eq!(fs::read_to_string(&themes_path).unwrap(), themes.to_string());
+        assert_eq!(
+            fs::read_to_string(&themes_path).unwrap(),
+            themes.to_string()
+        );
         fs::remove_file(library.settings_path()).unwrap();
         assert_eq!(library.preferences().theme, None);
         assert_eq!(library.preferences().themes, themes);
