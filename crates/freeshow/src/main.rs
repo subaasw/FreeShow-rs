@@ -67,9 +67,17 @@ fn readable_on(text: Rgb, back: Rgb) -> Rgb {
     if ratio >= 1.5 {
         text
     } else if b > 0.18 {
-        Rgb { r: 16, g: 16, b: 20 }
+        Rgb {
+            r: 16,
+            g: 16,
+            b: 20,
+        }
     } else {
-        Rgb { r: 240, g: 240, b: 255 }
+        Rgb {
+            r: 240,
+            g: 240,
+            b: 255,
+        }
     }
 }
 
@@ -81,7 +89,10 @@ fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     ui.set_primary_darkest(color(palette.primary_darkest));
     ui.set_text_color(color(palette.text));
     ui.set_accent(color(palette.secondary));
-    ui.set_accent_text(color(readable_on(palette.secondary_text, palette.secondary)));
+    ui.set_accent_text(color(readable_on(
+        palette.secondary_text,
+        palette.secondary,
+    )));
     let primary = palette.primary;
     let luma = 0.2126 * f32::from(primary.r)
         + 0.7152 * f32::from(primary.g)
