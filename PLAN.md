@@ -116,6 +116,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
 - [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
 - [x] ProPresenter 7 timed next-slide cues within an arrangement.
+- [x] ProPresenter 7 enabled, immediate global clear-audio and clear-background cues.
 - [ ] Other ProPresenter 7 graphics, remaining RTF controls, and timeline/action parity.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.
 - [x] ChurchApps service-plan lesson feeds and add-ons with downloadable media.

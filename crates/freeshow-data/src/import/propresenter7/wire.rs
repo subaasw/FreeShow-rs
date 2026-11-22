@@ -126,12 +126,33 @@ pub(super) enum CompletionAction {
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct Action {
+    #[prost(double, tag = "4")]
+    pub delay: f64,
+    #[prost(bool, tag = "6")]
+    pub enabled: bool,
     #[prost(enumeration = "ActionType", tag = "9")]
     pub kind: i32,
     #[prost(message, optional, tag = "20")]
     pub media: Option<MediaAction>,
     #[prost(message, optional, tag = "23")]
     pub slide: Option<SlideAction>,
+    #[prost(message, optional, tag = "26")]
+    pub clear: Option<ClearAction>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct ClearAction {
+    #[prost(enumeration = "ClearTarget", tag = "2")]
+    pub target: i32,
+    #[prost(int32, tag = "4")]
+    pub destination: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+pub(super) enum ClearTarget {
+    All = 0,
+    Audio = 1,
+    Background = 2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
