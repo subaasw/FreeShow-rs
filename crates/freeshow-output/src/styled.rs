@@ -39,9 +39,11 @@ pub struct BoxStyle {
     pub stroke_px: f32,
     pub stroke_color: Option<Rgba>,
     pub shadow: Option<TextShadow>,
-    /// CSS `border-radius` in slide pixels. `50%` still uses `elliptical_background`.
-    pub radius: f32,
-    pub box_shadow: Option<BoxShadow>,
+    /// CSS `border-radius` corners: top-left, top-right, bottom-right, bottom-left.
+    /// A single `50%` still uses `elliptical_background`.
+    pub radii: [CornerRadius; 4],
+    /// CSS `box-shadow` layers in source order (the first one paints on top).
+    pub box_shadows: Vec<BoxShadow>,
     /// CSS `backdrop-filter` from the item style, or empty.
     pub backdrop: String,
     rotation_deg: f32,
@@ -66,6 +68,67 @@ pub struct TextShadow {
     pub y: f32,
     pub blur: f32,
     pub color: Rgba,
+}
+
+/// One `border-radius` corner, in slide pixels or a percent of the shorter side.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum CornerRadius {
+    #[default]
+    Zero,
+    Px(f32),
+    Percent(f32),
+}
+
+impl CornerRadius {
+    fn parse(token: &str) -> Option<Self> {
+        let token = token.trim();
+        if let Some(percent) = token.strip_suffix('%') {
+            return percent.trim().parse().ok().map(Self::Percent);
+        }
+        px(token).map(Self::Px)
+    }
+
+    /// Output pixels for a box of `w`×`h` output pixels.
+    fn resolve(self, slide: &StyledSlide, w: i32, h: i32) -> i32 {
+        match self {
+            Self::Zero => 0,
+            Self::Px(value) => scale(value, slide.output_height, slide.source_height).max(0),
+            Self::Percent(percent) => (w.min(h) as f32 * percent / 100.0).round().max(0.0) as i32,
+        }
+    }
+}
+
+/// Resolved per-corner radii in output pixels: top-left, top-right, bottom-right, bottom-left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Radii([i32; 4]);
+
+impl Radii {
+    fn uniform(radius: i32) -> Self {
+        Self([radius.max(0); 4])
+    }
+
+    fn grow(self, by: i32) -> Self {
+        Self(
+            self.0
+                .map(|radius| if radius > 0 { (radius + by).max(0) } else { 0 }),
+        )
+    }
+
+    /// CSS scales every corner down when adjacent radii overflow a side.
+    fn fit(self, w: i32, h: i32) -> Self {
+        let [tl, tr, br, bl] = self.0;
+        let sides = [(tl + tr, w), (tr + br, h), (br + bl, w), (bl + tl, h)];
+        let factor = sides
+            .iter()
+            .filter(|(sum, _)| *sum > 0)
+            .map(|(sum, side)| (*side).max(0) as f32 / *sum as f32)
+            .fold(1.0_f32, f32::min);
+        if factor >= 1.0 {
+            self
+        } else {
+            Self(self.0.map(|radius| (radius as f32 * factor).floor() as i32))
+        }
+    }
 }
 
 /// CSS `box-shadow` on an item box.
@@ -109,8 +172,8 @@ impl Default for BoxStyle {
             stroke_px: 0.0,
             stroke_color: None,
             shadow: None,
-            radius: 0.0,
-            box_shadow: None,
+            radii: [CornerRadius::Zero; 4],
+            box_shadows: Vec::new(),
             backdrop: String::new(),
             rotation_deg: 0.0,
             gradient: None,
@@ -332,13 +395,13 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 style.pptx_rectangular_focus = parse_rectangular_focus(value)
             }
             "border-radius" => {
-                if value == "50%" {
+                if value.trim() == "50%" {
                     style.elliptical_background = true;
-                } else if let Some(radius) = px(value.split_whitespace().next().unwrap_or(value)) {
-                    style.radius = radius;
+                } else if let Some(radii) = parse_border_radius(value) {
+                    style.radii = radii;
                 }
             }
-            "box-shadow" => style.box_shadow = parse_box_shadow(value),
+            "box-shadow" => style.box_shadows = parse_box_shadows(value),
             "backdrop-filter" => style.backdrop = value.to_string(),
             "transform" => {
                 style.rotation_deg = value
@@ -1100,7 +1163,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
         return;
     }
     if !style.backdrop.trim().is_empty() {
-        let radius = item_radius(&style, slide);
+        let radius = item_radius(&style, slide, w, h);
         apply_backdrop(pixels, slide, &bounds, &style.backdrop, |px, py| {
             in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background)
         });
@@ -1187,7 +1250,7 @@ fn draw_rotated_item(
             w: x1 - x0,
             h: y1 - y0,
         };
-        let radius = item_radius(style, slide);
+        let radius = item_radius(style, slide, w, h);
         apply_backdrop(pixels, slide, &viewport, &style.backdrop, |px, py| {
             let (sx, sy) = sample(px, py);
             in_item_shape(sx, sy, 0, 0, w, h, radius, style.elliptical_background)
@@ -1258,8 +1321,13 @@ fn draw_item_content(
     blend: Blend,
 ) {
     let text::Clip { x, y, w, h } = bounds;
-    let radius = item_radius(style, slide);
-    if let Some(shadow) = style.box_shadow.filter(|shadow| !shadow.inset) {
+    let radius = item_radius(style, slide, w, h);
+    for &shadow in style
+        .box_shadows
+        .iter()
+        .rev()
+        .filter(|shadow| !shadow.inset)
+    {
         paint_box_shadow(
             pixels,
             slide,
@@ -1358,7 +1426,7 @@ fn draw_item_content(
                 cursor_y,
                 w,
                 bar_h,
-                radius,
+                Radii::uniform(radius),
                 color,
             );
         }
@@ -1606,7 +1674,7 @@ fn draw_item_content(
             );
         }
     }
-    if let Some(shadow) = style.box_shadow.filter(|shadow| shadow.inset) {
+    for &shadow in style.box_shadows.iter().rev().filter(|shadow| shadow.inset) {
         paint_inset_shadow(
             pixels,
             slide,
@@ -2596,6 +2664,42 @@ fn parse_shadow(value: &str) -> Option<TextShadow> {
     })
 }
 
+/// CSS `border-radius` shorthand (1–4 values; the elliptical `/` part is ignored).
+fn parse_border_radius(value: &str) -> Option<[CornerRadius; 4]> {
+    let horizontal = value.split('/').next().unwrap_or(value);
+    let values = horizontal
+        .split_whitespace()
+        .map(CornerRadius::parse)
+        .collect::<Option<Vec<_>>>()?;
+    Some(match values.as_slice() {
+        [all] => [*all; 4],
+        [a, b] => [*a, *b, *a, *b],
+        [a, b, c] => [*a, *b, *c, *b],
+        [a, b, c, d, ..] => [*a, *b, *c, *d],
+        [] => return None,
+    })
+}
+
+/// Comma-separated `box-shadow` layers. Commas inside `rgb(...)` stay with their color.
+fn parse_box_shadows(value: &str) -> Vec<BoxShadow> {
+    let mut layers = Vec::new();
+    let mut depth = 0_i32;
+    let mut start = 0;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                layers.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    layers.push(&value[start..]);
+    layers.into_iter().filter_map(parse_box_shadow).collect()
+}
+
 fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     let mut rest = value.trim();
     if rest.is_empty() || rest.eq_ignore_ascii_case("none") {
@@ -2642,7 +2746,7 @@ fn in_item_shape(
     y: i32,
     w: i32,
     h: i32,
-    radius: i32,
+    radius: Radii,
     ellipse: bool,
 ) -> bool {
     if px < x || py < y || px >= x + w || py >= y + h {
@@ -2658,11 +2762,11 @@ fn in_item_shape(
     !outside_round_corner(px - x, py - y, w, h, radius)
 }
 
-fn item_radius(style: &BoxStyle, slide: &StyledSlide) -> i32 {
+fn item_radius(style: &BoxStyle, slide: &StyledSlide, w: i32, h: i32) -> Radii {
     if style.elliptical_background {
-        0
+        Radii::default()
     } else {
-        scale(style.radius, slide.output_height, slide.source_height).max(0)
+        Radii(style.radii.map(|corner| corner.resolve(slide, w, h))).fit(w, h)
     }
 }
 
@@ -2830,7 +2934,7 @@ fn paint_box_shadow(
     y: i32,
     w: i32,
     h: i32,
-    radius: i32,
+    radius: Radii,
     ellipse: bool,
     shadow: BoxShadow,
 ) {
@@ -2857,7 +2961,7 @@ fn paint_box_shadow(
             sy,
             sw,
             sh,
-            radius + spread,
+            radius.grow(spread),
             ellipse,
             shadow.color,
         );
@@ -2879,7 +2983,7 @@ fn paint_box_shadow(
                 sy + dy,
                 sw,
                 sh,
-                radius + spread,
+                radius.grow(spread),
                 ellipse,
                 faded(alpha),
             );
@@ -2895,7 +2999,7 @@ fn stamp_shadow_shape(
     y: i32,
     w: i32,
     h: i32,
-    radius: i32,
+    radius: Radii,
     ellipse: bool,
     color: Rgba,
 ) {
@@ -2916,7 +3020,7 @@ fn paint_inset_shadow(
     y: i32,
     w: i32,
     h: i32,
-    radius: i32,
+    radius: Radii,
     ellipse: bool,
     shadow: BoxShadow,
 ) {
@@ -2928,7 +3032,7 @@ fn paint_inset_shadow(
     let inner_y = y + oy + spread;
     let inner_w = (w - spread * 2).max(1);
     let inner_h = (h - spread * 2).max(1);
-    let inner_r = (radius - spread).max(0);
+    let inner_r = radius.grow(-spread);
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
     for py in y0..y1 {
         for px in x0..x1 {
@@ -3179,10 +3283,10 @@ fn fill_round_rect(
     y: i32,
     w: i32,
     h: i32,
-    radius: i32,
+    radius: Radii,
     color: Rgba,
 ) {
-    let radius = radius.min(w / 2).min(h / 2).max(0);
+    let radius = radius.fit(w, h);
     let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
     for py in y0..y1 {
         for px in x0..x1 {
@@ -3194,18 +3298,16 @@ fn fill_round_rect(
     }
 }
 
-fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radius: i32) -> bool {
-    if radius <= 0 {
-        return false;
-    }
-    let (cx, cy) = if dx < radius && dy < radius {
-        (radius, radius)
-    } else if dx >= w - radius && dy < radius {
-        (w - radius - 1, radius)
-    } else if dx < radius && dy >= h - radius {
-        (radius, h - radius - 1)
-    } else if dx >= w - radius && dy >= h - radius {
-        (w - radius - 1, h - radius - 1)
+fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radii: Radii) -> bool {
+    let [tl, tr, br, bl] = radii.0;
+    let (radius, cx, cy) = if tl > 0 && dx < tl && dy < tl {
+        (tl, tl, tl)
+    } else if tr > 0 && dx >= w - tr && dy < tr {
+        (tr, w - tr - 1, tr)
+    } else if br > 0 && dx >= w - br && dy >= h - br {
+        (br, w - br - 1, h - br - 1)
+    } else if bl > 0 && dx < bl && dy >= h - bl {
+        (bl, bl, h - bl - 1)
     } else {
         return false;
     };
@@ -3222,7 +3324,7 @@ fn fill_item_background(
     y: i32,
     w: i32,
     h: i32,
-    radius: i32,
+    radius: Radii,
 ) {
     if style.gradient.is_none() && style.background.is_none() {
         return;
@@ -3319,7 +3421,7 @@ fn fill_item_background(
                 }
             }
         }
-    } else if radius > 0 {
+    } else if radius != Radii::default() {
         fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
     } else {
         fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
@@ -3644,18 +3746,14 @@ mod tests {
             .unwrap();
         assert_eq!(faded_shadow.color.a, 204);
         assert!(parse_style("text-shadow: none;").shadow.is_none());
-        let box_shadow = parse_style("box-shadow: 2px 2px 8px 0 rgb(0 0 0 / 0.5);")
-            .box_shadow
-            .unwrap();
+        let box_shadow = parse_style("box-shadow: 2px 2px 8px 0 rgb(0 0 0 / 0.5);").box_shadows[0];
         assert_eq!(box_shadow.x, 2.0);
         assert_eq!(box_shadow.y, 2.0);
         assert_eq!(box_shadow.blur, 8.0);
         assert_eq!(box_shadow.spread, 0.0);
         assert_eq!(box_shadow.color.a, 128);
         assert!(!box_shadow.inset);
-        let inset = parse_style("box-shadow: inset 4px 6px 2px 3px #ff0000;")
-            .box_shadow
-            .unwrap();
+        let inset = parse_style("box-shadow: inset 4px 6px 2px 3px #ff0000;").box_shadows[0];
         assert!(inset.inset);
         assert_eq!(inset.spread, 3.0);
         assert_eq!(
@@ -3667,9 +3765,9 @@ mod tests {
                 a: 255
             }
         );
-        assert!(parse_style("box-shadow: none;").box_shadow.is_none());
+        assert!(parse_style("box-shadow: none;").box_shadows.is_empty());
         let rounded = parse_style("border-radius: 8px;backdrop-filter: blur(10px);");
-        assert_eq!(rounded.radius, 8.0);
+        assert_eq!(rounded.radii, [CornerRadius::Px(8.0); 4]);
         assert!(!rounded.elliptical_background);
         assert_eq!(rounded.backdrop, "blur(10px)");
         assert!(parse_style("border-radius: 50%;").elliptical_background);
@@ -3905,6 +4003,72 @@ mod tests {
         slide.items[0].style = style.into();
         slide.items[0].lines.clear();
         slide
+    }
+
+    #[test]
+    fn border_radius_shorthand_and_shadow_layers_parse_like_css() {
+        let two = parse_style("border-radius: 10px 20%;");
+        assert_eq!(
+            two.radii,
+            [
+                CornerRadius::Px(10.0),
+                CornerRadius::Percent(20.0),
+                CornerRadius::Px(10.0),
+                CornerRadius::Percent(20.0)
+            ]
+        );
+        let three = parse_style("border-radius: 1px 2px 3px / 9px;");
+        assert_eq!(
+            three.radii,
+            [
+                CornerRadius::Px(1.0),
+                CornerRadius::Px(2.0),
+                CornerRadius::Px(3.0),
+                CornerRadius::Px(2.0)
+            ]
+        );
+        assert_eq!(
+            parse_style("border-radius: 0 0 0 40px;").radii[3],
+            CornerRadius::Px(40.0)
+        );
+        let layers =
+            parse_style("box-shadow: 0 0 4px rgb(0, 0, 0), inset 2px 2px 0 1px #ff0000, 5px 5px;")
+                .box_shadows;
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0].blur, 4.0);
+        assert!(layers[1].inset);
+        assert_eq!(layers[2].x, 5.0);
+        assert_eq!(
+            Radii([300, 300, 0, 0]).fit(400, 400),
+            Radii([200, 200, 0, 0])
+        );
+    }
+
+    #[test]
+    fn single_corners_and_stacked_shadows_are_painted() {
+        // 400px source box = 200 output px at 960x540; only the top-right corner is round.
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:400px;height:400px;background:#ffffff;border-radius: 0 200px 0 0;",
+        ));
+        let at = |x: usize, y: usize| &frame.pixels[(y * 960 + x) * 4..(y * 960 + x) * 4 + 3];
+        assert_eq!(at(0, 0), &[255, 255, 255], "top-left stays square");
+        assert_eq!(at(0, 199), &[255, 255, 255], "bottom-left stays square");
+        assert_eq!(at(199, 199), &[255, 255, 255], "bottom-right stays square");
+        assert!(at(199, 0)[0] < 40, "top-right is cut: {:?}", at(199, 0));
+        let stacked = render_styled(&style_slide(
+            "left:200px;top:200px;width:200px;height:200px;background:#ffffff;box-shadow: 200px 0 0 0 #ff0000, 0 200px 0 0 #00ff00;",
+        ));
+        let px = |x: usize, y: usize| &stacked.pixels[(y * 960 + x) * 4..(y * 960 + x) * 4 + 3];
+        assert!(
+            px(220, 120)[0] > 200 && px(220, 120)[1] < 40,
+            "red layer: {:?}",
+            px(220, 120)
+        );
+        assert!(
+            px(120, 220)[1] > 200 && px(120, 220)[0] < 40,
+            "green layer: {:?}",
+            px(120, 220)
+        );
     }
 
     #[test]
