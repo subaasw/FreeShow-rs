@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod church_import;
-mod live;
 mod desktop;
-mod runtime;
+mod live;
 mod present;
+mod runtime;
 mod session;
 mod stage;
 mod theme;
@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 
-use freeshow_ai::SlideAssist;
 use church_import::ChurchImport;
+use freeshow_ai::SlideAssist;
 use freeshow_cloud::CloudBackup;
 use freeshow_core::{AppSettings, Rgb, ThemePalette};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
@@ -596,12 +596,7 @@ fn fade_into(
         move || {
             let next = step.get().saturating_add(1);
             step.set(next);
-            let frame = motion_frame(
-                &from,
-                &to,
-                &motion,
-                f32::from(next) / f32::from(steps),
-            );
+            let frame = motion_frame(&from, &to, &motion, f32::from(next) / f32::from(steps));
             if send_ndi {
                 ndi().submit(&frame.pixels, frame.width, frame.height);
                 freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
@@ -851,9 +846,10 @@ fn follow_video(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(33),
         move || {
-            let timing = player_tick.borrow().as_ref().map(|player| {
-                (player.position_seconds(), player.duration_seconds())
-            });
+            let timing = player_tick
+                .borrow()
+                .as_ref()
+                .map(|player| (player.position_seconds(), player.duration_seconds()));
             let raster = player_tick
                 .borrow_mut()
                 .as_mut()
@@ -1139,7 +1135,11 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
             "--install-desktop" => launch.install_desktop = true,
             "--uninstall-desktop" => launch.uninstall_desktop = true,
             "--check-runtime" => launch.check_runtime = true,
-            "--check-media" => launch.check_media = Some(PathBuf::from(args.next().ok_or("--check-media needs a video file")?)),
+            "--check-media" => {
+                launch.check_media = Some(PathBuf::from(
+                    args.next().ok_or("--check-media needs a video file")?,
+                ))
+            }
             "--data" => launch.data = args.next().map(PathBuf::from),
             "--show" => launch.show = args.next().map(PathBuf::from),
             "--list-audio-devices" => launch.list_audio_devices = true,
@@ -1253,13 +1253,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let control = ControlWindow::new()?;
-    let startup_import = session.root.clone().and_then(|root| match ChurchImport::start(root) {
-        Ok(job) => Some(job),
-        Err(error) => {
-            tracing::error!("could not start ChurchApps import: {error}");
-            None
-        }
-    });
+    let startup_import = session
+        .root
+        .clone()
+        .and_then(|root| match ChurchImport::start(root) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                tracing::error!("could not start ChurchApps import: {error}");
+                None
+            }
+        });
     let church_import = Rc::new(RefCell::new(startup_import));
     {
         let church_import = Rc::clone(&church_import);
@@ -1643,7 +1646,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         if current.recording {
                             let frame = last_output.borrow();
-                            freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+                            freeshow_record::ServiceCapture.submit(
+                                &frame.pixels,
+                                frame.width,
+                                frame.height,
+                            );
                         }
                     }
                     5 => {
@@ -1674,7 +1681,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(error) => {
                                     tracing::error!("could not start ChurchApps import: {error}");
                                     if let Some(ui) = ui.upgrade() {
-                                        ui.set_import_status("Could not start ChurchApps import".into());
+                                        ui.set_import_status(
+                                            "Could not start ChurchApps import".into(),
+                                        );
                                     }
                                 }
                             }
@@ -1797,17 +1806,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             player.set_span(from, to);
                             follow_video(
-                            Rc::clone(&video_timer),
-                            Rc::clone(&video_player),
-                            player,
-                            Some(path.clone()),
-                            Rc::clone(&session),
-                            Rc::clone(&output_slot),
-                            Rc::clone(&preview_slot),
-                            Rc::clone(&stage_slot),
-                            Rc::clone(&last_output),
-                            Rc::clone(&last_stage),
-                        );
+                                Rc::clone(&video_timer),
+                                Rc::clone(&video_player),
+                                player,
+                                Some(path.clone()),
+                                Rc::clone(&session),
+                                Rc::clone(&output_slot),
+                                Rc::clone(&preview_slot),
+                                Rc::clone(&stage_slot),
+                                Rc::clone(&last_output),
+                                Rc::clone(&last_stage),
+                            );
                         }
                         Err(err) => tracing::error!("could not play video: {err}"),
                     }
@@ -2135,7 +2144,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .network_output("rtmp")
             .unwrap_or_else(|| "default".into());
         let _ = freeshow_record::ServiceCapture.start_rtmp_routed(
-            &url, OUTPUT_WIDTH, OUTPUT_HEIGHT, &output_id,
+            &url,
+            OUTPUT_WIDTH,
+            OUTPUT_HEIGHT,
+            &output_id,
         );
         let frame = last_output.borrow();
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
@@ -2369,7 +2381,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (0, false) => String::new(),
                         (0, true) => "ChurchApps import failed. See the log.".into(),
                         (count, false) => format!("ChurchApps prepared {count} shows"),
-                        (count, true) => format!("ChurchApps prepared {count} shows. See the log for skipped sources."),
+                        (count, true) => format!(
+                            "ChurchApps prepared {count} shows. See the log for skipped sources."
+                        ),
                     };
                     ui.set_import_status(status.into());
                 }

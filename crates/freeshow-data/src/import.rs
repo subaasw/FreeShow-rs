@@ -64,10 +64,16 @@ pub fn import_sources(
         let found = if propresenter::is_bundle(&path) {
             propresenter::import_bundle(&bytes, media)
         } else if extension.eq_ignore_ascii_case("pptx") || looks_like_pptx(&bytes) {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("slides");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("slides");
             powerpoint::import(name, &bytes, Some(media)).map(|show| vec![show])
         } else if extension.eq_ignore_ascii_case("pro") {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("song");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("song");
             propresenter7::decode(name, &bytes).map(|mut show| {
                 propresenter7::resolve_standalone_media(&mut show, &path);
                 vec![show]
@@ -1299,7 +1305,9 @@ fn save_imported_media(media: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf
             Err(error) => return Err(error.into()),
         }
     }
-    Err(DataError::Scripture("too many imported media filename collisions".into()))
+    Err(DataError::Scripture(
+        "too many imported media filename collisions".into(),
+    ))
 }
 
 fn file_stem(name: &str) -> String {

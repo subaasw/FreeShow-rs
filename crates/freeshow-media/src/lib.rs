@@ -6,13 +6,15 @@
 
 mod audio;
 mod runtime;
-pub use runtime::{check_runtime, RuntimeStatus};
-mod video;
+pub use runtime::{RuntimeStatus, check_runtime};
 mod network;
-pub use network::{network_channel,network_audio_mix};
+mod video;
 pub use freeshow_core::NetworkRoute;
+pub use network::{network_audio_mix, network_channel};
 
-pub use audio::{AudioOutput, AudioPlaybackOptions, Pcm, Playback, apply_volume, decode_audio, output_devices};
+pub use audio::{
+    AudioOutput, AudioPlaybackOptions, Pcm, Playback, apply_volume, decode_audio, output_devices,
+};
 pub use video::{VideoPlayer, cameras, video_output_devices};
 
 use std::path::Path;

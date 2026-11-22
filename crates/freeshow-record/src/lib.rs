@@ -350,7 +350,13 @@ mod tests {
                     .collect();
             let (pipeline, appsrc) = open_pipeline(&descriptions).unwrap();
             let raw = count_buffers(appsrc.static_pad("src").unwrap());
-            let encoded = count_buffers(pipeline.by_name("mux").unwrap().static_pad("video").unwrap());
+            let encoded = count_buffers(
+                pipeline
+                    .by_name("mux")
+                    .unwrap()
+                    .static_pad("video")
+                    .unwrap(),
+            );
             counts = Some((raw, encoded));
             assert!(start_pipeline(&RTMP, pipeline, appsrc, 64, 48));
         }
@@ -511,7 +517,10 @@ mod tests {
             "only {} static video frames in FLV ({raw_frames} raw, {encoded_frames} at the mux)",
             video.len()
         );
-        assert!(encoded_frames > raw_frames, "expected frame-rate correction under slow input");
+        assert!(
+            encoded_frames > raw_frames,
+            "expected frame-rate correction under slow input"
+        );
         let first_video = video.first().unwrap().1;
         let last_video = video.last().unwrap().1;
         assert!(

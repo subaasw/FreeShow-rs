@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -14,16 +14,38 @@ pub enum Command {
     SetShow(usize),
     SetSlide(usize),
     /// Open one row of the current project. `slide` is set for a song and empty for media.
-    OpenProjectItem { index: usize, slide: Option<usize> },
+    OpenProjectItem {
+        index: usize,
+        slide: Option<usize>,
+    },
     Clear,
-    PresentVerse { reference: String, text: String },
-    SetShowText { id: String, text: String },
-    CreateShow { id: String, name: String, text: String },
-    AddToProject { project_id: String, show_id: String },
-    ShowOverlay { id: String },
-    ClearOverlay { id: String },
+    PresentVerse {
+        reference: String,
+        text: String,
+    },
+    SetShowText {
+        id: String,
+        text: String,
+    },
+    CreateShow {
+        id: String,
+        name: String,
+        text: String,
+    },
+    AddToProject {
+        project_id: String,
+        show_id: String,
+    },
+    ShowOverlay {
+        id: String,
+    },
+    ClearOverlay {
+        id: String,
+    },
     ClearOverlays,
-    Play { name: String },
+    Play {
+        name: String,
+    },
     /// Output gain in thousandths, so 1000 is full volume.
     SetVolume {
         thousandths: u16,
@@ -39,25 +61,57 @@ pub enum Command {
     StopAudio,
     ToggleMedia,
     ToggleIcecast(Option<bool>),
-    PauseAudio { name: String },
-    SeekAudio { millis: u64 },
-    SeekVideo { millis: u64 },
-    SetMediaLoop { on: bool },
-    SetMediaMute { on: bool },
-    SetTemplate { id: String },
-    StartTimer { id: String },
-    PauseTimer { id: String },
-    StopTimer { id: String },
+    PauseAudio {
+        name: String,
+    },
+    SeekAudio {
+        millis: u64,
+    },
+    SeekVideo {
+        millis: u64,
+    },
+    SetMediaLoop {
+        on: bool,
+    },
+    SetMediaMute {
+        on: bool,
+    },
+    SetTemplate {
+        id: String,
+    },
+    StartTimer {
+        id: String,
+    },
+    PauseTimer {
+        id: String,
+    },
+    StopTimer {
+        id: String,
+    },
     RearrangeGroups {
         show_id: String,
         from: usize,
         to: usize,
     },
-    AddGroup { show_id: String, group_id: String },
-    ChangeLayout { show_id: String, layout_id: String },
-    RenameProject { project_id: String, name: String },
-    DeleteProject { project_id: String },
-    RemoveProjectItem { project_id: String, index: usize },
+    AddGroup {
+        show_id: String,
+        group_id: String,
+    },
+    ChangeLayout {
+        show_id: String,
+        layout_id: String,
+    },
+    RenameProject {
+        project_id: String,
+        name: String,
+    },
+    DeleteProject {
+        project_id: String,
+    },
+    RemoveProjectItem {
+        project_id: String,
+        index: usize,
+    },
     CreateProject {
         id: String,
         name: String,
@@ -642,10 +696,18 @@ fn open_project_neighbor(snapshot: &mut ShowSnapshot, delta: isize) -> Option<Co
         let opened = match item.kind.as_str() {
             "show" | "" => select_show(snapshot, &item.id).is_some(),
             "image" | "video" | "player" | "audio" | "folder" => true,
-            "overlay" => snapshot.overlays.iter().any(|overlay| overlay.id == item.id),
+            "overlay" => snapshot
+                .overlays
+                .iter()
+                .any(|overlay| overlay.id == item.id),
             _ => false,
         };
-        if opened && item.kind == "overlay" && !snapshot.active_overlays.iter().any(|active| active == &item.id)
+        if opened
+            && item.kind == "overlay"
+            && !snapshot
+                .active_overlays
+                .iter()
+                .any(|active| active == &item.id)
         {
             snapshot.active_overlays.push(item.id.clone());
         }
@@ -918,14 +980,16 @@ fn set_template(
 ) -> Vec<Value> {
     let id = data.get("id").and_then(Value::as_str).unwrap_or("");
     if snapshot.templates.iter().any(|template| template.id == id) {
-        commands.push(Command::SetTemplate {
-            id: id.to_string(),
-        });
+        commands.push(Command::SetTemplate { id: id.to_string() });
     }
     vec![templates_message(snapshot)]
 }
 
-fn show_overlay(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
+fn show_overlay(
+    snapshot: &mut ShowSnapshot,
+    data: &Value,
+    commands: &mut Vec<Command>,
+) -> Vec<Value> {
     let id = data.get("id").and_then(Value::as_str).unwrap_or("");
     if snapshot.overlays.iter().any(|overlay| overlay.id == id)
         && !snapshot.active_overlays.iter().any(|active| active == id)
@@ -1207,7 +1271,10 @@ fn move_grouped_slides(slides: &mut [RemoteSlide], from: usize, to: usize) -> bo
     if from >= positions.len() || to >= positions.len() || from == to {
         return false;
     }
-    let mut grouped: Vec<RemoteSlide> = positions.iter().map(|index| slides[*index].clone()).collect();
+    let mut grouped: Vec<RemoteSlide> = positions
+        .iter()
+        .map(|index| slides[*index].clone())
+        .collect();
     let slide = grouped.remove(from);
     grouped.insert(to, slide);
     for (index, slide) in positions.into_iter().zip(grouped) {
@@ -1304,10 +1371,7 @@ fn add_group(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Comma
 
 fn search_shows_message(snapshot: &ShowSnapshot, data: &Value) -> Value {
     let query = data.get("query").and_then(Value::as_str).unwrap_or("");
-    let limit = data
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(500) as usize;
+    let limit = data.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize;
     let needle = query.trim().to_lowercase();
     let results = if needle.chars().count() < 2 {
         Vec::new()
@@ -1384,7 +1448,11 @@ fn slides_from_text(text: &str) -> Vec<RemoteSlide> {
         .collect()
 }
 
-fn set_plain_text(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
+fn set_plain_text(
+    snapshot: &mut ShowSnapshot,
+    data: &Value,
+    commands: &mut Vec<Command>,
+) -> Vec<Value> {
     let requested = data.get("id").and_then(Value::as_str).unwrap_or("");
     let text = data.get("value").and_then(Value::as_str).unwrap_or("");
     let index = snapshot
@@ -1433,7 +1501,11 @@ fn set_plain_text(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<
     vec![show_message(snapshot), out_message(snapshot)]
 }
 
-fn create_show(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
+fn create_show(
+    snapshot: &mut ShowSnapshot,
+    data: &Value,
+    commands: &mut Vec<Command>,
+) -> Vec<Value> {
     let name = data
         .get("name")
         .and_then(Value::as_str)
@@ -1459,7 +1531,10 @@ fn create_show(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Com
     snapshot.cleared = false;
     snapshot.scripture_lines.clear();
     if let Some(project_id) = snapshot.project_id.clone()
-        && let Some(project) = snapshot.projects.iter_mut().find(|project| project.id == project_id)
+        && let Some(project) = snapshot
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
     {
         project.shows.push(RemoteProjectItem {
             id: id.clone(),
@@ -1485,7 +1560,11 @@ fn create_show(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Com
     ]
 }
 
-fn add_to_project(snapshot: &mut ShowSnapshot, data: &Value, commands: &mut Vec<Command>) -> Vec<Value> {
+fn add_to_project(
+    snapshot: &mut ShowSnapshot,
+    data: &Value,
+    commands: &mut Vec<Command>,
+) -> Vec<Value> {
     let project_id = data
         .get("projectId")
         .and_then(Value::as_str)
@@ -1527,7 +1606,11 @@ fn rename_project(
     commands: &mut Vec<Command>,
 ) -> Vec<Value> {
     let project_id = data.get("id").and_then(Value::as_str).unwrap_or("");
-    let name = data.get("name").and_then(Value::as_str).unwrap_or("").trim();
+    let name = data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     if !project_id.is_empty()
         && !name.is_empty()
         && let Some(project) = snapshot
@@ -1605,7 +1688,11 @@ fn step_scripture_message(
 }
 
 fn adjacent_verse(snapshot: &ShowSnapshot, delta: isize) -> Option<(String, String)> {
-    let current = snapshot.scripture_lines.first().cloned().unwrap_or_default();
+    let current = snapshot
+        .scripture_lines
+        .first()
+        .cloned()
+        .unwrap_or_default();
     let mut flat = Vec::new();
     for bible in snapshot.bibles.iter() {
         for book in &bible.books {
@@ -1780,10 +1867,7 @@ fn dotted_hit(bible: &RemoteBible, reference: &str) -> Option<(String, String)> 
     let book_number: u64 = parts.next()?.parse().ok()?;
     let chapter_number: u64 = parts.next()?.parse().ok()?;
     let verse_number: u64 = parts.next()?.split('-').next()?.parse().ok()?;
-    let book = bible
-        .books
-        .iter()
-        .find(|book| book.number == book_number)?;
+    let book = bible.books.iter().find(|book| book.number == book_number)?;
     verse_text(book, chapter_number, verse_number)
 }
 
@@ -1792,13 +1876,18 @@ fn named_hit(bible: &RemoteBible, reference: &str) -> Option<(String, String)> {
     let (chapter, verse) = rest.split_once(':')?;
     let chapter_number: u64 = chapter.parse().ok()?;
     let verse_number: u64 = verse.split('-').next()?.parse().ok()?;
-    let book = bible.books.iter().find(|book| {
-        book.name.eq_ignore_ascii_case(book_name.trim())
-    })?;
+    let book = bible
+        .books
+        .iter()
+        .find(|book| book.name.eq_ignore_ascii_case(book_name.trim()))?;
     verse_text(book, chapter_number, verse_number)
 }
 
-fn verse_text(book: &RemoteBook, chapter_number: u64, verse_number: u64) -> Option<(String, String)> {
+fn verse_text(
+    book: &RemoteBook,
+    chapter_number: u64,
+    verse_number: u64,
+) -> Option<(String, String)> {
     let chapter = book
         .chapters
         .iter()
@@ -1980,9 +2069,16 @@ fn create_project(
     let parent = snapshot
         .project_id
         .as_ref()
-        .and_then(|active| snapshot.projects.iter().find(|project| &project.id == active))
+        .and_then(|active| {
+            snapshot
+                .projects
+                .iter()
+                .find(|project| &project.id == active)
+        })
         .map(|project| project.parent.clone())
-        .filter(|parent| parent != "/" && snapshot.folders.iter().any(|folder| &folder.id == parent))
+        .filter(|parent| {
+            parent != "/" && snapshot.folders.iter().any(|folder| &folder.id == parent)
+        })
         .unwrap_or_else(|| "/".into());
     snapshot.projects.push(RemoteProject {
         id: id.clone(),
@@ -2066,15 +2162,15 @@ mod tests {
                             label: "how sweet".into(),
                             lines: vec!["how sweet".into()],
                             notes: String::new(),
-                id: String::new(),
-                group: String::new(),
+                            id: String::new(),
+                            group: String::new(),
                         },
                         RemoteSlide {
                             label: "the sound".into(),
                             lines: vec!["the sound".into()],
                             notes: String::new(),
-                id: String::new(),
-                group: String::new(),
+                            id: String::new(),
+                            group: String::new(),
                         },
                     ],
                 },
@@ -2087,8 +2183,8 @@ mod tests {
                         label: "Hello".into(),
                         lines: vec!["Hello".into()],
                         notes: String::new(),
-                id: String::new(),
-                group: String::new(),
+                        id: String::new(),
+                        group: String::new(),
                     }],
                 },
             ],
@@ -2208,10 +2304,7 @@ mod tests {
             "For God sent not his Son"
         );
 
-        let (replies, _) = handle_message(
-            &mut snapshot,
-            &json!({ "channel": "PASSWORD" }),
-        );
+        let (replies, _) = handle_message(&mut snapshot, &json!({ "channel": "PASSWORD" }));
         assert_eq!(replies[4]["channel"], "SCRIPTURE");
         assert_eq!(replies[4]["data"]["kjv"]["name"], "KJV");
     }
@@ -2286,10 +2379,8 @@ mod tests {
         assert_eq!(replies[1]["data"]["lines"][0], "Verse one");
 
         snapshot.scripture_lines = vec!["John 3:16".into(), "For God so loved the world".into()];
-        let (replies, commands) = handle_message(
-            &mut snapshot,
-            &json!({ "channel": "API:scripture_next" }),
-        );
+        let (replies, commands) =
+            handle_message(&mut snapshot, &json!({ "channel": "API:scripture_next" }));
         assert_eq!(replies[0]["data"]["lines"][0], "John 3:17");
         assert!(matches!(commands[0], Command::PresentVerse { .. }));
 
@@ -2303,7 +2394,10 @@ mod tests {
         assert_eq!(replies[0]["channel"], "API:create_show");
         assert_eq!(replies[0]["data"]["show"]["name"], "Call to worship");
         assert!(matches!(commands[0], Command::CreateShow { .. }));
-        assert_eq!(snapshot.projects[0].shows.last().unwrap().name, "Call to worship");
+        assert_eq!(
+            snapshot.projects[0].shows.last().unwrap().name,
+            "Call to worship"
+        );
 
         let (replies, _) = handle_message(&mut snapshot, &json!({ "channel": "API:get_cleared" }));
         assert_eq!(replies[0]["data"]["slide"], false);
@@ -2329,10 +2423,7 @@ mod tests {
             &mut snapshot,
             &json!({ "channel": "API:id_select_overlay", "data": { "id": "logo" } }),
         );
-        assert_eq!(
-            commands,
-            vec![Command::ShowOverlay { id: "logo".into() }]
-        );
+        assert_eq!(commands, vec![Command::ShowOverlay { id: "logo".into() }]);
         assert_eq!(replies[0]["channel"], "OUT_DATA");
         assert_eq!(replies[0]["data"]["overlays"][0], "logo");
         assert_eq!(replies[1]["data"]["overlays"], false);
@@ -2341,10 +2432,7 @@ mod tests {
             &mut snapshot,
             &json!({ "channel": "API:clear_overlay", "data": { "id": "logo" } }),
         );
-        assert_eq!(
-            commands,
-            vec![Command::ClearOverlay { id: "logo".into() }]
-        );
+        assert_eq!(commands, vec![Command::ClearOverlay { id: "logo".into() }]);
         assert_eq!(replies[1]["data"]["overlays"], true);
 
         snapshot.active_overlays.push("logo".into());
@@ -2527,7 +2615,10 @@ mod tests {
             &json!({ "channel": "API:change_volume", "data": { "volume": 0.5 } }),
         );
         assert_eq!(commands, vec![Command::SetVolume { thousandths: 500 }]);
-        assert_eq!(replies[0]["data"]["audioChannelsData"]["main"]["volume"], 0.5);
+        assert_eq!(
+            replies[0]["data"]["audioChannelsData"]["main"]["volume"],
+            0.5
+        );
 
         let (_, commands) = handle_message(
             &mut snapshot,
@@ -2570,10 +2661,7 @@ mod tests {
             &mut snapshot,
             &json!({ "channel": "API:set_template", "data": { "id": "big" } }),
         );
-        assert_eq!(
-            commands,
-            vec![Command::SetTemplate { id: "big".into() }]
-        );
+        assert_eq!(commands, vec![Command::SetTemplate { id: "big".into() }]);
         let (_, commands) = handle_message(
             &mut snapshot,
             &json!({ "channel": "API:set_template", "data": { "id": "missing" } }),
@@ -2668,10 +2756,7 @@ mod tests {
                 "data": { "showId": "grace", "groupId": "s2" }
             }),
         );
-        assert!(matches!(
-            commands[0],
-            Command::AddGroup { .. }
-        ));
+        assert!(matches!(commands[0], Command::AddGroup { .. }));
         assert_eq!(snapshot.shows[0].slides.last().unwrap().group, "Chorus");
     }
 

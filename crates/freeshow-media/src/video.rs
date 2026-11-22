@@ -381,7 +381,7 @@ mod gst_player {
 
     #[cfg(target_os = "macos")]
     fn macos_speaker_devices() -> Result<Vec<(u32, String)>, MediaError> {
-        use coreaudio::audio_unit::{macos_helpers, Scope};
+        use coreaudio::audio_unit::{Scope, macos_helpers};
         // GStreamer's macOS provider can block discovery in a headless process.
         // Query output metadata through the CoreAudio bindings CPAL already
         // uses, then pass the native device ID to osxaudiosink.
@@ -1141,7 +1141,7 @@ mod gst_player {
 }
 
 #[cfg(feature = "gst")]
-pub use gst_player::{cameras, video_output_devices, VideoPlayer};
+pub use gst_player::{VideoPlayer, cameras, video_output_devices};
 
 #[cfg(not(feature = "gst"))]
 pub struct VideoPlayer;

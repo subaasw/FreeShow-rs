@@ -2,13 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::session::Session;
 use freeshow_data::ShowFile;
 use freeshow_output::{
-    Fit, Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
-    StyledLine, StyledSlide, TextRun, Blend, blend_mode, blur_frames, clear_frame, crossfade, decode_image, ease_progress, over, parse_color, placed_image,
-    render_styled, scale_frames, slide_frames, slide_way, spin_frames, filter_blur, filter_brightness, filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia,
+    Blend, Fit, Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH,
+    StyledItem, StyledLine, StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, crossfade,
+    decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
+    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, over,
+    parse_color, placed_image, render_styled, scale_frames, slide_frames, slide_way, spin_frames,
 };
-use crate::session::Session;
 
 /// One step of a slide or media transition. `t` is the raw progress from 0 to 1.
 pub fn motion_frame(
@@ -103,7 +105,13 @@ fn paint_overlays(mut frame: Frame, session: &Session, under_slide: bool) -> Fra
                 items
                     .iter()
                     .map(|item| {
-                        styled_item(item, session.root.as_deref(), None, None, &session_variables(session))
+                        styled_item(
+                            item,
+                            session.root.as_deref(),
+                            None,
+                            None,
+                            &session_variables(session),
+                        )
                     })
                     .collect()
             })
@@ -170,7 +178,9 @@ pub fn stage_frame(session: &Session) -> Frame {
                                 .map(|lines| {
                                     lines
                                         .into_iter()
-                                        .map(|line| freeshow_data::fill_variables(&line, &variables))
+                                        .map(|line| {
+                                            freeshow_data::fill_variables(&line, &variables)
+                                        })
                                         .collect()
                                 })
                                 .collect(),
@@ -184,17 +194,24 @@ pub fn stage_frame(session: &Session) -> Frame {
     };
     let root = session.root.as_deref();
     let mut still_backgrounds = std::collections::HashMap::new();
-    if session.tab != "scripture" && let Some(index) = index
+    if session.tab != "scripture"
+        && let Some(index) = index
         && let Some(show) = session.show_index.and_then(|slot| session.shows.get(slot))
     {
         for item in &session.stage.items {
-            if item.kind != freeshow_data::StageItemKind::Slide || !item.include_media || item.offset == 0 {
+            if item.kind != freeshow_data::StageItemKind::Slide
+                || !item.include_media
+                || item.offset == 0
+            {
                 continue;
             }
-            let Some(target) = i64::try_from(index).ok()
+            let Some(target) = i64::try_from(index)
+                .ok()
                 .and_then(|index| index.checked_add(item.offset))
                 .and_then(|index| usize::try_from(index).ok())
-            else { continue };
+            else {
+                continue;
+            };
             if let freeshow_data::SlideBackdrop::Picture { path, .. } = show.backdrop_at(target)
                 && freeshow_media::media_kind(Path::new(&path)) == freeshow_media::MediaKind::Image
             {
@@ -202,7 +219,10 @@ pub fn stage_frame(session: &Session) -> Frame {
             }
         }
     }
-    let sources = session.stage.items.iter()
+    let sources = session
+        .stage
+        .items
+        .iter()
         .filter(|item| item.kind == freeshow_data::StageItemKind::Media)
         .filter_map(|item| item.src.as_deref())
         .chain(still_backgrounds.values().map(String::as_str));
@@ -221,9 +241,16 @@ pub fn stage_frame(session: &Session) -> Frame {
             audience: audience
                 .as_ref()
                 .map(|(id, name, image)| (id.as_str(), name.as_str(), image)),
-            current_background: session.underlay.as_ref().filter(|_| !session.blanked).map(|image| (
-                image, session.background_fit, session.background_flip_x, session.background_flip_y
-            )),
+            current_background: session.underlay.as_ref().filter(|_| !session.blanked).map(
+                |image| {
+                    (
+                        image,
+                        session.background_fit,
+                        session.background_flip_x,
+                        session.background_flip_y,
+                    )
+                },
+            ),
             still_backgrounds: Some(&still_backgrounds),
         },
     )
@@ -328,7 +355,10 @@ fn styled_item(
     page: Option<(usize, usize)>,
     variables: &[(String, String)],
 ) -> StyledItem {
-    let chords_on = item.pointer("/chords/enabled").and_then(|value| value.as_bool()) == Some(true);
+    let chords_on = item
+        .pointer("/chords/enabled")
+        .and_then(|value| value.as_bool())
+        == Some(true);
     let reveal_lines = item.get("lineReveal").and_then(|value| value.as_bool()) == Some(true);
     let lines = item
         .get("lines")
@@ -339,9 +369,7 @@ fn styled_item(
                 .enumerate()
                 .filter(|(index, _)| {
                     if reveal_lines {
-                        reveal
-                            .map(|count| *index < count as usize)
-                            .unwrap_or(true)
+                        reveal.map(|count| *index < count as usize).unwrap_or(true)
                     } else if let Some((start, end)) = page {
                         *index >= start && *index < end
                     } else {
@@ -352,16 +380,18 @@ fn styled_item(
                 .flat_map(|line| {
                     let lyric = styled_line(line, variables);
                     let chord = chords_on.then(|| chord_line(item, line)).flatten();
-                    chord.into_iter().chain(std::iter::once(lyric)).collect::<Vec<_>>()
+                    chord
+                        .into_iter()
+                        .chain(std::iter::once(lyric))
+                        .collect::<Vec<_>>()
                 })
                 .collect()
         })
         .unwrap_or_default();
     let qr = item.get("type").and_then(|value| value.as_str()) == Some("qr_code");
     let image = if qr {
-        freeshow_data::QrItem::parse(item).and_then(|qr| {
-            freeshow_output::qr_image(&qr.text, &qr.color, &qr.background)
-        })
+        freeshow_data::QrItem::parse(item)
+            .and_then(|qr| freeshow_output::qr_image(&qr.text, &qr.color, &qr.background))
     } else {
         item.get("src")
             .and_then(|value| value.as_str())
@@ -383,7 +413,11 @@ fn styled_item(
         fit: if qr {
             Fit::Contain
         } else {
-            Fit::named(item.get("fit").and_then(|value| value.as_str()).unwrap_or("contain"))
+            Fit::named(
+                item.get("fit")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("contain"),
+            )
         },
         line_bg: item
             .pointer("/specialStyle/lineBg")
@@ -393,22 +427,56 @@ fn styled_item(
         line_radius: json_number(item.pointer("/specialStyle/lineRadius")).unwrap_or(0.0),
         flip_x: item.get("flipped").and_then(|value| value.as_bool()) == Some(true),
         flip_y: item.get("flippedY").and_then(|value| value.as_bool()) == Some(true),
-        opacity: filter_opacity(item.get("filter").and_then(|value| value.as_str()).unwrap_or("")),
+        opacity: filter_opacity(
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
         grayscale: filter_grayscale(
-            item.get("filter").and_then(|value| value.as_str()).unwrap_or(""),
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
         ),
-        invert: filter_invert(item.get("filter").and_then(|value| value.as_str()).unwrap_or("")),
-        sepia: filter_sepia(item.get("filter").and_then(|value| value.as_str()).unwrap_or("")),
+        invert: filter_invert(
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
+        sepia: filter_sepia(
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
         brightness: filter_brightness(
-            item.get("filter").and_then(|value| value.as_str()).unwrap_or(""),
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
         ),
-        contrast: filter_contrast(item.get("filter").and_then(|value| value.as_str()).unwrap_or("")),
-        saturate: filter_saturate(item.get("filter").and_then(|value| value.as_str()).unwrap_or("")),
+        contrast: filter_contrast(
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
+        saturate: filter_saturate(
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
         hue_rotate: filter_hue_rotate(
-            item.get("filter").and_then(|value| value.as_str()).unwrap_or(""),
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
         ),
-        blur: filter_blur(item.get("filter").and_then(|value| value.as_str()).unwrap_or("")),
-        blend: blend_mode(item.get("blend").and_then(|value| value.as_str()).unwrap_or("normal")),
+        blur: filter_blur(
+            item.get("filter")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
+        blend: blend_mode(
+            item.get("blend")
+                .and_then(|value| value.as_str())
+                .unwrap_or("normal"),
+        ),
         crop: item_crop(item),
     }
 }
@@ -419,7 +487,10 @@ fn item_crop(item: &serde_json::Value) -> freeshow_output::Crop {
         right: json_number(item.pointer("/cropping/right")).unwrap_or(0.0),
         bottom: json_number(item.pointer("/cropping/bottom")).unwrap_or(0.0),
         left: json_number(item.pointer("/cropping/left")).unwrap_or(0.0),
-        clip: item.pointer("/cropping/type").and_then(|value| value.as_str()) != Some("ppt"),
+        clip: item
+            .pointer("/cropping/type")
+            .and_then(|value| value.as_str())
+            != Some("ppt"),
     }
 }
 
@@ -456,7 +527,9 @@ fn styled_line(line: &serde_json::Value, variables: &[(String, String)]) -> Styl
                 runs.iter()
                     .map(|run| TextRun {
                         text: freeshow_data::fill_variables(
-                            run.get("value").and_then(|value| value.as_str()).unwrap_or(""),
+                            run.get("value")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or(""),
                             variables,
                         ),
                         style: run
@@ -547,7 +620,10 @@ fn chord_marks(line: &serde_json::Value) -> Option<Vec<(usize, String)>> {
             if key.is_empty() {
                 return None;
             }
-            let pos = chord.get("pos").and_then(|value| value.as_u64()).unwrap_or(0) as usize;
+            let pos = chord
+                .get("pos")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
             Some((pos, key.to_string()))
         })
         .collect();
@@ -675,25 +751,39 @@ mod tests {
             .map(|(index, _)| (index % frame.width as usize, index / frame.width as usize))
             .collect::<Vec<_>>();
         assert!(!green.is_empty(), "the styled text did not render");
-        assert!(green.iter().all(|(x, y)| (33..590).contains(x) && (45..204).contains(y)));
+        assert!(
+            green
+                .iter()
+                .all(|(x, y)| (33..590).contains(x) && (45..204).contains(y))
+        );
     }
 
     #[test]
     fn stage_lyrics_can_mirror_the_current_background() {
         use freeshow_data::StageItemKind;
         let mut session = Session::empty();
-        session.stage.items.retain(|item| item.kind == StageItemKind::Slide);
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == StageItemKind::Slide);
         assert!(!session.stage.items.is_empty());
         session.stage.items.truncate(1);
         let box_spec = &mut session.stage.items[0];
         box_spec.style = "left:0px;top:0px;width:320px;height:180px;".into();
         box_spec.include_media = true;
-        session.underlay = Some(Raster { width: 16, height: 9, rgba: [255, 0, 0, 255].repeat(144) });
+        session.underlay = Some(Raster {
+            width: 16,
+            height: 9,
+            rgba: [255, 0, 0, 255].repeat(144),
+        });
         let frame = stage_frame(&session);
         assert_eq!(frame.pixel(80, 45), parse_color("#ff0000").unwrap());
         assert_ne!(frame.pixel(170, 100), parse_color("#ff0000").unwrap());
         session.stage.items[0].include_media = false;
-        assert_ne!(stage_frame(&session).pixel(80, 45), parse_color("#ff0000").unwrap());
+        assert_ne!(
+            stage_frame(&session).pixel(80, 45),
+            parse_color("#ff0000").unwrap()
+        );
     }
 
     #[test]
@@ -702,9 +792,11 @@ mod tests {
         let library = freeshow_data::Library::open(&root);
         let stage_path = library.stage_path();
         std::fs::create_dir_all(stage_path.parent().unwrap()).unwrap();
-        std::fs::write(root.join("clip.mp4"),
-            include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4"))
-            .unwrap();
+        std::fs::write(
+            root.join("clip.mp4"),
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4"),
+        )
+        .unwrap();
         std::fs::write(stage_path, r##"{
             "layout":{"settings":{"color":"#111111"}, "items":{"clip":{"type":"media", "src":"clip.mp4",
             "style":"left:0px;top:0px;width:320px;height:180px;"}}}
@@ -720,12 +812,18 @@ mod tests {
                 assert_eq!(frame.pixel(180, 100), parse_color("#111111").unwrap());
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "stage clip produced no picture");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stage clip produced no picture"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(session.underlay.is_none());
         session.stage.items.clear();
-        assert_eq!(stage_frame(&session).pixel(80, 45), parse_color("#111111").unwrap());
+        assert_eq!(
+            stage_frame(&session).pixel(80, 45),
+            parse_color("#111111").unwrap()
+        );
         drop(session);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -992,10 +1090,14 @@ mod tests {
             }),
             "chords stay off until the item enables them"
         );
-        *show.show.pointer_mut("/slides/s1/items/0/chords/enabled").unwrap() =
-            serde_json::json!(true);
-        *show.show.pointer_mut("/slides/s1/items/0/chords/size").unwrap() =
-            serde_json::json!(100);
+        *show
+            .show
+            .pointer_mut("/slides/s1/items/0/chords/enabled")
+            .unwrap() = serde_json::json!(true);
+        *show
+            .show
+            .pointer_mut("/slides/s1/items/0/chords/size")
+            .unwrap() = serde_json::json!(100);
         let full = frame_for_slide(&show, 0, None, true, None, true, None, &[]);
         assert!(
             orange_rows(&frame) < orange_rows(&full),
@@ -1015,8 +1117,10 @@ mod tests {
             }]
         });
         let resting = frame_for_slide(&show, 0, None, true, None, true, None, &[]);
-        *show.show.pointer_mut("/slides/s1/items/0/chords/offsetY").unwrap() =
-            serde_json::json!(80);
+        *show
+            .show
+            .pointer_mut("/slides/s1/items/0/chords/offsetY")
+            .unwrap() = serde_json::json!(80);
         let lifted = frame_for_slide(&show, 0, None, true, None, true, None, &[]);
         assert!(top_orange(&lifted) + 20 < top_orange(&resting));
     }
@@ -1038,9 +1142,8 @@ mod tests {
             .pixels
             .chunks(frame.width as usize * 4)
             .filter(|row| {
-                row.chunks(4).any(|pixel| {
-                    pixel[0] > 200 && pixel[1] > 80 && pixel[1] < 200 && pixel[2] < 80
-                })
+                row.chunks(4)
+                    .any(|pixel| pixel[0] > 200 && pixel[1] > 80 && pixel[1] < 200 && pixel[2] < 80)
             })
             .count()
     }
@@ -1051,18 +1154,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let png = [
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-            0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x76,
-            0x5e, 0x98, 0x9a, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
-            0xcf, 0xc0, 0x00, 0x44, 0x60, 0xe2, 0x3f, 0x00, 0x19, 0xf3, 0x03, 0xfd, 0x9a, 0xd8, 0x73,
-            0x31, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x76, 0x5e, 0x98, 0x9a, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x44, 0x60, 0xe2, 0x3f, 0x00, 0x19, 0xf3, 0x03,
+            0xfd, 0x9a, 0xd8, 0x73, 0x31, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+            0x42, 0x60, 0x82,
         ];
         std::fs::write(root.join("wide.png"), png).unwrap();
         let mut show = ShowFile::blank("song", "Song");
-        let item = show
-            .show
-            .pointer_mut("/slides/s1/items/0")
-            .unwrap();
+        let item = show.show.pointer_mut("/slides/s1/items/0").unwrap();
         item.as_object_mut().unwrap().insert(
             "style".into(),
             serde_json::json!("left:0px;top:0px;width:1920px;height:1080px;"),
@@ -1077,10 +1178,7 @@ mod tests {
         let contained = frame_for_slide(&show, 0, None, true, None, true, None, &[]);
         assert_eq!(contained.pixel(0, 0), Rgba::TRANSPARENT);
 
-        *show
-            .show
-            .pointer_mut("/slides/s1/items/0/fit")
-            .unwrap() = serde_json::json!("fill");
+        *show.show.pointer_mut("/slides/s1/items/0/fit").unwrap() = serde_json::json!("fill");
         let filled = frame_for_slide(&show, 0, None, true, None, true, None, &[]);
         assert_eq!(filled.pixel(0, 0).r, 255);
         assert_eq!(filled.pixel(0, 0).g, 0);
