@@ -123,7 +123,8 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Solid PowerPoint theme fills and slide-level color-map overrides.
 - [x] PowerPoint solid-fill tint, shade, and luminance transforms.
 - [x] PowerPoint linear and centered circular gradients, linked backgrounds, and tiled media.
-- [ ] PowerPoint alpha and gamma color transforms, custom gradient geometry, and backgrounds from other import formats.
+- [x] PowerPoint background alpha and gamma color transforms.
+- [ ] PowerPoint custom gradient geometry and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
 their original backgrounds.

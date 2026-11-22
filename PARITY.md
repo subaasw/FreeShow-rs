@@ -165,7 +165,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
-| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | PowerPoint includes linked and tiled backgrounds plus linear and centered circular background gradients. See the M6 importer list in `PLAN.md` for remaining format details. |
+| ProPresenter, PowerPoint, OpenSong, SongBeamer, and other listed fixtures | done | 3.5 | PowerPoint includes linked and tiled backgrounds, linear and centered circular gradients, and opacity and gamma transforms on background fills. See the M6 importer list in `PLAN.md` for remaining format details. |
 | MediaShout XML/SSC/JSON, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only, project packages | done | 1.2 | Fixture tests for each |
 | Native MediaShout `.mdb` | not-yet | 0.3 | Not a viable pure-Rust path |
 
