@@ -269,6 +269,10 @@
             showId: current.id
           })));
         });
+      } catch {
+        // FreeShow closed or the Wi-Fi dropped; the next poll tries again.
+        document.getElementById("show-name").textContent = "Lost the connection to FreeShow, retrying…";
+        lastStateText = "";
       } finally {
         busy = false;
       }
