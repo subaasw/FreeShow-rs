@@ -404,8 +404,13 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         output_name: settings.output_name.into(),
         output_always_on_top: settings.output_always_on_top,
         output_kiosk: settings.output_kiosk,
+        text_transition: settings.text_transition.into(),
+        text_duration: settings.text_duration,
+        media_transition: settings.media_transition.into(),
+        media_duration: settings.media_duration,
     });
     ui.set_theme_names(strings(&settings.themes));
+    ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
     ui.set_autosave_choices(strings(&session::AUTOSAVE_CHOICES.map(str::to_string)));
     let inspector = session.inspector_form();
     ui.set_inspector_data(InspectorData {

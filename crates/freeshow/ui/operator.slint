@@ -91,6 +91,7 @@ export component ControlWindow inherits Window {
     in property <SettingsData> settings-data;
     in property <[string]> theme-names;
     in property <[string]> autosave-choices;
+    in property <[string]> transition-kinds;
     in property <string> settings-status;
     callback apply-setting(string, string);
     in property <string> update-label: "";
@@ -911,6 +912,7 @@ export component ControlWindow inherits Window {
             data: root.settings-data;
             themes: root.theme-names;
             autosave-choices: root.autosave-choices;
+            transition-kinds: root.transition-kinds;
             status: root.settings-status;
             text-color: root.text-color;
             close-fill: root.primary-lighter;

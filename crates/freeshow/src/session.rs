@@ -20,7 +20,7 @@ use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
 };
 pub use library_edit::ProjectPick;
-pub use panels::{AUTOSAVE_CHOICES, STAGE_ADD_KINDS};
+pub use panels::{AUTOSAVE_CHOICES, STAGE_ADD_KINDS, TRANSITION_KINDS};
 
 /// Network feeds due for a refresh: weather locations and RSS URLs.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -4869,6 +4869,10 @@ impl Session {
         self.root
             .as_deref()
             .and_then(|root| Library::open(root).style_transition(kind))
+    }
+
+    pub fn library_transition(&self, media: bool) -> freeshow_data::TextTransition {
+        self.library_motion(media)
     }
 
     fn library_motion(&self, media: bool) -> freeshow_data::TextTransition {

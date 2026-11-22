@@ -24,6 +24,10 @@ export struct SettingsData {
     output-name: string,
     output-always-on-top: bool,
     output-kiosk: bool,
+    text-transition: string,
+    text-duration: int,
+    media-transition: string,
+    media-duration: int,
 }
 
 export struct InspectorData {
@@ -108,6 +112,7 @@ export component SettingsPanel inherits Rectangle {
     in property <SettingsData> data;
     in property <[string]> themes;
     in property <[string]> autosave-choices;
+    in property <[string]> transition-kinds;
     in property <string> status;
     in property <color> text-color;
     in property <color> close-fill;
@@ -240,6 +245,47 @@ export component SettingsPanel inherits Rectangle {
                             maximum: 20;
                             value: root.data.split-lines;
                             edited(value) => { root.apply("splitLines", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Slide transition"; text-color: root.text-color; }
+                        ComboBox {
+                            model: root.transition-kinds;
+                            current-value: root.data.text-transition;
+                            selected(value) => { root.apply("textTransition", value); }
+                        }
+                        SpinBox {
+                            minimum: 0;
+                            maximum: 10000;
+                            step-size: 100;
+                            value: root.data.text-duration;
+                            edited(value) => { root.apply("textDuration", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Media transition"; text-color: root.text-color; }
+                        ComboBox {
+                            model: root.transition-kinds;
+                            current-value: root.data.media-transition;
+                            selected(value) => { root.apply("mediaTransition", value); }
+                        }
+                        SpinBox {
+                            minimum: 0;
+                            maximum: 10000;
+                            step-size: 100;
+                            value: root.data.media-duration;
+                            edited(value) => { root.apply("mediaDuration", value); }
+                        }
+                    }
+                    Row {
+                        Rectangle {}
+                        Text {
+                            colspan: 2;
+                            text: "Durations are in milliseconds. A show or slide with its own transition keeps it.";
+                            color: root.text-color;
+                            opacity: 0.6;
+                            font-size: 12px;
+                            wrap: word-wrap;
                         }
                     }
                 }
