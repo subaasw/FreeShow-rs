@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use ab_glyph::{Font, FontVec, PxScale, point};
+use ab_glyph::{Font, FontVec, PxScale};
 
 use crate::{Rgba, paint};
 
@@ -104,39 +104,18 @@ pub fn draw(
             if let Some(previous) = previous {
                 cursor_x += font.kern_unscaled(previous, id) * factor;
             }
-            let glyph = id.with_scale_and_position(scale, point(cursor_x, baseline));
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|gx, gy, coverage| {
-                    if coverage < 0.04 {
-                        return;
-                    }
-                    let y_px = bounds.min.y + gy as f32;
-                    let shear = if typeface.italic {
-                        (baseline - y_px) * 0.2
-                    } else {
-                        0.0
-                    };
-                    let x = (bounds.min.x + gx as f32 + shear).round() as i32;
-                    let y = y_px.round() as i32;
-                    if x < clip.x || y < clip.y || x >= clip.x + clip.w || y >= clip.y + clip.h {
-                        return;
-                    }
-                    let alpha = (coverage.clamp(0.0, 1.0) * f32::from(color.a)).round() as u8;
-                    paint(
-                        pixels,
-                        frame_w,
-                        frame_h,
-                        x,
-                        y,
-                        Rgba {
-                            r: color.r,
-                            g: color.g,
-                            b: color.b,
-                            a: alpha,
-                        },
-                    );
-                });
+            if let Some(glyph) = cached_glyph(font, typeface, scale, id) {
+                blit_glyph(
+                    pixels,
+                    frame_w,
+                    frame_h,
+                    &glyph,
+                    cursor_x,
+                    baseline,
+                    clip,
+                    typeface.italic,
+                    color,
+                );
             }
             cursor_x += font.h_advance_unscaled(id) * factor;
             if index + 1 < count {
@@ -148,6 +127,115 @@ pub fn draw(
             previous = Some(id);
         }
     });
+}
+
+#[derive(Clone)]
+struct CachedGlyph {
+    min_x: f32,
+    min_y: f32,
+    width: u32,
+    coverage: Vec<u8>,
+}
+
+type GlyphKey = (String, bool, u32, u16);
+type GlyphCache = HashMap<GlyphKey, CachedGlyph>;
+
+fn glyph_bitmaps() -> &'static Mutex<GlyphCache> {
+    static GLYPHS: OnceLock<Mutex<GlyphCache>> = OnceLock::new();
+    GLYPHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_glyph(
+    font: &FontVec,
+    typeface: Typeface<'_>,
+    scale: PxScale,
+    id: ab_glyph::GlyphId,
+) -> Option<CachedGlyph> {
+    let key = (
+        typeface.family.to_ascii_lowercase(),
+        typeface.bold,
+        scale.x.to_bits(),
+        id.0,
+    );
+    {
+        let cache = glyph_bitmaps()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(glyph) = cache.get(&key) {
+            return Some(glyph.clone());
+        }
+    }
+    let outlined = font.outline_glyph(id.with_scale(scale))?;
+    let bounds = outlined.px_bounds();
+    let width = (bounds.width().ceil() as u32).saturating_add(1);
+    let height = (bounds.height().ceil() as u32).saturating_add(1);
+    let mut coverage = vec![0u8; (width * height) as usize];
+    outlined.draw(|gx, gy, value| {
+        if value < 0.04 {
+            return;
+        }
+        if gx >= width || gy >= height {
+            return;
+        }
+        coverage[(gy * width + gx) as usize] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    });
+    let glyph = CachedGlyph {
+        min_x: bounds.min.x,
+        min_y: bounds.min.y,
+        width,
+        coverage,
+    };
+    glyph_bitmaps()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(key, glyph.clone());
+    Some(glyph)
+}
+
+fn blit_glyph(
+    pixels: &mut [u8],
+    frame_w: u32,
+    frame_h: u32,
+    glyph: &CachedGlyph,
+    cursor_x: f32,
+    baseline: f32,
+    clip: &Clip,
+    italic: bool,
+    color: Rgba,
+) {
+    if glyph.width == 0 || glyph.coverage.is_empty() {
+        return;
+    }
+    let height = glyph.coverage.len() as u32 / glyph.width.max(1);
+    for gy in 0..height {
+        for gx in 0..glyph.width {
+            let coverage = glyph.coverage[(gy * glyph.width + gx) as usize];
+            if coverage == 0 {
+                continue;
+            }
+            let y_px = glyph.min_y + gy as f32;
+            let shear = if italic { (baseline - y_px) * 0.2 } else { 0.0 };
+            let x = (cursor_x + glyph.min_x + gx as f32 + shear).round() as i32;
+            let y = (baseline + glyph.min_y + gy as f32).round() as i32;
+            if x < clip.x || y < clip.y || x >= clip.x + clip.w || y >= clip.y + clip.h {
+                continue;
+            }
+            let alpha = ((u16::from(coverage) * u16::from(color.a) + 127) / 255) as u8;
+            paint(
+                pixels,
+                frame_w,
+                frame_h,
+                x,
+                y,
+                Rgba {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: alpha,
+                },
+            );
+        }
+    }
 }
 
 fn with_face<T>(typeface: Typeface<'_>, draw: impl FnOnce(&FontVec) -> T) -> T {
@@ -232,6 +320,10 @@ pub fn register_custom_fonts(fonts: &[(String, PathBuf)]) {
         .unwrap_or_else(|err| err.into_inner())
         .clear();
     named_faces()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clear();
+    glyph_bitmaps()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clear();

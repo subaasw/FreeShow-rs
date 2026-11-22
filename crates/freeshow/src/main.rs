@@ -1326,7 +1326,7 @@ fn follow_video(
                     session.video_time = time;
                     session.video_duration = duration;
                 }
-                session.underlay = Some(raster);
+                session.replace_underlay(Some(raster));
                 (audience_frame(&session), stage_frame(&session))
             };
             let shown = {
