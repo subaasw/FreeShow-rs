@@ -138,10 +138,35 @@ pub(super) enum ResolvedFill {
 pub(super) struct GradientFill {
     /// CSS angle for a linear fill.
     pub linear_angle: Option<f64>,
-    /// Point focus relative to the center and radius of the outer circle.
-    pub radial_focus: Option<[f64; 2]>,
+    pub focus: Option<GradientFocus>,
     /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
     pub stops: Vec<(f64, Color)>,
+}
+
+#[derive(Clone)]
+pub(super) enum GradientFocus {
+    RadialPoint([f64; 2]),
+    Rectangle([f64; 4]),
+}
+
+impl GradientFocus {
+    pub(super) fn from_path(path: &str, [left, top, right, bottom]: [f64; 4]) -> Option<Self> {
+        match path {
+            "circle" if (left + right - 1.0).abs() < 1e-9 && (top + bottom - 1.0).abs() < 1e-9 => {
+                let (x, y) = (left - right, top - bottom);
+                (x * x + y * y < 1.0 && (x != 0.0 || y != 0.0)).then_some(Self::RadialPoint([x, y]))
+            }
+            "rect"
+                if [left, top, right, bottom].iter().all(|edge| *edge >= 0.0)
+                    && left + right <= 1.0
+                    && top + bottom <= 1.0 =>
+            {
+                Some(Self::Rectangle([left, top, right, bottom]))
+            }
+            // shortcut: extended radial focuses and non-nested paths use the centered fill until their geometry is supported.
+            _ => None,
+        }
+    }
 }
 
 impl GradientFill {
@@ -173,13 +198,19 @@ impl GradientFill {
         }
         stops.sort_by(|left, right| left.0.total_cmp(&right.0));
         let path = child(fill, "path");
-        let radial_focus = path
-            .filter(|path| path.attribute("path") == Some("circle"))
-            .and_then(|path| child(path, "fillToRect"))
-            .and_then(|rect| radial_point(|key| rect.attribute(key).and_then(percentage)));
+        let focus = path.and_then(|path| {
+            let rect = child(path, "fillToRect");
+            GradientFocus::from_path(
+                path.attribute("path").unwrap_or("rect"),
+                gradient_insets(|key| {
+                    rect.and_then(|rect| rect.attribute(key))
+                        .and_then(percentage)
+                }),
+            )
+        });
         Some(Self {
             linear_angle: path.is_none().then_some(angle),
-            radial_focus,
+            focus,
             stops,
         })
     }
@@ -198,8 +229,14 @@ impl GradientFill {
             Some(angle) => format!("background:linear-gradient({}deg, {body});", angle.round()),
             None => format!("background:radial-gradient(circle at center, {body});"),
         };
-        if let Some([x, y]) = self.radial_focus {
-            style.push_str(&format!("--pptx-radial-focus:{x:.5} {y:.5};"));
+        match self.focus {
+            Some(GradientFocus::RadialPoint([x, y])) => {
+                style.push_str(&format!("--pptx-radial-focus:{x:.5} {y:.5};"))
+            }
+            Some(GradientFocus::Rectangle([l, t, r, b])) => style.push_str(&format!(
+                "--pptx-rectangular-focus:{l:.5} {t:.5} {r:.5} {b:.5};"
+            )),
+            None => {}
         }
         Some(ResolvedFill::Gradient {
             style,
@@ -209,14 +246,8 @@ impl GradientFill {
     }
 }
 
-pub(super) fn radial_point(inset: impl Fn(&str) -> Option<f64>) -> Option<[f64; 2]> {
-    let [left, top, right, bottom] = ["l", "t", "r", "b"].map(|key| inset(key).unwrap_or(0.0));
-    // shortcut: extended focus ellipses and points outside the outer circle use a centered fill until their geometry is supported.
-    if (left + right - 1.0).abs() > 1e-9 || (top + bottom - 1.0).abs() > 1e-9 {
-        return None;
-    }
-    let (x, y) = (left - right, top - bottom);
-    (x * x + y * y < 1.0 && (x != 0.0 || y != 0.0)).then_some([x, y])
+pub(super) fn gradient_insets(inset: impl Fn(&str) -> Option<f64>) -> [f64; 4] {
+    ["l", "t", "r", "b"].map(|key| inset(key).unwrap_or(0.0))
 }
 
 pub(super) fn percentage(value: &str) -> Option<f64> {

@@ -639,9 +639,8 @@ fn find_background(
     let mut tiled = false;
     let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
     let mut gradient_angle = 90.0;
-    let mut radial_gradient = false;
-    let mut circular_path = false;
-    let mut radial_focus = None;
+    let mut gradient_path = None;
+    let mut gradient_insets = [0.0; 4];
     let mut gs_pos = None;
     let mut gs_color = None;
     loop {
@@ -696,12 +695,11 @@ fn find_background(
                             }
                         }
                         (Some("gradFill"), "path") => {
-                            radial_gradient = true;
-                            circular_path =
-                                attribute(&element, "path").as_deref() == Some("circle");
+                            gradient_path =
+                                Some(attribute(&element, "path").unwrap_or_else(|| "rect".into()));
                         }
-                        (Some("path"), "fillToRect") if circular_path => {
-                            radial_focus = theme::radial_point(|key| {
+                        (Some("path"), "fillToRect") if gradient_path.is_some() => {
+                            gradient_insets = theme::gradient_insets(|key| {
                                 attribute(&element, key).and_then(|value| theme::percentage(&value))
                             });
                         }
@@ -735,8 +733,10 @@ fn find_background(
     let gradient = (gradient_stops.len() >= 2).then(|| {
         gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
         GradientFill {
-            linear_angle: (!radial_gradient).then_some(gradient_angle),
-            radial_focus,
+            linear_angle: gradient_path.is_none().then_some(gradient_angle),
+            focus: gradient_path
+                .as_deref()
+                .and_then(|path| theme::GradientFocus::from_path(path, gradient_insets)),
             stops: gradient_stops,
         }
     });
@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_and_radial_gradients_become_full_slide_shape_items() {
+    fn gradients_become_full_slide_shape_items() {
         let layout_rel = br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
         let files = archive(&[
             (
@@ -1212,8 +1212,24 @@ mod tests {
                     <a:path path="circle"><a:fillToRect l="75000" t="50%" r="25000" b="50%"/></a:path>
                 </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Radial</a:t></a:r></a:p></p:cSld></p:sld>"#,
             ),
+            (
+                "ppt/slides/slide4.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill>
+                    <a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst>
+                    <a:path><a:fillToRect l="30%" t="20000" r="10000" b="40000"/></a:path>
+                </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Rectangle</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide5.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1002"><a:srgbClr val="00AA00"/></p:bgRef></p:bg>
+                    <a:p><a:r><a:t>Theme rectangle</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
             ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide5.xml.rels", layout_rel),
             ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#),
             (
                 "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
@@ -1237,6 +1253,13 @@ mod tests {
                                     <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                                 </a:gsLst>
                                 <a:path path="circle"><a:fillToRect l="25000" t="75000" r="75000" b="25000"/></a:path>
+                            </a:gradFill>
+                            <a:gradFill>
+                                <a:gsLst>
+                                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                                </a:gsLst>
+                                <a:path path="rect"><a:fillToRect l="50000" r="50000"/></a:path>
                             </a:gradFill>
                         </a:bgFillStyleLst>
                     </a:fmtScheme>
@@ -1286,6 +1309,17 @@ mod tests {
                 .unwrap()
                 .contains("--pptx-radial-focus:0.50000 0.00000;")
         );
+        for (slide, focus) in [
+            ("s4", "0.30000 0.20000 0.10000 0.40000"),
+            ("s5", "0.50000 0.00000 0.50000 0.00000"),
+        ] {
+            assert!(
+                show.show["slides"][slide]["items"][0]["style"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("--pptx-rectangular-focus:{focus};"))
+            );
+        }
     }
 
     #[test]
