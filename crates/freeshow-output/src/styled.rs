@@ -2,7 +2,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use crate::{Rgba, paint, text};
+use crate::{Rgba, paint, source_over, text};
 
 /// FreeShow lays items out in a 1920×1080 slide. The compositor scales that
 /// space onto the output frame.
@@ -964,18 +964,7 @@ pub fn over(base: &crate::Frame, top: &crate::Frame) -> crate::Frame {
             }
             continue;
         }
-        if alpha == 255 {
-            pixels[index..index + 4].copy_from_slice(&top.pixels[index..index + 4]);
-        } else {
-            let cover = u16::from(alpha);
-            let remain = 255 - cover;
-            for channel in 0..3 {
-                let below = u16::from(pixels[index + channel]);
-                let above = u16::from(top.pixels[index + channel]);
-                pixels[index + channel] = ((above * cover + below * remain) / 255) as u8;
-            }
-            pixels[index + 3] = 255;
-        }
+        source_over(&mut pixels[index..index + 4], &top.pixels[index..index + 4]);
         index += 4;
     }
     crate::Frame {
@@ -2995,19 +2984,7 @@ fn blit(
                 continue;
             }
             let dst = (dest_row + dest_x as u32 * 4) as usize;
-            let alpha = image.rgba[src + 3];
-            if alpha == 255 {
-                pixels[dst..dst + 4].copy_from_slice(&image.rgba[src..src + 4]);
-            } else if alpha > 0 {
-                let cover = u16::from(alpha);
-                let remain = 255 - cover;
-                for channel in 0..3 {
-                    let below = u16::from(pixels[dst + channel]);
-                    let above = u16::from(image.rgba[src + channel]);
-                    pixels[dst + channel] = ((above * cover + below * remain) / 255) as u8;
-                }
-                pixels[dst + 3] = 255;
-            }
+            source_over(&mut pixels[dst..dst + 4], &image.rgba[src..src + 4]);
         }
     }
 }
@@ -3643,6 +3620,31 @@ mod tests {
         assert!((125..=130).contains(&pixel.r), "{pixel:?}");
         assert!((125..=130).contains(&pixel.g), "{pixel:?}");
         assert_eq!(pixel.b, 0);
+    }
+
+    #[test]
+    fn translucent_shapes_and_images_keep_alpha_across_output_layers() {
+        let mut slide =
+            style_slide("left:0px;top:0px;width:1920px;height:1080px;background-color:#FF000080;");
+        slide.background = Rgba::TRANSPARENT;
+        let shape = render_styled(&slide);
+        assert_eq!(shape.pixel(0, 0), parse_color("#FF000080").unwrap());
+
+        slide.items[0].style = "left:0px;top:0px;width:1920px;height:1080px;".into();
+        slide.items[0].image = Some(Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 255, 128],
+        });
+        let image = render_styled(&slide);
+        assert_eq!(image.pixel(0, 0), parse_color("#0000FF80").unwrap());
+
+        let layers = over(&shape, &image);
+        assert_eq!(layers.pixel(0, 0), parse_color("#5400AAC0").unwrap());
+        slide.items.clear();
+        slide.background = parse_color("#00FF00").unwrap();
+        let output = over(&render_styled(&slide), &layers);
+        assert_eq!(output.pixel(0, 0), parse_color("#3F3F80").unwrap());
     }
 
     #[test]
