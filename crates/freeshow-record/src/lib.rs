@@ -2,6 +2,8 @@
 
 mod icecast;
 pub use icecast::IcecastSender;
+mod whip;
+pub use whip::whip_post;
 
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender};

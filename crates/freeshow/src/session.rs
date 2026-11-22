@@ -197,6 +197,43 @@ pub struct NdiTarget {
     pub stage: bool,
 }
 
+/// An OMT picture the library asked to broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmtTarget {
+    pub id: String,
+    pub name: String,
+    pub stage: bool,
+}
+
+/// A WHIP WebRTC picture the library asked to broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebrtcTarget {
+    pub id: String,
+    pub url: String,
+    pub token: Option<String>,
+    pub stage: bool,
+}
+
+fn is_stage_output(output: &serde_json::Value) -> bool {
+    output["stageOutput"]
+        .as_str()
+        .is_some_and(|layout| !layout.is_empty())
+}
+
+fn named_source(output: &serde_json::Value, data_key: &str, fallback: &str) -> String {
+    let valid = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .filter(|name| !name.is_empty() && !name.contains('\0'))
+            .map(str::to_string)
+    };
+    valid(&output[data_key]["name"]).unwrap_or_else(|| {
+        valid(&output["name"])
+            .map(|name| format!("{fallback} - {name}"))
+            .unwrap_or_else(|| fallback.into())
+    })
+}
+
 impl Session {
     pub fn empty() -> Self {
         Self {
@@ -2147,6 +2184,50 @@ impl Session {
                     .as_str()
                     .is_some_and(|layout| !layout.is_empty());
                 Some(NdiTarget { id, name, stage })
+            })
+            .collect()
+    }
+
+    pub fn omt_outputs(&self) -> Vec<OmtTarget> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        Library::open(root)
+            .network_outputs("omt")
+            .into_iter()
+            .map(|(id, output)| {
+                let name = named_source(&output, "omtData", "FreeShow OMT");
+                let stage = is_stage_output(&output);
+                OmtTarget { id, name, stage }
+            })
+            .collect()
+    }
+
+    pub fn webrtc_outputs(&self) -> Vec<WebrtcTarget> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        Library::open(root)
+            .network_outputs("webrtc")
+            .into_iter()
+            .filter_map(|(id, output)| {
+                let url = output["webrtcData"]["url"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+                    .map(str::to_string)?;
+                let token = output["webrtcData"]["token"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_string);
+                let stage = is_stage_output(&output);
+                Some(WebrtcTarget {
+                    id,
+                    url,
+                    token,
+                    stage,
+                })
             })
             .collect()
     }
@@ -4197,6 +4278,85 @@ mod tests {
         assert_eq!(
             session.ndi_output(),
             Some(("main".into(), "Sanctuary".into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn omt_and_webrtc_outputs_use_stored_names_and_whip_urls() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-session-omt-webrtc-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            serde_json::json!({
+                "outputs": {
+                    "main": {
+                        "name": "Main",
+                        "omt": true,
+                        "webrtc": true,
+                        "enabled": true,
+                        "omtData": {"name": "Sanctuary OMT"},
+                        "webrtcData": {
+                            "url": "https://whip.example/main",
+                            "token": "secret"
+                        }
+                    },
+                    "stage": {
+                        "name": "Stage",
+                        "omt": true,
+                        "webrtc": true,
+                        "enabled": true,
+                        "stageOutput": "default",
+                        "webrtcData": {"url": " http://127.0.0.1:8080/whip "}
+                    },
+                    "empty": {
+                        "name": "Empty",
+                        "webrtc": true,
+                        "enabled": true,
+                        "webrtcData": {"url": ""}
+                    },
+                    "off": {"name": "Off", "omt": true, "webrtc": true, "enabled": false}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let session = Session::open(root.clone());
+        assert_eq!(
+            session.omt_outputs(),
+            vec![
+                OmtTarget {
+                    id: "main".into(),
+                    name: "Sanctuary OMT".into(),
+                    stage: false
+                },
+                OmtTarget {
+                    id: "stage".into(),
+                    name: "FreeShow OMT - Stage".into(),
+                    stage: true
+                },
+            ]
+        );
+        assert_eq!(
+            session.webrtc_outputs(),
+            vec![
+                WebrtcTarget {
+                    id: "main".into(),
+                    url: "https://whip.example/main".into(),
+                    token: Some("secret".into()),
+                    stage: false
+                },
+                WebrtcTarget {
+                    id: "stage".into(),
+                    url: "http://127.0.0.1:8080/whip".into(),
+                    token: None,
+                    stage: true
+                },
+            ]
         );
         let _ = std::fs::remove_dir_all(root);
     }
