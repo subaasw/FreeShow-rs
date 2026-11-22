@@ -5503,15 +5503,19 @@ pub struct SlideLabel {
 }
 
 fn slide_rows_for(slides: &[freeshow_data::SlideView], group_numbers: bool) -> Vec<SlideLabel> {
-    let mut counts = HashMap::<&str, usize>::new();
+    // Numbers tell apart different slides that share a group name. A chorus sung twice is the
+    // same slide, so it keeps one label, as in FreeShow.
+    let mut ids = HashMap::<&str, Vec<&str>>::new();
     if group_numbers {
         for slide in slides {
             if let Some(group) = slide.group.as_deref().filter(|group| !group.is_empty()) {
-                *counts.entry(group).or_default() += 1;
+                let seen = ids.entry(group).or_default();
+                if !seen.contains(&slide.id.as_str()) {
+                    seen.push(&slide.id);
+                }
             }
         }
     }
-    let mut seen = HashMap::<&str, usize>::new();
     slides
         .iter()
         .map(|slide| {
@@ -5519,14 +5523,12 @@ fn slide_rows_for(slides: &[freeshow_data::SlideView], group_numbers: bool) -> V
                 .group
                 .as_deref()
                 .filter(|group| !group.is_empty())
-                .map(|group| {
-                    if counts.get(group).copied().unwrap_or(0) > 1 {
-                        let number = seen.entry(group).or_default();
-                        *number += 1;
+                .map(|group| match ids.get(group) {
+                    Some(seen) if seen.len() > 1 => {
+                        let number = seen.iter().position(|id| *id == slide.id).unwrap_or(0) + 1;
                         format!("{group} {number}")
-                    } else {
-                        group.to_string()
                     }
+                    _ => group.to_string(),
                 });
             SlideLabel {
                 text: slide_label_with_group(slide, group_name.as_deref()),
@@ -10036,6 +10038,23 @@ Second line"
             "For God so loved the world"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_repeated_chorus_keeps_one_label_and_different_verses_are_numbered() {
+        let mut show = ShowFile::blank("song", "Song");
+        assert!(show.set_lyrics_text(
+            "[Verse]\nOne\n\n[Chorus]\nSing\n\n[Verse]\nTwo\n\n[Chorus]\nSing",
+            0
+        ));
+        let labels: Vec<_> = slide_rows_for(&show.ordered_slides(), true)
+            .into_iter()
+            .map(|row| row.text)
+            .collect();
+        assert!(labels[0].starts_with("Verse 1"), "{labels:?}");
+        assert!(labels[1].starts_with("Chorus") && !labels[1].starts_with("Chorus 2"));
+        assert!(labels[2].starts_with("Verse 2"));
+        assert_eq!(labels[1], labels[3]);
     }
 
     #[test]
