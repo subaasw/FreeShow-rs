@@ -1099,6 +1099,12 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     {
         return;
     }
+    if !style.backdrop.trim().is_empty() {
+        let radius = item_radius(&style, slide);
+        apply_backdrop(pixels, slide, &bounds, &style.backdrop, |px, py| {
+            in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background)
+        });
+    }
     draw_item_content(pixels, slide, item, &style, bounds, opacity, item.blend);
 }
 
@@ -1111,10 +1117,6 @@ fn draw_rotated_item(
     opacity: f32,
 ) -> bool {
     let text::Clip { x, y, w, h } = *bounds;
-    // shortcut: keep backdrop filters on the direct path until rotation can sample and filter the underlying slide.
-    if !style.backdrop.trim().is_empty() {
-        return false;
-    }
     let scale_x = if slide.source_width > 0.0 {
         slide.output_width as f32 / slide.source_width
     } else {
@@ -1138,7 +1140,8 @@ fn draw_rotated_item(
     let y0 = (cy - extent_y).floor().max(0.0) as i32;
     let x1 = (cx + extent_x).ceil().min(slide.output_width as f32) as i32;
     let y1 = (cy + extent_y).ceil().min(slide.output_height as f32) as i32;
-    if x0 >= x1 || y0 >= y1 || opacity == 0.0 {
+    let backdrop = !style.backdrop.trim().is_empty();
+    if x0 >= x1 || y0 >= y1 || (opacity == 0.0 && !backdrop) {
         return true;
     }
     let (sin_x, sin_y) = (sin * ratio, sin / ratio);
@@ -1176,6 +1179,22 @@ fn draw_rotated_item(
     // shortcut: extreme scale ratios use the direct path until rotated layers can be tiled.
     if layer_len > pixels.len().saturating_mul(4) {
         return false;
+    }
+    if backdrop {
+        let viewport = text::Clip {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        };
+        let radius = item_radius(style, slide);
+        apply_backdrop(pixels, slide, &viewport, &style.backdrop, |px, py| {
+            let (sx, sy) = sample(px, py);
+            in_item_shape(sx, sy, 0, 0, w, h, radius, style.elliptical_background)
+        });
+        if opacity == 0.0 {
+            return true;
+        }
     }
     let local = StyledSlide {
         output_width: width,
@@ -1239,24 +1258,7 @@ fn draw_item_content(
     blend: Blend,
 ) {
     let text::Clip { x, y, w, h } = bounds;
-    let radius = if style.elliptical_background {
-        0
-    } else {
-        scale(style.radius, slide.output_height, slide.source_height).max(0)
-    };
-    if !style.backdrop.trim().is_empty() {
-        apply_backdrop(
-            pixels,
-            slide,
-            x,
-            y,
-            w,
-            h,
-            radius,
-            style.elliptical_background,
-            &style.backdrop,
-        );
-    }
+    let radius = item_radius(style, slide);
     if let Some(shadow) = style.box_shadow.filter(|shadow| !shadow.inset) {
         paint_box_shadow(
             pixels,
@@ -2656,17 +2658,22 @@ fn in_item_shape(
     !outside_round_corner(px - x, py - y, w, h, radius)
 }
 
+fn item_radius(style: &BoxStyle, slide: &StyledSlide) -> i32 {
+    if style.elliptical_background {
+        0
+    } else {
+        scale(style.radius, slide.output_height, slide.source_height).max(0)
+    }
+}
+
 fn apply_backdrop(
     pixels: &mut [u8],
     slide: &StyledSlide,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    radius: i32,
-    ellipse: bool,
+    bounds: &text::Clip,
     filter: &str,
+    contains: impl Fn(i32, i32) -> bool,
 ) {
+    let text::Clip { x, y, w, h } = *bounds;
     let pad = output_spacing(filter_blur(filter), slide)
         .round()
         .clamp(0.0, 24.0) as i32;
@@ -2691,7 +2698,9 @@ fn apply_backdrop(
         bh,
     );
     if pad > 0 {
-        box_blur_buffer(&mut filtered, cw, ch, pad);
+        let mut horizontal = vec![0; filtered.len()];
+        box_blur_axis(&filtered, &mut horizontal, cw, ch, pad, true);
+        box_blur_axis(&horizontal, &mut filtered, cw, ch, pad, false);
     }
     let opacity = filter_opacity(filter);
     let grayscale = filter_grayscale(filter);
@@ -2704,7 +2713,7 @@ fn apply_backdrop(
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
     for py in y0..y1 {
         for px in x0..x1 {
-            if !in_item_shape(px, py, x, y, w, h, radius, ellipse) {
+            if !contains(px, py) {
                 continue;
             }
             let sx = (px - cx0).clamp(0, cw - 1) as usize;
@@ -2732,40 +2741,6 @@ fn apply_backdrop(
             let dest = ((py as u32 * slide.output_width + px as u32) * 4) as usize;
             if dest + 3 < pixels.len() {
                 pixels[dest..dest + 4].copy_from_slice(&color);
-            }
-        }
-    }
-}
-
-fn box_blur_buffer(pixels: &mut [u8], width: i32, height: i32, radius: i32) {
-    if radius <= 0 || width <= 0 || height <= 0 {
-        return;
-    }
-    let source = pixels.to_vec();
-    let radius = radius.max(1);
-    let width = width as usize;
-    let height = height as usize;
-    let r = radius as usize;
-    for y in 0..height {
-        for x in 0..width {
-            let mut sum = [0u32; 4];
-            let mut count = 0u32;
-            let y0 = y.saturating_sub(r);
-            let y1 = (y + r + 1).min(height);
-            let x0 = x.saturating_sub(r);
-            let x1 = (x + r + 1).min(width);
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    let i = (py * width + px) * 4;
-                    for channel in 0..4 {
-                        sum[channel] += u32::from(source[i + channel]);
-                    }
-                    count += 1;
-                }
-            }
-            let dest = (y * width + x) * 4;
-            for channel in 0..4 {
-                pixels[dest + channel] = (sum[channel] / count.max(1)) as u8;
             }
         }
     }
@@ -3870,6 +3845,22 @@ mod tests {
             assert_eq!(frame.pixel(50, 75), parse_color(expected).unwrap());
             assert_eq!(frame.pixel(75, 50), slide.background);
         }
+    }
+
+    #[test]
+    fn backdrop_filter_follows_the_rotated_ellipse() {
+        let mut slide = style_slide(
+            "left:20px;top:40px;width:60px;height:20px;border-radius:50%;backdrop-filter:blur(2px) invert(100%);transform:rotate(90deg);",
+        );
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = parse_color("#0000FF").unwrap();
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(50, 70), parse_color("#FFFF00").unwrap());
+        assert_eq!(frame.pixel(40, 20), slide.background);
+        assert_eq!(frame.pixel(75, 50), slide.background);
     }
 
     #[test]
