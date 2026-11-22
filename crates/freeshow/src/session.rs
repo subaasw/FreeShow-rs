@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeshow_data::{
-    AUDIO_DIR, BibleFile, Catalog, DrawStroke, FreeShowPreferences, Library, MEDIA_DIR, MediaEntry,
-    MixStep, OutlinedBook, ProjectsFile, ShowFile, SlideBackdrop, SlideJump, StageLayout,
-    TimerStep, VerseHit, default_stage, new_id,
+    AUDIO_DIR, BibleFile, Catalog, DrawStroke, EffectSpec, FreeShowPreferences, Library, MEDIA_DIR,
+    MediaEntry, MixStep, OutlinedBook, PlayerVideo, ProjectsFile, ShowFile, SlideBackdrop,
+    SlideJump, StageLayout, TimelineCue, TimerStep, VerseHit, default_stage, new_id,
+    parse_timeline_text, timeline_cues_from_show, timeline_text_from,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 use freeshow_output::{
@@ -115,6 +116,13 @@ pub struct Session {
     pub active_scene: Option<String>,
     pub active_interaction: Option<String>,
     pub draw_strokes: Vec<DrawStroke>,
+    pub player_now: Option<String>,
+    pub player_videos: Vec<PlayerVideo>,
+    pub active_effects: Vec<String>,
+    pub timeline_cues: Vec<TimelineCue>,
+    pub timeline_playing: bool,
+    timeline_started: Option<std::time::Instant>,
+    timeline_fired: usize,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     /// The selected text box on the current slide.
@@ -300,6 +308,13 @@ impl Session {
             active_scene: None,
             active_interaction: None,
             draw_strokes: Vec::new(),
+            player_now: None,
+            player_videos: Vec::new(),
+            active_effects: Vec::new(),
+            timeline_cues: Vec::new(),
+            timeline_playing: false,
+            timeline_started: None,
+            timeline_fired: 0,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -457,6 +472,13 @@ impl Session {
             active_scene: None,
             active_interaction: None,
             draw_strokes,
+            player_now: None,
+            player_videos: Vec::new(),
+            active_effects: Vec::new(),
+            timeline_cues: Vec::new(),
+            timeline_playing: false,
+            timeline_started: None,
+            timeline_fired: 0,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -534,6 +556,7 @@ impl Session {
         };
         session.restore_watermark();
         session.apply_active_scenes();
+        session.load_player_videos();
         session
     }
 
@@ -713,6 +736,7 @@ impl Session {
         self.reveal_count = 0;
         self.click_revealed = false;
         self.line_index = 0;
+        self.load_timeline();
         self.apply_slide_actions();
         true
     }
@@ -788,6 +812,23 @@ impl Session {
                 .unwrap_or_else(|| format!("{:.0} fps", self.preferences.timecode_framerate()));
             parts.push(format!("Timecode {kind} {clock}"));
         }
+        if let Some(name) = &self.player_now {
+            parts.push(format!("Player {name}"));
+        }
+        if !self.active_effects.is_empty() {
+            parts.push(format!("Effect {}", self.active_effects.join(", ")));
+        }
+        let audio_fx = self.preferences.audio_effect_names();
+        if !audio_fx.is_empty() {
+            parts.push(format!("Audio FX {}", audio_fx.join(", ")));
+        }
+        if self.timeline_playing {
+            parts.push("Timeline".to_string());
+        }
+        let delay = self.preferences.output_delay_ms();
+        if delay > 0 {
+            parts.push(format!("Delay {delay} ms"));
+        }
         parts.join("  ·  ")
     }
 
@@ -795,6 +836,17 @@ impl Session {
         match self.tab.as_str() {
             "shows" => self.shows.iter().map(ShowFile::name).collect(),
             "media" => self.media.iter().map(MediaEntry::label).collect(),
+            "player" => self
+                .player_videos
+                .iter()
+                .map(|video| {
+                    if video.kind == "file" || video.path.is_some() {
+                        video.name.clone()
+                    } else {
+                        format!("{} ({})", video.name, video.kind)
+                    }
+                })
+                .collect(),
             "audio" => self.audio.clone(),
             "overlays" => self.overlays.clone(),
             "templates" => self.templates.clone(),
@@ -865,6 +917,16 @@ impl Session {
                     "End interaction".to_string()
                 } else {
                     "Ask".to_string()
+                },
+                if self.timeline_playing {
+                    "Stop timeline".to_string()
+                } else {
+                    "Timeline".to_string()
+                },
+                if self.active_effects.is_empty() {
+                    "Effects".to_string()
+                } else {
+                    "Clear effects".to_string()
                 },
             ],
             _ => Vec::new(),
@@ -1030,6 +1092,7 @@ impl Session {
                 DrawerAction::None
             }
             "media" => self.choose_media(index),
+            "player" => self.choose_player(index),
             "audio" => self.choose_audio(index),
             "overlays" => self.toggle_overlay(index),
             "templates" => self.choose_template(index),
@@ -1286,6 +1349,181 @@ impl Session {
             color: color.to_string(),
             up: false,
         });
+    }
+
+    fn load_player_videos(&mut self) {
+        let Some(root) = &self.root else {
+            self.player_videos.clear();
+            return;
+        };
+        self.player_videos = Library::open(root).player_videos();
+    }
+
+    fn choose_player(&mut self, index: usize) -> DrawerAction {
+        let Some(video) = self.player_videos.get(index).cloned() else {
+            return DrawerAction::None;
+        };
+        self.player_now = Some(video.name.clone());
+        if let Some(path) = video
+            .path
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+        {
+            let _ = self.play_path(path);
+        }
+        DrawerAction::None
+    }
+
+    pub fn start_effect(&mut self, id_or_name: &str) -> bool {
+        let Some(effect) = self.preferences.effect(id_or_name) else {
+            return false;
+        };
+        if !self.active_effects.iter().any(|id| id == &effect.id) {
+            self.active_effects.push(effect.id);
+        }
+        true
+    }
+
+    pub fn clear_effects(&mut self) {
+        self.active_effects.clear();
+    }
+
+    pub fn toggle_effects(&mut self) -> bool {
+        if !self.active_effects.is_empty() {
+            self.clear_effects();
+            return true;
+        }
+        let Some(effect) = self.preferences.effects_library().into_iter().next() else {
+            return false;
+        };
+        self.start_effect(&effect.id)
+    }
+
+    pub fn live_effects(&self) -> Vec<EffectSpec> {
+        self.active_effects
+            .iter()
+            .filter_map(|id| self.preferences.effect(id))
+            .collect()
+    }
+
+    fn load_timeline(&mut self) {
+        self.timeline_cues = self
+            .current_show()
+            .map(|show| timeline_cues_from_show(&show.show))
+            .unwrap_or_default();
+        self.timeline_playing = false;
+        self.timeline_started = None;
+        self.timeline_fired = 0;
+    }
+
+    pub fn timeline_text(&self) -> String {
+        timeline_text_from(&self.timeline_cues)
+    }
+
+    pub fn save_timeline(&mut self, text: &str) -> bool {
+        let cues = parse_timeline_text(text);
+        self.timeline_cues = cues.clone();
+        let Some(index) = self.show_index else {
+            return !cues.is_empty() || text.trim().is_empty();
+        };
+        let Some(show) = self.shows.get_mut(index) else {
+            return false;
+        };
+        let actions: Vec<serde_json::Value> = cues
+            .iter()
+            .map(|cue| {
+                let mut data = serde_json::json!({});
+                if let Some(value) = &cue.data {
+                    if let Ok(index) = value.parse::<u64>() {
+                        data["index"] = serde_json::json!(index);
+                    } else {
+                        data["id"] = serde_json::json!(value);
+                    }
+                }
+                serde_json::json!({
+                    "id": cue.name,
+                    "time": cue.time_ms,
+                    "name": cue.name,
+                    "type": cue.kind,
+                    "data": data
+                })
+            })
+            .collect();
+        show.show["timeline"] = serde_json::json!({ "actions": actions, "loop": false });
+        if let Some(path) = show.path.clone() {
+            let _ = show.save(&path);
+        }
+        true
+    }
+
+    pub fn start_timeline(&mut self) -> bool {
+        if self.timeline_cues.is_empty() {
+            self.load_timeline();
+        }
+        if self.timeline_cues.is_empty() {
+            return false;
+        }
+        self.timeline_playing = true;
+        self.timeline_started = Some(std::time::Instant::now());
+        self.timeline_fired = 0;
+        true
+    }
+
+    pub fn stop_timeline(&mut self) {
+        self.timeline_playing = false;
+        self.timeline_started = None;
+        self.timeline_fired = 0;
+    }
+
+    /// Fires due timeline cues. Returns true when the output should refresh.
+    pub fn tick_timeline(&mut self, now: std::time::Instant) -> bool {
+        if !self.timeline_playing {
+            return false;
+        }
+        let Some(started) = self.timeline_started else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(started).as_millis() as u64;
+        let mut changed = false;
+        while self.timeline_fired < self.timeline_cues.len() {
+            let cue = self.timeline_cues[self.timeline_fired].clone();
+            if cue.time_ms > elapsed {
+                break;
+            }
+            self.timeline_fired += 1;
+            changed |= self.run_timeline_cue(&cue);
+        }
+        if self.timeline_fired >= self.timeline_cues.len() {
+            self.stop_timeline();
+        }
+        changed
+    }
+
+    fn run_timeline_cue(&mut self, cue: &TimelineCue) -> bool {
+        match cue.kind.to_ascii_lowercase().as_str() {
+            "next" | "next_slide" | "go" => self.advance_show(),
+            "previous" | "previous_slide" => self.retreat_show(),
+            "overlay" => {
+                if let Some(id) = cue
+                    .data
+                    .as_deref()
+                    .and_then(|name| self.resolve_overlay_id(name))
+                    && !self.active_overlays.iter().any(|active| active == &id)
+                {
+                    self.active_overlays.push(id);
+                    return true;
+                }
+                false
+            }
+            "scene" => cue.data.as_deref().is_some_and(|id| self.start_scene(id)),
+            "effect" => cue.data.as_deref().is_some_and(|id| self.start_effect(id)),
+            "clear" => {
+                self.clear_output();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Selects the first show and first slide and applies that slide.
@@ -5605,6 +5843,94 @@ mod tests {
         assert!(functions.contains(&"Variables".to_string()));
         assert!(functions.contains(&"Clear drawing".to_string()));
         assert!(functions.contains(&"End interaction".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn player_effects_audio_and_timeline_drive_the_output() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-player-timeline-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = root.join("Config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r##"{
+                "special": {"guideSeen": true, "outputDelayMs": 120},
+                "timeline": {"zoom": 2},
+                "effectsLibrary": {
+                    "snow": {
+                        "name": "Snow",
+                        "color": "white",
+                        "items": [{"type": "snow"}]
+                    }
+                },
+                "audioEffects": {
+                    "master": {
+                        "stack": [{
+                            "id": "gain1",
+                            "type": "filter",
+                            "enabled": true,
+                            "config": {"gain": 0.5}
+                        }]
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+        std::fs::write(config.join("overlays.json"), r#"{"logo":{"name":"Logo"}}"#).unwrap();
+        std::fs::write(
+            config.join("settings_synced.json"),
+            r#"{
+                "playerVideos": {
+                    "intro": {"name": "Intro Loop", "type": "youtube", "id": "abc"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut session = Session::open(root.clone());
+        assert_eq!(session.preferences.timeline_zoom(), 2.0);
+        assert_eq!(session.preferences.output_delay_ms(), 120);
+        assert!((session.preferences.audio_effect_gain() - 0.5).abs() < f32::EPSILON);
+        assert!(session.chrome_status().contains("Audio FX master:filter"));
+        assert!(session.chrome_status().contains("Delay 120 ms"));
+        session.tab = "player".to_string();
+        assert!(
+            session
+                .drawer()
+                .iter()
+                .any(|row| row.contains("Intro Loop"))
+        );
+        let _ = session.select_drawer(0);
+        assert_eq!(session.player_now.as_deref(), Some("Intro Loop"));
+        assert!(session.start_effect("Snow"));
+        assert_eq!(session.active_effects, vec!["snow".to_string()]);
+        let _ = crate::live::audience_frame(&session);
+        assert!(session.create_project());
+        assert!(session.create_show_with(
+            "timeline",
+            "Cues",
+            "[Verse]
+First line
+
+Chorus:
+Second line"
+        ));
+        assert!(session.save_timeline("0.000 overlay:logo\n0.050 next\n"));
+        assert_eq!(session.timeline_cues.len(), 2);
+        assert!(session.start_timeline());
+        let started = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(started + std::time::Duration::from_millis(1)));
+        assert!(session.active_overlays.contains(&"logo".to_string()));
+        assert!(session.tick_timeline(started + std::time::Duration::from_millis(80)));
+        assert_eq!(session.slide_index, Some(1));
+        assert!(!session.timeline_playing);
+        session.tab = "functions".to_string();
+        let functions = session.drawer();
+        assert!(functions.contains(&"Timeline".to_string()));
+        assert!(functions.contains(&"Clear effects".to_string()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

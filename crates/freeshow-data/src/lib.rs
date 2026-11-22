@@ -155,6 +155,36 @@ pub struct DrawStroke {
     pub up: bool,
 }
 
+/// A stored Player-tab video (local path or a YouTube/Vimeo id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerVideo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub path: Option<String>,
+}
+
+/// A named live effect from `effectsLibrary` or synced `effects`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectSpec {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub background: String,
+    pub place_under: bool,
+    pub item_types: Vec<String>,
+    pub display_duration_ms: Option<u64>,
+}
+
+/// One cue on a show timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineCue {
+    pub time_ms: u64,
+    pub name: String,
+    pub kind: String,
+    pub data: Option<String>,
+}
+
 impl FreeShowPreferences {
     /// FreeShow's default clock is 24-hour.
     pub fn uses_12_hour_clock(&self) -> bool {
@@ -485,6 +515,50 @@ impl FreeShowPreferences {
             .or_else(|| self.draw_settings.get("size").and_then(json_f32))
             .filter(|size| *size > 0.0)
             .unwrap_or(12.0)
+    }
+
+    /// Live output delay in milliseconds, from `special.outputDelayMs`.
+    pub fn output_delay_ms(&self) -> u32 {
+        self.special
+            .get("outputDelayMs")
+            .and_then(Value::as_u64)
+            .or_else(|| self.special.get("outputDelay").and_then(Value::as_u64))
+            .and_then(|ms| u32::try_from(ms).ok())
+            .unwrap_or(0)
+    }
+
+    pub fn effects_library(&self) -> Vec<EffectSpec> {
+        effects_from(&self.effects_library)
+    }
+
+    pub fn effect(&self, id_or_name: &str) -> Option<EffectSpec> {
+        let query = id_or_name.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let wanted = query.to_ascii_lowercase();
+        self.effects_library().into_iter().find(|effect| {
+            effect.id.eq_ignore_ascii_case(&wanted) || effect.name.eq_ignore_ascii_case(&wanted)
+        })
+    }
+
+    /// Combined linear gain from stored `audioEffects` stacks (default 1.0).
+    pub fn audio_effect_gain(&self) -> f32 {
+        audio_effect_gain(&self.audio_effects)
+    }
+
+    /// Enabled processor names in `audioEffects`.
+    pub fn audio_effect_names(&self) -> Vec<String> {
+        audio_effect_names(&self.audio_effects)
+    }
+
+    /// Timeline editor zoom from settings, when stored.
+    pub fn timeline_zoom(&self) -> f32 {
+        self.timeline
+            .get("zoom")
+            .and_then(json_f32)
+            .filter(|zoom| *zoom > 0.0)
+            .unwrap_or(1.0)
     }
 }
 
@@ -4559,6 +4633,14 @@ impl Library {
         fs::write(path, json.to_string()).is_ok()
     }
 
+    /// Player-tab videos from `settings_synced.json`.
+    pub fn player_videos(&self) -> Vec<PlayerVideo> {
+        self.synced_json()
+            .and_then(|json| json.get("playerVideos").cloned())
+            .map(|value| player_videos_from(&value))
+            .unwrap_or_default()
+    }
+
     /// Volume and mute of the main audio channel. Missing settings are full volume, unmuted.
     pub fn main_audio(&self) -> (f32, bool) {
         self.channel_audio("main")
@@ -5532,6 +5614,258 @@ fn json_f32(value: &Value) -> Option<f32> {
         .or_else(|| value.as_i64().map(|number| number as f32))
         .or_else(|| value.as_u64().map(|number| number as f32))
         .or_else(|| value.as_str()?.parse().ok())
+}
+
+fn effects_from(value: &Value) -> Vec<EffectSpec> {
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(id, entry)| {
+            let items = entry
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            if item.get("hidden").and_then(Value::as_bool) == Some(true) {
+                                return None;
+                            }
+                            item.get("type")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|kind| !kind.is_empty())
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            EffectSpec {
+                id: id.clone(),
+                name: entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .to_string(),
+                color: entry
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                background: entry
+                    .get("background")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                place_under: entry.get("placeUnderSlide").and_then(Value::as_bool) == Some(true),
+                item_types: items,
+                display_duration_ms: entry
+                    .get("displayDuration")
+                    .and_then(Value::as_u64)
+                    .map(|secs| secs.saturating_mul(1000))
+                    .or_else(|| entry.get("displayDurationMs").and_then(Value::as_u64)),
+            }
+        })
+        .collect()
+}
+
+fn audio_effect_names(value: &Value) -> Vec<String> {
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for (channel, config) in map {
+        let Some(stack) = config.get("stack").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in stack {
+            if item.get("enabled").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
+            let kind = item.get("type").and_then(Value::as_str).unwrap_or("effect");
+            names.push(format!("{channel}:{kind}"));
+        }
+    }
+    names
+}
+
+fn audio_effect_gain(value: &Value) -> f32 {
+    let Some(map) = value.as_object() else {
+        return 1.0;
+    };
+    let mut gain = 1.0_f32;
+    for config in map.values() {
+        let Some(stack) = config.get("stack").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in stack {
+            if item.get("enabled").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
+            if let Some(stored) = item
+                .get("config")
+                .and_then(|config| {
+                    config
+                        .get("gain")
+                        .or_else(|| config.get("volume"))
+                        .or_else(|| config.get("outputGain"))
+                })
+                .and_then(json_f32)
+            {
+                gain *= stored;
+            }
+        }
+    }
+    gain.clamp(0.0, 4.0)
+}
+
+/// Player videos stored in `settings_synced.json`.
+pub fn player_videos_from(value: &Value) -> Vec<PlayerVideo> {
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut videos = Vec::new();
+    for (id, entry) in map {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .trim();
+        if name.is_empty() {
+            continue;
+        }
+        let kind = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("mediaType").and_then(Value::as_str))
+            .unwrap_or("file")
+            .to_string();
+        let path = entry
+            .get("path")
+            .or_else(|| entry.get("url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string);
+        videos.push(PlayerVideo {
+            id: id.clone(),
+            name: name.to_string(),
+            kind,
+            path,
+        });
+    }
+    videos
+}
+
+/// Timeline cues stored on a show document.
+pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
+    let actions = show
+        .get("timeline")
+        .and_then(|timeline| timeline.get("actions"))
+        .and_then(Value::as_array)
+        .or_else(|| {
+            show.pointer("/layouts/main/timeline/actions")
+                .and_then(Value::as_array)
+        });
+    let Some(actions) = actions else {
+        return Vec::new();
+    };
+    let mut cues = Vec::new();
+    for action in actions {
+        let time_ms = action
+            .get("time")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                action
+                    .get("time")
+                    .and_then(json_f32)
+                    .map(|secs| (secs * 1000.0).round() as u64)
+            })
+            .unwrap_or(0);
+        let kind = action
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("action")
+            .to_string();
+        let data = action
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .or_else(|| action.pointer("/data/path").and_then(Value::as_str))
+            .or_else(|| action.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .or_else(|| {
+                action
+                    .pointer("/data/index")
+                    .and_then(Value::as_u64)
+                    .map(|index| index.to_string())
+            });
+        cues.push(TimelineCue {
+            time_ms,
+            name: action
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&kind)
+                .to_string(),
+            kind,
+            data,
+        });
+    }
+    cues.sort_by_key(|cue| cue.time_ms);
+    cues
+}
+
+pub fn timeline_text_from(cues: &[TimelineCue]) -> String {
+    cues.iter()
+        .map(|cue| {
+            let seconds = cue.time_ms as f32 / 1000.0;
+            match &cue.data {
+                Some(data) if !data.is_empty() && data != &cue.kind => {
+                    format!("{seconds:.3} {}:{data}", cue.kind)
+                }
+                _ => format!("{seconds:.3} {}", cue.kind),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn parse_timeline_text(text: &str) -> Vec<TimelineCue> {
+    let mut cues = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let Some(time) = parts.next() else {
+            continue;
+        };
+        let rest = parts.next().unwrap_or("next").trim();
+        let seconds: f32 = if let Some(ms) = time.strip_suffix("ms") {
+            ms.parse::<f32>().unwrap_or(0.0) / 1000.0
+        } else {
+            time.parse().unwrap_or(0.0)
+        };
+        let (kind, data) = rest
+            .split_once(':')
+            .map(|(kind, data)| {
+                (
+                    kind.trim(),
+                    Some(data.trim().to_string()).filter(|s| !s.is_empty()),
+                )
+            })
+            .unwrap_or((rest, None));
+        let kind = if kind.is_empty() { "next" } else { kind };
+        cues.push(TimelineCue {
+            time_ms: (seconds.max(0.0) * 1000.0).round() as u64,
+            name: kind.to_string(),
+            kind: kind.to_string(),
+            data,
+        });
+    }
+    cues.sort_by_key(|cue| cue.time_ms);
+    cues
 }
 
 /// FreeShow's default library folder, when it already exists on this machine.

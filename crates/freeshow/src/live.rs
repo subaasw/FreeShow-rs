@@ -95,7 +95,49 @@ pub fn audience_frame(session: &Session) -> Frame {
     paint_overlays(&mut frame, session, false);
     paint_interaction(&mut frame, session);
     paint_drawing(&mut frame, session);
+    paint_effects(&mut frame, session);
     frame
+}
+
+fn paint_effects(frame: &mut Frame, session: &Session) {
+    for effect in session.live_effects() {
+        let color = parse_color(&effect.color)
+            .or_else(|| parse_color(&effect.background))
+            .unwrap_or(Rgba {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 40,
+            });
+        let wash = Rgba {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a.clamp(24, 48),
+        };
+        // A light full-frame wash, plus a few deterministic dots for particle types.
+        let step_x = (frame.width / 8).max(1);
+        let step_y = (frame.height / 6).max(1);
+        let particles = effect
+            .item_types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "stars" | "snow" | "bubbles" | "confetti"));
+        if particles {
+            let mut y = step_y;
+            while y < frame.height {
+                let mut x = step_x;
+                while x < frame.width {
+                    frame.fill_circle(x as i32, y as i32, 3, color);
+                    x += step_x;
+                }
+                y += step_y;
+            }
+        } else if !effect.color.is_empty() || !effect.background.is_empty() {
+            let cx = (frame.width / 2) as i32;
+            let cy = (frame.height / 2) as i32;
+            frame.fill_circle(cx, cy, (frame.height / 6).max(8) as i32, wash);
+        }
+    }
 }
 
 fn paint_interaction(frame: &mut Frame, session: &Session) {
