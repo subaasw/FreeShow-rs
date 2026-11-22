@@ -93,7 +93,9 @@ export component HeaderButton inherits Rectangle {
     in property <color> text-color;
     in property <color> accent-text;
     callback clicked();
-    width: 88px;
+    min-width: max(56px, label-text.preferred-width + 12px);
+    preferred-width: max(88px, label-text.preferred-width + 20px);
+    max-width: max(88px, label-text.preferred-width + 20px);
     height: 32px;
     border-radius: OperatorStyle.chrome-radius;
     background: root.accent;
@@ -103,7 +105,7 @@ export component HeaderButton inherits Rectangle {
         border-radius: parent.border-radius;
         background: pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
     }
-    Text {
+    label-text := Text {
         text: root.label;
         color: root.accent-text;
         font-size: 13px * OperatorStyle.font-scale;
@@ -177,5 +179,105 @@ export component ListRow inherits Rectangle {
             key-focus.focus();
             root.clicked();
         }
+    }
+}
+
+// Maps key presses to shortcut chords for the operator, output and stage windows.
+export component HotkeyScope inherits FocusScope {
+    callback hotkey(string, bool, bool, bool);
+    key-pressed(event) => {
+            if (event.text == Key.F11) {
+                root.hotkey("F11", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.F1) {
+                root.hotkey("F1", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.RightArrow) {
+                root.hotkey("Right", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.LeftArrow) {
+                root.hotkey("Left", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.PageDown) {
+                root.hotkey("PageDown", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.PageUp) {
+                root.hotkey("PageUp", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else if (event.text == Key.Escape) {
+                root.hotkey("Escape", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            } else {
+                root.hotkey(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+            }
+            accept
+        }
+}
+
+// One slide in the show's slide list: a thumbnail when there is one, else its text.
+export component SlideCard inherits Rectangle {
+    in property <string> label;
+    in property <int> number;
+    in property <image> thumb;
+    in property <bool> has-thumb;
+    in property <bool> active;
+    in property <bool> live;
+    in property <color> accent;
+    in property <color> text-color;
+    in property <color> accent-text;
+    in property <bool> has-color: false;
+    in property <bool> full-color: false;
+    in property <color> group-color: #00000000;
+    in property <color> group-text: #f0f0ff;
+    callback clicked();
+    border-radius: OperatorStyle.chrome-radius;
+    background: root.live ? root.accent : (root.active ? #ffffff40 : (pointer.has-hover ? OperatorStyle.hover : #00000030));
+    if root.has-thumb: Rectangle {
+        x: 3px;
+        y: 3px;
+        width: parent.width - 6px;
+        height: (parent.width - 6px) * 9 / 16;
+        background: black;
+        Image {
+            source: root.thumb;
+            width: 100%;
+            height: 100%;
+            image-fit: contain;
+        }
+        if root.live: Rectangle {
+            x: 4px;
+            y: 4px;
+            width: live-tag.preferred-width + 10px;
+            height: 16px;
+            border-radius: 3px;
+            background: #c0392b;
+            live-tag := Text {
+                text: "LIVE";
+                color: #ffffff;
+                font-size: 10px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Rectangle {
+        x: 3px;
+        y: root.has-thumb ? parent.height - 25px : 3px;
+        width: parent.width - 6px;
+        height: root.has-thumb ? 22px : parent.height - 6px;
+        border-radius: OperatorStyle.chrome-radius;
+        background: root.has-color ? (root.full-color ? root.group-color : #00000060) : #00000060;
+        if root.has-color && !root.full-color: Rectangle {
+            x: 0;
+            width: 4px;
+            height: 100%;
+            background: root.group-color;
+        }
+        Text {
+            x: 10px;
+            width: parent.width - 14px;
+            text: root.number + "  " + root.label;
+            color: root.has-color && !root.full-color ? root.group-text : (root.has-color ? root.group-text : root.text-color);
+            font-size: 12px * OperatorStyle.font-scale;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    pointer := TouchArea {
+        clicked => { root.clicked(); }
     }
 }

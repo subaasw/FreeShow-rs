@@ -33,7 +33,7 @@ use freeshow_pco::PlanSource;
 use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
 use freeshow_timecode::TimecodeSource;
-use live::{OpeningFade, audience_frame, motion_frame, stage_frame};
+use live::{OpeningFade, audience_frame, edit_frame, motion_frame, stage_frame};
 use present::{FrameSlot, attach_frame};
 use session::{DrawerAction, PendingPlay, Session};
 use slint::winit_030::WinitWindowAccessor;
@@ -68,26 +68,77 @@ fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
     style.set_chrome_radius(theme.border_radius);
 }
 
-fn slide_grid(session: &Session) -> slint::ModelRc<SlideGridRow> {
-    let columns = session.slides_list_columns().max(1);
+const SLIDE_THUMB_WIDTH: u32 = 320;
+const SLIDE_THUMB_HEIGHT: u32 = 180;
+
+thread_local! {
+    /// Slide thumbnails keyed by show content and position, so a refresh only draws changes.
+    static SLIDE_THUMBS: RefCell<std::collections::HashMap<u64, slint::Image>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Thumbnails for every slide of the open show, or none in list mode and scripture.
+fn slide_thumbs(session: &Session) -> Vec<slint::Image> {
+    use std::hash::{Hash, Hasher};
+    if session.tab == "scripture" || session.slides_list_columns() < 2 {
+        return Vec::new();
+    }
+    let Some(show) = session
+        .show_index
+        .and_then(|index| session.shows.get(index))
+    else {
+        return Vec::new();
+    };
+    let mut base = std::collections::hash_map::DefaultHasher::new();
+    show.id.hash(&mut base);
+    show.show.to_string().hash(&mut base);
+    session.root.hash(&mut base);
+    let base = base.finish();
+    let count = show.ordered_slides().len();
+    SLIDE_THUMBS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 4000 {
+            cache.clear();
+        }
+        (0..count)
+            .map(|index| {
+                let mut key = std::collections::hash_map::DefaultHasher::new();
+                (base, index).hash(&mut key);
+                cache
+                    .entry(key.finish())
+                    .or_insert_with(|| {
+                        let frame = live::slide_thumbnail(
+                            session,
+                            show,
+                            index,
+                            SLIDE_THUMB_WIDTH,
+                            SLIDE_THUMB_HEIGHT,
+                        );
+                        present::frame_image(&frame)
+                    })
+                    .clone()
+            })
+            .collect()
+    })
+}
+
+fn slide_cards(session: &Session) -> slint::ModelRc<SlideRowData> {
     let full_colors = session.preferences.full_colors();
-    let rows = session
+    let thumbs = slide_thumbs(session);
+    let cards = session
         .slide_rows()
-        .into_iter()
+        .iter()
         .enumerate()
-        .collect::<Vec<_>>();
-    let grid = rows
-        .chunks(columns)
-        .map(|chunk| SlideGridRow {
-            items: slint::ModelRc::new(slint::VecModel::from(
-                chunk
-                    .iter()
-                    .map(|(index, row)| slide_row_data(*index, row, full_colors))
-                    .collect::<Vec<_>>(),
-            )),
+        .map(|(index, row)| {
+            let mut data = slide_row_data(index, row, full_colors);
+            if let Some(thumb) = thumbs.get(index) {
+                data.thumb = thumb.clone();
+                data.has_thumb = true;
+            }
+            data
         })
         .collect::<Vec<_>>();
-    slint::ModelRc::new(slint::VecModel::from(grid))
+    slint::ModelRc::new(slint::VecModel::from(cards))
 }
 
 fn slide_row_data(index: usize, row: &session::SlideLabel, full_colors: bool) -> SlideRowData {
@@ -104,6 +155,7 @@ fn slide_row_data(index: usize, row: &session::SlideLabel, full_colors: bool) ->
             } else {
                 group
             },
+            ..SlideRowData::default()
         }
     } else {
         SlideRowData {
@@ -112,6 +164,7 @@ fn slide_row_data(index: usize, row: &session::SlideLabel, full_colors: bool) ->
             has_color: false,
             group_color: slint::Color::from_argb_u8(0, 0, 0, 0),
             group_text: default_text,
+            ..SlideRowData::default()
         }
     }
 }
@@ -260,8 +313,9 @@ fn spelling_note(session: &Session, text: &str) -> String {
 
 fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_drawer_rows(drawer_rows(session));
-    ui.set_slide_grid(slide_grid(session));
+    ui.set_slide_cards(slide_cards(session));
     ui.set_slides_columns(session.slides_list_columns() as i32);
+    ui.set_live_slide(session.live_slide_index().map_or(-1, |index| index as i32));
     ui.set_full_colors(session.preferences.full_colors());
     ui.set_project_names(strings(&session.project_labels()));
     ui.set_project_title(session.project_title().into());
@@ -668,6 +722,16 @@ fn sample_audio(session: &RefCell<Session>, audio: &RefCell<Option<AudioOutput>>
     }
 }
 
+type LivePump = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+/// Applies queued operator commands and output refreshes right away.
+fn pump_live(pump: &LivePump) {
+    let run = pump.borrow().clone();
+    if let Some(run) = run {
+        run();
+    }
+}
+
 fn stop_video(timer: &slint::Timer, video: &RefCell<Option<VideoPlayer>>) {
     timer.stop();
     *video.borrow_mut() = None;
@@ -781,6 +845,9 @@ fn start_pending(
         }
         Some(PendingPlay::StopAudio) => {
             *playback.audio.borrow_mut() = None;
+        }
+        Some(PendingPlay::StopVideo) => {
+            stop_video(&playback.timer, &playback.video);
         }
         Some(PendingPlay::PauseAudio) => {
             if let Some(output) = playback.audio.borrow().as_ref() {
@@ -1531,6 +1598,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
+    // The slide being edited, shown in place of the live picture while editing.
+    let edit_weak = control.as_weak();
+    let edit_redraw = control.as_weak();
+    let edit_slot = Rc::new(attach_frame(
+        control.window(),
+        clear_frame(output_width, output_height),
+        move |image| {
+            if let Some(control) = edit_weak.upgrade() {
+                control.set_edit_preview(image);
+            }
+        },
+        move || {
+            if let Some(control) = edit_redraw.upgrade() {
+                control.window().request_redraw();
+            }
+        },
+    )?);
     let output_slot = Rc::new(output_slot);
     let stage_slot = Rc::new(stage_slot);
     let preview_slot = Rc::new(preview_slot);
@@ -1562,6 +1646,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let session = Rc::new(RefCell::new(session));
+    // Runs one live-update pass now instead of waiting for the next 100 ms tick.
+    let live_pump: LivePump = Rc::default();
     let settings = Rc::new(RefCell::new(settings));
     let audio_out: Rc<RefCell<Option<AudioOutput>>> = Rc::new(RefCell::new(None));
     let video_player: Rc<RefCell<Option<VideoPlayer>>> = Rc::new(RefCell::new(None));
@@ -1737,7 +1823,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let settings = Rc::clone(&settings);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         let output_window = output.as_weak();
         control.on_apply_setting(move |key, value| {
             let result = session.borrow_mut().apply_setting(&key, &value);
@@ -1763,7 +1849,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         apply_theme(&ui, &theme);
                     }
                     refresh(&ui, &current);
-                    publish(&preview_slot, audience_frame(&current));
+                    publish(&edit_slot, edit_frame(&current));
                 }
                 Err(err) => {
                     tracing::warn!("setting {key} not saved: {err}");
@@ -1776,7 +1862,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_inspector_set(move |key, value| {
             let result = session.borrow_mut().inspector_set(&key, &value);
             if let Err(err) = &result {
@@ -1786,7 +1872,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let current = session.borrow();
                 refresh(&ui, &current);
                 if result.is_ok() {
-                    publish(&preview_slot, audience_frame(&current));
+                    publish(&edit_slot, edit_frame(&current));
                 }
             }
         });
@@ -1931,9 +2017,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Shortcuts pressed while the output or stage window has focus drive the show too.
+    {
+        let ui = control.as_weak();
+        output.on_hotkey(move |text, ctrl, alt, shift| {
+            if let Some(ui) = ui.upgrade() {
+                ui.invoke_hotkey(text, ctrl, alt, shift);
+            }
+        });
+        let ui = control.as_weak();
+        stage.on_hotkey(move |text, ctrl, alt, shift| {
+            if let Some(ui) = ui.upgrade() {
+                ui.invoke_hotkey(text, ctrl, alt, shift);
+            }
+        });
+    }
+
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        let live_pump = Rc::clone(&live_pump);
         control.on_hotkey(move |text, ctrl, alt, shift| {
             let mut chord = String::new();
             if ctrl {
@@ -1955,6 +2058,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session.borrow().always_on_top,
                     session.borrow().kiosk,
                 );
+                pump_live(&live_pump);
             }
         });
     }
@@ -1965,6 +2069,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let output_slot = Rc::clone(&output_slot);
         let stage_slot = Rc::clone(&stage_slot);
         let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         let output_fade = Rc::clone(&output_fade);
         let stage_fade = Rc::clone(&stage_fade);
         let last_output = Rc::clone(&last_output);
@@ -1995,6 +2100,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         *audio_out.borrow_mut() = None;
                         let blank = clear_frame(output_width, output_height);
                         next_slide.stop();
+                        output_fade.stop();
+                        stage_fade.stop();
                         *last_output.borrow_mut() = blank.clone();
                         publish_audience(&output_slot, blank.clone());
                         publish(&preview_slot, blank);
@@ -2264,7 +2371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 tracing::error!("ai could not update the slide");
                                 return;
                             }
-                            publish(&preview_slot, audience_frame(&current));
+                            publish(&edit_slot, edit_frame(&current));
                         }
                     }
                     13 => current.toggle_icecast(None),
@@ -2516,11 +2623,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        let live_pump = Rc::clone(&live_pump);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_choose_slide(move |index| {
-            session.borrow_mut().select_slide(index.max(0) as usize);
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            {
+                let mut current = session.borrow_mut();
+                // As in FreeShow, a click outside the editor puts the slide on the output.
+                if ui.get_edit_mode() {
+                    current.select_slide_for_edit(index.max(0) as usize);
+                } else {
+                    current.select_slide(index.max(0) as usize);
+                    current.blanked = false;
+                    current.refresh_output = true;
+                }
             }
+            refresh(&ui, &session.borrow());
+            if ui.get_edit_mode() {
+                publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+            pump_live(&live_pump);
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_edit_mode_changed(move || {
+            if ui.upgrade().is_some_and(|ui| ui.get_edit_mode()) {
+                publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+        });
+    }
+
+    {
+        let session = Rc::clone(&session);
+        let live_pump = Rc::clone(&live_pump);
+        control.on_clear_output(move |layer| {
+            use freeshow_remote::Command;
+            let command = match layer.as_str() {
+                "slide" => Command::ClearSlide,
+                "background" => Command::ClearBackground,
+                "overlays" => Command::ClearOverlays,
+                "audio" => Command::StopAudio,
+                _ => Command::Clear,
+            };
+            session.borrow_mut().ui_commands.push(command);
+            pump_live(&live_pump);
         });
     }
 
@@ -2575,52 +2727,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_prev_item(move || {
             session.borrow_mut().prev_item();
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
+                publish(&edit_slot, edit_frame(&session.borrow()));
             }
         });
     }
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_next_item(move || {
             session.borrow_mut().next_item();
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
+                publish(&edit_slot, edit_frame(&session.borrow()));
             }
         });
     }
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_add_item(move || {
             if !session.borrow_mut().add_item_box() {
                 tracing::error!("could not add a text box");
             }
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
+                publish(&edit_slot, edit_frame(&session.borrow()));
             }
         });
     }
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_remove_item(move || {
             if !session.borrow_mut().remove_item_box() {
                 tracing::error!("could not remove the text box");
             }
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
-                publish(&preview_slot, audience_frame(&session.borrow()));
+                publish(&edit_slot, edit_frame(&session.borrow()));
             }
         });
     }
@@ -2649,6 +2801,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut session = session.borrow_mut();
             if session.tab == "shows" {
                 session.save_lyrics(text.as_str());
+                // Run the slide's own background and cues, as a click would.
+                if let Some(index) = session.slide_index {
+                    session.select_slide(index);
+                }
             }
             session.blanked = false;
             let audience = audience_frame(&session);
@@ -2686,7 +2842,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_choose_project(move |index| {
             let picked = session
                 .borrow_mut()
@@ -2700,7 +2856,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_active_tab("shows".into());
                     ui.set_panel_title("Shows".into());
                     refresh(&ui, &session.borrow());
-                    publish(&preview_slot, audience_frame(&session.borrow()));
+                    publish(&edit_slot, edit_frame(&session.borrow()));
                 }
                 Ok(session::ProjectPick::Drawer { tab, label, index }) => {
                     ui.set_active_tab(tab.into());
@@ -2745,13 +2901,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_create_show(move || {
             if !session.borrow_mut().create_show() {
                 tracing::error!("could not create a show");
                 return;
             }
-            publish(&preview_slot, audience_frame(&session.borrow()));
+            publish(&edit_slot, edit_frame(&session.borrow()));
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
             }
@@ -2761,13 +2917,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_add_slide(move || {
             if !session.borrow_mut().add_slide() {
                 tracing::error!("could not add a slide");
                 return;
             }
-            publish(&preview_slot, audience_frame(&session.borrow()));
+            publish(&edit_slot, edit_frame(&session.borrow()));
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
             }
@@ -2899,137 +3055,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let import_snapshot = Arc::clone(&snapshot);
     let remote_timer = slint::Timer::default();
-    remote_timer.start(
-        slint::TimerMode::Repeated,
-        std::time::Duration::from_millis(100),
-        move || {
-            let mut batch = Vec::new();
-            while let Ok(command) = command_rx.try_recv() {
-                batch.push(command);
-            }
-            if batch.is_empty() {
-                let started = remote_session
-                    .borrow_mut()
-                    .start_due_events(chrono::Utc::now());
-                sample_audio(&remote_session, &remote_audio);
-                let moved = {
-                    let mut session = remote_session.borrow_mut();
-                    session.run_due_cue_completion(std::time::Instant::now())
-                        || session.refresh_output
-                };
-                if started || moved {
-                    remote_session.borrow_mut().refresh_output = false;
-                    if moved {
-                        remote_next_slide.stop();
-                        let plays = remote_session.borrow_mut().take_plays();
-                        let fades = picture_fades_in(&plays[0], &remote_session.borrow());
-                        if !fades && remote_session.borrow().background_transition {
-                            stop_video(&remote_video_timer, &remote_video);
-                        }
-                        start_plays(
-                            plays,
-                            &remote_session,
-                            &remote_playback,
-                            &remote_output,
-                            &remote_preview,
-                            &remote_stage,
-                            &remote_last_output,
-                            &remote_last_stage,
-                        );
-                        if fades {
-                            if let Some(ui) = remote_ui.upgrade() {
-                                refresh(&ui, &remote_session.borrow());
-                            }
-                            if let Ok(mut stored) = snapshot.lock() {
-                                *stored = remote_session.borrow().to_snapshot();
-                            }
-                            return;
-                        }
+    let pump: Rc<dyn Fn()> = Rc::new(move || {
+        let mut batch = Vec::new();
+        while let Ok(command) = command_rx.try_recv() {
+            batch.push(command);
+        }
+        batch.append(&mut remote_session.borrow_mut().ui_commands);
+        if batch.is_empty() {
+            let started = remote_session
+                .borrow_mut()
+                .start_due_events(chrono::Utc::now());
+            sample_audio(&remote_session, &remote_audio);
+            let moved = {
+                let mut session = remote_session.borrow_mut();
+                session.run_due_cue_completion(std::time::Instant::now()) || session.refresh_output
+            };
+            if started || moved {
+                remote_session.borrow_mut().refresh_output = false;
+                if moved {
+                    remote_next_slide.stop();
+                    let plays = remote_session.borrow_mut().take_plays();
+                    let fades = picture_fades_in(&plays[0], &remote_session.borrow());
+                    if !fades && remote_session.borrow().background_transition {
+                        stop_video(&remote_video_timer, &remote_video);
                     }
-                    let (audience, stage) = {
-                        let session = remote_session.borrow();
-                        (audience_frame(&session), stage_frame(&session))
-                    };
-                    if let Some(ui) = remote_ui.upgrade() {
-                        refresh(&ui, &remote_session.borrow());
-                    }
-                    let (motion, background) = remote_session.borrow_mut().output_motion();
-                    let seconds = if background {
-                        None
-                    } else {
-                        remote_session.borrow().next_timer_seconds()
-                    };
-                    send_frames(
-                        &remote_output_fade,
-                        &remote_stage_fade,
+                    start_plays(
+                        plays,
+                        &remote_session,
+                        &remote_playback,
                         &remote_output,
                         &remote_preview,
                         &remote_stage,
                         &remote_last_output,
                         &remote_last_stage,
-                        audience,
-                        stage,
-                        motion,
-                        background,
-                        &remote_next_slide,
-                        &remote_session,
-                        remote_ui.clone(),
-                        seconds,
-                        &remote_playback,
                     );
+                    if fades {
+                        if let Some(ui) = remote_ui.upgrade() {
+                            refresh(&ui, &remote_session.borrow());
+                        }
+                        if let Ok(mut stored) = snapshot.lock() {
+                            *stored = remote_session.borrow().to_snapshot();
+                        }
+                        return;
+                    }
                 }
-                if let Ok(mut stored) = snapshot.lock() {
-                    *stored = remote_session.borrow().to_snapshot();
+                let (audience, stage) = {
+                    let session = remote_session.borrow();
+                    (audience_frame(&session), stage_frame(&session))
+                };
+                if let Some(ui) = remote_ui.upgrade() {
+                    refresh(&ui, &remote_session.borrow());
                 }
-                return;
-            }
-            let clear = matches!(batch.last(), Some(freeshow_remote::Command::Clear));
-            sample_audio(&remote_session, &remote_audio);
-            let output_refresh = std::mem::take(&mut remote_session.borrow_mut().refresh_output);
-            let (audience, stage, timed_move) = {
-                let mut session = remote_session.borrow_mut();
-                for command in batch {
-                    session.apply_remote(command);
-                }
-                let timed_move = session.run_due_cue_completion(std::time::Instant::now());
-                let audience = audience_frame(&session);
-                let stage = stage_frame(&session);
-                if let Ok(mut stored) = snapshot.lock() {
-                    *stored = session.to_snapshot();
-                }
-                (audience, stage, timed_move)
-            };
-            let plays = remote_session.borrow_mut().take_plays();
-            let fades = picture_fades_in(&plays[0], &remote_session.borrow());
-            if timed_move || output_refresh {
-                remote_next_slide.stop();
-                if !fades && remote_session.borrow().background_transition {
-                    stop_video(&remote_video_timer, &remote_video);
-                }
-            }
-            start_plays(
-                plays,
-                &remote_session,
-                &remote_playback,
-                &remote_output,
-                &remote_preview,
-                &remote_stage,
-                &remote_last_output,
-                &remote_last_stage,
-            );
-            if fades {
-                remote_next_slide.stop();
-            }
-            if clear {
-                stop_video(&remote_video_timer, &remote_video);
-                *remote_audio.borrow_mut() = None;
-                remote_next_slide.stop();
-                *remote_last_output.borrow_mut() = audience.clone();
-                publish(&remote_output, audience.clone());
-                publish(&remote_preview, audience);
-                *remote_last_stage.borrow_mut() = stage.clone();
-                publish(&remote_stage, stage);
-            } else if !fades {
                 let (motion, background) = remote_session.borrow_mut().output_motion();
                 let seconds = if background {
                     None
@@ -3055,10 +3131,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &remote_playback,
                 );
             }
-            if let Some(ui) = remote_ui.upgrade() {
-                refresh(&ui, &remote_session.borrow());
+            if let Ok(mut stored) = snapshot.lock() {
+                *stored = remote_session.borrow().to_snapshot();
             }
-        },
+            return;
+        }
+        let clear = matches!(batch.last(), Some(freeshow_remote::Command::Clear));
+        sample_audio(&remote_session, &remote_audio);
+        let output_refresh = std::mem::take(&mut remote_session.borrow_mut().refresh_output);
+        let (audience, stage, timed_move) = {
+            let mut session = remote_session.borrow_mut();
+            for command in batch {
+                session.apply_remote(command);
+            }
+            let timed_move = session.run_due_cue_completion(std::time::Instant::now());
+            let audience = audience_frame(&session);
+            let stage = stage_frame(&session);
+            if let Ok(mut stored) = snapshot.lock() {
+                *stored = session.to_snapshot();
+            }
+            (audience, stage, timed_move)
+        };
+        let plays = remote_session.borrow_mut().take_plays();
+        let fades = picture_fades_in(&plays[0], &remote_session.borrow());
+        if timed_move || output_refresh {
+            remote_next_slide.stop();
+            if !fades && remote_session.borrow().background_transition {
+                stop_video(&remote_video_timer, &remote_video);
+            }
+        }
+        start_plays(
+            plays,
+            &remote_session,
+            &remote_playback,
+            &remote_output,
+            &remote_preview,
+            &remote_stage,
+            &remote_last_output,
+            &remote_last_stage,
+        );
+        if fades {
+            remote_next_slide.stop();
+        }
+        if clear {
+            stop_video(&remote_video_timer, &remote_video);
+            *remote_audio.borrow_mut() = None;
+            remote_next_slide.stop();
+            // A fade still running would paint the old slide back over the blank.
+            remote_output_fade.stop();
+            remote_stage_fade.stop();
+            *remote_last_output.borrow_mut() = audience.clone();
+            publish(&remote_output, audience.clone());
+            publish(&remote_preview, audience);
+            *remote_last_stage.borrow_mut() = stage.clone();
+            publish(&remote_stage, stage);
+        } else if !fades {
+            let (motion, background) = remote_session.borrow_mut().output_motion();
+            let seconds = if background {
+                None
+            } else {
+                remote_session.borrow().next_timer_seconds()
+            };
+            send_frames(
+                &remote_output_fade,
+                &remote_stage_fade,
+                &remote_output,
+                &remote_preview,
+                &remote_stage,
+                &remote_last_output,
+                &remote_last_stage,
+                audience,
+                stage,
+                motion,
+                background,
+                &remote_next_slide,
+                &remote_session,
+                remote_ui.clone(),
+                seconds,
+                &remote_playback,
+            );
+        }
+        if let Some(ui) = remote_ui.upgrade() {
+            refresh(&ui, &remote_session.borrow());
+        }
+    });
+    *live_pump.borrow_mut() = Some(Rc::clone(&pump));
+    remote_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(100),
+        move || pump(),
     );
 
     let clock_session = Rc::clone(&session);
@@ -3141,7 +3302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let spell_timer = Rc::clone(&spell_timer);
         let lyrics_timer = Rc::clone(&lyrics_timer);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_lyrics_edited(move |_| {
             {
                 let ui = ui.clone();
@@ -3160,7 +3321,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Slide text saves itself shortly after typing stops, like FreeShow.
             let ui = ui.clone();
             let session = Rc::clone(&session);
-            let preview_slot = Rc::clone(&preview_slot);
+            let edit_slot = Rc::clone(&edit_slot);
             lyrics_timer.start(
                 slint::TimerMode::SingleShot,
                 std::time::Duration::from_millis(600),
@@ -3176,7 +3337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         session.borrow_mut().notice = "Could not save the slide text".into();
                     }
                     refresh(&ui, &session.borrow());
-                    publish(&preview_slot, audience_frame(&session.borrow()));
+                    publish(&edit_slot, edit_frame(&session.borrow()));
                 },
             );
         });
@@ -3184,11 +3345,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let notice_timer = Rc::new(slint::Timer::default());
     let library_done: Rc<dyn Fn(&ControlWindow)> = {
         let session = Rc::clone(&session);
-        let preview_slot = Rc::clone(&preview_slot);
+        let edit_slot = Rc::clone(&edit_slot);
         let notice_timer = Rc::clone(&notice_timer);
         Rc::new(move |ui: &ControlWindow| {
             refresh(ui, &session.borrow());
-            publish(&preview_slot, audience_frame(&session.borrow()));
+            publish(&edit_slot, edit_frame(&session.borrow()));
             let ui = ui.as_weak();
             let session = Rc::clone(&session);
             notice_timer.start(

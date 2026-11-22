@@ -376,6 +376,9 @@ pub fn normalize_action_channel(action: &str) -> String {
         "previous" | "prev" | "previous_slide" => "API:previous_slide".into(),
         "clear" | "clear_all" => "API:clear_all".into(),
         "clear_slide" => "API:clear_slide".into(),
+        "clear_background" => "API:clear_background".into(),
+        "clear_overlays" => "API:clear_overlays".into(),
+        "clear_audio" => "API:clear_audio".into(),
         "state" | "get_state" => "API:get_cleared".into(),
         other => format!("API:{other}"),
     }
@@ -496,6 +499,9 @@ async fn companion_index(
             "previous",
             "clear",
             "clear_slide",
+            "clear_background",
+            "clear_overlays",
+            "clear_audio",
             "go"
         ]
     })))

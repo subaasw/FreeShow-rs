@@ -58,7 +58,7 @@ impl FrameSlot {
     }
 }
 
-fn frame_image(frame: &Frame) -> slint::Image {
+pub fn frame_image(frame: &Frame) -> slint::Image {
     let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
         &frame.pixels,
         frame.width,

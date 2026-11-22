@@ -123,6 +123,7 @@ pub enum PendingPlay {
     Video(PathBuf),
     Camera(String),
     StopAudio,
+    StopVideo,
     ToggleMedia,
     PauseAudio,
     ResumeAudio,
@@ -250,6 +251,8 @@ pub struct Session {
     media_finished: Option<(String, bool)>,
     /// The show moved because media ended, so the output windows need a new frame.
     pub refresh_output: bool,
+    /// Live commands from the operator window, run with the remote batch.
+    pub ui_commands: Vec<freeshow_remote::Command>,
     pub audio_paused: bool,
     pub media_paused: bool,
     pub media_loop: bool,
@@ -458,6 +461,7 @@ impl Session {
             effect_return: None,
             media_finished: None,
             refresh_output: false,
+            ui_commands: Vec::new(),
             audio_paused: false,
             media_paused: false,
             media_loop: true,
@@ -634,6 +638,7 @@ impl Session {
             effect_return: None,
             media_finished: None,
             refresh_output: false,
+            ui_commands: Vec::new(),
             audio_paused: false,
             media_paused: false,
             media_loop: true,
@@ -1104,9 +1109,7 @@ impl Session {
                 })
                 .collect();
         }
-        if self.tab != "shows" {
-            return Vec::new();
-        }
+        // The open show stays in view while the operator browses media, audio and the rest.
         self.current_show()
             .map(|show| slide_rows_for(&show.ordered_slides(), self.preferences.group_numbers()))
             .unwrap_or_default()
@@ -3685,6 +3688,18 @@ impl Session {
         }
     }
 
+    /// Picks the slide to edit without changing anything on the output.
+    pub fn select_slide_for_edit(&mut self, index: usize) {
+        if self.tab != "scripture"
+            && self
+                .current_show()
+                .is_some_and(|show| index < show.ordered_slides().len())
+        {
+            self.slide_index = Some(index);
+            self.line_index = 0;
+        }
+    }
+
     pub fn current_slide_text(&self) -> Option<String> {
         let show = self.show_index.and_then(|index| self.shows.get(index))?;
         let slides = show.ordered_slides();
@@ -4113,6 +4128,23 @@ impl Session {
                 self.active_overlays.clear();
                 self.restore_locked_overlays();
                 self.clear_output();
+            }
+            freeshow_remote::Command::ClearSlide => {
+                if self.preferences.out_locked() {
+                    return;
+                }
+                self.slide_hidden = true;
+                self.pending_cue_completion = None;
+            }
+            freeshow_remote::Command::ClearBackground => {
+                if self.preferences.out_locked() {
+                    return;
+                }
+                self.replace_underlay(None);
+                self.reset_background_look();
+                self.video_time = 0.0;
+                self.video_duration = 0.0;
+                self.pending_play = Some(PendingPlay::StopVideo);
             }
             freeshow_remote::Command::ShowOverlay { id } => {
                 if self.overlay_catalog.get(&id).is_some()
@@ -4605,6 +4637,22 @@ impl Session {
         self.projects
             .save(&Library::open(root).projects_path())
             .is_ok()
+    }
+
+    /// The slide of the open show that is on the output now, if any.
+    pub fn live_slide_index(&self) -> Option<usize> {
+        if self.blanked || self.slide_hidden {
+            return None;
+        }
+        let show = self.current_show()?;
+        match self.program_content.borrow().as_ref() {
+            Some(crate::live::ProgramContent::Slide { show_id, index, .. })
+                if show_id == &show.id =>
+            {
+                Some(*index)
+            }
+            _ => None,
+        }
     }
 
     fn current_show(&self) -> Option<&ShowFile> {
@@ -5482,7 +5530,7 @@ impl Session {
 
     pub fn guide_text(&self) -> String {
         let mut text = String::from(
-            "Welcome to FreeShow\n1. Pick a show from the drawer.\n2. Choose a slide and press Go.\n3. Open Output for the audience and Stage for the foldback.\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
+            "Welcome to FreeShow\n1. Pick a show from the drawer or your project.\n2. Click a slide to put it on the output. Arrow keys and Page Up/Down step through.\n3. Open Output for the audience and Stage for the foldback. Esc or Clear all blanks the screen.\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
         );
         if let Some(alert) = self.alert_banner() {
             text = format!("{alert}\n\n{text}");
@@ -5491,7 +5539,7 @@ impl Session {
             text.push_str("\n\nProfile login required.");
         }
         text.push_str(
-            "\n\nSettings and Stage edit are in the header; the Inspector sits beside the preview.",
+            "\n\nEdit opens the slide editor: clicks then pick slides without going live, and Go shows the one you are editing.",
         );
         text
     }
@@ -5565,18 +5613,18 @@ impl Session {
         let Some(action) = action else {
             return false;
         };
+        if action == "clear" {
+            self.ui_commands.push(freeshow_remote::Command::Clear);
+            return true;
+        }
         let live = match action.as_str() {
             "next" => self.advance_show(),
             "previous" => self.retreat_show(),
             "go" => self.slide_index.is_some() || self.open_first_show(),
-            "clear" => {
-                self.apply_remote(freeshow_remote::Command::Clear);
-                true
-            }
             _ => false,
         };
         if live {
-            self.blanked &= action == "clear";
+            self.blanked = false;
             self.refresh_output = true;
             return true;
         }
@@ -6677,6 +6725,43 @@ mod tests {
     }
 
     #[test]
+    fn clear_layers_one_at_a_time_and_mark_the_live_slide() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-clear-layers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with("song", "Song", "One\n\nTwo"));
+        session.select_slide(1);
+        session.replace_underlay(Some(Raster {
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+        }));
+        let _ = crate::live::audience_frame(&session);
+        assert_eq!(session.live_slide_index(), Some(1));
+
+        session.apply_remote(freeshow_remote::Command::ClearBackground);
+        assert!(session.underlay.is_none());
+        assert!(matches!(session.pending_play, Some(PendingPlay::StopVideo)));
+        assert_eq!(session.live_slide_index(), Some(1), "the slide stays up");
+
+        session.apply_remote(freeshow_remote::Command::ClearSlide);
+        assert_eq!(session.live_slide_index(), None);
+        assert!(!session.blanked, "only the slide layer went away");
+
+        // Picking a slide to edit leaves the cleared output alone.
+        session.select_slide_for_edit(0);
+        assert_eq!(session.slide_index, Some(0));
+        assert!(session.slide_hidden);
+
+        // The open show stays listed while another drawer tab is browsed.
+        session.tab = "media".into();
+        assert_eq!(session.slide_rows().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn live_shortcuts_ask_for_an_output_refresh() {
         let root =
             std::env::temp_dir().join(format!("freeshow-rust-live-keys-{}", std::process::id()));
@@ -6695,6 +6780,10 @@ mod tests {
         assert!(session.perform_shortcut("PageUp"));
         assert_eq!(session.slide_index, Some(1));
         assert!(session.perform_shortcut("Escape"));
+        assert_eq!(session.ui_commands, vec![freeshow_remote::Command::Clear]);
+        for command in std::mem::take(&mut session.ui_commands) {
+            session.apply_remote(command);
+        }
         assert!(session.blanked);
         assert!(session.perform_shortcut(" "));
         assert!(!session.blanked);
