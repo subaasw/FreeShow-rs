@@ -429,7 +429,7 @@ mod tests {
     }
 
     fn has_color(raster: &Raster, color: Rgba) -> bool {
-        raster.rgba.chunks_exact(4).any(|px| {
+        raster.rgba.as_chunks::<4>().0.iter().any(|px| {
             px[0].abs_diff(color.r) < 8
                 && px[1].abs_diff(color.g) < 8
                 && px[2].abs_diff(color.b) < 8

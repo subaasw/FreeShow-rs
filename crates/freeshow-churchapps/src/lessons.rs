@@ -355,10 +355,7 @@ fn caches_lesson_media(url: &str) -> bool {
         .next()
         .unwrap_or(url)
         .to_ascii_lowercase();
-    if path.ends_with(".m3u8") || path.ends_with(".mpd") {
-        return false;
-    }
-    true
+    !(path.ends_with(".m3u8") || path.ends_with(".mpd"))
 }
 
 fn is_stream_page(url: &str) -> bool {

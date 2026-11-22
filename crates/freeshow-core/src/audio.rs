@@ -117,7 +117,7 @@ mod tests {
             output_channel: Some(3),
         };
         assert_eq!(
-            speaker_matrix(2, 4, &[cue.clone()]),
+            speaker_matrix(2, 4, std::slice::from_ref(&cue)),
             vec![vec![0.0; 2], vec![0.0; 2], vec![0.0; 2], vec![0.25, 0.25]]
         );
         let selected = SpeakerRoute {

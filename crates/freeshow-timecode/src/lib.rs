@@ -151,16 +151,9 @@ pub fn latest_clock() -> Option<String> {
     Some(code.display())
 }
 
+#[derive(Default)]
 pub struct MtcInput {
     pub port: String,
-}
-
-impl Default for MtcInput {
-    fn default() -> Self {
-        Self {
-            port: String::new(),
-        }
-    }
 }
 
 impl TimecodeSource for MtcInput {

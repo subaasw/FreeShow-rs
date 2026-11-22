@@ -213,7 +213,7 @@ fn serve(
 /// Pack RGBA8 into UYVY 4:2:2, the picture format FreeShow sends to NDI.
 /// The conversion is BT.601 full range with the same integer weights FreeShow uses.
 pub fn rgba_to_uyvy(pixels: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    if width == 0 || height == 0 || width % 2 != 0 {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) {
         return None;
     }
     let width = width as usize;
@@ -279,7 +279,7 @@ mod tests {
         let mut names = Vec::new();
         for index in 0..20_u64 {
             let mut buffer =
-                gstreamer::Buffer::from_slice(vec![128_u8, 200, 128, 200].repeat(32 * 32 / 2));
+                gstreamer::Buffer::from_slice([128_u8, 200, 128, 200].repeat(32 * 32 / 2));
             buffer
                 .get_mut()
                 .unwrap()

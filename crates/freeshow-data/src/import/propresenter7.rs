@@ -91,10 +91,10 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
             slides[parent["id"].as_str().unwrap()]["children"] = json!(order);
             parent["children"] = Value::Object(children);
         }
-        if let Some(group_id) = info.and_then(|info| id(&info.uuid)) {
-            if groups.insert(group_id, parent.clone()).is_some() {
-                return Err(invalid("duplicate cue group identifier"));
-            }
+        if let Some(group_id) = info.and_then(|info| id(&info.uuid))
+            && groups.insert(group_id, parent.clone()).is_some()
+        {
+            return Err(invalid("duplicate cue group identifier"));
         }
         default_order.push(parent);
     }

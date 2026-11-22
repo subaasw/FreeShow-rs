@@ -100,11 +100,11 @@ jobs:
 
       - name: Clippy
         if: runner.os != 'Windows'
-        run: bash scripts/ci-run.sh cargo clippy --workspace --all-targets --locked
+        run: bash scripts/ci-run.sh cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Clippy
         if: runner.os == 'Windows'
         shell: pwsh
-        run: python scripts/windows/ci-run.py cargo clippy --workspace --all-targets --locked
+        run: python scripts/windows/ci-run.py cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
         if: runner.os != 'Windows'

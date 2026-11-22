@@ -324,7 +324,7 @@ mod gst_player {
             .ok_or_else(|| video_error("could not enumerate cameras"))?;
         monitor.start().map_err(video_error)?;
         let devices = monitor.devices();
-        let _ = monitor.stop();
+        monitor.stop();
         Ok(devices.into_iter().collect())
     }
 
@@ -393,7 +393,7 @@ mod gst_player {
             .ok_or_else(|| video_error("could not enumerate audio sinks"))?;
         monitor.start().map_err(video_error)?;
         let devices = monitor.devices();
-        let _ = monitor.stop();
+        monitor.stop();
         Ok(devices.into_iter().collect())
     }
 
@@ -610,7 +610,7 @@ mod gst_player {
                 // GStreamer 1.26 rejects a mix-matrix whose row count does not
                 // already match the converter's output channel count.
                 if was_explicit && channels_change {
-                    convert.set_property("mix-matrix", &gst::Array::new(Vec::<gst::Array>::new()));
+                    convert.set_property("mix-matrix", gst::Array::new(Vec::<gst::Array>::new()));
                 }
                 filter.set_property("caps", &caps);
                 let rebuild = was_explicit || !matrix.as_slice().is_empty();
@@ -821,6 +821,31 @@ mod gst_player {
         });
     }
 
+    fn clock_seconds(time: Option<gst::ClockTime>) -> f64 {
+        time.map(|time| time.nseconds() as f64 / 1_000_000_000.0)
+            .unwrap_or(0.0)
+    }
+
+    fn video_launch(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        let location = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        let source = if crate::is_remote_url(&raw) {
+            format!("uridecodebin uri=\"{location}\" name=dec")
+        } else {
+            format!("filesrc location=\"{location}\" ! decodebin name=dec")
+        };
+        format!(
+            "{source} ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
+            rgba_caps()
+        )
+    }
+
+    fn rgba_caps() -> String {
+        format!(
+            "videoscale add-borders=true ! video/x-raw,format=RGBA,width={OUTPUT_WIDTH},height={OUTPUT_HEIGHT},pixel-aspect-ratio=1/1"
+        )
+    }
+
     #[cfg(test)]
     mod audio_tests {
         use super::*;
@@ -901,8 +926,10 @@ mod gst_player {
                     let map = sample.buffer().unwrap().map_readable().unwrap();
                     let amplitude = map
                         .as_slice()
-                        .chunks_exact(4)
-                        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).abs())
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|bytes| f32::from_le_bytes(*bytes).abs())
                         .fold(0.0_f32, f32::max);
                     last = Some(amplitude);
                     if (amplitude - expected).abs() < 0.005 {
@@ -928,9 +955,8 @@ mod gst_player {
                     let map = sample.buffer().unwrap().map_readable().unwrap();
                     last.fill(0.0);
                     for frame in map.as_slice().chunks_exact(4 * expected.len()) {
-                        for (index, value) in frame.chunks_exact(4).enumerate() {
-                            last[index] = last[index]
-                                .max(f32::from_le_bytes(value.try_into().unwrap()).abs());
+                        for (index, value) in frame.as_chunks::<4>().0.iter().enumerate() {
+                            last[index] = last[index].max(f32::from_le_bytes(*value).abs());
                         }
                     }
                     if last
@@ -1115,31 +1141,6 @@ mod gst_player {
                 0.0
             );
         }
-    }
-
-    fn clock_seconds(time: Option<gst::ClockTime>) -> f64 {
-        time.map(|time| time.nseconds() as f64 / 1_000_000_000.0)
-            .unwrap_or(0.0)
-    }
-
-    fn video_launch(path: &Path) -> String {
-        let raw = path.to_string_lossy();
-        let location = raw.replace('\\', "\\\\").replace('"', "\\\"");
-        let source = if crate::is_remote_url(&raw) {
-            format!("uridecodebin uri=\"{location}\" name=dec")
-        } else {
-            format!("filesrc location=\"{location}\" ! decodebin name=dec")
-        };
-        format!(
-            "{source} ! videoconvert ! {} ! appsink name=sink max-buffers=1 drop=true sync=true",
-            rgba_caps()
-        )
-    }
-
-    fn rgba_caps() -> String {
-        format!(
-            "videoscale add-borders=true ! video/x-raw,format=RGBA,width={OUTPUT_WIDTH},height={OUTPUT_HEIGHT},pixel-aspect-ratio=1/1"
-        )
     }
 }
 

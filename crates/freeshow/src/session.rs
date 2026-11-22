@@ -775,7 +775,7 @@ impl Session {
         else {
             return String::new();
         };
-        show.item_text(&slide.id, self.current_item(&show))
+        show.item_text(&slide.id, self.current_item(show))
             .unwrap_or_else(|| show.plain_text(&slide.id))
     }
 
@@ -1086,10 +1086,10 @@ impl Session {
             .and_then(|show| show.media_flags(&path.to_string_lossy()));
         if self.background_path.as_deref() == Some(path) {
             self.background_transition = false;
-            if let Some((_, _, video_type)) = &flags {
-                if video_type.is_some() {
-                    self.slide_hidden = video_type.as_deref() == Some("foreground");
-                }
+            if let Some((_, _, video_type)) = &flags
+                && video_type.is_some()
+            {
+                self.slide_hidden = video_type.as_deref() == Some("foreground");
             }
             return;
         }
@@ -1163,14 +1163,14 @@ impl Session {
         };
         match jump {
             SlideJump::Index { show_id, index } => {
-                if let Some(show_id) = show_id {
-                    if self.current_show().is_some_and(|show| show.id != show_id) {
-                        if self.open_show_at(&show_id, index) {
-                            self.follow_started_show(0);
-                            self.follow_slide_jump(depth + 1);
-                        }
-                        return;
+                if let Some(show_id) = show_id
+                    && self.current_show().is_some_and(|show| show.id != show_id)
+                {
+                    if self.open_show_at(&show_id, index) {
+                        self.follow_started_show(0);
+                        self.follow_slide_jump(depth + 1);
                     }
+                    return;
                 }
                 self.jump_to_slide(index, depth);
             }
@@ -1252,39 +1252,35 @@ impl Session {
             .map(|pause| pause.before.clone())
             .unwrap_or(using);
         let holding = pause.is_some();
-        if holding {
-            if let (Some(show_index), Some(slide_index)) = (show_index, slide_index) {
-                if let Some(show) = self.shows.get_mut(show_index) {
-                    let _ = show.set_actions_at(slide_index, &run);
-                }
-            }
+        if holding
+            && let (Some(show_index), Some(slide_index)) = (show_index, slide_index)
+            && let Some(show) = self.shows.get_mut(show_index)
+        {
+            let _ = show.set_actions_at(slide_index, &run);
         }
         self.apply_slide_actions_now(false);
-        if holding {
-            if let (Some(show_index), Some(slide_index), Some(real)) =
+        if holding
+            && let (Some(show_index), Some(slide_index), Some(real)) =
                 (show_index, slide_index, real)
-            {
-                if let Some(show) = self.shows.get_mut(show_index) {
-                    let _ = show.set_actions_at(slide_index, &real);
-                }
-            }
+            && let Some(show) = self.shows.get_mut(show_index)
+        {
+            let _ = show.set_actions_at(slide_index, &real);
         }
         let still_here = self.show_index == show_index && self.slide_index == slide_index;
-        if still_here {
-            if let Some(pause) = pause {
-                if !pause.after.is_empty() {
-                    let show_id = self
-                        .current_show()
-                        .map(|show| show.id.clone())
-                        .unwrap_or_default();
-                    self.pending_actions = Some(PendingActions {
-                        due: Instant::now() + Duration::from_secs_f64(pause.seconds),
-                        show_id,
-                        slide_index: slide_index.unwrap_or(0),
-                        actions: pause.after,
-                    });
-                }
-            }
+        if still_here
+            && let Some(pause) = pause
+            && !pause.after.is_empty()
+        {
+            let show_id = self
+                .current_show()
+                .map(|show| show.id.clone())
+                .unwrap_or_default();
+            self.pending_actions = Some(PendingActions {
+                due: Instant::now() + Duration::from_secs_f64(pause.seconds),
+                show_id,
+                slide_index: slide_index.unwrap_or(0),
+                actions: pause.after,
+            });
         }
     }
 
@@ -1320,36 +1316,36 @@ impl Session {
             .as_ref()
             .map(|pause| pause.before.clone())
             .unwrap_or(actions);
-        if let (Some(show_index), Some(slide_index)) = (show_index, slide_index) {
-            if let Some(show) = self.shows.get_mut(show_index) {
-                let _ = show.set_actions_at(slide_index, &run);
-            }
+        if let (Some(show_index), Some(slide_index)) = (show_index, slide_index)
+            && let Some(show) = self.shows.get_mut(show_index)
+        {
+            let _ = show.set_actions_at(slide_index, &run);
         }
         self.apply_slide_actions_now(true);
-        if let (Some(show_index), Some(slide_index), Some(real)) = (show_index, slide_index, real) {
-            if let Some(show) = self.shows.get_mut(show_index) {
-                let _ = show.set_actions_at(slide_index, &real);
-            }
+        if let (Some(show_index), Some(slide_index), Some(real)) = (show_index, slide_index, real)
+            && let Some(show) = self.shows.get_mut(show_index)
+        {
+            let _ = show.set_actions_at(slide_index, &real);
         }
         let still_here = self.show_index == show_index && self.slide_index == slide_index;
-        if still_here {
-            if let Some(pause) = pause {
-                if !pause.after.is_empty() {
-                    let show_id = self
-                        .current_show()
-                        .map(|show| show.id.clone())
-                        .unwrap_or_default();
-                    self.pending_actions = Some(PendingActions {
-                        due: Instant::now() + Duration::from_secs_f64(pause.seconds),
-                        show_id,
-                        slide_index: slide_index.unwrap_or(0),
-                        actions: pause.after,
-                    });
-                }
-            }
+        if still_here
+            && let Some(pause) = pause
+            && !pause.after.is_empty()
+        {
+            let show_id = self
+                .current_show()
+                .map(|show| show.id.clone())
+                .unwrap_or_default();
+            self.pending_actions = Some(PendingActions {
+                due: Instant::now() + Duration::from_secs_f64(pause.seconds),
+                show_id,
+                slide_index: slide_index.unwrap_or(0),
+                actions: pause.after,
+            });
         }
     }
 
+    #[cfg(test)]
     /// Makes a stored wait due, then runs it. Used when a test does not sleep.
     pub fn finish_waits(&mut self) -> bool {
         if let Some(pending) = &mut self.pending_actions {
@@ -1798,11 +1794,9 @@ impl Session {
             .unwrap_or((false, false, Vec::new()));
         if stop {
             self.running = None;
-        } else if pause {
-            if let Some(running) = self.running.as_mut() {
-                running.mark = running.shown();
-                running.since = None;
-            }
+        } else if pause && let Some(running) = self.running.as_mut() {
+            running.mark = running.shown();
+            running.since = None;
         }
         for id in ids {
             let _ = self.start_named_timer(&id);
@@ -2145,6 +2139,7 @@ impl Session {
             .and_then(|root| Library::open(root).network_output(kind))
     }
 
+    #[cfg(test)]
     pub fn ndi_output(&self) -> Option<(String, String)> {
         self.ndi_outputs()
             .into_iter()
@@ -2564,14 +2559,15 @@ impl Session {
     pub fn add_item_box(&mut self) -> bool {
         let added =
             self.edit_current_item(|show, slide_id, _| show.add_item_box(slide_id).is_some());
-        if added && let Some(show) = self.current_show() {
-            if let Some(id) = self.slide_index.and_then(|index| {
+        if added
+            && let Some(show) = self.current_show()
+            && let Some(id) = self.slide_index.and_then(|index| {
                 show.ordered_slides()
                     .get(index)
                     .map(|slide| slide.id.clone())
-            }) {
-                self.item_index = show.item_count(&id).saturating_sub(1);
-            }
+            })
+        {
+            self.item_index = show.item_count(&id).saturating_sub(1);
         }
         added
     }
@@ -3369,11 +3365,10 @@ impl Session {
         if let Some(total) = self.current_show().and_then(|show| {
             self.slide_index
                 .and_then(|index| show.line_reveal_lines(index))
-        }) {
-            if (self.reveal_count as usize) < total {
-                self.reveal_count += 1;
-                return true;
-            }
+        }) && (self.reveal_count as usize) < total
+        {
+            self.reveal_count += 1;
+            return true;
         }
         let (output_id, output_name) = self.audience();
         let restart = self.current_show().and_then(|show| {
@@ -5406,12 +5401,12 @@ mod tests {
         assert!(
             matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("hit.mp3"))
         );
-        assert!(session.finish_media("hit.mp3", true) == false);
+        assert!(!session.finish_media("hit.mp3", true));
         let plays = session.take_plays();
         assert!(
             matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("one.mp3"))
         );
-        assert!(session.finish_media("one.mp3", true) == false);
+        assert!(!session.finish_media("one.mp3", true));
         let plays = session.take_plays();
         assert!(
             matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("two.mp3"))
@@ -5630,7 +5625,7 @@ mod tests {
         assert!((session.audio_routes()[0].gain - 0.5).abs() < 0.001);
         assert!(!session.finish_media("other.mp3", true));
         assert!(session.take_plays()[0].is_none());
-        assert!(session.finish_media("one.mp3", true) == false);
+        assert!(!session.finish_media("one.mp3", true));
         let plays = session.take_plays();
         assert!(
             matches!(plays[0], Some(PendingPlay::Audio(ref path)) if path.ends_with("two.mp3"))
@@ -5644,7 +5639,7 @@ mod tests {
         };
         let started = path.file_name().unwrap().to_string_lossy().to_string();
         assert!(["a.mp3", "b.mp3", "c.mp3"].contains(&started.as_str()));
-        assert!(session.finish_media(&path.to_string_lossy(), true) == false);
+        assert!(!session.finish_media(&path.to_string_lossy(), true));
         let plays = session.take_plays();
         let Some(PendingPlay::Audio(ref next)) = plays[0] else {
             panic!("shuffle playlist did not step");

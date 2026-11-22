@@ -296,6 +296,7 @@ fn show_frame(session: &Session, index: Option<usize>) -> Frame {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn frame_for_slide(
     show: &ShowFile,
     index: usize,
@@ -808,7 +809,9 @@ mod tests {
         assert_eq!(frame.pixel(0, 0), parse_color("#000040").unwrap());
         let green = frame
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(_, pixel)| pixel[1] > 220 && pixel[0] < 30 && pixel[2] < 30)
             .map(|(index, _)| (index % frame.width as usize, index / frame.width as usize))
@@ -973,7 +976,7 @@ mod tests {
         session.underlay = Some(Raster {
             width: 4,
             height: 4,
-            rgba: vec![255, 0, 0, 255].repeat(16),
+            rgba: [255, 0, 0, 255].repeat(16),
         });
         let covered = audience_frame(&session);
         assert!(

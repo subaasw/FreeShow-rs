@@ -788,14 +788,18 @@ mod tests {
         let frame = paint_stage(&slides, Some(0), &layout, "12:00:00", "05:00", &context);
         let red = frame
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[0] > 200 && px[1] < 40 && px[2] < 40)
             .count();
         assert!(red > 100, "live camera pixels={red}");
         // The missing camera still paints its device name, which is not a red fill.
         let lit = frame
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px.iter().any(|b| *b > 0))
             .count();
         assert!(lit > red, "missing camera should keep a label");
@@ -838,7 +842,9 @@ mod tests {
         );
         let lit = frame
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px.iter().any(|byte| *byte > 0))
             .count();
         assert!(lit > 1_000, "web and chart pixels={lit}");
@@ -846,7 +852,9 @@ mod tests {
         assert!(
             frame
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[0] > 200 && px[1] > 200 && px[2] > 200),
             "empty chart should keep a label"
         );

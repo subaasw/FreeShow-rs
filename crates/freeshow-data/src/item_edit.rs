@@ -20,7 +20,7 @@ impl ShowFile {
     }
 
     pub fn item_text(&self, slide_id: &str, index: usize) -> Option<String> {
-        let item = self.items(slide_id)?.into_iter().nth(index)?;
+        let item = self.items(slide_id)?.get(index)?;
         let lines = item.get("lines")?.as_array()?;
         let mut text = Vec::new();
         for line in lines {

@@ -675,13 +675,13 @@ const THUMB_WIDTH: u32 = 56;
 const THUMB_HEIGHT: u32 = 40;
 
 fn media_thumb(entry: &MediaEntry) -> slint::Image {
-    if entry.exists && entry.kind == MediaEntryKind::Image {
-        if let Some(image) = std::fs::read(&entry.path)
+    if entry.exists
+        && entry.kind == MediaEntryKind::Image
+        && let Some(image) = std::fs::read(&entry.path)
             .ok()
             .and_then(|bytes| decode_image(&bytes))
-        {
-            return slint_image(&fit_raster(&image, THUMB_WIDTH, THUMB_HEIGHT));
-        }
+    {
+        return slint_image(&fit_raster(&image, THUMB_WIDTH, THUMB_HEIGHT));
     }
     slint_image(&kind_thumb(entry))
 }
@@ -701,7 +701,7 @@ fn slint_image(raster: &Raster) -> slint::Image {
 }
 
 fn kind_thumb(entry: &MediaEntry) -> Raster {
-    let mut rgba = vec![0x1c, 0x1c, 0x28, 0xff].repeat((THUMB_WIDTH * THUMB_HEIGHT) as usize);
+    let mut rgba = [0x1c, 0x1c, 0x28, 0xff].repeat((THUMB_WIDTH * THUMB_HEIGHT) as usize);
     let color = if !entry.exists {
         [0x88, 0x44, 0x44, 0xff]
     } else {
@@ -954,10 +954,10 @@ fn sample_audio(session: &RefCell<Session>, audio: &RefCell<Option<AudioOutput>>
         session.audio_time = output.position_seconds();
         session.audio_duration = output.duration_seconds();
         session.audio_paused = output.is_paused();
-        if output.is_finished() {
-            if let Some(path) = session.playing_audio.clone() {
-                let _ = session.finish_media(&path.to_string_lossy(), true);
-            }
+        if output.is_finished()
+            && let Some(path) = session.playing_audio.clone()
+        {
+            let _ = session.finish_media(&path.to_string_lossy(), true);
         }
     } else {
         session.audio_time = 0.0;
@@ -977,6 +977,7 @@ struct LivePlayback {
     timer: Rc<slint::Timer>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_pending(
     pending: Option<PendingPlay>,
     session: &Rc<RefCell<Session>>,
@@ -1113,6 +1114,7 @@ fn start_pending(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_plays(
     plays: [Option<PendingPlay>; 2],
     session: &Rc<RefCell<Session>>,
@@ -1153,6 +1155,7 @@ fn picture_fades_in(pending: &Option<PendingPlay>, session: &Session) -> bool {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn follow_video(
     timer: Rc<slint::Timer>,
     player: Rc<RefCell<Option<VideoPlayer>>>,
@@ -1201,10 +1204,8 @@ fn follow_video(
                     .borrow()
                     .as_ref()
                     .is_some_and(|player| player.is_finished());
-                if finished {
-                    if let Some(path) = ended.as_deref() {
-                        let _ = session.finish_media(&path.to_string_lossy(), false);
-                    }
+                if finished && let Some(path) = ended.as_deref() {
+                    let _ = session.finish_media(&path.to_string_lossy(), false);
                 }
                 return;
             };
@@ -1240,6 +1241,7 @@ fn follow_video(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_frames(
     output_fade: &Rc<slint::Timer>,
     stage_fade: &Rc<slint::Timer>,
@@ -1305,6 +1307,7 @@ fn send_frames(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn schedule_next_slide(
     timer: &Rc<slint::Timer>,
     session: &Rc<RefCell<Session>>,
@@ -1412,9 +1415,9 @@ fn place_output(window: &slint::Window, saved: Option<usize>) {
             return false;
         };
         let pos = monitor.position();
-        let _ = winit_window.set_outer_position(
-            slint::winit_030::winit::dpi::PhysicalPosition::new(pos.x, pos.y),
-        );
+        winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(
+            pos.x, pos.y,
+        ));
         true
     });
     if placed != Some(true) {
@@ -1591,6 +1594,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = NDI.set(NdiBroadcast::open(&session));
     let _ = WEBRTC.set(WebrtcBroadcast::open(&session));
+    for target in session.omt_outputs() {
+        tracing::warn!(
+            "OMT output {} ({}) is configured, but the Open Media Transport runtime is not bundled",
+            target.id,
+            target.name
+        );
+    }
     session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show
@@ -2263,7 +2273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio_out = Rc::clone(&audio_out);
         let video_player = Rc::clone(&video_player);
         control.on_set_volume(move |value| {
-            let volume = (value as f32 / 100.0).clamp(0.0, 1.0);
+            let volume = (value / 100.0).clamp(0.0, 1.0);
             session.borrow_mut().set_channel_volume("main", volume);
             let routes = session.borrow().audio_routes();
             if let Some(output) = audio_out.borrow().as_ref() {

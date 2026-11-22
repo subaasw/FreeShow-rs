@@ -221,9 +221,9 @@ pub(super) fn is_bundle(path: &Path) -> bool {
 
 // Validate the whole archive before copying any media. ZIP paths are never used
 // as filesystem destinations; this also rejects unsafe unused members.
-pub(super) fn bundle_shows(
-    bytes: &[u8],
-) -> Result<(zip::ZipArchive<Cursor<&[u8]>>, Vec<(String, ShowFile)>), DataError> {
+type BundleShows<'a> = (zip::ZipArchive<Cursor<&'a [u8]>>, Vec<(String, ShowFile)>);
+
+pub(super) fn bundle_shows(bytes: &[u8]) -> Result<BundleShows<'_>, DataError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(invalid)?;
     if archive.len() > 10_000 {
         return Err(invalid("ProPresenter bundle has too many entries"));

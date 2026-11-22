@@ -7,16 +7,9 @@ use serde_json::{Value, json};
 
 /// Listens on one MIDI input. An empty name uses the first connected port.
 /// `FREESHOW_MIDI_IN` selects a port by name when this stays empty.
+#[derive(Default)]
 pub struct MidiInput {
     pub port: String,
-}
-
-impl Default for MidiInput {
-    fn default() -> Self {
-        Self {
-            port: String::new(),
-        }
-    }
 }
 
 impl Integration for MidiInput {
@@ -108,7 +101,7 @@ pub fn message_for_bytes(bytes: &[u8]) -> Option<Value> {
     match (channel, data1) {
         (1, 0) => Some(json!({ "channel": "API:next_slide" })),
         (1, 1) => Some(json!({ "channel": "API:previous_slide" })),
-        (3, 0 | 1 | 2) => Some(json!({ "channel": "API:clear_all" })),
+        (3, 0..=2) => Some(json!({ "channel": "API:clear_all" })),
         (5, 2) => {
             let index = data2.saturating_sub(1);
             Some(json!({ "channel": "API:index_select_slide", "data": { "index": index } }))
