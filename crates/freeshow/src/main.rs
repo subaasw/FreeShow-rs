@@ -627,6 +627,9 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         blend: inspector.filters.blend.into(),
         slide_transition: inspector.slide_transition.into(),
         slide_transition_ms: inspector.slide_transition_ms,
+        valign: inspector.item_box.valign.into(),
+        rotation: inspector.item_box.rotation,
+        text_case: inspector.typography.text_case.into(),
     });
     ui.set_stage_layout_name(session.stage.name.clone().into());
     let rows: Vec<StageRowData> = session
@@ -2115,6 +2118,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         apply_theme(&ui, &theme);
                     }
+                    // Labels, language and output names in the header follow at once.
+                    apply_chrome(&ui, &current, settings.borrow().output_screen);
                     refresh(&ui, &current);
                     publish(&edit_slot, edit_frame(&current));
                 }

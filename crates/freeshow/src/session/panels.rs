@@ -1047,6 +1047,33 @@ impl Session {
                 }
                 self.edit_current_item(|show, slide, item| show.set_item_align(slide, item, &value))
             }
+            "valign" => {
+                if !["top", "center", "bottom"].contains(&value.as_str()) {
+                    return Err(format!("invalid vertical alignment {value:?}"));
+                }
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_valign(slide, item, &value)
+                })
+            }
+            "rotation" => {
+                let degrees = parse_int(&value, -360, 360)?.rem_euclid(360);
+                let css = if degrees == 0 {
+                    String::new()
+                } else {
+                    format!("rotate({degrees}deg)")
+                };
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_box_css(slide, item, "transform", &css)
+                })
+            }
+            "text-case" => {
+                if !["none", "uppercase", "lowercase", "capitalize"].contains(&value.as_str()) {
+                    return Err(format!("invalid text case {value:?}"));
+                }
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_text_case(slide, item, &value)
+                })
+            }
             "left" | "top" | "width" | "height" | "border-radius" => {
                 let (min, max) = match key {
                     "width" | "height" => (1, 8000),

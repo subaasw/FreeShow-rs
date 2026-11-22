@@ -16,6 +16,10 @@ pub struct ItemBox {
     pub height: i32,
     pub background: String,
     pub radius: i32,
+    /// `top`, `center` or `bottom`, from the box `align-items`.
+    pub valign: String,
+    /// Clockwise turn in whole degrees, from the box `transform: rotate()`.
+    pub rotation: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,6 +37,8 @@ pub struct ItemTypography {
     pub outline_width: i32,
     pub outline_color: String,
     pub shadow: TextShadow,
+    /// CSS `text-transform`: empty, `uppercase`, `lowercase` or `capitalize`.
+    pub text_case: String,
 }
 
 /// A `text-shadow` as FreeShow's editor writes it: offsets, blur and colour.
@@ -346,6 +352,9 @@ impl ShowFile {
             shadow: css_value(&style, "text-shadow")
                 .map(|value| TextShadow::parse(&value))
                 .unwrap_or_default(),
+            text_case: css_value(&style, "text-transform")
+                .filter(|value| value != "none")
+                .unwrap_or_default(),
         }
     }
 
@@ -390,6 +399,32 @@ impl ShowFile {
         self.set_item_css(slide_id, index, "-webkit-text-stroke", "")
             && self.set_item_css(slide_id, index, "-webkit-text-stroke-width", &width)
             && self.set_item_css(slide_id, index, "-webkit-text-stroke-color", &color)
+    }
+
+    /// Sets vertical alignment (`top`, `center`, `bottom`) in the item's `align` CSS.
+    pub fn set_item_valign(&mut self, slide_id: &str, index: usize, valign: &str) -> bool {
+        let value = match valign {
+            "top" => "flex-start",
+            "bottom" => "flex-end",
+            _ => "",
+        };
+        let Some(item) = self.item_mut(slide_id, index) else {
+            return false;
+        };
+        let align = item.get("align").and_then(Value::as_str).unwrap_or("");
+        let next = css_set(align, "align-items", value);
+        if next.trim().is_empty() {
+            item.remove("align");
+        } else {
+            item.insert("align".to_string(), Value::String(next));
+        }
+        true
+    }
+
+    /// Sets the text case; an empty value or `none` removes it.
+    pub fn set_item_text_case(&mut self, slide_id: &str, index: usize, case: &str) -> bool {
+        let value = if case == "none" { "" } else { case };
+        self.set_item_css(slide_id, index, "text-transform", value)
     }
 
     pub fn set_item_shadow(&mut self, slide_id: &str, index: usize, shadow: &TextShadow) -> bool {
@@ -450,6 +485,31 @@ impl ShowFile {
                 .or_else(|| css_value(style, "background"))
                 .unwrap_or_default(),
             radius: css_px(style, "border-radius").unwrap_or(0),
+            // FreeShow keeps vertical alignment in the item's `align` CSS, not its `style`.
+            valign: match self
+                .item(slide_id, index)
+                .and_then(|item| item.get("align"))
+                .and_then(Value::as_str)
+                .and_then(|align| css_value(align, "align-items"))
+                .as_deref()
+            {
+                Some("flex-start" | "start" | "top") => "top".to_string(),
+                Some("flex-end" | "end" | "bottom") => "bottom".to_string(),
+                _ => "center".to_string(),
+            },
+            rotation: css_value(style, "transform")
+                .and_then(|value| {
+                    value
+                        .trim()
+                        .strip_prefix("rotate(")?
+                        .strip_suffix(')')?
+                        .trim()
+                        .strip_suffix("deg")?
+                        .trim()
+                        .parse::<f32>()
+                        .ok()
+                })
+                .map_or(0, |degrees| degrees.round() as i32),
         }
     }
 

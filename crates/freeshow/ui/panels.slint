@@ -89,6 +89,9 @@ export struct InspectorData {
     blend: string,
     slide-transition: string,
     slide-transition-ms: int,
+    valign: string,
+    rotation: int,
+    text-case: string,
 }
 
 export struct StageRowData {
@@ -883,6 +886,31 @@ export component InspectorPanel inherits VerticalLayout {
             value: root.data.blend == "" ? "normal" : root.data.blend;
             selected(value) => { root.set("blend", value); }
         }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Vertical"; text-color: root.text-color; min-width: 48px; }
+        ValueCombo {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            model: ["top", "center", "bottom"];
+            value: root.data.valign;
+            selected(value) => { root.set("valign", value); }
+        }
+        FieldLabel { text: "Turn °"; text-color: root.text-color; min-width: 32px; }
+        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 359; step-size: 15; shown: root.data.rotation; edited(value) => { root.set("rotation", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Case"; text-color: root.text-color; min-width: 48px; }
+        ValueCombo {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            model: ["none", "uppercase", "lowercase", "capitalize"];
+            value: root.data.text-case == "" ? "none" : root.data.text-case;
+            selected(value) => { root.set("text-case", value); }
+        }
+        Rectangle { horizontal-stretch: 1; }
     }
     HorizontalLayout {
         spacing: 6px;

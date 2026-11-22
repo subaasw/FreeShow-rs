@@ -7960,6 +7960,25 @@ Second line"
         session.inspector_set("opacity", "60").unwrap();
         session.inspector_set("blend", "screen").unwrap();
         assert!(session.inspector_set("blend", "glow").is_err());
+        session.inspector_set("valign", "bottom").unwrap();
+        session.inspector_set("rotation", "-90").unwrap();
+        session.inspector_set("text-case", "uppercase").unwrap();
+        assert!(session.inspector_set("valign", "middle").is_err());
+        let form = session.inspector_form();
+        assert_eq!(
+            (form.item_box.valign.as_str(), form.item_box.rotation),
+            ("bottom", 270)
+        );
+        assert_eq!(form.typography.text_case, "uppercase");
+        let item = session.current_show().unwrap().show["slides"]["s1"]["items"][1].clone();
+        assert_eq!(item["align"], "align-items: flex-end;");
+        session.inspector_set("rotation", "0").unwrap();
+        session.inspector_set("valign", "center").unwrap();
+        let form = session.inspector_form();
+        assert_eq!(
+            (form.item_box.valign.as_str(), form.item_box.rotation),
+            ("center", 0)
+        );
         session.inspector_set("slide-transition", "spin").unwrap();
         session.inspector_set("slide-transition-ms", "900").unwrap();
         let form = session.inspector_form();
