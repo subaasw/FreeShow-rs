@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FreeShow remote</title>
+  <link rel="icon" href="data:,">
   <style>
     :root {
       color-scheme: dark;
@@ -48,6 +49,13 @@
     select { font: inherit; max-width: 100%; }
     #next { background: var(--accent); }
     button.active { outline: 2px solid var(--accent); }
+    .next-lines { margin: 4px 0 12px; color: var(--muted); white-space: pre-wrap; font-size: 1rem; min-height: 1.4rem; }
+    .secondary { margin-top: 8px; }
+    .secondary button { min-height: 44px; font-size: 0.9rem; font-weight: 500; }
+    .section-row { color: var(--muted); font-size: 0.8rem; font-weight: 650; text-transform: uppercase; padding: 6px 2px 0; }
+    .row-note { color: var(--muted); font-size: 0.8rem; }
+    #show-filter { width: 100%; font: inherit; padding: 8px 10px; border-radius: 8px; border: 0; background: var(--panel); color: var(--text); margin-bottom: 8px; }
+    .group { display: inline-block; font-size: 0.75rem; color: var(--muted); margin-right: 6px; }
     ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
     @media (max-width: 700px) {
       .columns { flex-direction: column; }
@@ -61,22 +69,36 @@
   </header>
   <main>
     <p id="lines" class="lines"></p>
+    <p id="next-lines" class="next-lines"></p>
     <div class="controls">
       <button id="prev" type="button">Previous</button>
       <button id="next" type="button">Next</button>
       <button id="clear" type="button">Clear</button>
     </div>
+    <div class="controls secondary">
+      <button id="prev-item" type="button">Previous item</button>
+      <button id="next-item" type="button">Next item</button>
+      <button id="clear-slide" type="button">Hide text</button>
+      <button id="clear-background" type="button">Stop background</button>
+    </div>
     <div class="columns" style="margin-top: 16px">
       <section>
-        <h2>Shows</h2>
-        <ul id="shows"></ul>
-      </section>
-      <section>
-        <h2>Slides</h2>
+        <h2 id="project-title">Project</h2>
+        <ul id="project"></ul>
+        <h2 style="margin-top: 16px">Slides</h2>
         <ul id="slides"></ul>
       </section>
       <section>
-        <h2>Media</h2>
+        <h2>Shows</h2>
+        <input id="show-filter" type="search" placeholder="Find a show" aria-label="Find a show">
+        <ul id="shows"></ul>
+      </section>
+      <section>
+        <h2>Overlays</h2>
+        <ul id="overlays"></ul>
+        <h2 style="margin-top: 16px">Timers</h2>
+        <ul id="timers"></ul>
+        <h2 style="margin-top: 16px">Media</h2>
         <ul id="media"></ul>
         <label for="audio-channel">Audio channel</label>
         <select id="audio-channel"><option value="main">Main</option></select>
@@ -90,6 +112,8 @@
     let busy = false;
     let channelState = {};
     let passwordAttempts = 0;
+    let lastStateText = "";
+    let lastFilter = "";
 
     function password() {
       return localStorage.getItem("freeshow-password") || "";
@@ -138,17 +162,83 @@
           document.getElementById("show-name").textContent = "Password required";
           return;
         }
-        const state = await response.json();
+        // Rebuilding only on change keeps a button under a finger from being replaced mid-tap.
+        const text = await response.text();
+        const filterText = document.getElementById("show-filter").value;
+        if (text === lastStateText && filterText === lastFilter) return;
+        lastStateText = text;
+        lastFilter = filterText;
+        const state = JSON.parse(text);
         document.getElementById("show-name").textContent = state.cleared
           ? "Cleared"
           : (state.show_name || "No show");
         document.getElementById("lines").textContent = state.cleared
           ? ""
           : (state.lines || []).join("\n");
+        document.getElementById("next-lines").textContent = state.cleared || !(state.next_lines || []).length
+          ? ""
+          : "Next: " + state.next_lines.join(" / ");
+        const project = (state.projects || []).find((entry) => entry.id === state.project_id);
+        document.getElementById("project-title").textContent = project ? project.name : "Project";
+        const projectList = document.getElementById("project");
+        projectList.replaceChildren();
+        if (!project || !(project.shows || []).length) {
+          const empty = document.createElement("li");
+          empty.className = "row-note";
+          empty.textContent = project ? "This project is empty." : "No project is open.";
+          projectList.appendChild(empty);
+        }
+        ((project && project.shows) || []).forEach((entry, index) => {
+          if (entry.kind === "section") {
+            const header = document.createElement("li");
+            header.className = "section-row";
+            header.textContent = entry.name;
+            projectList.appendChild(header);
+            return;
+          }
+          const label = entry.kind && entry.kind !== "show" ? entry.name + " (" + entry.kind + ")" : entry.name;
+          projectList.appendChild(item(label, index === state.project_item, () =>
+            act("API:index_select_project_item", { index: index })));
+        });
         const shows = document.getElementById("shows");
         shows.replaceChildren();
+        const filter = document.getElementById("show-filter").value.trim().toLowerCase();
         (state.shows || []).forEach((show, index) => {
+          if (filter && !show.name.toLowerCase().includes(filter)) return;
           shows.appendChild(item(show.name, index === state.show_index, () => act("SHOW", show.id)));
+        });
+        const overlays = document.getElementById("overlays");
+        overlays.replaceChildren();
+        const activeOverlays = state.active_overlays || [];
+        if (!(state.overlays || []).length) {
+          const empty = document.createElement("li");
+          empty.className = "row-note";
+          empty.textContent = "No overlays yet.";
+          overlays.appendChild(empty);
+        }
+        (state.overlays || []).forEach((overlay) => {
+          const shown = activeOverlays.includes(overlay.id);
+          overlays.appendChild(item((shown ? "Hide " : "Show ") + overlay.name, shown, () =>
+            act(shown ? "API:clear_overlay" : "API:id_select_overlay", { id: overlay.id })));
+        });
+        const timers = document.getElementById("timers");
+        timers.replaceChildren();
+        (state.timers || []).forEach((timer) => {
+          const running = state.active_timer === timer.id && !state.timer_paused;
+          const li = document.createElement("li");
+          li.className = "controls";
+          const start = document.createElement("button");
+          start.type = "button";
+          start.textContent = (running ? "Pause " : "Start ") + timer.name;
+          if (state.active_timer === timer.id) start.className = "active";
+          start.addEventListener("click", () => act(running ? "API:id_pause_timer" : "API:id_start_timer", { id: timer.id }));
+          const stop = document.createElement("button");
+          stop.type = "button";
+          stop.textContent = "Stop";
+          stop.style.flex = "0 0 auto";
+          stop.addEventListener("click", () => act("API:id_stop_timer", { id: timer.id }));
+          li.append(start, stop);
+          timers.appendChild(li);
         });
         const media = document.getElementById("media");
         media.replaceChildren();
@@ -187,6 +277,11 @@
     document.getElementById("next").addEventListener("click", () => act("API:next_slide"));
     document.getElementById("prev").addEventListener("click", () => act("API:previous_slide"));
     document.getElementById("clear").addEventListener("click", () => act("API:clear_all"));
+    document.getElementById("next-item").addEventListener("click", () => act("API:next_project_item"));
+    document.getElementById("prev-item").addEventListener("click", () => act("API:previous_project_item"));
+    document.getElementById("clear-slide").addEventListener("click", () => act("API:clear_slide"));
+    document.getElementById("clear-background").addEventListener("click", () => act("API:clear_background"));
+    document.getElementById("show-filter").addEventListener("input", () => refresh());
     function updateChannel() {
       const id = document.getElementById("audio-channel").value;
       const channel = channelState[id] || {};
