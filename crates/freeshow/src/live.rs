@@ -252,6 +252,7 @@ pub fn stage_frame(session: &Session) -> Frame {
                 },
             ),
             still_backgrounds: Some(&still_backgrounds),
+            twelve_hour: session.preferences.uses_12_hour_clock(),
         },
     )
 }

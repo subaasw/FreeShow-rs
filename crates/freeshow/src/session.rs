@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use freeshow_core::{NetworkRoute, SpeakerRoute};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -661,7 +662,7 @@ impl Session {
             return Vec::new();
         }
         self.current_show()
-            .map(|show| show.ordered_slides().iter().map(slide_label).collect())
+            .map(|show| slide_labels_for(&show.ordered_slides(), self.preferences.group_numbers()))
             .unwrap_or_default()
     }
 
@@ -2354,17 +2355,7 @@ impl Session {
                         .map(|layout| freeshow_remote::RemoteLayout {
                             id: layout.id,
                             name: layout.name,
-                            slides: layout
-                                .slides
-                                .into_iter()
-                                .map(|slide| freeshow_remote::RemoteSlide {
-                                    label: slide_label(&slide),
-                                    lines: slide.lines,
-                                    notes: slide.notes,
-                                    id: slide.id,
-                                    group: slide.group.unwrap_or_default(),
-                                })
-                                .collect(),
+                            slides: remote_slides(layout.slides, self.preferences.group_numbers()),
                         })
                         .collect::<Vec<_>>();
                     let active = show.active_layout();
@@ -2373,16 +2364,7 @@ impl Session {
                         .find(|layout| layout.id == active)
                         .map(|layout| layout.slides.clone())
                         .unwrap_or_else(|| {
-                            show.ordered_slides()
-                                .into_iter()
-                                .map(|slide| freeshow_remote::RemoteSlide {
-                                    label: slide_label(&slide),
-                                    lines: slide.lines,
-                                    notes: slide.notes,
-                                    id: slide.id,
-                                    group: slide.group.unwrap_or_default(),
-                                })
-                                .collect()
+                            remote_slides(show.ordered_slides(), self.preferences.group_numbers())
                         });
                     freeshow_remote::RemoteShow {
                         id: show.id.clone(),
@@ -3589,15 +3571,70 @@ fn dated_project_name(existing: Vec<String>) -> String {
     }
 }
 
-fn slide_label(slide: &freeshow_data::SlideView) -> String {
+fn remote_slides(
+    slides: Vec<freeshow_data::SlideView>,
+    group_numbers: bool,
+) -> Vec<freeshow_remote::RemoteSlide> {
+    let labels = slide_labels_for(&slides, group_numbers);
+    slides
+        .into_iter()
+        .zip(labels)
+        .map(|(slide, label)| freeshow_remote::RemoteSlide {
+            label,
+            lines: slide.lines,
+            notes: slide.notes,
+            id: slide.id,
+            group: slide.group.unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn slide_labels_for(slides: &[freeshow_data::SlideView], group_numbers: bool) -> Vec<String> {
+    let mut counts = HashMap::<&str, usize>::new();
+    if group_numbers {
+        for slide in slides {
+            if let Some(group) = slide.group.as_deref().filter(|group| !group.is_empty()) {
+                *counts.entry(group).or_default() += 1;
+            }
+        }
+    }
+    let mut seen = HashMap::<&str, usize>::new();
+    slides
+        .iter()
+        .map(|slide| {
+            let group_name = slide
+                .group
+                .as_deref()
+                .filter(|group| !group.is_empty())
+                .map(|group| {
+                    if counts.get(group).copied().unwrap_or(0) > 1 {
+                        let number = seen.entry(group).or_default();
+                        *number += 1;
+                        format!("{group} {number}")
+                    } else {
+                        group.to_string()
+                    }
+                });
+            slide_label_with_group(slide, group_name.as_deref())
+        })
+        .collect()
+}
+
+fn slide_label_with_group(slide: &freeshow_data::SlideView, group: Option<&str>) -> String {
     let text = slide
         .lines
         .iter()
         .find(|line| !line.is_empty())
         .map(String::as_str)
         .unwrap_or("");
-    match &slide.group {
-        Some(group) if !group.is_empty() => format!("{group}: {text}"),
+    match group {
+        Some(group) if !group.is_empty() => {
+            if text.is_empty() {
+                group.to_string()
+            } else {
+                format!("{group}: {text}")
+            }
+        }
         _ => text.to_string(),
     }
 }
@@ -4038,6 +4075,36 @@ mod tests {
         assert_eq!(again.shows[0].ordered_slides().len(), 2);
         assert_eq!(again.projects.projects().len(), 1);
         assert!(again.project_title().contains('.'));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn slide_labels_number_repeated_groups_from_library_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-group-numbers-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert!(session.save_group("Verse"));
+        assert!(session.add_slide());
+        session.slide_index = Some(1);
+        assert!(session.save_group("Verse"));
+        assert!(session.save_lyrics("second"));
+        session.slide_index = Some(0);
+        assert!(session.save_lyrics("first"));
+        assert_eq!(
+            session.slide_labels(),
+            vec!["Verse 1: first".to_string(), "Verse 2: second".to_string()]
+        );
+        std::fs::write(root.join("settings.json"), r#"{"groupNumbers":false}"#).unwrap();
+        let mut muted = Session::open(root.clone());
+        muted.select_drawer(0);
+        assert_eq!(
+            muted.slide_labels(),
+            vec!["Verse: first".to_string(), "Verse: second".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

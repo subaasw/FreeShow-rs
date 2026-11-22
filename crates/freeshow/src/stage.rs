@@ -78,6 +78,8 @@ pub struct StageContext<'a> {
     pub media: Option<&'a StageMedia>,
     pub current_background: Option<(&'a Raster, Fit, bool, bool)>,
     pub still_backgrounds: Option<&'a HashMap<i64, String>>,
+    /// When true, clock boxes use FreeShow's 12-hour `timeFormat`.
+    pub twelve_hour: bool,
 }
 
 pub fn paint_stage(
@@ -238,7 +240,7 @@ fn lines_for(
                 notes.lines().map(str::to_string).collect()
             }
         }
-        StageItemKind::Clock => vec![clock_text(clock, &item.clock)],
+        StageItemKind::Clock => vec![clock_text(clock, &item.clock, context.twelve_hour)],
         StageItemKind::Timer => vec![timer_text(item, timer, context)],
         StageItemKind::Text => item
             .lines
@@ -354,12 +356,8 @@ fn media_label(item: &StageItemSpec) -> String {
         .to_string()
 }
 
-fn clock_text(clock: &str, options: &StageClockOptions) -> String {
-    let mut text = if options.seconds {
-        clock.to_string()
-    } else {
-        clock.get(..5).unwrap_or(clock).to_string()
-    };
+fn clock_text(clock: &str, options: &StageClockOptions, twelve_hour: bool) -> String {
+    let mut text = freeshow_data::format_clock(clock, twelve_hour, options.seconds);
     let date = format_date(&options.date_format, &chrono::Local::now());
     if !date.is_empty() {
         text.push(' ');
@@ -600,5 +598,24 @@ mod tests {
             Some("Ada")
         );
         assert_eq!(variable_value("missing", &values), None);
+    }
+
+    #[test]
+    fn twelve_hour_clocks_follow_the_library_time_format() {
+        let item = spec(StageItemKind::Clock);
+        let context = StageContext {
+            twelve_hour: true,
+            ..StageContext::default()
+        };
+        assert_eq!(
+            lines_for(&item, &[], None, "13:05:09", "05:00", &context),
+            vec!["1:05:09 PM".to_string()]
+        );
+        let mut no_seconds = item.clone();
+        no_seconds.clock.seconds = false;
+        assert_eq!(
+            lines_for(&no_seconds, &[], None, "00:05:09", "05:00", &context),
+            vec!["12:05 AM".to_string()]
+        );
     }
 }

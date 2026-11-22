@@ -2331,16 +2331,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clock_timer = slint::Timer::default();
     let autosave_session = Rc::clone(&session);
     let autosave_timer = slint::Timer::default();
-    autosave_timer.start(
-        slint::TimerMode::Repeated,
-        std::time::Duration::from_secs(15 * 60),
-        move || {
+    if let Some(period) = session.borrow().preferences.autosave_interval() {
+        autosave_timer.start(slint::TimerMode::Repeated, period, move || {
             let wrote = autosave_session.borrow().autosave();
             if wrote > 0 {
                 tracing::info!("autosave wrote {wrote} files");
             }
-        },
-    );
+        });
+    }
     let import_session = Rc::clone(&session);
     let import_ui = control.as_weak();
     let import_timer = slint::Timer::default();
