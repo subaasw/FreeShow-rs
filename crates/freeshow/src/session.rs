@@ -189,6 +189,14 @@ pub struct Session {
     pub warnings: Vec<String>,
 }
 
+/// An NDI picture the library asked to broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NdiTarget {
+    pub id: String,
+    pub name: String,
+    pub stage: bool,
+}
+
 impl Session {
     pub fn empty() -> Self {
         Self {
@@ -2101,30 +2109,48 @@ impl Session {
     }
 
     pub fn ndi_output(&self) -> Option<(String, String)> {
-        let (id, output) = self
-            .root
-            .as_ref()
-            .and_then(|root| Library::open(root).network_output_settings("ndi"))?;
-        let groups = &output["ndiData"]["groups"];
-        if !groups.is_null() && groups.as_str() != Some("") {
-            // The installed ndisink exposes no groups property. Do not publish
-            // a grouped source to the default discovery group instead.
-            tracing::warn!("grouped NDI output is not supported; sender disabled");
-            return None;
-        }
-        let valid = |value: &serde_json::Value| {
-            value
-                .as_str()
-                .filter(|name| !name.is_empty() && !name.contains('\0'))
-                .map(str::to_string)
-        };
-        let name = valid(&output["ndiData"]["name"]).unwrap_or_else(|| {
-            valid(&output["name"])
-                .map(|name| format!("FreeShow NDI - {name}"))
-                .unwrap_or_else(|| "FreeShow NDI".into())
-        });
-        Some((id, name))
+        self.ndi_outputs()
+            .into_iter()
+            .find(|target| !target.stage)
+            .map(|target| (target.id, target.name))
     }
+
+    /// Enabled NDI pictures, including stage. Grouped outputs stay off because
+    /// the installed ndisink has no discovery-group property.
+    pub fn ndi_outputs(&self) -> Vec<NdiTarget> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        Library::open(root)
+            .network_outputs("ndi")
+            .into_iter()
+            .filter_map(|(id, output)| {
+                let groups = &output["ndiData"]["groups"];
+                if !groups.is_null() && groups.as_str() != Some("") {
+                    // The installed ndisink exposes no groups property. Do not publish
+                    // a grouped source to the default discovery group instead.
+                    tracing::warn!("grouped NDI output is not supported; sender disabled");
+                    return None;
+                }
+                let valid = |value: &serde_json::Value| {
+                    value
+                        .as_str()
+                        .filter(|name| !name.is_empty() && !name.contains('\0'))
+                        .map(str::to_string)
+                };
+                let name = valid(&output["ndiData"]["name"]).unwrap_or_else(|| {
+                    valid(&output["name"])
+                        .map(|name| format!("FreeShow NDI - {name}"))
+                        .unwrap_or_else(|| "FreeShow NDI".into())
+                });
+                let stage = output["stageOutput"]
+                    .as_str()
+                    .is_some_and(|layout| !layout.is_empty());
+                Some(NdiTarget { id, name, stage })
+            })
+            .collect()
+    }
+
     fn routes_for_sources(&self, sources: &[&str], file_gain: f32) -> Vec<SpeakerRoute> {
         let main = if self.audio_muted { 0.0 } else { self.volume };
         let Some(root) = &self.root else {
@@ -4104,6 +4130,74 @@ mod tests {
         settings["outputs"]["ndi"]["ndiData"]["groups"] = serde_json::json!("");
         std::fs::write(&path, settings.to_string()).unwrap();
         assert_eq!(session.ndi_output(), Some(("ndi".into(), "My NDI".into())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ndi_outputs_send_each_ungrouped_picture_including_stage() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-session-ndi-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            serde_json::json!({
+                "outputs": {
+                    "main": {
+                        "name": "Main",
+                        "ndi": true,
+                        "enabled": true,
+                        "ndiData": {"name": "Sanctuary"}
+                    },
+                    "overflow": {
+                        "name": "Overflow",
+                        "ndi": true,
+                        "enabled": true
+                    },
+                    "grouped": {
+                        "name": "Private",
+                        "ndi": true,
+                        "enabled": true,
+                        "ndiData": {"name": "Private NDI", "groups": "Staff"}
+                    },
+                    "off": {"name": "Off", "ndi": true, "enabled": false},
+                    "stage": {
+                        "name": "Stage",
+                        "ndi": true,
+                        "enabled": true,
+                        "stageOutput": "default",
+                        "ndiData": {"name": "Stage NDI"}
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let session = Session::open(root.clone());
+        assert_eq!(
+            session.ndi_outputs(),
+            vec![
+                NdiTarget {
+                    id: "main".into(),
+                    name: "Sanctuary".into(),
+                    stage: false
+                },
+                NdiTarget {
+                    id: "overflow".into(),
+                    name: "FreeShow NDI - Overflow".into(),
+                    stage: false
+                },
+                NdiTarget {
+                    id: "stage".into(),
+                    name: "Stage NDI".into(),
+                    stage: true
+                },
+            ]
+        );
+        assert_eq!(
+            session.ndi_output(),
+            Some(("main".into(), "Sanctuary".into()))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]

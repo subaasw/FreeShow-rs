@@ -175,7 +175,7 @@ Acceptance: a `stage.json` from Electron renders every box type the Sunday opera
 ### M4. Network media and multi-picture output
 
 - Remaining network transports: OMT, WebRTC.
-- NDI groups, multiple independent NDI pictures, and stage NDI (grouped NDI stays disabled today).
+- [x] Multiple independent NDI pictures and stage NDI. Grouped NDI stays disabled because ndisink has no discovery-group property.
 - Keep Icecast / RTMP / stereo network routes working; add tests for any new transport at the crate that owns it.
 - Stream-only Lessons.church pages that have no direct media URL (today: not-yet).
 

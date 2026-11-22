@@ -45,7 +45,7 @@ OSC input listens on UDP port 5505, the same port FreeShow uses. `/freeshow/slid
 
 MIDI input opens the first connected input, or the port named by `FREESHOW_MIDI_IN`. FreeShow's default notes are used: channel 1 note 0 is next, note 1 is previous, channel 3 note 0 clears, and channel 5 note 2 selects a slide from the velocity.
 
-The first enabled audience NDI output in the library sends the current audience picture and its routed stereo audio through the GStreamer NDI plugin. Its source name uses `ndiData.name`, or `FreeShow NDI - <output name>`. With no enabled NDI output, nothing is broadcast. The plugin and NDI SDK runtime are required. Grouped outputs stay disabled because the current sink does not expose NDI discovery groups. Multiple independent NDI pictures and stage NDI are not implemented.
+Each enabled, ungrouped NDI output in the library sends its picture and routed stereo audio through the GStreamer NDI plugin. Audience outputs send the audience picture; stage outputs send the stage picture. A source name uses `ndiData.name`, or `FreeShow NDI - <output name>`. With no enabled NDI output, nothing is broadcast. The plugin and NDI SDK runtime are required. Grouped outputs stay disabled because the current sink does not expose NDI discovery groups.
 
 MIDI timecode uses the first input, or the port named by `FREESHOW_MTC_IN`. Quarter-frames and full frames replace the stage clock with `HH:MM:SS:FF` while they are arriving. Linear timecode listens only when `FREESHOW_LTC_IN` names an input (`default` uses the system input) and uses 25 fps unless `FREESHOW_LTC_FPS` is set.
 
@@ -147,7 +147,7 @@ Settings and the log are stored in the app config directory:
 - `crates/freeshow-remote` — phone remote and stage web pages
 - `crates/freeshow-osc` — OSC input
 - `crates/freeshow-midi` — MIDI input
-- `crates/freeshow-ndi` — NDI send of the audience picture as `FreeShow NDI`. The show runs when the NDI plugin is missing
+- `crates/freeshow-ndi` — NDI send of each enabled audience or stage picture. The show runs when the NDI plugin is missing
 - `crates/freeshow-timecode` — MIDI timecode and linear timecode audio
 - `crates/freeshow-record` — audience recording and RTMP. The show runs when the encoder is missing
 - `crates/freeshow-pco` — Planning Center service plans. The show runs when no account is connected

@@ -795,15 +795,71 @@ fn publish(slot: &FrameSlot, frame: Frame) {
 }
 
 fn publish_audience(slot: &FrameSlot, frame: Frame) {
-    ndi().submit(&frame.pixels, frame.width, frame.height);
-    freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+    submit_network(NetworkPicture::Audience, &frame);
     slot.publish(frame);
 }
 
-static NDI: std::sync::OnceLock<freeshow_ndi::NdiSender> = std::sync::OnceLock::new();
+fn publish_stage(slot: &FrameSlot, frame: Frame) {
+    submit_network(NetworkPicture::Stage, &frame);
+    slot.publish(frame);
+}
 
-fn ndi() -> &'static freeshow_ndi::NdiSender {
-    NDI.get_or_init(|| freeshow_ndi::NdiSender::disabled(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+#[derive(Clone, Copy)]
+enum NetworkPicture {
+    Audience,
+    Stage,
+}
+
+struct NdiBroadcast {
+    audience: Vec<freeshow_ndi::NdiSender>,
+    stage: Vec<freeshow_ndi::NdiSender>,
+}
+
+impl NdiBroadcast {
+    fn open(session: &session::Session) -> Self {
+        let mut audience = Vec::new();
+        let mut stage = Vec::new();
+        for target in session.ndi_outputs() {
+            let sender = freeshow_ndi::NdiSender::open_routed(
+                &target.name,
+                OUTPUT_WIDTH,
+                OUTPUT_HEIGHT,
+                &target.id,
+            );
+            if target.stage {
+                stage.push(sender);
+            } else {
+                audience.push(sender);
+            }
+        }
+        Self { audience, stage }
+    }
+
+    fn submit(&self, picture: NetworkPicture, pixels: &[u8], width: u32, height: u32) {
+        let senders = match picture {
+            NetworkPicture::Audience => &self.audience,
+            NetworkPicture::Stage => &self.stage,
+        };
+        for sender in senders {
+            sender.submit(pixels, width, height);
+        }
+    }
+}
+
+static NDI: std::sync::OnceLock<NdiBroadcast> = std::sync::OnceLock::new();
+
+fn ndi() -> &'static NdiBroadcast {
+    NDI.get_or_init(|| NdiBroadcast {
+        audience: Vec::new(),
+        stage: Vec::new(),
+    })
+}
+
+fn submit_network(picture: NetworkPicture, frame: &Frame) {
+    ndi().submit(picture, &frame.pixels, frame.width, frame.height);
+    if matches!(picture, NetworkPicture::Audience) {
+        freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+    }
 }
 
 fn fade_into(
@@ -811,15 +867,12 @@ fn fade_into(
     slots: Vec<Rc<FrameSlot>>,
     from: Frame,
     to: Frame,
-    send_ndi: bool,
+    picture: NetworkPicture,
     motion: freeshow_data::TextTransition,
 ) {
     if motion.kind == "none" {
         let frame = to;
-        if send_ndi {
-            ndi().submit(&frame.pixels, frame.width, frame.height);
-            freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
-        }
+        submit_network(picture, &frame);
         for slot in &slots {
             slot.publish(frame.clone());
         }
@@ -835,10 +888,7 @@ fn fade_into(
             let next = step.get().saturating_add(1);
             step.set(next);
             let frame = motion_frame(&from, &to, &motion, f32::from(next) / f32::from(steps));
-            if send_ndi {
-                ndi().submit(&frame.pixels, frame.width, frame.height);
-                freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
-            }
+            submit_network(picture, &frame);
             for slot in &slots {
                 slot.publish(frame.clone());
             }
@@ -1136,7 +1186,7 @@ fn follow_video(
             *last_stage.borrow_mut() = stage.clone();
             publish_audience(&output_slot, shown.clone());
             publish(&preview_slot, shown);
-            publish(&stage_slot, stage);
+            publish_stage(&stage_slot, stage);
         },
     );
 }
@@ -1166,7 +1216,7 @@ fn send_frames(
         vec![Rc::clone(output_slot), Rc::clone(preview_slot)],
         from_output,
         audience,
-        true,
+        NetworkPicture::Audience,
         motion.clone(),
     );
     let from_stage = last_stage.borrow().clone();
@@ -1185,7 +1235,7 @@ fn send_frames(
         vec![Rc::clone(stage_slot)],
         from_stage,
         stage,
-        false,
+        NetworkPicture::Stage,
         stage_motion,
     );
     if !background {
@@ -1490,13 +1540,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
-    let ndi_sender = session
-        .ndi_output()
-        .map(|(id, name)| {
-            freeshow_ndi::NdiSender::open_routed(&name, OUTPUT_WIDTH, OUTPUT_HEIGHT, &id)
-        })
-        .unwrap_or_else(|| freeshow_ndi::NdiSender::disabled(OUTPUT_WIDTH, OUTPUT_HEIGHT));
-    let _ = NDI.set(ndi_sender);
+    let _ = NDI.set(NdiBroadcast::open(&session));
     session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show
@@ -1619,7 +1663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *last_stage.borrow_mut() = stage.clone();
         publish_audience(&output_slot, audience.clone());
         publish(&preview_slot, audience);
-        publish(&stage_slot, stage);
+        publish_stage(&stage_slot, stage);
     }
     let _ = ndi();
 
@@ -1749,7 +1793,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         publish(&preview_slot, blank);
                         let stage = stage_frame(&current);
                         *last_stage.borrow_mut() = stage.clone();
-                        publish(&stage_slot, stage);
+                        publish_stage(&stage_slot, stage);
                     }
                     1 => {
                         if !current.advance_show() {
@@ -1891,7 +1935,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         current.toggle_timer();
                         let stage = stage_frame(&current);
                         *last_stage.borrow_mut() = stage.clone();
-                        publish(&stage_slot, stage);
+                        publish_stage(&stage_slot, stage);
                     }
                     4 => {
                         let Some(root) = current.root.clone() else {
