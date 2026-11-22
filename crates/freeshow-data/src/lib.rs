@@ -5818,24 +5818,30 @@ pub fn player_videos_from(value: &Value) -> Vec<PlayerVideo> {
     videos
 }
 
-/// Timeline cues stored on a show document.
-pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
+/// The show-level timeline takes precedence over the active layout's timeline.
+pub fn timeline_for_show(show: &Value) -> Option<(&Value, Option<&str>)> {
     let active = show
         .pointer("/settings/activeLayout")
         .and_then(Value::as_str)
         .unwrap_or("main");
-    let top_level = show
-        .get("timeline")
-        .and_then(|timeline| timeline.get("actions"))
-        .and_then(Value::as_array);
-    let imported_ms = top_level.is_none() && show["origin"] == "propresenter";
-    let actions = top_level.or_else(|| {
-        show.get("layouts")?
-            .get(active)?
-            .pointer("/timeline/actions")?
-            .as_array()
-    });
-    let Some(actions) = actions else {
+    show.get("timeline")
+        .filter(|timeline| timeline["actions"].is_array())
+        .map(|timeline| (timeline, None))
+        .or_else(|| {
+            Some((
+                show.get("layouts")?.get(active)?.get("timeline")?,
+                Some(active),
+            ))
+        })
+}
+
+/// Timeline cues stored on a show document.
+pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
+    let Some((timeline, layout)) = timeline_for_show(show) else {
+        return Vec::new();
+    };
+    let imported_ms = layout.is_some() && show["origin"] == "propresenter";
+    let Some(actions) = timeline["actions"].as_array() else {
         return Vec::new();
     };
     let mut cues = Vec::new();
