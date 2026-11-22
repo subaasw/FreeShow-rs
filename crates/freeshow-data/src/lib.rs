@@ -52,6 +52,113 @@ pub struct FreeShowPreferences {
     pub remote_port: Option<u16>,
     /// `ports.stage`, the stage page port.
     pub stage_port: Option<u16>,
+    /// `language`, for example `en` or `nb`.
+    pub language: Option<String>,
+    /// `timeFormat`: `24` or `12`.
+    pub time_format: Option<String>,
+    /// `autosave`: `never`, or a value such as `15min`.
+    pub autosave: Option<String>,
+    pub labels_disabled: Option<bool>,
+    pub group_numbers: Option<bool>,
+    pub format_new_show: Option<bool>,
+    pub auto_output: Option<bool>,
+    pub max_connections: Option<u32>,
+    /// Audience outputs stored in `settings.json`, in file order.
+    pub outputs: Vec<OutputPreference>,
+}
+
+/// One output from FreeShow's library `settings.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputPreference {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub active: bool,
+    pub style: String,
+}
+
+impl FreeShowPreferences {
+    /// FreeShow's default clock is 24-hour.
+    pub fn uses_12_hour_clock(&self) -> bool {
+        self.time_format.as_deref() == Some("12")
+    }
+
+    /// `None` means autosave is turned off. Missing settings use 15 minutes.
+    pub fn autosave_interval(&self) -> Option<std::time::Duration> {
+        let key = self.autosave.as_deref().unwrap_or("15min");
+        if key.eq_ignore_ascii_case("never") {
+            return None;
+        }
+        let minutes = key
+            .strip_suffix("min")
+            .or_else(|| key.strip_suffix("m"))
+            .unwrap_or(key)
+            .parse::<u64>()
+            .ok()
+            .filter(|minutes| *minutes > 0 && *minutes <= 24 * 60)?;
+        Some(std::time::Duration::from_secs(minutes.saturating_mul(60)))
+    }
+
+    /// FreeShow numbers repeated groups unless this is stored as false.
+    pub fn group_numbers(&self) -> bool {
+        self.group_numbers.unwrap_or(true)
+    }
+
+    pub fn labels_disabled(&self) -> bool {
+        self.labels_disabled.unwrap_or(false)
+    }
+
+    pub fn format_new_show(&self) -> bool {
+        self.format_new_show.unwrap_or(false)
+    }
+
+    pub fn max_connections(&self) -> u32 {
+        self.max_connections.unwrap_or(10)
+    }
+
+    /// Formats a 24-hour `HH:MM:SS` clock, honoring `timeFormat` and seconds.
+    pub fn format_clock(&self, clock_24: &str, seconds: bool) -> String {
+        format_clock(clock_24, self.uses_12_hour_clock(), seconds)
+    }
+}
+
+/// Formats `HH:MM:SS` or `HH:MM` as 24-hour or 12-hour text.
+pub fn format_clock(clock_24: &str, twelve_hour: bool, seconds: bool) -> String {
+    let mut parts = clock_24.split(':');
+    let Some(hour) = parts
+        .next()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+    else {
+        return if seconds {
+            clock_24.to_string()
+        } else {
+            clock_24.get(..5).unwrap_or(clock_24).to_string()
+        };
+    };
+    let minute = parts
+        .next()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let second = parts
+        .next()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if twelve_hour {
+        let period = if hour >= 12 { "PM" } else { "AM" };
+        let hour12 = match hour % 12 {
+            0 => 12,
+            other => other,
+        };
+        if seconds {
+            format!("{hour12}:{minute:02}:{second:02} {period}")
+        } else {
+            format!("{hour12}:{minute:02} {period}")
+        }
+    } else if seconds {
+        format!("{hour:02}:{minute:02}:{second:02}")
+    } else {
+        format!("{hour:02}:{minute:02}")
+    }
 }
 
 use std::fs::{self, File};
@@ -3522,6 +3629,14 @@ impl Library {
                 .and_then(|port| u16::try_from(port).ok())
                 .filter(|port| *port != 0)
         };
+        let flag = |name: &str| json.get(name).and_then(Value::as_bool);
+        let text_setting = |name: &str| {
+            json.get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
         FreeShowPreferences {
             theme,
             themes: fs::read_to_string(self.root.join(CONFIG_DIR).join("themes.json"))
@@ -3531,6 +3646,26 @@ impl Library {
             remote_password,
             remote_port: port("remote"),
             stage_port: port("stage"),
+            language: text_setting("language"),
+            time_format: text_setting("timeFormat").filter(|value| value == "12" || value == "24"),
+            autosave: text_setting("autosave").filter(|value| {
+                value.eq_ignore_ascii_case("never")
+                    || value
+                        .strip_suffix("min")
+                        .or_else(|| value.strip_suffix("m"))
+                        .and_then(|minutes| minutes.parse::<u64>().ok())
+                        .is_some_and(|minutes| minutes > 0 && minutes <= 24 * 60)
+            }),
+            labels_disabled: flag("labelsDisabled"),
+            group_numbers: flag("groupNumbers"),
+            format_new_show: flag("formatNewShow"),
+            auto_output: flag("autoOutput"),
+            max_connections: json
+                .get("maxConnections")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value <= 10_000),
+            outputs: output_preferences(&json),
         }
     }
 
@@ -4411,6 +4546,30 @@ impl Library {
         names.sort();
         Ok(names)
     }
+}
+
+fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
+    let Some(outputs) = settings.get("outputs").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    outputs
+        .iter()
+        .map(|(id, output)| OutputPreference {
+            id: id.clone(),
+            name: output
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            enabled: output.get("enabled").and_then(Value::as_bool) != Some(false),
+            active: output.get("active").and_then(Value::as_bool) == Some(true),
+            style: output
+                .get("style")
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                .to_string(),
+        })
+        .collect()
 }
 
 /// FreeShow's default library folder, when it already exists on this machine.
@@ -5502,6 +5661,87 @@ mod tests {
         assert_eq!(library.preferences(), FreeShowPreferences::default());
         fs::write(library.settings_path(), "not json").unwrap();
         assert_eq!(library.preferences(), FreeShowPreferences::default());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn library_preferences_read_operator_settings_and_outputs() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-operator-settings-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let library = Library::open(&root);
+        fs::write(
+            library.settings_path(),
+            r#"{
+                "language":" nb ",
+                "timeFormat":"12",
+                "autosave":"5min",
+                "labelsDisabled":true,
+                "groupNumbers":false,
+                "formatNewShow":true,
+                "autoOutput":true,
+                "maxConnections":3,
+                "outputs":{
+                    "default":{"enabled":true,"active":true,"name":"Primary","style":"wide"},
+                    "stage":{"enabled":false,"name":"Side","style":""}
+                }
+            }"#,
+        )
+        .unwrap();
+        let preferences = library.preferences();
+        assert_eq!(preferences.language.as_deref(), Some("nb"));
+        assert!(preferences.uses_12_hour_clock());
+        assert_eq!(
+            preferences.autosave_interval(),
+            Some(std::time::Duration::from_secs(5 * 60))
+        );
+        assert!(preferences.labels_disabled());
+        assert!(!preferences.group_numbers());
+        assert!(preferences.format_new_show());
+        assert_eq!(preferences.auto_output, Some(true));
+        assert_eq!(preferences.max_connections(), 3);
+        assert_eq!(
+            preferences.outputs,
+            vec![
+                OutputPreference {
+                    id: "default".into(),
+                    name: "Primary".into(),
+                    enabled: true,
+                    active: true,
+                    style: "wide".into(),
+                },
+                OutputPreference {
+                    id: "stage".into(),
+                    name: "Side".into(),
+                    enabled: false,
+                    active: false,
+                    style: "".into(),
+                },
+            ]
+        );
+        assert_eq!(format_clock("00:05:09", true, true), "12:05:09 AM");
+        assert_eq!(format_clock("13:05:09", true, false), "1:05 PM");
+        assert_eq!(format_clock("13:05:09", false, false), "13:05");
+        let defaults = FreeShowPreferences::default();
+        assert!(!defaults.uses_12_hour_clock());
+        assert_eq!(
+            defaults.autosave_interval(),
+            Some(std::time::Duration::from_secs(15 * 60))
+        );
+        assert!(defaults.group_numbers());
+        assert_eq!(defaults.max_connections(), 10);
+        fs::write(
+            library.settings_path(),
+            r#"{"timeFormat":"26","autosave":"soon","maxConnections":-1,"language":""}"#,
+        )
+        .unwrap();
+        assert_eq!(library.preferences(), FreeShowPreferences::default());
+        fs::write(library.settings_path(), r#"{"autosave":"never"}"#).unwrap();
+        assert_eq!(library.preferences().autosave.as_deref(), Some("never"));
+        assert_eq!(library.preferences().autosave_interval(), None);
         let _ = fs::remove_dir_all(&root);
     }
 }

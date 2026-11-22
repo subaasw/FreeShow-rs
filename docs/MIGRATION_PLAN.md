@@ -155,7 +155,7 @@ Acceptance: `main` compiles on Linux, Windows, and macOS; `cargo fmt --check`, `
 
 The service path exists; the daily editor still feels thinner than Electron.
 
-- Honor more of library `settings.json` (outputs, styles, language, autosave interval already present, display names). Extend `FreeShowPreferences` with tests, field by field.
+- [x] Read more of library `settings.json` into `FreeShowPreferences` (language, `timeFormat`, autosave, `labelsDisabled`, `groupNumbers`, `formatNewShow`, `autoOutput`, `maxConnections`, outputs), with tests. Stage clocks, the autosave timer, and slide-group labels honor the matching keys. Still unread or unwired: styles, language UI, display names, `autoOutput`, `maxConnections`, `formatNewShow`, and `labelsDisabled`.
 - Theme hover, focus, and border overrides.
 - Drawer media as real files (thumbnails, duration, missing-file badges), not names only.
 - Richer lyric editing: more than "plain text plus one box moved by 40 px". Item selection, typography, and adding/removing boxes, still writing valid FreeShow JSON.
