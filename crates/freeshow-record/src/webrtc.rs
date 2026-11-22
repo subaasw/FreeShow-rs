@@ -15,7 +15,7 @@ use crate::{Job, encoders, init_gstreamer};
 
 const HANDSHAKE: Duration = Duration::from_secs(8);
 
-/// Sends one WHIP destination with a webrtcbin H.264 encode path.
+/// Sends one WHIP destination with H.264 video and optional routed Opus audio.
 /// The show keeps running when the encoder, endpoint, or handshake fails.
 pub struct WebrtcSender {
     width: u32,
@@ -26,14 +26,35 @@ pub struct WebrtcSender {
 
 impl WebrtcSender {
     pub fn open(url: &str, token: Option<&str>, width: u32, height: u32) -> Option<Self> {
+        Self::open_output(url, token, width, height, None)
+    }
+
+    pub fn open_routed(
+        url: &str,
+        token: Option<&str>,
+        width: u32,
+        height: u32,
+        output: &str,
+    ) -> Option<Self> {
+        Self::open_output(url, token, width, height, Some(output))
+    }
+
+    fn open_output(
+        url: &str,
+        token: Option<&str>,
+        width: u32,
+        height: u32,
+        output: Option<&str>,
+    ) -> Option<Self> {
         let url = url.to_string();
         let token = token.map(str::to_string);
+        let output = output.map(str::to_string);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (jobs, jobs_rx) = mpsc::sync_channel(2);
         let thread = std::thread::Builder::new()
             .name("freeshow-webrtc".into())
-            .spawn(
-                move || match start_session(&url, token.as_deref(), width, height) {
+            .spawn(move || {
+                match start_session(&url, token.as_deref(), width, height, output.as_deref()) {
                     Ok((pipeline, appsrc)) => {
                         let _ = ready_tx.send(true);
                         serve(pipeline, appsrc, jobs_rx);
@@ -42,8 +63,8 @@ impl WebrtcSender {
                         tracing::warn!("WebRTC output did not start: {err}");
                         let _ = ready_tx.send(false);
                     }
-                },
-            )
+                }
+            })
             .ok()?;
         if ready_rx
             .recv_timeout(HANDSHAKE + Duration::from_secs(5))
@@ -84,11 +105,18 @@ fn start_session(
     token: Option<&str>,
     width: u32,
     height: u32,
+    output: Option<&str>,
 ) -> Result<(gstreamer::Pipeline, AppSrc), String> {
-    let (pipeline, appsrc, webrtc) = open_encode_pipeline(width, height)?;
-    let offer = local_offer(&webrtc)?;
-    let (answer, _) = whip_post(url, token, &offer)?;
-    apply_remote_answer(&webrtc, &answer)?;
+    let (pipeline, appsrc, webrtc) = open_encode_pipeline(width, height, output)?;
+    let negotiate = || {
+        let offer = local_offer(&webrtc)?;
+        let (answer, _) = whip_post(url, token, &offer)?;
+        apply_remote_answer(&webrtc, &answer)
+    };
+    if let Err(error) = negotiate() {
+        let _ = pipeline.set_state(gstreamer::State::Null);
+        return Err(error);
+    }
     tracing::info!("WebRTC WHIP session started");
     Ok((pipeline, appsrc))
 }
@@ -96,17 +124,19 @@ fn start_session(
 fn open_encode_pipeline(
     width: u32,
     height: u32,
+    output: Option<&str>,
 ) -> Result<(gstreamer::Pipeline, AppSrc, gstreamer::Element), String> {
     init_gstreamer()?;
     if gstreamer::ElementFactory::find("webrtcbin").is_none() {
         return Err("webrtcbin is not installed".into());
     }
     let pay = "h264parse config-interval=-1 ! rtph264pay pt=96 config-interval=-1 aggregate-mode=zero-latency ! application/x-rtp,media=video,encoding-name=H264,payload=96";
+    let audio = output.map_or_else(String::new, |id| format!("{} ! send.", audio_rtp(id)));
     let descriptions: Vec<String> = encoders()
         .into_iter()
         .map(|encoder| {
             format!(
-                "appsrc name=src is-live=true format=time block=false do-timestamp=true caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! videoconvert ! video/x-raw,format=I420 ! {encoder} ! {pay} ! webrtcbin name=send bundle-policy=max-bundle"
+                "webrtcbin name=send bundle-policy=max-bundle appsrc name=src is-live=true format=time block=false do-timestamp=true caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! videoconvert ! video/x-raw,format=I420 ! {encoder} ! {pay} ! send. {audio}"
             )
         })
         .collect();
@@ -135,6 +165,13 @@ fn open_encode_pipeline(
         return Ok((pipeline, appsrc, webrtc));
     }
     Err("WebRTC encode pipeline did not start".into())
+}
+
+fn audio_rtp(output: &str) -> String {
+    format!(
+        "{} ! audioconvert ! opusenc bitrate=128000 ! rtpopuspay pt=97 ! application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,encoding-params=(string)2,sprop-stereo=(string)1,payload=97",
+        freeshow_media::network_audio_mix(output),
+    )
 }
 
 fn local_offer(webrtc: &gstreamer::Element) -> Result<String, String> {
@@ -375,7 +412,7 @@ pub(crate) fn answer_sdp(offer: &str) -> Result<String, String> {
 /// Create a local WHIP offer from the encode pipeline, used by tests.
 #[cfg(test)]
 pub(crate) fn whip_offer_sdp(width: u32, height: u32) -> Result<String, String> {
-    let (pipeline, _appsrc, webrtc) = open_encode_pipeline(width, height)?;
+    let (pipeline, _appsrc, webrtc) = open_encode_pipeline(width, height, None)?;
     let result = local_offer(&webrtc);
     let _ = pipeline.set_state(gstreamer::State::Null);
     result
@@ -396,6 +433,42 @@ mod tests {
             offer.to_ascii_uppercase().contains("H264") || offer.contains("m=video"),
             "offer should describe a video encode: {offer}"
         );
+    }
+
+    #[test]
+    fn routed_audio_is_encoded_as_opus_rtp() {
+        init_gstreamer().unwrap();
+        let id = format!("whip-audio-{}", std::process::id());
+        let pipeline = gstreamer::parse::launch(&format!(
+            "audiotestsrc is-live=true volume=0.5 ! audio/x-raw,format=F32LE,rate=48000,channels=2 ! interaudiosink channel=\"{}\" sync=false {} ! rtpopusdepay ! opusdec ! audioconvert ! audio/x-raw,format=F32LE,channels=2 ! appsink name=capture sync=false",
+            freeshow_media::network_channel(&id, false), audio_rtp(&id),
+        ))
+        .unwrap();
+        let pipeline = pipeline.downcast::<gstreamer::Pipeline>().unwrap();
+        let sink = pipeline
+            .by_name("capture")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut heard = false;
+        while Instant::now() < deadline {
+            if let Some(sample) = sink.try_pull_sample(gstreamer::ClockTime::from_mseconds(100)) {
+                let map = sample.buffer().unwrap().map_readable().unwrap();
+                heard = map.as_slice().as_chunks::<8>().0.iter().any(|frame| {
+                    let [left, right] = frame.as_chunks::<4>().0 else {
+                        unreachable!()
+                    };
+                    f32::from_le_bytes(*left).abs() > 0.1 && f32::from_le_bytes(*right).abs() > 0.1
+                });
+                if heard {
+                    break;
+                }
+            }
+        }
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        assert!(heard, "expected routed audio on both decoded Opus channels");
     }
 
     #[test]
@@ -446,11 +519,20 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
             offer
         });
-        let sender = WebrtcSender::open(&url, Some("secret"), 64, 64).expect("WHIP encode session");
+        let sender = WebrtcSender::open_routed(&url, Some("secret"), 64, 64, "audience")
+            .expect("WHIP encode session");
         sender.submit(&[80u8; 64 * 64 * 4], 64, 64);
         drop(sender);
         let offer = server.join().unwrap();
         assert!(offer.contains("v=0"));
+        assert!(
+            offer.contains("m=audio "),
+            "posted offer lacks audio: {offer}"
+        );
+        assert!(
+            offer.to_ascii_lowercase().contains("opus/48000/2") && offer.contains("sprop-stereo=1"),
+            "posted offer lacks stereo Opus: {offer}"
+        );
         assert!(
             offer.to_ascii_uppercase().contains("H264") || offer.contains("m=video"),
             "posted offer should describe a video encode: {offer}"

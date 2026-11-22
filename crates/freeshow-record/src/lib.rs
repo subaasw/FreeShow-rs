@@ -24,6 +24,16 @@ impl WebrtcSender {
         None
     }
 
+    pub fn open_routed(
+        _url: &str,
+        _token: Option<&str>,
+        _width: u32,
+        _height: u32,
+        _output: &str,
+    ) -> Option<Self> {
+        None
+    }
+
     pub fn submit(&self, _pixels: &[u8], _width: u32, _height: u32) {}
 }
 
