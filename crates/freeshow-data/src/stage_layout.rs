@@ -231,6 +231,17 @@ pub struct StageLayout {
 }
 
 pub fn default_stage() -> StageLayout {
+    let mut layout = built_in_stage();
+    // Give built-in items the ids `serialize_stage` would write, so editors can address them.
+    for (index, item) in layout.items.iter_mut().enumerate() {
+        if item.id.is_empty() {
+            item.id = format!("{}{}", kind_name(item.kind), index + 1);
+        }
+    }
+    layout
+}
+
+fn built_in_stage() -> StageLayout {
     StageLayout {
         name: "Default".into(),
         background: "#12121c".into(),
@@ -278,6 +289,10 @@ pub fn load_stage_file(path: &Path) -> StageLayout {
 
 pub fn parse_stage(text: &str) -> Result<StageLayout, ()> {
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
+    if value.get("items").is_some_and(Value::is_object) {
+        // A single layout object rather than FreeShow's `{ id: layout }` map.
+        return layout_from(&value);
+    }
     let object = value.as_object().ok_or(())?;
     let layout = object
         .values()
@@ -286,11 +301,120 @@ pub fn parse_stage(text: &str) -> Result<StageLayout, ()> {
     layout_from(layout)
 }
 
+/// Saves `layout` into `stage.json` without losing anything this app does not model.
+///
+/// The active layout (the first one not disabled) is updated in place: other
+/// layouts, layout keys such as `password`, disabled items, and per-item fields
+/// that are not parsed (text lines, sources, QR/chart data, clock options) are
+/// kept. A file that exists but does not parse is refused rather than replaced.
+/// The write goes through a temp file and a rename.
 pub fn write_stage_layout(path: &std::path::Path, layout: &StageLayout) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serialize_stage(layout))
+    let fresh: Value = serde_json::from_str(&serialize_stage(layout))
+        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+    let fresh = fresh.get("default").cloned().unwrap_or_default();
+    let mut root = match fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(value @ Value::Object(_)) => value,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "{} is not a stage layout file; not replacing it",
+                        path.display()
+                    ),
+                ));
+            }
+        },
+        Err(err) if err.kind() == ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
+        Err(err) => return Err(err),
+    };
+    let target = if root.get("items").is_some_and(Value::is_object) {
+        &mut root
+    } else {
+        let key = root
+            .as_object()
+            .and_then(|layouts| {
+                layouts
+                    .iter()
+                    .find(|(_, layout)| {
+                        layout.get("items").is_some_and(Value::is_object)
+                            && layout.get("disabled").and_then(Value::as_bool) != Some(true)
+                    })
+                    .map(|(key, _)| key.clone())
+            })
+            .unwrap_or_else(|| "default".to_string());
+        let entry = &mut root[key.as_str()];
+        if !entry.is_object() {
+            *entry = Value::Object(serde_json::Map::new());
+        }
+        entry
+    };
+    merge_layout(target, &fresh);
+    let staging = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(&root)
+        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+    fs::write(&staging, text)?;
+    fs::rename(&staging, path).inspect_err(|_| {
+        let _ = fs::remove_file(&staging);
+    })
+}
+
+/// Overlays the fields this app models onto an existing FreeShow layout object.
+fn merge_layout(target: &mut Value, fresh: &Value) {
+    const MODELED: [&str; 6] = ["type", "style", "align", "offset", "lineCount", "label"];
+    target["name"] = fresh["name"].clone();
+    if !target.get("settings").is_some_and(Value::is_object) {
+        target["settings"] = Value::Object(serde_json::Map::new());
+    }
+    target["settings"]["color"] = fresh["settings"]["color"].clone();
+    let existing = target
+        .get("items")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut items = serde_json::Map::new();
+    let mut order = Vec::new();
+    if let Some(fresh_items) = fresh.get("items").and_then(Value::as_object) {
+        let fresh_order = fresh
+            .get("itemOrder")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for id in fresh_order.iter().filter_map(Value::as_str) {
+            let Some(Value::Object(modeled)) = fresh_items.get(id) else {
+                continue;
+            };
+            let mut item = match existing.get(id) {
+                Some(Value::Object(old)) => old.clone(),
+                _ => serde_json::Map::new(),
+            };
+            for key in MODELED {
+                match modeled.get(key) {
+                    Some(value) => {
+                        item.insert(key.to_string(), value.clone());
+                    }
+                    None => {
+                        item.remove(key);
+                    }
+                }
+            }
+            items.insert(id.to_string(), Value::Object(item));
+            order.push(Value::String(id.to_string()));
+        }
+    }
+    // Items hidden with `enabled: false` are skipped on load; keep them on save.
+    for (id, item) in existing {
+        if item.get("enabled").and_then(Value::as_bool) == Some(false) && !items.contains_key(&id) {
+            order.push(Value::String(id.clone()));
+            items.insert(id, item);
+        }
+    }
+    target["itemOrder"] = Value::Array(order);
+    target["items"] = Value::Object(items);
 }
 
 pub fn serialize_stage(layout: &StageLayout) -> String {
@@ -637,6 +761,59 @@ fn legacy_kind(id: &str) -> StageItemKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saving_a_layout_keeps_other_layouts_hidden_items_and_unknown_fields() {
+        let dir = std::env::temp_dir().join(format!("freeshow-stage-merge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stage.json");
+        fs::write(
+            &path,
+            r##"{
+              "old": {"name": "Old", "disabled": true, "items": {"a": {"type": "clock", "style": "left:0px;"}}},
+              "live": {"name": "Live", "password": "1234", "settings": {"color": "#000000", "autoStretch": true},
+                "items": {
+                  "t": {"type": "text", "style": "left:1px;top:1px;width:10px;height:10px;", "lines": ["Hi"], "auto": true},
+                  "h": {"type": "clock", "style": "left:2px;", "enabled": false}
+                }}
+            }"##,
+        )
+        .unwrap();
+        let mut layout = load_stage_file(&path);
+        assert_eq!(layout.name, "Live");
+        layout.items[0].style = "left:500px;top:1px;width:10px;height:10px;".into();
+        write_stage_layout(&path, &layout).unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["old"]["name"], "Old");
+        assert_eq!(saved["live"]["password"], "1234");
+        assert_eq!(saved["live"]["settings"]["autoStretch"], true);
+        assert_eq!(saved["live"]["items"]["t"]["lines"][0], "Hi");
+        assert_eq!(saved["live"]["items"]["t"]["auto"], true);
+        assert!(
+            saved["live"]["items"]["t"]["style"]
+                .as_str()
+                .unwrap()
+                .contains("500px")
+        );
+        assert_eq!(saved["live"]["items"]["h"]["enabled"], false);
+        assert_eq!(load_stage_file(&path).items[0].style, layout.items[0].style);
+        fs::write(&path, "{ broken").unwrap();
+        assert!(write_stage_layout(&path, &layout).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ broken");
+        let single = dir.join("single.json");
+        fs::write(
+            &single,
+            r##"{"name":"Solo","items":{"x":{"type":"clock","style":"left:3px;","extra":1}}}"##,
+        )
+        .unwrap();
+        let solo = load_stage_file(&single);
+        assert_eq!(solo.name, "Solo");
+        write_stage_layout(&single, &solo).unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&single).unwrap()).unwrap();
+        assert_eq!(saved["items"]["x"]["extra"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_stage_layout_round_trips() {
         let dir = std::env::temp_dir().join(format!("freeshow-stage-{}", std::process::id()));
