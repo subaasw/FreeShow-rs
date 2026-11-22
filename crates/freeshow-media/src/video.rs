@@ -617,11 +617,20 @@ mod gst_player {
             let input_format = self.input_format.clone();
             let filter = self.filter.clone();
             let volume = self.volume.clone();
+            let (major, minor, _, _) = gst::version();
             let update = move || -> bool {
                 let queued = pending.lock().unwrap().take();
                 let Some(MixUpdate { matrix, caps, gain }) = queued else {
                     return true;
                 };
+                if (major, minor) >= (1, 28) {
+                    // Current audioconvert rebuilds its converter on the next
+                    // buffer and accepts matrices for caps yet to negotiate.
+                    filter.set_property("caps", &caps);
+                    convert.set_property("mix-matrix", &matrix);
+                    volume.set_property("volume", gain);
+                    return true;
+                }
                 volume.set_property("volume", 0.0_f64);
                 let was_explicit = !convert
                     .property::<gst::Array>("mix-matrix")
@@ -655,7 +664,7 @@ mod gst_player {
                     pending
                         .lock()
                         .unwrap()
-                        .replace(MixUpdate { matrix, caps, gain });
+                        .get_or_insert(MixUpdate { matrix, caps, gain });
                     return false;
                 }
                 convert.set_property("mix-matrix", &matrix);
@@ -976,15 +985,18 @@ mod gst_player {
         fn expect_channels(sink: &AppSink, expected: &[f32]) {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             let mut last = vec![0.0_f32; expected.len()];
+            let mut last_channels = None;
+            let mut matching_buffers = 0;
             while std::time::Instant::now() < deadline {
                 if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
-                    let channels = sample
+                    last_channels = sample
                         .caps()
                         .and_then(|caps| caps.structure(0))
                         .and_then(|caps| caps.get::<i32>("channels").ok());
-                    if channels != Some(expected.len() as i32) {
+                    if last_channels != Some(expected.len() as i32) {
                         continue;
                     }
+                    matching_buffers += 1;
                     let map = sample.buffer().unwrap().map_readable().unwrap();
                     last.fill(0.0);
                     for frame in map.as_slice().chunks_exact(4 * expected.len()) {
@@ -1001,7 +1013,9 @@ mod gst_player {
                     }
                 }
             }
-            panic!("expected channels {expected:?}, got {last:?}");
+            panic!(
+                "expected channels {expected:?}, got {last:?} after {matching_buffers} matching buffers, last channel count {last_channels:?}"
+            );
         }
 
         #[test]
