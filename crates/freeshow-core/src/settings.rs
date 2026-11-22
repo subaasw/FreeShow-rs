@@ -5,10 +5,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-fn default_true() -> bool {
-    true
-}
-
 /// Pixel placement of one operator or output window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowPlacement {
@@ -64,7 +60,7 @@ impl WindowProfile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
     /// An explicit theme choice for this app. `None` uses the FreeShow library
     /// theme, then the default theme.
@@ -72,9 +68,11 @@ pub struct AppSettings {
     pub theme: Option<String>,
     #[serde(default)]
     pub data_path: Option<PathBuf>,
-    #[serde(default = "default_true")]
+    /// Audience window open at startup. Off on first run, like FreeShow; the
+    /// Output button remembers the last choice.
+    #[serde(default)]
     pub show_output: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_stage: bool,
     /// Monitor index for the audience window. Empty means the second monitor when one is connected.
     #[serde(default)]
@@ -88,21 +86,6 @@ pub struct AppSettings {
     /// Profile applied when the operator windows open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_window_profile: Option<String>,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            theme: None,
-            data_path: None,
-            show_output: true,
-            show_stage: true,
-            output_screen: None,
-            audio_devices: Default::default(),
-            window_profiles: Default::default(),
-            active_window_profile: None,
-        }
-    }
 }
 
 #[derive(Debug)]
