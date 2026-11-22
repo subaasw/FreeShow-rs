@@ -1032,7 +1032,14 @@ impl Session {
                 "Clear".to_string(),
                 "Next".to_string(),
                 "Previous".to_string(),
-                "Timer".to_string(),
+                // The countdown on stage displays: what a click does, and how much is left.
+                if self.timer_deadline.is_some() {
+                    format!("Pause timer ({} left)", self.timer_label())
+                } else if self.timer_left == 0 || self.timer_left == 300 {
+                    "Start 5-minute timer".to_string()
+                } else {
+                    format!("Resume timer ({} left)", self.timer_label())
+                },
                 if self.recording {
                     "Stop".to_string()
                 } else {
