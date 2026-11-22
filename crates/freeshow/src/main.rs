@@ -522,6 +522,14 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         h: inspector.item_box.height,
         background: inspector.item_box.background.into(),
         radius: inspector.item_box.radius,
+        line_height: inspector.typography.line_height_pct,
+        letter_spacing: inspector.typography.letter_spacing,
+        outline_width: inspector.typography.outline_width,
+        outline_color: inspector.typography.outline_color.into(),
+        shadow_x: inspector.typography.shadow.x,
+        shadow_y: inspector.typography.shadow.y,
+        shadow_blur: inspector.typography.shadow.blur,
+        shadow_color: inspector.typography.shadow.color.into(),
     });
     ui.set_stage_layout_name(session.stage.name.clone().into());
     let rows: Vec<StageRowData> = session

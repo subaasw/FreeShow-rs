@@ -67,6 +67,14 @@ export struct InspectorData {
     h: int,
     background: string,
     radius: int,
+    line-height: int,
+    letter-spacing: int,
+    outline-width: int,
+    outline-color: string,
+    shadow-x: int,
+    shadow-y: int,
+    shadow-blur: int,
+    shadow-color: string,
 }
 
 export struct StageRowData {
@@ -750,7 +758,45 @@ export component InspectorPanel inherits VerticalLayout {
         spacing: 6px;
         FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 48px; }
         SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 2000; value: root.data.radius; edited(value) => { root.set("border-radius", value); } }
+        FieldLabel { text: "Line %"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; value: root.data.line-height; edited(value) => { root.set("line-height", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Spacing"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -300; maximum: 100; value: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
         Rectangle { horizontal-stretch: 1; }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Outline"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; value: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            text: root.data.outline-color;
+            placeholder-text: "#000000";
+            accepted(value) => { root.set("outline-color", value); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Shadow"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; value: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            text: root.data.shadow-color;
+            placeholder-text: "#000000";
+            accepted(value) => { root.set("shadow-color", value); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Shadow X"; text-color: root.text-color; min-width: 48px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; value: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
+        FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
+        SpinBox { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; value: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
     }
 }
 
