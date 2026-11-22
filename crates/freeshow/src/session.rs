@@ -2227,7 +2227,7 @@ impl Session {
                 self.remember_background(&path);
                 self.set_still_underlay(path.clone(), self.load_still(&path));
                 self.background_transition = true;
-                self.note_media_layer(&path, MediaKind::Image);
+                self.note_drawer_media_layer(&path);
                 DrawerAction::Present
             }
             MediaKind::Video => {
@@ -2235,7 +2235,9 @@ impl Session {
                 self.remember_background(&path);
                 self.remember_video_playback(&path);
                 self.replace_underlay(None);
-                self.note_media_layer(&path, MediaKind::Video);
+                let foreground = self.note_drawer_media_layer(&path);
+                // Like FreeShow's media drawer, a picked video loops unless it is a foreground clip.
+                self.media_loop = !foreground;
                 self.background_transition = true;
                 DrawerAction::PlayVideo(path)
             }
@@ -2416,6 +2418,19 @@ impl Session {
     }
 
     /// A foreground picture or a one-shot video replaces the song. A background video keeps it.
+    /// Media picked in the drawer goes behind the song; only a foreground clip replaces it.
+    /// Returns whether it is a foreground clip.
+    fn note_drawer_media_layer(&mut self, path: &Path) -> bool {
+        let foreground = self
+            .root
+            .as_deref()
+            .map(|root| Library::open(root).media_video_type(path))
+            .unwrap_or_default()
+            == "foreground";
+        self.slide_hidden = foreground;
+        foreground
+    }
+
     fn note_media_layer(&mut self, path: &Path, kind: MediaKind) {
         let video_type = self
             .root
@@ -10515,6 +10530,43 @@ Second line"
         session.apply_remote(freeshow_remote::Command::SetVolume { thousandths: 250 });
         assert_eq!(session.volume, 0.25);
         assert_eq!(session.to_snapshot().media[0].kind, "video");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_picture_from_the_media_drawer_goes_behind_the_live_song() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-media-behind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Media")).unwrap();
+        let png = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207,
+            192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+            130,
+        ];
+        std::fs::write(root.join("Media/bg.png"), png).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with("song", "Song", "One\n\nTwo"));
+        session.select_slide(0);
+        let _ = crate::live::audience_frame(&session);
+        session.tab = "media".into();
+        assert!(matches!(session.select_drawer(0), DrawerAction::Present));
+        assert!(session.underlay.is_some());
+        assert!(!session.slide_hidden, "the lyrics stay over the picture");
+        let _ = crate::live::audience_frame(&session);
+        assert_eq!(session.live_slide_index(), Some(0));
+        std::fs::write(
+            root.join("media.json"),
+            serde_json::json!({ root.join("Media/bg.png").to_string_lossy(): { "videoType": "foreground" } })
+                .to_string(),
+        )
+        .unwrap();
+        session.select_drawer(0);
+        assert!(
+            session.slide_hidden,
+            "a foreground picture replaces the song"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
