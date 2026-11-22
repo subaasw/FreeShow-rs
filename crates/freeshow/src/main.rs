@@ -2,6 +2,7 @@
 
 mod church_import;
 mod desktop;
+mod lang;
 mod live;
 mod present;
 mod runtime;
@@ -40,7 +41,7 @@ slint::slint! {
         in-out property <float> font-scale: 1;
     }
 
-    struct DrawerTab { id: string, label: string }
+    struct DrawerTab { id: string, label: string, short: string }
 
     export struct DrawerRowData {
         name: string,
@@ -193,6 +194,7 @@ slint::slint! {
         callback open-stage();
         callback choose-screen();
         in-out property <string> screen-label: "Screen";
+        in property <bool> show-labels: true;
         callback select-tab(string);
         callback choose-drawer(int);
         callback choose-slide(int);
@@ -223,15 +225,15 @@ slint::slint! {
         preferred-height: 800px;
         background: root.primary-darkest;
 
-        property <[DrawerTab]> tabs: [
-            { id: "shows", label: "Shows" },
-            { id: "media", label: "Media" },
-            { id: "audio", label: "Audio" },
-            { id: "overlays", label: "Overlays" },
-            { id: "templates", label: "Templates" },
-            { id: "scripture", label: "Scripture" },
-            { id: "calendar", label: "Calendar" },
-            { id: "functions", label: "Functions" },
+        in-out property <[DrawerTab]> tabs: [
+            { id: "shows", label: "Shows", short: "S" },
+            { id: "media", label: "Media", short: "M" },
+            { id: "audio", label: "Audio", short: "A" },
+            { id: "overlays", label: "Overlays", short: "O" },
+            { id: "templates", label: "Templates", short: "T" },
+            { id: "scripture", label: "Scripture", short: "B" },
+            { id: "calendar", label: "Calendar", short: "C" },
+            { id: "functions", label: "Functions", short: "F" },
         ];
 
         VerticalLayout {
@@ -260,14 +262,14 @@ slint::slint! {
                         clicked => { root.choose-screen(); }
                     }
                     HeaderButton {
-                        label: "Output";
+                        label: root.show-labels ? "Output" : "O";
                         accent: root.accent;
                         text-color: root.text-color;
                         accent-text: root.accent-text;
                         clicked => { root.open-output(); }
                     }
                     HeaderButton {
-                        label: "Stage";
+                        label: root.show-labels ? "Stage" : "S";
                         accent: root.accent;
                         text-color: root.text-color;
                         accent-text: root.accent-text;
@@ -284,7 +286,7 @@ slint::slint! {
                         alignment: start;
                         spacing: 0;
                         for tab in root.tabs: RailButton {
-                            label: tab.label;
+                            label: root.show-labels ? tab.label : tab.short;
                             active: root.active-tab == tab.id;
                             primary: root.primary;
                             accent: root.accent;
@@ -1267,11 +1269,34 @@ fn monitor_count(window: &slint::Window) -> usize {
         .unwrap_or(0)
 }
 
-fn screen_label(index: Option<usize>) -> String {
-    match index {
+fn screen_label(index: Option<usize>, outputs: &[freeshow_data::OutputPreference]) -> String {
+    let screen = match index {
         Some(index) => format!("Screen {}", index + 1),
         None => "Screen".to_string(),
+    };
+    let name = outputs
+        .iter()
+        .find(|output| output.active && output.enabled)
+        .map(|output| output.name.as_str())
+        .filter(|name| !name.is_empty());
+    match name {
+        Some(name) => format!("{screen} · {name}"),
+        None => screen,
     }
+}
+
+fn apply_chrome(ui: &ControlWindow, session: &Session, output_screen: Option<usize>) {
+    ui.set_show_labels(!session.preferences.labels_disabled());
+    ui.set_screen_label(screen_label(output_screen, &session.preferences.outputs).into());
+    let tabs: Vec<DrawerTab> = lang::drawer_tabs(session.preferences.language.as_deref())
+        .into_iter()
+        .map(|(id, label, short)| DrawerTab {
+            id: id.into(),
+            label: label.into(),
+            short: short.into(),
+        })
+        .collect();
+    ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
 }
 
 fn place(window: &slint::Window, x: i32, y: i32) {
@@ -1463,12 +1488,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     control.set_active_tab(session.tab.clone().into());
     control.set_panel_title("Shows".into());
     refresh(&control, &session);
+    apply_chrome(&control, &session, settings.output_screen);
 
     let output = OutputWindow::new()?;
     let stage = StageWindow::new()?;
     let chosen =
         freeshow_core::output_monitor_index(settings.output_screen, monitor_count(output.window()));
-    control.set_screen_label(screen_label(chosen).into());
+    apply_chrome(&control, &session, chosen);
     let output_weak = output.as_weak();
     let output_redraw = output.as_weak();
     let output_slot = attach_frame(
@@ -1537,7 +1563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = ndi();
 
-    if settings.show_output {
+    if settings.show_output || session.preferences.auto_output() {
         output.show()?;
         place_output(output.window(), settings.output_screen);
     }
@@ -1575,6 +1601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let output_for_screen = output.as_weak();
         let settings_for_screen = Rc::clone(&settings);
         let settings_path_for_screen = settings_path.clone();
+        let session_for_screen = Rc::clone(&session);
         let ui = control.as_weak();
         control.on_choose_screen(move || {
             let Some(output) = output_for_screen.upgrade() else {
@@ -1590,7 +1617,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 place_output(output.window(), next);
             }
             if let Some(ui) = ui.upgrade() {
-                ui.set_screen_label(screen_label(next).into());
+                apply_chrome(&ui, &session_for_screen.borrow(), next);
             }
             if let Err(err) = settings_for_screen.borrow().save(&settings_path_for_screen) {
                 tracing::error!("could not save settings: {err}");
@@ -2393,12 +2420,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
     let (stage_frame_tx, stage_frame_rx) = mpsc::sync_channel(1);
-    freeshow_remote::spawn(
+    let max_connections = session.borrow().preferences.max_connections();
+    freeshow_remote::spawn_limited(
         Arc::clone(&snapshot),
         command_tx.clone(),
         remote_password,
         remote_ports,
         stage_frame_tx,
+        max_connections,
     );
     freeshow_osc::OscInput::default().start(freeshow_remote::ShowBus {
         snapshot: Arc::clone(&snapshot),
