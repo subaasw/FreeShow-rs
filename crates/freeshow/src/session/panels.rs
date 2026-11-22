@@ -14,6 +14,17 @@ pub const STAGE_ADD_KINDS: [&str; 7] = [
     "slide", "next", "notes", "clock", "timer", "text", "tracker",
 ];
 
+/// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
+pub const STAGE_ADD_NAMES: [&str; 7] = [
+    "Current slide",
+    "Next slide",
+    "Slide notes",
+    "Clock",
+    "Timer",
+    "Text",
+    "Slide number",
+];
+
 /// Library `settings.json` values shown in Settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsForm {
@@ -163,6 +174,60 @@ pub struct StageRow {
     pub height: i32,
     pub font_px: i32,
     pub color: String,
+    /// What the operator calls this item, such as "Next slide" or "Clock".
+    pub title: String,
+    pub align: String,
+    /// Slides ahead of the live one: 0 is the current slide, 1 the next.
+    pub offset: i32,
+    /// Lines shown at most; 0 shows the whole slide.
+    pub line_count: i32,
+    /// A text item's words, one line per line.
+    pub text: String,
+    pub seconds: bool,
+    pub date_format: String,
+    /// The timer a timer item follows; empty follows whichever timer runs.
+    pub timer: String,
+}
+
+/// Date formats a stage clock can show, as FreeShow stores them; `none` hides the date.
+pub const STAGE_DATE_FORMATS: [&str; 5] = [
+    "none",
+    "DD/MM/YYYY",
+    "MM/DD/YYYY",
+    "YYYY-MM-DD",
+    "DD.MM.YYYY",
+];
+
+/// The name an item has in the stage editor list.
+pub(crate) fn stage_item_title(item: &freeshow_data::StageItemSpec) -> String {
+    use freeshow_data::StageItemKind as Kind;
+    if !item.label.trim().is_empty() {
+        return item.label.trim().to_string();
+    }
+    match item.kind {
+        Kind::Slide => match item.offset {
+            0 => "Current slide".to_string(),
+            1 => "Next slide".to_string(),
+            n if n > 1 => format!("Slide +{n}"),
+            n => format!("Slide {n}"),
+        },
+        Kind::Notes => "Slide notes".to_string(),
+        Kind::Clock => "Clock".to_string(),
+        Kind::Timer => "Timer".to_string(),
+        Kind::Text => match item.lines.first().map(|line| line.trim()) {
+            Some(first) if !first.is_empty() => format!("Text: {first}"),
+            _ => "Text".to_string(),
+        },
+        Kind::Variable => "Variable".to_string(),
+        Kind::SlideTracker => "Slide number".to_string(),
+        Kind::Media => "Picture or video".to_string(),
+        Kind::Camera => "Camera".to_string(),
+        Kind::CurrentOutput => "Output picture".to_string(),
+        Kind::QrCode => "QR code".to_string(),
+        Kind::Web => "Web page".to_string(),
+        Kind::Chart => "Chart".to_string(),
+        Kind::Custom => item.id.clone(),
+    }
 }
 
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -960,6 +1025,18 @@ impl Session {
                     height: px("height", 1080),
                     font_px: px("font-size", 100),
                     color: freeshow_data::css_value(&item.style, "color").unwrap_or_default(),
+                    title: stage_item_title(item),
+                    align: if item.align.is_empty() {
+                        "center".to_string()
+                    } else {
+                        item.align.clone()
+                    },
+                    offset: item.offset.clamp(-99, 99) as i32,
+                    line_count: item.line_count.unwrap_or(0).min(99) as i32,
+                    text: item.lines.join("\n"),
+                    seconds: item.clock.seconds,
+                    date_format: item.clock.date_format.clone(),
+                    timer: item.timer_id.clone().unwrap_or_default(),
                 }
             })
             .collect()
@@ -967,6 +1044,12 @@ impl Session {
 
     /// Sets one geometry or text field on a stage item and saves `Config/stage.json`.
     pub fn stage_set(&mut self, id: &str, key: &str, value: &str) -> Result<(), String> {
+        if matches!(
+            key,
+            "align" | "offset" | "line-count" | "text" | "seconds" | "date-format" | "timer"
+        ) {
+            return self.stage_set_option(id, key, value);
+        }
         let value = value.trim();
         let css = match key {
             "left" | "top" => format!("{}px", parse_int(value, -8000, 8000)?),
@@ -988,6 +1071,78 @@ impl Session {
             .map(|item| freeshow_data::css_set(&item.style, key, &css))
             .ok_or_else(|| format!("no stage item {id:?}"))?;
         if self.set_stage_item_style(id, &style) {
+            Ok(())
+        } else {
+            Err("could not save stage.json".into())
+        }
+    }
+
+    /// The editor name of the stage item `id`, or the id when it is gone.
+    pub fn stage_item_name(&self, id: &str) -> String {
+        self.stage
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .map_or_else(|| id.to_string(), stage_item_title)
+    }
+
+    /// Named timers a stage timer item can follow, as `(id, name)`.
+    pub fn timer_choices(&self) -> Vec<(String, String)> {
+        self.timers
+            .iter()
+            .map(|timer| (timer.id.clone(), timer.name.clone()))
+            .collect()
+    }
+
+    /// Sets one per-kind option (alignment, slide offset, clock format, timer, text).
+    fn stage_set_option(&mut self, id: &str, key: &str, value: &str) -> Result<(), String> {
+        let timers: Vec<String> = self.timers.iter().map(|timer| timer.id.clone()).collect();
+        let item = self
+            .stage
+            .items
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| format!("no stage item {id:?}"))?;
+        match key {
+            "align" => {
+                let align = value.trim();
+                if !matches!(align, "left" | "center" | "right") {
+                    return Err(format!("invalid alignment {align:?}"));
+                }
+                item.align = if align == "center" {
+                    String::new()
+                } else {
+                    align.to_string()
+                };
+            }
+            "offset" => item.offset = parse_int(value, -99, 99)?,
+            "line-count" => {
+                let count = parse_int(value, 0, 99)?;
+                item.line_count = (count > 0).then_some(count as usize);
+            }
+            "text" => {
+                item.lines = value
+                    .lines()
+                    .map(|line| line.trim_end().to_string())
+                    .collect();
+            }
+            "seconds" => item.clock.seconds = parse_bool(value)?,
+            "date-format" => {
+                if !STAGE_DATE_FORMATS.contains(&value.trim()) {
+                    return Err(format!("unknown date format {value:?}"));
+                }
+                item.clock.date_format = value.trim().to_string();
+            }
+            "timer" => {
+                let timer = value.trim();
+                if !timer.is_empty() && !timers.iter().any(|known| known == timer) {
+                    return Err(format!("no timer {timer:?}"));
+                }
+                item.timer_id = (!timer.is_empty()).then(|| timer.to_string());
+            }
+            other => return Err(format!("unknown stage field {other:?}")),
+        }
+        if self.save_stage_layout() {
             Ok(())
         } else {
             Err("could not save stage.json".into())

@@ -365,7 +365,14 @@ pub fn write_stage_layout(path: &std::path::Path, layout: &StageLayout) -> std::
 
 /// Overlays the fields this app models onto an existing FreeShow layout object.
 fn merge_layout(target: &mut Value, fresh: &Value) {
-    const MODELED: [&str; 6] = ["type", "style", "align", "offset", "lineCount", "label"];
+    const MODELED: [&str; 6] = [
+        "type",
+        "style",
+        "align",
+        "slideOffset",
+        "lineCount",
+        "label",
+    ];
     target["name"] = fresh["name"].clone();
     if !target.get("settings").is_some_and(Value::is_object) {
         target["settings"] = Value::Object(serde_json::Map::new());
@@ -402,6 +409,9 @@ fn merge_layout(target: &mut Value, fresh: &Value) {
                     }
                 }
             }
+            // Earlier builds wrote the slide offset under this name; FreeShow reads `slideOffset`.
+            item.remove("offset");
+            merge_item_options(&mut item, modeled);
             items.insert(id.to_string(), Value::Object(item));
             order.push(Value::String(id.to_string()));
         }
@@ -415,6 +425,47 @@ fn merge_layout(target: &mut Value, fresh: &Value) {
     }
     target["itemOrder"] = Value::Array(order);
     target["items"] = Value::Object(items);
+}
+
+/// Folds the per-kind options this app edits into an existing item without dropping the
+/// FreeShow keys it does not model (other clock keys, styled text runs).
+fn merge_item_options(
+    item: &mut serde_json::Map<String, Value>,
+    modeled: &serde_json::Map<String, Value>,
+) {
+    if let Some(Value::Object(clock)) = modeled.get("clock") {
+        let target = item
+            .entry("clock")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !target.is_object() {
+            *target = Value::Object(serde_json::Map::new());
+        }
+        if let Some(target) = target.as_object_mut() {
+            for (key, value) in clock {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(id) = modeled.get("timer").and_then(|timer| timer.get("id")) {
+        let target = item
+            .entry("timer")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !target.is_object() {
+            *target = Value::Object(serde_json::Map::new());
+        }
+        target["id"] = id.clone();
+    }
+    if let Some(src) = modeled.get("src") {
+        item.insert("src".into(), src.clone());
+    }
+    if let Some(lines) = modeled.get("lines") {
+        let current = Value::Object(item.clone());
+        let fresh = Value::Object(modeled.clone());
+        // Rewriting unchanged text would flatten FreeShow's styled runs, so only real edits land.
+        if text_lines(&current) != text_lines(&fresh) {
+            item.insert("lines".into(), lines.clone());
+        }
+    }
 }
 
 pub fn serialize_stage(layout: &StageLayout) -> String {
@@ -434,7 +485,30 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
             object.insert("align".into(), Value::String(item.align.clone()));
         }
         if item.offset != 0 {
-            object.insert("offset".into(), Value::from(item.offset));
+            object.insert("slideOffset".into(), Value::from(item.offset));
+        }
+        if item.kind == StageItemKind::Clock {
+            object.insert(
+                "clock".into(),
+                serde_json::json!({
+                    "seconds": item.clock.seconds,
+                    "dateFormat": item.clock.date_format,
+                }),
+            );
+        }
+        if let Some(timer) = &item.timer_id {
+            object.insert("timer".into(), serde_json::json!({ "id": timer }));
+        }
+        if let Some(src) = &item.src {
+            object.insert("src".into(), Value::String(src.clone()));
+        }
+        if item.kind == StageItemKind::Text {
+            let lines: Vec<Value> = item
+                .lines
+                .iter()
+                .map(|line| serde_json::json!({ "align": "", "text": [{ "value": line }] }))
+                .collect();
+            object.insert("lines".into(), Value::Array(lines));
         }
         if let Some(count) = item.line_count {
             object.insert("lineCount".into(), Value::from(count as u64));
@@ -551,6 +625,7 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                 .to_string(),
             offset: item_value
                 .get("slideOffset")
+                .or_else(|| item_value.get("offset"))
                 .and_then(Value::as_i64)
                 .unwrap_or_else(|| i64::from(legacy && id.contains("next"))),
             line_count: item_value
@@ -811,6 +886,53 @@ mod tests {
         write_stage_layout(&single, &solo).unwrap();
         let saved: Value = serde_json::from_str(&fs::read_to_string(&single).unwrap()).unwrap();
         assert_eq!(saved["items"]["x"]["extra"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edited_item_options_survive_a_save_and_keep_styled_text() {
+        let dir = std::env::temp_dir().join(format!("freeshow-stage-opts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stage.json");
+        fs::write(
+            &path,
+            r##"{"default":{"name":"Main","items":{
+              "next":{"type":"slide_text","offset":1,"style":"left:0px;"},
+              "styled":{"type":"text","style":"","lines":[{"align":"","text":[{"value":"Hi","style":"color:red;"}]}]},
+              "c":{"type":"clock","clock":{"seconds":true,"extra":"keep"},"style":""},
+              "t":{"type":"timer","style":""}
+            },"itemOrder":["next","styled","c","t"]}}"##,
+        )
+        .unwrap();
+        let mut layout = load_stage_file(&path);
+        assert_eq!(
+            layout.items[0].offset, 1,
+            "an older save's offset still reads"
+        );
+        layout.items[2].clock.seconds = false;
+        layout.items[2].clock.date_format = "DD/MM/YYYY".into();
+        layout.items[3].timer_id = Some("sermon".into());
+        write_stage_layout(&path, &layout).unwrap();
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let items = &saved["default"]["items"];
+        assert_eq!(items["next"]["slideOffset"], 1);
+        assert!(items["next"].get("offset").is_none());
+        assert_eq!(
+            items["styled"]["lines"][0]["text"][0]["style"],
+            "color:red;"
+        );
+        assert_eq!(items["c"]["clock"]["seconds"], false);
+        assert_eq!(items["c"]["clock"]["dateFormat"], "DD/MM/YYYY");
+        assert_eq!(items["c"]["clock"]["extra"], "keep");
+        assert_eq!(items["t"]["timer"]["id"], "sermon");
+        let mut layout = load_stage_file(&path);
+        assert_eq!(layout.items[0].offset, 1);
+        assert!(!layout.items[2].clock.seconds);
+        assert_eq!(layout.items[3].timer_id.as_deref(), Some("sermon"));
+        layout.items[1].lines = vec!["Welcome".into(), "home".into()];
+        write_stage_layout(&path, &layout).unwrap();
+        assert_eq!(load_stage_file(&path).items[1].lines, ["Welcome", "home"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

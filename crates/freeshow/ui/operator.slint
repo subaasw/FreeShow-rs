@@ -113,9 +113,21 @@ export component ControlWindow inherits Window {
     in property <InspectorData> inspector-data;
     callback inspector-set(string, string);
     in-out property <bool> show-stage-editor: false;
+    // The stage layout drawn small in the stage editor, refreshed after each edit.
+    in property <image> stage-preview;
+    callback stage-editor-opened();
+    changed show-stage-editor => {
+        if (self.show-stage-editor) {
+            root.stage-editor-opened();
+        }
+    }
     in property <string> stage-layout-name;
     in property <[StageRowData]> stage-rows;
     in property <[string]> stage-add-kinds;
+    in property <[string]> stage-add-names;
+    in property <[string]> stage-date-formats;
+    in property <[string]> stage-timer-ids;
+    in property <[string]> stage-timer-names;
     in property <string> stage-status;
     in-out property <int> stage-selected: 0;
     callback stage-set(string, string, string);
@@ -1100,6 +1112,11 @@ export component ControlWindow inherits Window {
             layout-name: root.stage-layout-name;
             rows: root.stage-rows;
             add-kinds: root.stage-add-kinds;
+            add-names: root.stage-add-names;
+            date-formats: root.stage-date-formats;
+            timer-ids: root.stage-timer-ids;
+            timer-names: root.stage-timer-names;
+            preview: root.stage-preview;
             status: root.stage-status;
             selected <=> root.stage-selected;
             text-color: root.text-color;
