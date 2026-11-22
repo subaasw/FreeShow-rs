@@ -708,6 +708,28 @@ export component ControlWindow inherits Window {
         if !root.focus-mode: Rectangle {
             height: root.drawer-height * 1px;
             background: root.primary;
+            if root.drawer-rows.length == 0 && root.search-query == "": Text {
+                x: 16px;
+                y: 12px;
+                width: parent.width - 32px;
+                wrap: word-wrap;
+                color: root.text-color;
+                opacity: 0.7;
+                font-size: 13px * OperatorStyle.font-scale;
+                text: root.active-tab == "shows" ? "No shows yet. Click New show, or drag song files (FreeShow, ProPresenter, OpenLP, OpenLyrics, text, PowerPoint and more) onto this window."
+                    : root.active-tab == "media" ? "Drag pictures and videos onto this window to add them to the media library."
+                    : root.active-tab == "audio" ? "Drag audio files onto this window to add them."
+                    : root.active-tab == "scripture" ? "Drag a Bible file (.fsb or USFM) onto this window to add it."
+                    : "";
+            }
+            if root.drawer-rows.length == 0 && root.search-query != "": Text {
+                x: 16px;
+                y: 12px;
+                color: root.text-color;
+                opacity: 0.7;
+                font-size: 13px * OperatorStyle.font-scale;
+                text: "Nothing matches “" + root.search-query + "”";
+            }
             Flickable {
                 HorizontalLayout {
                     spacing: 0;

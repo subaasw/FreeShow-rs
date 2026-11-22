@@ -3192,6 +3192,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     {
+        // Files dropped on the operator window are imported in one batch.
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let library_done = Rc::clone(&library_done);
+        let dropped: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let timer = Rc::new(slint::Timer::default());
+        control.window().on_winit_window_event(move |_, event| {
+            use slint::winit_030::{EventResult, winit::event::WindowEvent};
+            let WindowEvent::DroppedFile(path) = event else {
+                return EventResult::Propagate;
+            };
+            dropped.borrow_mut().push(path.clone());
+            let ui = ui.clone();
+            let session = Rc::clone(&session);
+            let library_done = Rc::clone(&library_done);
+            let dropped = Rc::clone(&dropped);
+            timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(150),
+                move || {
+                    let paths = std::mem::take(&mut *dropped.borrow_mut());
+                    let result = session.borrow_mut().import_files(&paths);
+                    let message = match result {
+                        Ok(message) => message,
+                        Err(err) => format!("Import: {err}"),
+                    };
+                    tracing::info!("{message}");
+                    session.borrow_mut().notice = message;
+                    if let Some(ui) = ui.upgrade() {
+                        library_done(&ui);
+                    }
+                },
+            );
+            EventResult::PreventDefault
+        });
+    }
+    {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let library_done = Rc::clone(&library_done);
