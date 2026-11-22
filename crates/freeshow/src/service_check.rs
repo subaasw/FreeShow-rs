@@ -153,19 +153,23 @@ fn rss_mb() -> Option<f64> {
 
 #[cfg(target_os = "macos")]
 fn rss_mb() -> Option<f64> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // Query this process and read the output only if libproc filled the structure.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
         return None;
     }
-    let kb = std::str::from_utf8(&output.stdout)
-        .ok()?
-        .trim()
-        .parse::<f64>()
-        .ok()?;
-    Some(kb / 1024.0)
+    let info = unsafe { info.assume_init() };
+    Some(info.pti_resident_size as f64 / (1024.0 * 1024.0))
 }
 
 #[cfg(windows)]
@@ -332,6 +336,9 @@ pub fn check_perf(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>
     }
     if idle_rss_mb.is_some_and(|mb| mb > RSS_BUDGET_MB) {
         missed.push("idle RSS");
+    }
+    if cfg!(any(target_os = "linux", target_os = "macos", windows)) && idle_rss_mb.is_none() {
+        missed.push("idle RSS unavailable");
     }
     if still_fps < STILL_BUDGET_FPS {
         missed.push("1080p still fps");
