@@ -1,0 +1,55 @@
+# Generated fixture. Rebuild from FreeShow's public/proto schemas:
+# protoc -I public/proto --encode=rv.data.Presentation public/proto/presentation.proto
+uuid { string: "test-pro7" }
+name: "Test Presentation"
+notes: "Service notes"
+selected_arrangement { string: "second" }
+arrangements { uuid { string: "first" } name: "Verse first" group_identifiers { string: "verse" } group_identifiers { string: "chorus" } }
+arrangements { uuid { string: "second" } name: "Repeat chorus" group_identifiers { string: "chorus" } group_identifiers { string: "verse" } group_identifiers { string: "chorus" } }
+cue_groups {
+  group { uuid { string: "verse" } name: "Verse 1" color { red: 0.5 alpha: 1.0 } }
+  cue_identifiers { string: "v1" } cue_identifiers { string: "v2" }
+}
+cue_groups {
+  group { uuid { string: "chorus" } name: "Chorus" }
+  cue_identifiers { string: "c1" }
+}
+cues {
+  uuid { string: "v1" }
+  isEnabled: true
+  actions {
+    slide { presentation {
+      notes { rtf_data: "{\\rtf1 Leader note}" }
+      base_slide {
+        draws_background_color: true
+        background_color { blue: 0.25 alpha: 1.0 }
+        size { width: 1280 height: 720 }
+        elements { element {
+          bounds { origin { x: 45 y: 60 } size { width: 740 height: 210 } }
+          text {
+            attributes { font { family: "Arial" size: 72 bold: true italic: true } paragraph_style { alignment: ALIGNMENT_RIGHT } text_solid_fill { green: 1.0 alpha: 1.0 } }
+            rtf_data: "{\\rtf1 Verse\\par And another line}"
+            vertical_alignment: VERTICAL_ALIGNMENT_BOTTOM
+          }
+        } }
+        elements { element { text { rtf_data: "{\\rtf1 Another text box}" } } }
+        elements { element { hidden: true text { rtf_data: "{\\rtf1 Hidden box}" } } }
+      }
+    } }
+  }
+}
+cues {
+  uuid { string: "v2" }
+  actions { slide { presentation { base_slide {
+    elements { element { text { rtf_data: "{\\rtf1 Disabled child}" } } }
+  } } } }
+}
+cues {
+  uuid { string: "c1" }
+  isEnabled: true
+  actions { slide { presentation { base_slide {
+    elements { element { text { rtf_data: "{\\rtf1 Chorus}" } } }
+  } } } }
+  actions { media { element { url { absolute_string: "file:///C:/Original/sky%20blue.png" } } image {} } }
+}
+ccli { author: "Test Author" song_number: 123 }

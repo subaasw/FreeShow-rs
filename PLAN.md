@@ -93,7 +93,7 @@ placeholder until the compositor grows those sources.
 - [x] Native macOS `.app`/`.dmg` with bundled runtime and documented signing.
 - [ ] Verify macOS distribution with Developer ID/notarization and on additional OS/architecture hosts.
 - [ ] Windows installer.
-- [ ] Linux runtime tarball and desktop installer: implemented, native CI verification pending.
+- [x] Linux runtime tarball and desktop installer verified on Ubuntu 24.04 x86-64.
 - [ ] Release workflow that builds all three from the lockfile.
 
 Acceptance: a fresh machine can install the app without a Rust toolchain.
@@ -101,7 +101,8 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 ### M6. Importer media
 
 - [x] ProPresenter 4–6 XML bundles and their slide-background media.
-- [ ] ProPresenter 7 protobuf, arrangements, and original text-box styling.
+- [x] ProPresenter 7 protobuf, arrangements, original text-box geometry, and box-level styling.
+- [ ] ProPresenter 7 mixed RTF styling, non-text graphics, and timeline/action parity.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.
 - [x] ChurchApps service-plan lesson feeds and add-ons with downloadable media.
 - [ ] Stream-only lesson media without a direct downloadable URL.
