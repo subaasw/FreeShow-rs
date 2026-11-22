@@ -17,6 +17,7 @@ struct Format {
     strike: Option<bool>,
     caps: Option<bool>,
     spacing_twips: Option<i32>,
+    hidden: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -203,6 +204,7 @@ impl Reader {
                 );
             }
             Destination::ColorTable => {}
+            Destination::Body if self.state.format.hidden => {}
             Destination::Body if unit == b'\n' as u16 => {
                 self.lines.push(std::mem::take(&mut self.line))
             }
@@ -360,6 +362,7 @@ impl Reader {
             "ulnone" => format.underline = Some(false),
             "strike" => format.strike = on,
             "caps" => format.caps = on,
+            "v" => format.hidden = number != Some(0),
             "expnd" => format.spacing_twips = number.map(|value| value.clamp(-2000, 2000) * 5),
             "expndtw" => format.spacing_twips = number.map(|value| value.clamp(-10000, 10000)),
             "plain" => {
@@ -373,6 +376,7 @@ impl Reader {
                     strike: Some(false),
                     caps: Some(false),
                     spacing_twips: Some(0),
+                    hidden: false,
                 }
             }
             "ql" | "qr" | "qc" | "qj" | "pard" => {

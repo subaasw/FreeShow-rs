@@ -795,6 +795,33 @@ mod tests {
     }
 
     #[test]
+    fn hidden_rtf_stays_out_of_imported_slides_and_notes() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let slide = presentation.cues[0].actions[0]
+            .slide
+            .as_mut()
+            .unwrap()
+            .presentation
+            .as_mut()
+            .unwrap();
+        slide.notes.as_mut().unwrap().rtf = br"{\rtf1 Note {\v backstage}for the leader}".to_vec();
+        slide.slide.as_mut().unwrap().elements[0]
+            .element
+            .as_mut()
+            .unwrap()
+            .text
+            .as_mut()
+            .unwrap()
+            .rtf = br"{\rtf1 First {\v omit \u9731?\line also omitted}line\par\v skip \v0 Second}"
+            .to_vec();
+        let show = crate::import::import_show("Hidden.pro", &presentation.encode_to_vec()).unwrap();
+        let verse = &show.ordered_slides()[1];
+        assert_eq!(verse.lines, ["First line", "Second", "Another text box"]);
+        assert_eq!(verse.notes, "Note for the leader");
+    }
+
+    #[test]
     fn imports_rotation_rounded_rectangles_timelines_and_warns_on_unsupported_cues() {
         let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
         let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
