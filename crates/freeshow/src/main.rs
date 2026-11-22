@@ -3924,6 +3924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut icecast_sender: Option<freeshow_record::IcecastSender> = None;
     let mut last_icecast = None;
     let mut last_stage_second = 0;
+    let mut last_timer_label = String::new();
     clock_timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(100),
@@ -3944,6 +3945,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && let Some(ui) = clock_ui.upgrade()
                 {
                     ui.set_drawer_rows(drawer_rows(&current));
+                }
+                // The timer button in Functions counts down with the timer.
+                if current.tab == "functions" {
+                    let label = current.timer_label();
+                    if label != last_timer_label
+                        && let Some(ui) = clock_ui.upgrade()
+                    {
+                        ui.set_drawer_rows(drawer_rows(&current));
+                        last_timer_label = label;
+                    }
                 }
                 // Video stills decoded in the background replace their placeholder icons.
                 if VIDEO_STILLS_READY.swap(false, std::sync::atomic::Ordering::Relaxed)
