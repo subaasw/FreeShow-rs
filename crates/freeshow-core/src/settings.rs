@@ -9,6 +9,61 @@ fn default_true() -> bool {
     true
 }
 
+/// Pixel placement of one operator or output window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowPlacement {
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+
+    /// Parses `x,y,width,height`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let parts: Vec<_> = text.split(',').map(str::trim).collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        Some(Self::new(
+            parts[0].parse().ok()?,
+            parts[1].parse().ok()?,
+            parts[2].parse().ok()?,
+            parts[3].parse().ok()?,
+        ))
+    }
+
+    pub fn as_text(&self) -> String {
+        format!("{},{},{},{}", self.x, self.y, self.width, self.height)
+    }
+}
+
+/// Named placements of the control, audience, and stage windows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WindowProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<WindowPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<WindowPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<WindowPlacement>,
+}
+
+impl WindowProfile {
+    pub fn is_empty(&self) -> bool {
+        self.control.is_none() && self.output.is_none() && self.stage.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
     /// An explicit theme choice for this app. `None` uses the FreeShow library
@@ -27,6 +82,12 @@ pub struct AppSettings {
     /// FreeShow speaker node IDs mapped to native output device names.
     #[serde(default)]
     pub audio_devices: std::collections::BTreeMap<String, String>,
+    /// Named window-layout profiles (control, output, and stage geometry).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub window_profiles: std::collections::BTreeMap<String, WindowProfile>,
+    /// Profile applied when the operator windows open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_window_profile: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -38,6 +99,8 @@ impl Default for AppSettings {
             show_stage: true,
             output_screen: None,
             audio_devices: Default::default(),
+            window_profiles: Default::default(),
+            active_window_profile: None,
         }
     }
 }
@@ -77,6 +140,104 @@ impl AppSettings {
         }
         let text = serde_json::to_string_pretty(self).map_err(SettingsError::Json)?;
         fs::write(path, text).map_err(SettingsError::Io)
+    }
+
+    pub fn window_profile(&self, name: &str) -> Option<&WindowProfile> {
+        self.window_profiles.get(name)
+    }
+
+    /// Stores a named layout. The first saved profile becomes the active one.
+    pub fn save_window_profile(&mut self, name: impl Into<String>, profile: WindowProfile) {
+        let name = name.into();
+        if self.active_window_profile.is_none() {
+            self.active_window_profile = Some(name.clone());
+        }
+        self.window_profiles.insert(name, profile);
+    }
+
+    /// Chooses the profile applied on the next open. `None` clears the choice.
+    pub fn set_active_window_profile(&mut self, name: Option<String>) -> bool {
+        match name {
+            None => {
+                self.active_window_profile = None;
+                true
+            }
+            Some(name) if self.window_profiles.contains_key(&name) => {
+                self.active_window_profile = Some(name);
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    pub fn active_profile(&self) -> Option<&WindowProfile> {
+        self.active_window_profile
+            .as_deref()
+            .and_then(|name| self.window_profiles.get(name))
+    }
+
+    /// Editor text: `active=name` plus `name.control=x,y,w,h` lines.
+    pub fn profile_text(&self) -> String {
+        let mut lines = vec![format!(
+            "active={}",
+            self.active_window_profile.clone().unwrap_or_default()
+        )];
+        for (name, profile) in &self.window_profiles {
+            if let Some(place) = &profile.control {
+                lines.push(format!("{name}.control={}", place.as_text()));
+            }
+            if let Some(place) = &profile.output {
+                lines.push(format!("{name}.output={}", place.as_text()));
+            }
+            if let Some(place) = &profile.stage {
+                lines.push(format!("{name}.stage={}", place.as_text()));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Replaces window profiles from [`Self::profile_text`] format.
+    pub fn apply_profile_text(&mut self, text: &str) {
+        let mut profiles = std::collections::BTreeMap::new();
+        let mut active = None;
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if key.eq_ignore_ascii_case("active") {
+                active = (!value.is_empty()).then(|| value.to_string());
+                continue;
+            }
+            let Some((name, slot)) = key.split_once('.') else {
+                continue;
+            };
+            let Some(place) = WindowPlacement::parse(value) else {
+                continue;
+            };
+            let entry = profiles
+                .entry(name.to_string())
+                .or_insert_with(WindowProfile::default);
+            match slot.trim().to_ascii_lowercase().as_str() {
+                "control" => entry.control = Some(place),
+                "output" | "audience" => entry.output = Some(place),
+                "stage" => entry.stage = Some(place),
+                _ => {}
+            }
+        }
+        profiles.retain(|_, profile| !profile.is_empty());
+        if let Some(name) = active.as_ref()
+            && !profiles.contains_key(name)
+        {
+            active = None;
+        }
+        self.window_profiles = profiles;
+        self.active_window_profile = active;
     }
 }
 

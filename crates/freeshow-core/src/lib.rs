@@ -11,7 +11,8 @@ mod theme;
 
 pub use log::{init_logging, log_file_path};
 pub use settings::{
-    AppSettings, SettingsError, config_dir, next_output_monitor, output_monitor_index,
+    AppSettings, SettingsError, WindowPlacement, WindowProfile, config_dir, next_output_monitor,
+    output_monitor_index,
 };
 pub use theme::{Rgb, Rgba, ThemePalette, theme_by_name};
 
@@ -128,7 +129,54 @@ mod tests {
             show_stage: false,
             output_screen: Some(1),
             audio_devices: [("speaker_sub_id".into(), "Stage Speakers".into())].into(),
+            window_profiles: Default::default(),
+            active_window_profile: None,
         };
+        settings.save(&path).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded, settings);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn window_layout_profiles_round_trip_and_activate() {
+        let mut settings = AppSettings::default();
+        let house = WindowProfile {
+            control: Some(WindowPlacement::new(40, 40, 1280, 800)),
+            output: Some(WindowPlacement::new(1920, 0, 1920, 1080)),
+            stage: Some(WindowPlacement::new(0, 800, 640, 400)),
+        };
+        settings.save_window_profile("house", house.clone());
+        assert_eq!(settings.active_window_profile.as_deref(), Some("house"));
+        assert_eq!(settings.active_profile(), Some(&house));
+        settings.save_window_profile(
+            "lobby",
+            WindowProfile {
+                control: Some(WindowPlacement::new(0, 0, 1024, 768)),
+                output: None,
+                stage: None,
+            },
+        );
+        assert!(settings.set_active_window_profile(Some("lobby".into())));
+        assert!(!settings.set_active_window_profile(Some("missing".into())));
+        assert_eq!(settings.active_window_profile.as_deref(), Some("lobby"));
+
+        settings.apply_profile_text(
+            "active=house\nhouse.control=40,40,1280,800\nhouse.output=1920,0,1920,1080\nhouse.stage=0,800,640,400\nlobby.control=8,8,800,600\n",
+        );
+        assert_eq!(settings.active_window_profile.as_deref(), Some("house"));
+        assert_eq!(
+            settings
+                .window_profile("house")
+                .and_then(|p| p.output.clone()),
+            Some(WindowPlacement::new(1920, 0, 1920, 1080))
+        );
+        assert_eq!(settings.profile_text().lines().next(), Some("active=house"));
+        let dir =
+            std::env::temp_dir().join(format!("freeshow-rust-profiles-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
         settings.save(&path).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded, settings);

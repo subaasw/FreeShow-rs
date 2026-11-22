@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use church_import::ChurchImport;
 use freeshow_ai::SlideAssist;
 use freeshow_cloud::CloudBackup;
-use freeshow_core::{AppSettings, Rgb};
+use freeshow_core::{AppSettings, Rgb, WindowPlacement, WindowProfile};
 use freeshow_data::{MediaEntry, MediaEntryKind};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
 use freeshow_obs::ObsControl;
@@ -281,6 +281,9 @@ slint::slint! {
         in property <bool> show-labels: true;
         callback dismiss-guide();
         callback save-shortcuts(string);
+        callback save-layouts(string);
+        in-out property <bool> show-layouts: false;
+        in-out property <string> layout-text: "";
         callback hotkey(string, bool, bool, bool);
         callback set-search(string);
         callback select-tab(string);
@@ -663,6 +666,38 @@ slint::slint! {
                             text-color: root.text-color;
                             accent-text: root.text-color;
                             clicked => { root.show-shortcuts = false; }
+                        }
+                    }
+                }
+            }
+            if root.show-layouts: Rectangle {
+                height: 180px;
+                background: root.primary;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    TextEdit {
+                        text <=> root.layout-text;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        HeaderButton {
+                            label: "Save";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.save-layouts(root.layout-text); }
+                        }
+                        HeaderButton {
+                            label: "Close";
+                            accent: root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.show-layouts = false; }
                         }
                     }
                 }
@@ -1682,6 +1717,72 @@ fn apply_window_behavior(window: &slint::Window, always_on_top: bool, kiosk: boo
     });
 }
 
+fn capture_placement(window: &slint::Window) -> Option<WindowPlacement> {
+    window
+        .with_winit_window(|winit_window| {
+            let pos = winit_window.outer_position().ok()?;
+            let size = winit_window.inner_size();
+            Some(WindowPlacement::new(pos.x, pos.y, size.width, size.height))
+        })
+        .flatten()
+}
+
+fn apply_placement(window: &slint::Window, place: &WindowPlacement) {
+    let _ = window.with_winit_window(|winit_window| {
+        winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(
+            place.x, place.y,
+        ));
+        let _ = winit_window.request_inner_size(slint::winit_030::winit::dpi::PhysicalSize::new(
+            place.width,
+            place.height,
+        ));
+    });
+}
+
+fn apply_window_profile(
+    control: &slint::Window,
+    output: &slint::Window,
+    stage: &slint::Window,
+    settings: &AppSettings,
+) {
+    let Some(profile) = settings.active_profile() else {
+        return;
+    };
+    if let Some(place) = &profile.control {
+        apply_placement(control, place);
+    }
+    if let Some(place) = &profile.output {
+        apply_placement(output, place);
+    }
+    if let Some(place) = &profile.stage {
+        apply_placement(stage, place);
+    }
+}
+
+fn capture_window_profile(
+    control: &slint::Window,
+    output: &slint::Window,
+    stage: &slint::Window,
+) -> WindowProfile {
+    WindowProfile {
+        control: capture_placement(control),
+        output: capture_placement(output),
+        stage: capture_placement(stage),
+    }
+}
+
+fn place_from_profile_or(
+    window: &slint::Window,
+    place: Option<&WindowPlacement>,
+    fallback: impl FnOnce(),
+) {
+    if let Some(place) = place {
+        apply_placement(window, place);
+    } else {
+        fallback();
+    }
+}
+
 fn place(window: &slint::Window, x: i32, y: i32) {
     let moved = window.with_winit_window(|winit_window| {
         winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
@@ -2018,7 +2119,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if visible {
             let _ = output.hide();
         } else if output.show().is_ok() {
-            place_output(output.window(), settings_for_output.borrow().output_screen);
+            let settings = settings_for_output.borrow();
+            place_from_profile_or(
+                output.window(),
+                settings.active_profile().and_then(|p| p.output.as_ref()),
+                || place_output(output.window(), settings.output_screen),
+            );
         }
         settings_for_output.borrow_mut().show_output = !visible;
         if let Err(err) = settings_for_output.borrow().save(&settings_path_for_output) {
@@ -2056,6 +2162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stage_toggle = stage.as_weak();
     let settings_for_stage = Rc::clone(&settings);
+    let settings_path_for_stage = settings_path.clone();
     control.on_open_stage(move || {
         let Some(stage) = stage_toggle.upgrade() else {
             return;
@@ -2064,10 +2171,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if visible {
             let _ = stage.hide();
         } else if stage.show().is_ok() {
-            place(stage.window(), 120, 140);
+            place_from_profile_or(
+                stage.window(),
+                settings_for_stage
+                    .borrow()
+                    .active_profile()
+                    .and_then(|p| p.stage.as_ref()),
+                || place(stage.window(), 120, 140),
+            );
         }
         settings_for_stage.borrow_mut().show_stage = !visible;
-        if let Err(err) = settings_for_stage.borrow().save(&settings_path) {
+        if let Err(err) = settings_for_stage.borrow().save(&settings_path_for_stage) {
             tracing::error!("could not save settings: {err}");
         }
     });
@@ -2117,6 +2231,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let ui = control.as_weak();
+        let settings = Rc::clone(&settings);
+        let settings_path = settings_path.clone();
+        let output = output.as_weak();
+        let stage = stage.as_weak();
+        control.on_save_layouts(move |text| {
+            settings.borrow_mut().apply_profile_text(&text);
+            if let Err(err) = settings.borrow().save(&settings_path) {
+                tracing::error!("could not save window layouts: {err}");
+            }
+            if let (Some(ui), Some(output), Some(stage)) =
+                (ui.upgrade(), output.upgrade(), stage.upgrade())
+            {
+                apply_window_profile(
+                    ui.window(),
+                    output.window(),
+                    stage.window(),
+                    &settings.borrow(),
+                );
+                ui.set_show_layouts(false);
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
         let session = Rc::clone(&session);
         control.on_hotkey(move |text, ctrl, alt, shift| {
             let mut chord = String::new();
@@ -2158,6 +2297,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let video_player = Rc::clone(&video_player);
         let video_timer = Rc::clone(&video_timer);
         let church_import = Rc::clone(&church_import);
+        let settings_for_functions = Rc::clone(&settings);
+        let settings_path_for_functions = settings_path.clone();
+        let output_for_functions = output.as_weak();
+        let stage_for_functions = stage.as_weak();
         control.on_choose_drawer(move |index| {
             let playback = LivePlayback {
                 audio: Rc::clone(&audio_out),
@@ -2492,6 +2635,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_show_shortcuts(open);
                             if open {
                                 ui.set_shortcut_text(current.shortcut_text().into());
+                            }
+                        }
+                    }
+                    26 => {
+                        if let (Some(ui), Some(output), Some(stage)) = (
+                            ui.upgrade(),
+                            output_for_functions.upgrade(),
+                            stage_for_functions.upgrade(),
+                        ) {
+                            let profile = capture_window_profile(
+                                ui.window(),
+                                output.window(),
+                                stage.window(),
+                            );
+                            let mut settings = settings_for_functions.borrow_mut();
+                            let name = settings
+                                .active_window_profile
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string());
+                            settings.save_window_profile(name, profile);
+                            if let Err(err) = settings.save(&settings_path_for_functions) {
+                                tracing::error!("could not save window layout: {err}");
+                            }
+                        }
+                    }
+                    27 => {
+                        if let Some(ui) = ui.upgrade() {
+                            let open = !ui.get_show_layouts();
+                            ui.set_show_layouts(open);
+                            if open {
+                                ui.set_layout_text(
+                                    settings_for_functions.borrow().profile_text().into(),
+                                );
                             }
                         }
                     }
@@ -3303,6 +3479,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     place(control.window(), 40, 40);
+    apply_window_profile(
+        control.window(),
+        output.window(),
+        stage.window(),
+        &settings.borrow(),
+    );
     tracing::info!("control window ready");
     let result = control.run();
     freeshow_record::ServiceCapture.stop_all();
