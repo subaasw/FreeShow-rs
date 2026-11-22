@@ -608,6 +608,25 @@ pub fn handle_message_authenticated(
         "API:rename_project" => rename_project(snapshot, &data, &mut commands),
         "API:delete_project" => delete_project(snapshot, &data, &mut commands),
         "API:remove_project_item" => remove_project_item(snapshot, &data, &mut commands),
+        "API:index_select_project_item" => {
+            if let Some(index) = index_of(&data)
+                && let Some(command) = open_project_index(snapshot, index)
+            {
+                commands.push(command);
+            }
+            vec![out_message(snapshot)]
+        }
+        "API:next_project_item" | "API:previous_project_item" => {
+            let delta = if channel == "API:next_project_item" {
+                1
+            } else {
+                -1
+            };
+            if let Some(command) = open_project_neighbor(snapshot, delta) {
+                commands.push(command);
+            }
+            vec![out_message(snapshot)]
+        }
         "API:change_layout" => change_layout(snapshot, &data, &mut commands),
         "API:create_project" => create_project(snapshot, &data, &mut commands),
         "API:scripture_next" => step_scripture_message(snapshot, 1, &mut commands),
@@ -668,6 +687,45 @@ fn step(snapshot: &mut ShowSnapshot, delta: isize) -> Option<Command> {
     let next = target.clamp(0, len as isize - 1) as usize;
     snapshot.slide_index = Some(next);
     Some(Command::SetSlide(next))
+}
+
+/// Opens one row of the current project, the way stepping onto it does: a song starts on its
+/// first slide and media plays. Section headers do nothing.
+fn open_project_index(snapshot: &mut ShowSnapshot, index: usize) -> Option<Command> {
+    let project_id = snapshot.project_id.clone()?;
+    let item = snapshot
+        .projects
+        .iter()
+        .find(|project| project.id == project_id)?
+        .shows
+        .get(index)?
+        .clone();
+    let opened = match item.kind.as_str() {
+        "show" | "" => select_show(snapshot, &item.id).is_some(),
+        "image" | "video" | "player" | "audio" | "folder" => true,
+        "overlay" => {
+            let known = snapshot
+                .overlays
+                .iter()
+                .any(|overlay| overlay.id == item.id);
+            if known
+                && !snapshot
+                    .active_overlays
+                    .iter()
+                    .any(|active| active == &item.id)
+            {
+                snapshot.active_overlays.push(item.id.clone());
+            }
+            known
+        }
+        _ => false,
+    };
+    if !opened {
+        return None;
+    }
+    snapshot.project_item = index;
+    let slide = matches!(item.kind.as_str(), "show" | "").then_some(0);
+    Some(Command::OpenProjectItem { index, slide })
 }
 
 fn open_project_neighbor(snapshot: &mut ShowSnapshot, delta: isize) -> Option<Command> {
@@ -3147,6 +3205,41 @@ mod tests {
         );
         assert_eq!(snapshot.show_index, Some(0));
         assert_eq!(snapshot.slide_index, Some(2));
+    }
+
+    #[test]
+    fn the_remote_opens_a_project_item_by_index_and_steps_items() {
+        let mut snapshot = sample();
+        sunday_project(&mut snapshot);
+        let (_, commands) = handle_message(
+            &mut snapshot,
+            &json!({ "channel": "API:index_select_project_item", "data": { "index": 2 } }),
+        );
+        assert_eq!(
+            commands,
+            vec![Command::OpenProjectItem {
+                index: 2,
+                slide: Some(0)
+            }]
+        );
+        assert_eq!(snapshot.project_item, 2);
+        assert_eq!(snapshot.show_index, Some(1));
+        let (_, commands) = handle_message(
+            &mut snapshot,
+            &json!({ "channel": "API:next_project_item" }),
+        );
+        assert_eq!(
+            commands,
+            vec![Command::OpenProjectItem {
+                index: 3,
+                slide: None
+            }]
+        );
+        let (_, commands) = handle_message(
+            &mut snapshot,
+            &json!({ "channel": "API:index_select_project_item", "data": 99 }),
+        );
+        assert!(commands.is_empty());
     }
 
     #[test]
