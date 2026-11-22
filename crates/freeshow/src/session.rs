@@ -1753,6 +1753,10 @@ impl Session {
             "next" | "next_slide" | "go" => self.advance_show(),
             "previous" | "previous_slide" => self.retreat_show(),
             "slide" => self.run_timeline_slide(cue),
+            "background" if !self.preferences.out_locked() => cue
+                .data
+                .as_deref()
+                .is_some_and(|id| self.run_timeline_background(id)),
             "overlay" => {
                 if let Some(id) = cue
                     .data
@@ -1777,6 +1781,46 @@ impl Session {
             }
             "clear" => {
                 self.clear_output();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn run_timeline_background(&mut self, id: &str) -> bool {
+        let Some(media) = self
+            .current_show()
+            .and_then(|show| show.show["media"].get(id))
+        else {
+            return false;
+        };
+        let Some(path) = media["path"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            return false;
+        };
+        let retrigger = media["retrigger"] == true;
+        match media_kind(&path) {
+            MediaKind::Image => self.show_background_still(&path, false, retrigger),
+            MediaKind::Video if path.is_file() => {
+                let loops = media["loop"] != false;
+                let muted = media["muted"] != false;
+                let ended = self
+                    .media_finished
+                    .as_ref()
+                    .is_some_and(|(file, audio)| !audio && Path::new(file) == path);
+                if retrigger
+                    || ended
+                    || self.background_path.as_ref() != Some(&path)
+                    || self.media_loop != loops
+                    || self.media_muted != muted
+                {
+                    self.queue_background_video(&path, Some((loops, muted)), false);
+                } else {
+                    self.slide_hidden = false;
+                }
                 true
             }
             _ => false,
@@ -2177,7 +2221,9 @@ impl Session {
             .current_show()
             .and_then(|show| show.media_flags(&path.to_string_lossy()));
         if self.background_path.as_deref() == Some(path) {
-            self.background_transition = false;
+            if !self.timeline_playing {
+                self.background_transition = false;
+            }
             if let Some((_, _, video_type)) = &flags
                 && video_type.is_some()
             {
@@ -2185,10 +2231,34 @@ impl Session {
             }
             return;
         }
+        let foreground = flags
+            .as_ref()
+            .and_then(|(_, _, kind)| kind.as_deref())
+            .map_or_else(
+                || {
+                    self.root.as_deref().is_some_and(|root| {
+                        Library::open(root).media_video_type(path) == "foreground"
+                    })
+                },
+                |kind| kind == "foreground",
+            );
+        self.queue_background_video(
+            path,
+            flags.map(|(loops, muted, _)| (loops, muted)),
+            foreground,
+        );
+    }
+
+    fn queue_background_video(
+        &mut self,
+        path: &Path,
+        audio_flags: Option<(bool, bool)>,
+        foreground: bool,
+    ) {
         self.media_finished = None;
         self.remember_background(path);
         self.remember_video_playback(path);
-        if let Some((loops, muted, _)) = flags {
+        if let Some((loops, muted)) = audio_flags {
             self.media_loop = loops;
             self.media_muted = muted;
         }
@@ -2196,18 +2266,7 @@ impl Session {
         self.blanked = false;
         self.background_path = Some(path.to_path_buf());
         self.background_transition = true;
-        let show_type = self
-            .current_show()
-            .and_then(|show| show.media_flags(&path.to_string_lossy()))
-            .and_then(|(_, _, video_type)| video_type);
-        if show_type.is_some() {
-            self.slide_hidden = show_type.as_deref() == Some("foreground");
-        } else {
-            self.slide_hidden = self
-                .root
-                .as_deref()
-                .is_some_and(|root| Library::open(root).media_video_type(path) == "foreground");
-        }
+        self.slide_hidden = foreground;
         self.pending_also = self
             .pending_also
             .take()
@@ -2231,6 +2290,31 @@ impl Session {
         Some(crop_raster(&image, left, right, top, bottom))
     }
 
+    fn show_background_still(&mut self, path: &Path, foreground: bool, retrigger: bool) -> bool {
+        if !retrigger
+            && self.background_path.as_deref() == Some(path)
+            && self.underlay_from.as_deref() == Some(path)
+            && self.underlay.is_some()
+        {
+            self.slide_hidden = foreground;
+            if !self.timeline_playing {
+                self.background_transition = false;
+            }
+            return true;
+        }
+        let Some(still) = self.load_still(path) else {
+            return false;
+        };
+        self.discard_queued_video();
+        self.remember_background(path);
+        self.set_still_underlay(path.to_path_buf(), Some(still));
+        self.background_path = Some(path.to_path_buf());
+        self.background_transition = true;
+        self.blanked = false;
+        self.slide_hidden = foreground;
+        true
+    }
+
     fn reset_background_look(&mut self) {
         self.background_fit = Fit::Contain;
         self.background_flip_x = false;
@@ -2247,6 +2331,10 @@ impl Session {
         self.reset_background_look();
         self.slide_hidden = false;
         self.background_transition = true;
+        self.discard_queued_video();
+    }
+
+    fn discard_queued_video(&mut self) {
         if matches!(self.pending_play, Some(PendingPlay::Video(_))) {
             self.pending_play = self.pending_also.take();
         }
@@ -2499,23 +2587,7 @@ impl Session {
                             let file_foreground = self.root.as_deref().is_some_and(|root| {
                                 Library::open(root).media_video_type(&path) == "foreground"
                             });
-                            let foreground = foreground || file_foreground;
-                            if self.background_path.as_ref() == Some(&path)
-                                && self.underlay_from.as_ref() == Some(&path)
-                                && self.underlay.is_some()
-                            {
-                                self.slide_hidden = foreground;
-                                self.background_transition = false;
-                            } else {
-                                self.remember_background(&path);
-                                self.set_still_underlay(path.clone(), self.load_still(&path));
-                                if self.underlay.is_some() {
-                                    self.background_path = Some(path);
-                                    self.background_transition = true;
-                                    self.blanked = false;
-                                    self.slide_hidden = foreground;
-                                }
-                            }
+                            self.show_background_still(&path, foreground || file_foreground, false);
                         }
                     }
                 }
@@ -6920,6 +6992,68 @@ Second line"
         assert_eq!(session.slide_index, Some(2));
         session.stop_timeline();
         assert!(!session.tick_timeline(start + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn imported_timeline_switches_backgrounds_without_reselecting_the_slide() {
+        let root = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let still = root.join("sky.png");
+        let video = root.join("motion.mp4");
+        std::fs::write(
+            &still,
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-cover.png"),
+        )
+        .unwrap();
+        std::fs::write(
+            &video,
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4"),
+        )
+        .unwrap();
+        let mut show = ShowFile::blank("media", "Media");
+        show.show["origin"] = serde_json::json!("propresenter");
+        show.show["media"] = serde_json::json!({
+            "still": {"path": still},
+            "clip": {"path": video, "loop": false},
+            "restart": {"path": video, "loop": false, "retrigger": true},
+            "looping": {"path": video, "loop": true},
+        });
+        show.show["layouts"]["main"]["timeline"]["actions"] = serde_json::json!([
+            {"time": 0, "type": "background", "data": {"id": "still"}},
+            {"time": 500, "type": "background", "data": {"id": "clip"}},
+            {"time": 600, "type": "background", "data": {"id": "clip"}},
+            {"time": 700, "type": "background", "data": {"id": "restart"}},
+            {"time": 800, "type": "background", "data": {"id": "looping"}},
+            {"time": 900, "type": "background", "data": {"id": "still"}},
+        ]);
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        assert!(session.present_show_id("media"));
+        assert!(session.save_timeline(&session.timeline_text()));
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(start));
+        assert_eq!(session.background_path.as_ref(), Some(&still));
+        assert!(session.underlay.is_some());
+        assert!(!session.tick_timeline(start + Duration::from_millis(499)));
+        assert!(session.tick_timeline(start + Duration::from_millis(500)));
+        assert!(!session.media_loop);
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Video(path)), None] if path == video)
+        );
+        session.tick_timeline(start + Duration::from_millis(600));
+        assert!(matches!(session.take_plays(), [None, None]));
+        assert!(session.tick_timeline(start + Duration::from_millis(700)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Video(path)), None] if path == video)
+        );
+        assert!(session.tick_timeline(start + Duration::from_millis(900)));
+        assert!(session.media_loop);
+        assert!(matches!(session.take_plays(), [None, None]));
+        assert_eq!(session.background_path.as_ref(), Some(&still));
+        assert_eq!(session.slide_index, Some(0));
+        assert!(!session.slide_hidden);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
