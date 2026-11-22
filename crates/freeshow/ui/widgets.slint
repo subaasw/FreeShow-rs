@@ -16,7 +16,9 @@ export component RailButton inherits Rectangle {
     in property <color> text-color;
     in property <color> accent-text;
     callback clicked();
-    height: 58px;
+    min-height: 34px;
+    preferred-height: 58px;
+    max-height: 58px;
     border-radius: OperatorStyle.chrome-radius;
     background: root.active ? root.accent : root.primary;
     Rectangle {
