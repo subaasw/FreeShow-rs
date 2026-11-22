@@ -1097,10 +1097,21 @@ impl ShowFile {
                 .into_iter()
                 .enumerate()
                 .map(|(index, chunk)| {
-                    (
-                        previous_groups.get(index).cloned().unwrap_or_default(),
-                        chunk.to_string(),
-                    )
+                    // "[Chorus]" on its own first line names the group, as in FreeShow's text editor.
+                    let (first, rest) = chunk.split_once('\n').unwrap_or((chunk, ""));
+                    let bracketed = first
+                        .trim()
+                        .strip_prefix('[')
+                        .and_then(|line| line.strip_suffix(']'))
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty());
+                    match bracketed {
+                        Some(name) => (name.to_string(), rest.trim().to_string()),
+                        None => (
+                            previous_groups.get(index).cloned().unwrap_or_default(),
+                            chunk.to_string(),
+                        ),
+                    }
                 })
                 .collect()
         };
@@ -1217,7 +1228,6 @@ impl ShowFile {
         atomic_write(path, self.export_plain_text().as_bytes())
     }
 
-    /// Plain text of each slide, in the same order FreeShow stores slide objects.
     /// The raw items of one slide, for saving it as an overlay or template.
     pub fn slide_items(&self, slide_id: &str) -> Vec<Value> {
         self.show
@@ -1229,6 +1239,7 @@ impl ShowFile {
             .unwrap_or_default()
     }
 
+    /// Plain text of each slide, in the same order FreeShow stores slide objects.
     pub fn slides(&self) -> Vec<SlideView> {
         let Some(slides) = self.show.get("slides").and_then(Value::as_object) else {
             return Vec::new();
@@ -6426,6 +6437,21 @@ mod tests {
             vec!["Three".to_string(), "Four".to_string()]
         );
         assert_eq!(slides[2].lines, vec!["Five".to_string()]);
+    }
+
+    #[test]
+    fn a_bracketed_first_line_names_the_group_even_without_formatting() {
+        let mut show = ShowFile::blank("grace", "Grace");
+        assert!(show.replace_lyrics_with_split(
+            "[Chorus]\nMy chains are gone\n\nPlain verse",
+            false,
+            0
+        ));
+        let slides = show.ordered_slides();
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].group.as_deref(), Some("Chorus"));
+        assert_eq!(slides[0].lines, vec!["My chains are gone".to_string()]);
+        assert_eq!(slides[1].lines, vec!["Plain verse".to_string()]);
     }
 
     #[test]
