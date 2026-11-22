@@ -7,6 +7,7 @@ on:
   pull_request:
     paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/linux.yml']
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

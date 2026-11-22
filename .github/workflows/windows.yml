@@ -7,6 +7,7 @@ on:
   pull_request:
     paths: ['crates/**', 'scripts/**', 'assets/**', 'Cargo.*', '.github/workflows/windows.yml']
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -30,7 +31,7 @@ jobs:
       - name: Install the pinned MSVC GStreamer SDK
         run: |
           $gst = Join-Path $env:RUNNER_TEMP 'freeshow-gstreamer'
-          scripts/windows/setup-gstreamer.ps1 -Destination $gst
+          & ./scripts/windows/setup-gstreamer.ps1 -Destination $gst
           $pkgConfig = @("$gst\bin\pkg-config.exe", "$gst\bin\pkgconf.exe") |
             Where-Object { Test-Path $_ } | Select-Object -First 1
           if (!$pkgConfig) {
