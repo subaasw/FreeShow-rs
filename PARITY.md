@@ -187,7 +187,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | NDI send, including stage and groups | done | 0.8 | One sender per (group, stage); source name `{name} [{group}]` |
 | NDI/OMT receive | done | 0.6 | DeviceMonitor plus `FREESHOW_NDI_SOURCES` / `FREESHOW_OMT_SOURCES`; empty when the plugin is missing |
 | OMT broadcast | partial | 0.3 | Configured, but the runtime is not bundled |
-| WebRTC/WHIP send | done | 0.5 |  |
+| WebRTC/WHIP send | done | 0.5 | H.264 video and stereo Opus from each saved `network_sub_<output-id>` route |
 | Auto-started RTMP | done | 0.5 | From `rtmpData` destinations or `special.autoRtmp`, plus `FREESHOW_RTMP` |
 | File recording and Icecast | done | 0.4 |  |
 | Virtual camera | done | 0.4 | Linux `v4l2sink`; soft-fail without a loopback device |

@@ -1195,11 +1195,12 @@ impl WebrtcBroadcast {
         let mut audience = Vec::new();
         let mut stage = Vec::new();
         for target in session.webrtc_outputs() {
-            let Some(sender) = freeshow_record::WebrtcSender::open(
+            let Some(sender) = freeshow_record::WebrtcSender::open_routed(
                 &target.url,
                 target.token.as_deref(),
                 session.output_width,
                 session.output_height,
+                &target.id,
             ) else {
                 tracing::warn!("WebRTC output {} did not start", target.id);
                 continue;
