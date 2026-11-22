@@ -1,0 +1,123 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install rustfmt
+        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy-test:
+    name: Clippy and tests (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+          - name: Windows
+            os: windows-2025
+          - name: macOS
+            os: macos-26
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux media and GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config \
+            libasound2-dev libudev-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa
+
+      - name: Install Windows GStreamer SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gst = Join-Path $env:RUNNER_TEMP 'freeshow-gstreamer'
+          & ./scripts/windows/setup-gstreamer.ps1 -Destination $gst
+          $pkgConfig = @("$gst\bin\pkg-config.exe", "$gst\bin\pkgconf.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$pkgConfig) {
+            $pkgConfig = (Get-Command pkg-config.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (!$pkgConfig -and (Test-Path 'C:\msys64\usr\bin\pkg-config.exe')) {
+            $pkgConfig = 'C:\msys64\usr\bin\pkg-config.exe'
+          }
+          if (!$pkgConfig) { throw 'Could not find pkg-config or pkgconf' }
+          "FREESHOW_GSTREAMER_ROOT=$gst" >> $env:GITHUB_ENV
+          "PKG_CONFIG=$pkgConfig" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          "PKG_CONFIG_LIBDIR=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$gst\bin" >> $env:GITHUB_PATH
+
+      - name: Install macOS media dependencies
+        if: runner.os == 'macOS'
+        run: |
+          test "$(uname -m)" = arm64
+          brew install pkgconf gstreamer
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Install clippy
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+
+      - name: Restore compilation cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: quality-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: quality-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Clippy
+        if: runner.os != 'Windows'
+        run: bash scripts/ci-run.sh cargo clippy --workspace --all-targets --locked
+      - name: Clippy
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/windows/ci-run.py cargo clippy --workspace --all-targets --locked
+
+      - name: Test
+        if: runner.os != 'Windows'
+        run: bash scripts/ci-run.sh cargo test --workspace --locked
+      - name: Test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/windows/ci-run.py --timeout 720 cargo test --locked --workspace
+
+      - name: Save compilation cache
+        if: always() && steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}

@@ -145,9 +145,9 @@ Restore a compile-clean `main`, document the architecture, and put format/lint/t
 - [x] Paint camera boxes as a labeled placeholder (live feed is later).
 - [x] Make speaker `mix-matrix` updates compatible with GStreamer 1.26.
 - [x] Write this architecture / migration plan.
-- [ ] `rustfmt` the workspace in its own commit so `cargo fmt --check` is meaningful.
-- [ ] Quality CI: `fmt`, `clippy`, and `test` on Linux, Windows, and macOS, without building installers.
-- [ ] `rust-toolchain.toml` (stable + rustfmt + clippy) so local and CI toolchains match.
+- [x] `rustfmt` the workspace in its own commit so `cargo fmt --check` is meaningful.
+- [x] Quality CI: `fmt`, `clippy`, and `test` on Linux, Windows, and macOS, without building installers.
+- [x] `rust-toolchain.toml` (stable + rustfmt + clippy) so local and CI toolchains match.
 
 Acceptance: `main` compiles on Linux, Windows, and macOS; `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked`, and `cargo test --workspace --locked` run in CI on all three.
 
