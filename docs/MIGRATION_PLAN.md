@@ -210,8 +210,8 @@ Close the remaining gaps versus FreeShow 1.6.8 so a Sunday operator can run a se
 - [x] Paint the compositor at the real output resolution (1920×1080 by default, or the active output's stored `bounds`) and re-measure the §4 budgets (Linux box, 22 Nov 2026: stills ~63 fps, video ~56 fps, Go/Next ~15 ms).
 - [x] Remaining importers: MediaShout, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only shows, and project packages, each with a small fixture and tests. Native MediaShout `.mdb` and Canva presentations stay out (Canva needs an account).
 - [x] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures. `outLocked` and `lockedOverlays` also take effect; drawer and similar chrome still use the stored objects in later M7 work.
-- [ ] Operator chrome, drawer, and output extras still listed as gaps.
-- [ ] Capture and I/O gaps.
+- [ ] Operator chrome, drawer, and output extras still listed as gaps. Header Search, `resized` panel widths, `splitLines`, `customFonts`, and the metronome/timecode footer are in; first-run guide, focus mode, timeline, draw tools, undo, and the shortcut editor remain.
+- [ ] Capture and I/O gaps. PDF, project-package, and screenshot export are in; OBS also reads library `obsData`. Hardware capture and cloud credentials remain.
 - [ ] Measure remote-button latency against the ≤20 ms budget.
 - Cloud providers (Canva, OnStage, Amazing Life) and AI speech-to-text come last, and only if they need no credentials; otherwise they stay documented.
 

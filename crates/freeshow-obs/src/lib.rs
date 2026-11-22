@@ -37,6 +37,49 @@ impl ObsOutput {
     pub fn configured() -> Option<Self> {
         from_environment()
     }
+
+    /// Library `obsData` (`ip`/`host`, `port`, `password`) when it is enabled.
+    /// `FREESHOW_OBS` still wins when it is set.
+    pub fn from_settings(data: &Value) -> Option<Self> {
+        from_environment().or_else(|| from_settings_value(data))
+    }
+}
+
+fn from_settings_value(data: &Value) -> Option<ObsOutput> {
+    if data.is_null() {
+        return None;
+    }
+    if data.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let host = data
+        .get("ip")
+        .or_else(|| data.get("host"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .unwrap_or("localhost");
+    let port = data
+        .get("port")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(4455);
+    let password = data
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let named = data.get("ip").is_some()
+        || data.get("host").is_some()
+        || data.get("port").is_some()
+        || data.get("enabled").and_then(Value::as_bool) == Some(true)
+        || data.get("connected").and_then(Value::as_bool) == Some(true);
+    named.then(|| ObsOutput {
+        host: host.to_string(),
+        port,
+        password,
+    })
 }
 
 impl ObsControl for ObsOutput {
@@ -316,5 +359,21 @@ mod tests {
         )
         .unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn library_obs_data_supplies_host_port_and_password() {
+        let obs = ObsOutput::from_settings(&json!({
+            "enabled": true,
+            "ip": "10.0.0.8",
+            "port": 4456,
+            "password": "secret"
+        }))
+        .unwrap();
+        assert_eq!(obs.host, "10.0.0.8");
+        assert_eq!(obs.port, 4456);
+        assert_eq!(obs.password, "secret");
+        assert!(ObsOutput::from_settings(&json!({"enabled": false, "ip": "10.0.0.8"})).is_none());
+        assert!(ObsOutput::from_settings(&Value::Null).is_none());
     }
 }
