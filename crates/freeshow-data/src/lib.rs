@@ -97,6 +97,10 @@ pub struct FreeShowPreferences {
     pub content_provider_data: Value,
     pub obs_data: Value,
     pub ai: Value,
+    /// Custom keyboard shortcuts: map of action name to chord, e.g. `"undo": "Ctrl+Z"`.
+    pub shortcuts: Value,
+    /// `special` bag, including `guideSeen`.
+    pub special: Value,
     /// From `settings_synced.json`.
     pub draw_settings: Value,
     pub profiles: Value,
@@ -115,6 +119,9 @@ pub struct OutputPreference {
     /// Stored `bounds.width` / `bounds.height` of this output, when present.
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// FreeShow defaults this to on for audience windows.
+    pub always_on_top: bool,
+    pub kiosk: bool,
 }
 
 impl FreeShowPreferences {
@@ -172,6 +179,49 @@ impl FreeShowPreferences {
 
     pub fn full_colors(&self) -> bool {
         self.full_colors.unwrap_or(false)
+    }
+
+    pub fn guide_seen(&self) -> bool {
+        self.special.get("guideSeen").and_then(Value::as_bool) == Some(true)
+    }
+
+    pub fn focus_mode_setting(&self) -> bool {
+        self.special.get("focusMode").and_then(Value::as_bool) == Some(true)
+    }
+
+    pub fn output_always_on_top(&self) -> bool {
+        self.outputs
+            .iter()
+            .find(|output| output.active && output.enabled)
+            .or_else(|| self.outputs.first())
+            .map(|output| output.always_on_top)
+            .unwrap_or(true)
+    }
+
+    pub fn output_kiosk(&self) -> bool {
+        self.outputs
+            .iter()
+            .find(|output| output.active && output.enabled)
+            .or_else(|| self.outputs.first())
+            .map(|output| output.kiosk)
+            .unwrap_or(false)
+    }
+
+    pub fn shortcut(&self, action: &str) -> String {
+        self.shortcuts
+            .get(action)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|chord| !chord.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_shortcut(action).to_string())
+    }
+
+    pub fn shortcut_list(&self) -> Vec<(String, String)> {
+        default_shortcuts()
+            .into_iter()
+            .map(|(action, _)| (action.to_string(), self.shortcut(action)))
+            .collect()
     }
 
     /// FreeShow alerts the operator about updates unless this is stored as false.
@@ -4035,6 +4085,8 @@ impl Library {
             content_provider_data: stored_value(&json, "contentProviderData"),
             obs_data: stored_value(&json, "obsData"),
             ai: stored_value(&json, "ai"),
+            shortcuts: stored_value(&json, "shortcuts"),
+            special: stored_value(&json, "special"),
             draw_settings: stored_value(&synced, "drawSettings"),
             profiles: stored_value(&synced, "profiles"),
             scenes: stored_value(&synced, "scenes"),
@@ -4967,6 +5019,8 @@ fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok())
                 .filter(|value| *value > 0),
+            always_on_top: output.get("alwaysOnTop").and_then(Value::as_bool) != Some(false),
+            kiosk: output.get("kiosk").and_then(Value::as_bool) == Some(true),
         })
         .collect()
 }
@@ -4976,6 +5030,78 @@ fn stored_value(json: &Value, name: &str) -> Value {
         .cloned()
         .filter(|value| !value.is_null())
         .unwrap_or(Value::Null)
+}
+
+pub fn default_shortcuts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("undo", "Ctrl+Z"),
+        ("redo", "Ctrl+Y"),
+        ("focus", "Ctrl+Shift+F"),
+        ("next", "Right"),
+        ("previous", "Left"),
+        ("go", "Space"),
+        ("kiosk", "F11"),
+        ("guide", "F1"),
+        ("always_on_top", "Ctrl+Shift+A"),
+    ]
+}
+
+fn default_shortcut(action: &str) -> &'static str {
+    default_shortcuts()
+        .into_iter()
+        .find(|(name, _)| *name == action)
+        .map(|(_, chord)| chord)
+        .unwrap_or("")
+}
+
+pub fn normalize_chord(text: &str) -> String {
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut key = String::new();
+    for part in text.split('+') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" | "cmd" | "meta" | "super" => ctrl = true,
+            "alt" | "option" => alt = true,
+            "shift" => shift = true,
+            other => key = titled_key(other),
+        }
+    }
+    let mut chord = String::new();
+    if ctrl {
+        chord.push_str("Ctrl+");
+    }
+    if alt {
+        chord.push_str("Alt+");
+    }
+    if shift {
+        chord.push_str("Shift+");
+    }
+    chord.push_str(&key);
+    chord
+}
+
+fn titled_key(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        " " | "space" | "spacebar" => "Space".into(),
+        "right" | "arrowright" => "Right".into(),
+        "left" | "arrowleft" => "Left".into(),
+        "up" | "arrowup" => "Up".into(),
+        "down" | "arrowdown" => "Down".into(),
+        "esc" | "escape" => "Escape".into(),
+        other if other.len() == 1 => other.to_ascii_uppercase(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
 }
 
 fn stored_size(json: &Value, name: &str, min: u32, max: u32) -> Option<u32> {
@@ -6218,6 +6344,8 @@ mod tests {
                     style: "wide".into(),
                     width: None,
                     height: None,
+                    always_on_top: true,
+                    kiosk: false,
                 },
                 OutputPreference {
                     id: "stage".into(),
@@ -6227,6 +6355,8 @@ mod tests {
                     style: "".into(),
                     width: None,
                     height: None,
+                    always_on_top: true,
+                    kiosk: false,
                 },
             ]
         );
@@ -6284,7 +6414,9 @@ mod tests {
                 "driveData": {"method": "disable"},
                 "contentProviderData": {"planningcenter": {"churchId": "c1"}},
                 "obsData": {"enabled": true, "port": 4455},
-                "ai": {"language": "en"}
+                "ai": {"language": "en"},
+                "shortcuts": {"undo": "Ctrl+Shift+Z", "go": "Enter"},
+                "special": {"guideSeen": true, "focusMode": true}
             }"#,
         )
         .unwrap();
@@ -6298,6 +6430,11 @@ mod tests {
         assert_eq!(preferences.split_lines(), 4);
         assert!(preferences.full_colors());
         assert_eq!(preferences.drawer_height(), 220);
+        assert!(preferences.guide_seen());
+        assert!(preferences.focus_mode_setting());
+        assert_eq!(preferences.shortcut("undo"), "Ctrl+Shift+Z");
+        assert_eq!(preferences.shortcut("redo"), "Ctrl+Y");
+        assert_eq!(preferences.shortcut("go"), "Enter");
         assert_eq!(preferences.left_panel_width(), 240);
         assert_eq!(preferences.right_panel_width(), 260);
         assert_eq!(preferences.slides_columns(), 4);
