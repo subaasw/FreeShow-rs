@@ -13,10 +13,12 @@ import sys
 import tempfile
 import tomllib
 
+from package_media import serve_sample
+
 ROOT = Path(__file__).resolve().parent.parent
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
-avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png
+avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png curl
 autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc wasapi2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 OPTIONAL_PLUGINS = "shout2 mediafoundation directshow ksvideo directsound wasapi".split()
 SAMPLE = ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4"
@@ -160,9 +162,12 @@ def verify(installer, sdk):
             app = installed / "freeshow.exe"
             runtime = run(app, "--check-runtime", env=env, cwd=temp, stdout=subprocess.PIPE, timeout=90)
             decode = run(app, "--check-media", sample, env=env, cwd=temp, stdout=subprocess.PIPE, timeout=90)
+            with serve_sample(sample) as url:
+                remote = run(app, "--check-media", url, env=env, cwd=temp, stdout=subprocess.PIPE, timeout=90)
             perf = run(app, "--check-perf", env=env, cwd=temp, stdout=subprocess.PIPE, timeout=180)
             assert json.loads(runtime.stdout)["missing"] == [], runtime.stdout
             assert json.loads(decode.stdout.splitlines()[-1])["decoded_video"], decode.stdout
+            assert json.loads(remote.stdout.splitlines()[-1])["decoded_video"], remote.stdout
             assert "next_ms" in json.loads(perf.stdout), perf.stdout
             assert list(profile.rglob("registry-*.bin")), "bundled runtime did not create a cold registry"
         finally:
@@ -171,7 +176,7 @@ def verify(installer, sdk):
         assert not app.exists() and not shortcut.exists()
         assert sentinel.read_text(encoding="utf-8") == "keep this library file"
     return {"installed_in_relocated_unicode_path": True, "sdk_hidden": True,
-            "cold_registry": True, "h264_decoded": True, "uninstall_kept_library": True}
+            "cold_registry": True, "h264_decoded": True, "http_video_decoded": True, "uninstall_kept_library": True}
 
 
 def main():
