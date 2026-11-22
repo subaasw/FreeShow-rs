@@ -272,7 +272,16 @@ slint::slint! {
         in-out property <string> search-query: "";
         in-out property <int> drawer-width: 240;
         in-out property <int> project-width: 260;
+        in-out property <int> drawer-height: 300;
+        in-out property <bool> focus-mode: false;
+        in-out property <bool> guide-visible: false;
+        in-out property <string> guide-text: "";
+        in-out property <bool> show-shortcuts: false;
+        in-out property <string> shortcut-text: "";
         in property <bool> show-labels: true;
+        callback dismiss-guide();
+        callback save-shortcuts(string);
+        callback hotkey(string, bool, bool, bool);
         callback set-search(string);
         callback select-tab(string);
         callback choose-drawer(int);
@@ -315,6 +324,22 @@ slint::slint! {
             { id: "functions", label: "Functions", short: "F" },
         ];
 
+        forward-focus: window-keys;
+        window-keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.F11) {
+                    root.hotkey("F11", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                } else if (event.text == Key.F1) {
+                    root.hotkey("F1", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                } else if (event.text == Key.RightArrow) {
+                    root.hotkey("Right", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                } else if (event.text == Key.LeftArrow) {
+                    root.hotkey("Left", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                } else {
+                    root.hotkey(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                }
+                accept
+            }
         VerticalLayout {
             spacing: 0;
             Rectangle {
@@ -382,26 +407,6 @@ slint::slint! {
                                 root.active-tab = tab.id;
                                 root.panel-title = tab.label;
                                 root.select-tab(tab.id);
-                            }
-                        }
-                    }
-                }
-                Rectangle {
-                    width: root.drawer-width * 1px;
-                    background: root.primary;
-                    Flickable {
-                        VerticalLayout {
-                            spacing: 0;
-                            alignment: start;
-                            for item[index] in root.drawer-rows: ListRow {
-                                label: item.name;
-                                thumb: item.thumb;
-                                show-thumb: item.show-thumb;
-                                active: root.selected-drawer == index;
-                                accent: root.accent;
-                                text-color: root.text-color;
-                                accent-text: root.accent-text;
-                                clicked => { root.choose-drawer(index); }
                             }
                         }
                     }
@@ -565,7 +570,7 @@ slint::slint! {
                     }
                 }
                 Rectangle {
-                    width: root.project-width * 1px;
+                    width: root.focus-mode ? 0px : root.project-width * 1px;
                     background: root.primary;
                     VerticalLayout {
                         padding: 12px;
@@ -607,6 +612,82 @@ slint::slint! {
                     }
                 }
             }
+            if root.guide-visible: Rectangle {
+                height: 160px;
+                background: root.primary-darker;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 12px;
+                    Text {
+                        text: root.guide-text;
+                        color: root.text-color;
+                        font-size: 14px * OperatorStyle.font-scale;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                        horizontal-stretch: 1;
+                    }
+                    HeaderButton {
+                        label: "Dismiss";
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        accent-text: root.accent-text;
+                        clicked => { root.dismiss-guide(); }
+                    }
+                }
+            }
+            if root.show-shortcuts: Rectangle {
+                height: 180px;
+                background: root.primary;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    TextEdit {
+                        text <=> root.shortcut-text;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        HeaderButton {
+                            label: "Save";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.save-shortcuts(root.shortcut-text); }
+                        }
+                        HeaderButton {
+                            label: "Close";
+                            accent: root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.show-shortcuts = false; }
+                        }
+                    }
+                }
+            }
+            if !root.focus-mode: Rectangle {
+                height: root.drawer-height * 1px;
+                background: root.primary;
+                Flickable {
+                    HorizontalLayout {
+                        spacing: 0;
+                        alignment: start;
+                        for item[index] in root.drawer-rows: ListRow {
+                            width: 220px;
+                            label: item.name;
+                            thumb: item.thumb;
+                            show-thumb: item.show-thumb;
+                            active: root.selected-drawer == index;
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.choose-drawer(index); }
+                        }
+                    }
+                }
+            }
             Rectangle {
                 height: 28px;
                 background: root.primary-darker;
@@ -636,6 +717,7 @@ slint::slint! {
                     }
                 }
             }
+        }
         }
     }
 
@@ -893,6 +975,10 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     });
     ui.set_volume(session.volume * 100.0);
     ui.set_chrome_status(session.chrome_status().into());
+    ui.set_focus_mode(session.focus_mode);
+    ui.set_guide_visible(session.guide_visible);
+    ui.set_guide_text(session.guide_text().into());
+    ui.set_drawer_height(session.preferences.drawer_height() as i32);
     ui.set_selected_slide(if session.tab == "scripture" {
         selected(session.verse_index)
     } else {
@@ -1563,6 +1649,10 @@ fn apply_chrome(ui: &ControlWindow, session: &Session, output_screen: Option<usi
     ui.set_screen_label(screen_label(output_screen, &session.preferences.outputs).into());
     ui.set_drawer_width(session.preferences.left_panel_width() as i32);
     ui.set_project_width(session.preferences.right_panel_width() as i32);
+    ui.set_drawer_height(session.preferences.drawer_height() as i32);
+    ui.set_focus_mode(session.focus_mode);
+    ui.set_guide_visible(session.guide_visible);
+    ui.set_guide_text(session.guide_text().into());
     let tabs: Vec<DrawerTab> = lang::drawer_tabs(session.preferences.language.as_deref())
         .into_iter()
         .map(|(id, label, short)| DrawerTab {
@@ -1572,6 +1662,24 @@ fn apply_chrome(ui: &ControlWindow, session: &Session, output_screen: Option<usi
         })
         .collect();
     ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
+}
+
+fn apply_window_behavior(window: &slint::Window, always_on_top: bool, kiosk: bool) {
+    let _ = window.with_winit_window(|winit_window| {
+        winit_window.set_window_level(if always_on_top {
+            slint::winit_030::winit::window::WindowLevel::AlwaysOnTop
+        } else {
+            slint::winit_030::winit::window::WindowLevel::Normal
+        });
+        winit_window.set_decorations(!kiosk);
+        winit_window.set_fullscreen(if kiosk {
+            Some(slint::winit_030::winit::window::Fullscreen::Borderless(
+                None,
+            ))
+        } else {
+            None
+        });
+    });
 }
 
 fn place(window: &slint::Window, x: i32, y: i32) {
@@ -1861,6 +1969,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if settings.show_output || session.preferences.auto_output() {
         output.show()?;
         place_output(output.window(), settings.output_screen);
+        apply_window_behavior(output.window(), session.always_on_top, session.kiosk);
     }
     if settings.show_stage {
         stage.show()?;
@@ -1979,6 +2088,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.borrow_mut().set_search(query.to_string());
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_dismiss_guide(move || {
+            session.borrow_mut().dismiss_guide();
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_save_shortcuts(move |text| {
+            session.borrow_mut().save_shortcuts(&text);
+            if let Some(ui) = ui.upgrade() {
+                ui.set_show_shortcuts(false);
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_hotkey(move |text, ctrl, alt, shift| {
+            let mut chord = String::new();
+            if ctrl {
+                chord.push_str("Ctrl+");
+            }
+            if alt {
+                chord.push_str("Alt+");
+            }
+            if shift {
+                chord.push_str("Shift+");
+            }
+            chord.push_str(&freeshow_data::normalize_chord(&text));
+            if session.borrow_mut().perform_shortcut(&chord)
+                && let Some(ui) = ui.upgrade()
+            {
+                refresh(&ui, &session.borrow());
+                apply_window_behavior(
+                    ui.window(),
+                    session.borrow().always_on_top,
+                    session.borrow().kiosk,
+                );
             }
         });
     }
@@ -2310,10 +2470,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     18 => current.toggle_metronome(),
+                    19 => {
+                        let _ = current.undo();
+                    }
+                    20 => {
+                        let _ = current.redo();
+                    }
+                    21 => {
+                        let _ = current.toggle_focus_mode();
+                    }
+                    22 => current.show_guide(),
+                    23 => {
+                        let _ = current.toggle_kiosk();
+                    }
+                    24 => {
+                        let _ = current.toggle_always_on_top();
+                    }
+                    25 => {
+                        if let Some(ui) = ui.upgrade() {
+                            let open = !ui.get_show_shortcuts();
+                            ui.set_show_shortcuts(open);
+                            if open {
+                                ui.set_shortcut_text(current.shortcut_text().into());
+                            }
+                        }
+                    }
                     _ => {}
                 }
+                let always_on_top = current.always_on_top;
+                let kiosk = current.kiosk;
                 if let Some(ui) = ui.upgrade() {
                     refresh(&ui, &current);
+                    apply_window_behavior(ui.window(), always_on_top, kiosk);
                 }
                 return;
             }

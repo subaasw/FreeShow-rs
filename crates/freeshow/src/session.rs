@@ -106,6 +106,12 @@ pub struct Session {
     pub metronome_on: bool,
     metronome_started: Option<std::time::Instant>,
     pub metronome_beat: u32,
+    history: Vec<EditSnapshot>,
+    redo: Vec<EditSnapshot>,
+    pub focus_mode: bool,
+    pub guide_visible: bool,
+    pub kiosk: bool,
+    pub always_on_top: bool,
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     /// The selected text box on the current slide.
@@ -282,6 +288,12 @@ impl Session {
             metronome_on: false,
             metronome_started: None,
             metronome_beat: 0,
+            history: Vec::new(),
+            redo: Vec::new(),
+            focus_mode: false,
+            guide_visible: false,
+            kiosk: false,
+            always_on_top: true,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -407,6 +419,10 @@ impl Session {
             .unwrap_or((OUTPUT_WIDTH, OUTPUT_HEIGHT));
         let active_overlays = preferences.locked_overlay_ids(&library.audience_output().0);
         freeshow_output::register_custom_fonts(&preferences.custom_font_files());
+        let focus_mode = preferences.focus_mode_setting();
+        let guide_visible = !preferences.guide_seen();
+        let kiosk = preferences.output_kiosk();
+        let always_on_top = preferences.output_always_on_top();
         Self {
             root: Some(root),
             icecast: library.icecast(),
@@ -425,6 +441,12 @@ impl Session {
             metronome_on: false,
             metronome_started: None,
             metronome_beat: 0,
+            history: Vec::new(),
+            redo: Vec::new(),
+            focus_mode,
+            guide_visible,
+            kiosk,
+            always_on_top,
             show_index: None,
             slide_index: None,
             item_index: 0,
@@ -798,6 +820,25 @@ impl Session {
                 } else {
                     "Metronome".to_string()
                 },
+                "Undo".to_string(),
+                "Redo".to_string(),
+                if self.focus_mode {
+                    "Exit focus mode".to_string()
+                } else {
+                    "Focus mode".to_string()
+                },
+                "Guide".to_string(),
+                if self.kiosk {
+                    "Exit kiosk".to_string()
+                } else {
+                    "Kiosk".to_string()
+                },
+                if self.always_on_top {
+                    "Windowed top".to_string()
+                } else {
+                    "Always on top".to_string()
+                },
+                "Shortcuts".to_string(),
             ],
             _ => Vec::new(),
         }
@@ -2648,6 +2689,7 @@ impl Session {
 
     /// Writes the selected slide even when another drawer tab is open.
     pub fn replace_slide_text(&mut self, text: &str) -> bool {
+        let snap = self.edit_snapshot("Edit lyrics");
         let Some(slide_index) = self.slide_index else {
             return false;
         };
@@ -2671,9 +2713,14 @@ impl Session {
             return false;
         }
         let Some(path) = show.path.clone() else {
+            self.commit_edit(snap);
             return true;
         };
-        show.save(&path).is_ok()
+        let ok = show.save(&path).is_ok();
+        if ok {
+            self.commit_edit(snap);
+        }
+        ok
     }
 
     pub fn save_lyrics(&mut self, text: &str) -> bool {
@@ -2687,6 +2734,7 @@ impl Session {
         if self.tab != "shows" {
             return false;
         }
+        let snap = self.edit_snapshot("Edit group");
         let Some(slide_index) = self.slide_index else {
             return false;
         };
@@ -2707,9 +2755,14 @@ impl Session {
             return false;
         }
         let Some(path) = show.path.clone() else {
+            self.commit_edit(snap);
             return true;
         };
-        show.save(&path).is_ok()
+        let ok = show.save(&path).is_ok();
+        if ok {
+            self.commit_edit(snap);
+        }
+        ok
     }
 
     pub fn nudge_box(&mut self, dx: i32, dy: i32, dw: i32, dh: i32) -> bool {
@@ -2802,6 +2855,7 @@ impl Session {
         if self.tab != "shows" {
             return false;
         }
+        let snap = self.edit_snapshot("Edit item");
         let Some(slide_index) = self.slide_index else {
             return false;
         };
@@ -2824,9 +2878,14 @@ impl Session {
             return false;
         }
         let Some(path) = show.path.clone() else {
+            self.commit_edit(snap);
             return true;
         };
-        show.save(&path).is_ok()
+        let ok = show.save(&path).is_ok();
+        if ok {
+            self.commit_edit(snap);
+        }
+        ok
     }
 
     pub fn select_item(&mut self, index: usize) -> bool {
@@ -3398,6 +3457,7 @@ impl Session {
         if self.tab != "shows" {
             return false;
         }
+        let snap = self.edit_snapshot("Add slide");
         let Some(show_index) = self.show_index else {
             return false;
         };
@@ -3419,6 +3479,7 @@ impl Session {
             self.slide_index = Some(index);
             self.blanked = false;
             self.slide_hidden = false;
+            self.commit_edit(snap);
         }
         saved
     }
@@ -4307,6 +4368,247 @@ fn overlay_views(catalog: &Catalog) -> Vec<freeshow_remote::RemoteOverlay> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct EditSnapshot {
+    label: String,
+    show_id: String,
+    show: serde_json::Value,
+    show_index: usize,
+    slide_index: Option<usize>,
+}
+
+impl Session {
+    fn edit_snapshot(&self, label: &str) -> Option<EditSnapshot> {
+        let show_index = self.show_index?;
+        let show = self.shows.get(show_index)?;
+        Some(EditSnapshot {
+            label: label.to_string(),
+            show_id: show.id.clone(),
+            show: show.show.clone(),
+            show_index,
+            slide_index: self.slide_index,
+        })
+    }
+
+    fn commit_edit(&mut self, snap: Option<EditSnapshot>) {
+        let Some(snap) = snap else {
+            return;
+        };
+        self.history.push(snap);
+        self.redo.clear();
+        if self.history.len() > 40 {
+            self.history.remove(0);
+        }
+    }
+
+    fn restore_snapshot(&mut self, snap: EditSnapshot) -> bool {
+        let Some(index) = self
+            .shows
+            .iter()
+            .position(|show| show.id == snap.show_id)
+            .or(Some(snap.show_index).filter(|index| *index < self.shows.len()))
+        else {
+            return false;
+        };
+        self.shows[index].show = snap.show;
+        self.show_index = Some(index);
+        self.slide_index = snap.slide_index;
+        if let Some(path) = self.shows[index].path.clone() {
+            let _ = self.shows[index].save(&path);
+        }
+        true
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(previous) = self.history.pop() else {
+            return false;
+        };
+        if let Some(current) = self.edit_snapshot(&previous.label) {
+            self.redo.push(current);
+        }
+        self.restore_snapshot(previous)
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        if let Some(current) = self.edit_snapshot(&next.label) {
+            self.history.push(current);
+        }
+        self.restore_snapshot(next)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn can_undo(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn last_edit_label(&self) -> Option<&str> {
+        self.history.last().map(|snap| snap.label.as_str())
+    }
+
+    pub fn toggle_focus_mode(&mut self) -> bool {
+        self.focus_mode = !self.focus_mode;
+        self.guide_visible = false;
+        self.patch_special("focusMode", serde_json::Value::Bool(self.focus_mode));
+        true
+    }
+
+    pub fn show_guide(&mut self) {
+        self.guide_visible = true;
+    }
+
+    pub fn dismiss_guide(&mut self) {
+        self.guide_visible = false;
+        self.patch_special("guideSeen", serde_json::json!(true));
+    }
+
+    pub fn guide_text(&self) -> String {
+        "Welcome to FreeShow\n\n1. Pick a show from the drawer.\n2. Choose a slide and press Go.\n3. Open Output for the audience and Stage for the foldback.\n\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.".to_string()
+    }
+
+    pub fn toggle_kiosk(&mut self) -> bool {
+        self.kiosk = !self.kiosk;
+        true
+    }
+
+    pub fn toggle_always_on_top(&mut self) -> bool {
+        self.always_on_top = !self.always_on_top;
+        true
+    }
+
+    pub fn shortcut_text(&self) -> String {
+        self.preferences
+            .shortcut_list()
+            .into_iter()
+            .map(|(action, chord)| format!("{action}={chord}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn save_shortcuts(&mut self, text: &str) -> bool {
+        let mut map = serde_json::Map::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((action, chord)) = line.split_once('=') else {
+                continue;
+            };
+            let action = action.trim();
+            let chord = freeshow_data::normalize_chord(chord);
+            if action.is_empty() || chord.is_empty() {
+                continue;
+            }
+            map.insert(action.to_string(), serde_json::Value::String(chord));
+        }
+        if map.is_empty() {
+            return false;
+        }
+        self.patch_settings(|settings| {
+            settings["shortcuts"] = serde_json::Value::Object(map);
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn chord_for(&self, action: &str) -> String {
+        freeshow_data::normalize_chord(&self.preferences.shortcut(action))
+    }
+
+    pub fn perform_shortcut(&mut self, chord: &str) -> bool {
+        let chord = freeshow_data::normalize_chord(chord);
+        if chord.is_empty() {
+            return false;
+        }
+        let action = self
+            .preferences
+            .shortcut_list()
+            .into_iter()
+            .find(|(_, bound)| freeshow_data::normalize_chord(bound) == chord)
+            .map(|(action, _)| action);
+        let Some(action) = action else {
+            return false;
+        };
+        match action.as_str() {
+            "undo" => self.undo(),
+            "redo" => self.redo(),
+            "focus" => self.toggle_focus_mode(),
+            "next" => self.advance_show(),
+            "previous" => self.retreat_show(),
+            "go" => {
+                if self.slide_index.is_some() {
+                    true
+                } else {
+                    self.open_first_show()
+                }
+            }
+            "kiosk" => self.toggle_kiosk(),
+            "guide" => {
+                if self.guide_visible {
+                    self.dismiss_guide();
+                } else {
+                    self.show_guide();
+                }
+                true
+            }
+            "always_on_top" => self.toggle_always_on_top(),
+            _ => false,
+        }
+    }
+
+    fn patch_special(&mut self, key: &str, value: serde_json::Value) -> bool {
+        self.patch_settings(|settings| {
+            let special = settings.as_object_mut().map(|root| {
+                root.entry("special")
+                    .or_insert_with(|| serde_json::json!({}))
+            });
+            if let Some(special) = special.and_then(serde_json::Value::as_object_mut) {
+                special.insert(key.to_string(), value);
+            }
+        })
+    }
+
+    fn patch_settings(&mut self, edit: impl FnOnce(&mut serde_json::Value)) -> bool {
+        let Some(root) = self.root.clone() else {
+            return false;
+        };
+        let path = root.join("settings.json");
+        let mut settings = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !settings.is_object() {
+            settings = serde_json::json!({});
+        }
+        edit(&mut settings);
+        let Ok(bytes) = serde_json::to_vec_pretty(&settings) else {
+            return false;
+        };
+        if std::fs::write(&path, bytes).is_err() {
+            return false;
+        }
+        if let Some(preferences) = self.reload_preferences() {
+            self.preferences = preferences;
+            true
+        } else {
+            true
+        }
+    }
+
+    fn reload_preferences(&self) -> Option<FreeShowPreferences> {
+        let root = self.root.as_ref()?;
+        Some(freeshow_data::Library::open(root).preferences())
+    }
+}
+
 fn scripture_catalog(bibles: &[BibleFile]) -> Arc<Vec<freeshow_remote::RemoteBible>> {
     Arc::new(
         bibles
@@ -4918,6 +5220,61 @@ mod tests {
         let listed = Session::open(root.clone());
         assert_eq!(listed.slides_list_columns(), 1);
         assert!(!listed.preferences.full_colors());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn undo_and_redo_restore_edited_lyrics() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-undo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert_eq!(session.slide_index, Some(0));
+        assert!(session.save_lyrics("first"));
+        assert!(session.save_lyrics("second"));
+        assert!(session.can_undo());
+        assert_eq!(session.last_edit_label(), Some("Edit lyrics"));
+        assert!(session.undo());
+        assert_eq!(session.lyrics(), "first");
+        assert!(session.can_redo());
+        assert!(session.redo());
+        assert_eq!(session.lyrics(), "second");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shortcuts_focus_guide_and_kiosk_toggle() {
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-shortcuts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session = Session::open(root.clone());
+        assert!(session.guide_visible);
+        assert!(session.guide_text().contains("Welcome"));
+        assert!(session.shortcut_text().contains("undo="));
+        session.dismiss_guide();
+        assert!(!session.guide_visible);
+        assert!(session.preferences.guide_seen());
+        assert!(session.toggle_focus_mode());
+        assert!(session.focus_mode);
+        assert!(session.save_shortcuts("undo=Ctrl+Shift+Z\ngo=Enter\n"));
+        assert_eq!(session.chord_for("undo"), "Ctrl+Shift+Z");
+        assert_eq!(session.chord_for("go"), "Enter");
+        assert!(session.perform_shortcut("Ctrl+Shift+F"));
+        assert!(!session.focus_mode);
+        assert!(session.perform_shortcut("F11"));
+        assert!(session.kiosk);
+        assert!(session.always_on_top);
+        assert!(session.perform_shortcut("Ctrl+Shift+A"));
+        assert!(!session.always_on_top);
         let _ = std::fs::remove_dir_all(&root);
     }
 
