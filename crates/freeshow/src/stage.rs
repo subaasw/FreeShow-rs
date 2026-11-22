@@ -11,7 +11,7 @@ use freeshow_output::{
 };
 
 pub struct StageSlide {
-    pub lines: Vec<String>,
+    pub text_boxes: Vec<Vec<String>>,
     pub notes: String,
 }
 
@@ -159,7 +159,7 @@ fn lines_for(
     context: &StageContext,
 ) -> Vec<String> {
     match item.kind {
-        StageItemKind::Slide => slide_lines(slides, index, item.offset, item.line_count),
+        StageItemKind::Slide => slide_lines(slides, index, item),
         StageItemKind::Notes => {
             let notes = slide_at(slides, index, item.offset)
                 .map(|slide| slide.notes.clone())
@@ -196,26 +196,35 @@ fn lines_for(
 fn slide_lines(
     slides: &[StageSlide],
     index: Option<usize>,
-    offset: i64,
-    line_count: Option<usize>,
+    item: &StageItemSpec,
 ) -> Vec<String> {
-    let Some(slide) = slide_at(slides, index, offset) else {
+    let Some(slide) = slide_at(slides, index, item.offset) else {
         return Vec::new();
     };
-    let mut lines = slide.lines.clone();
-    if let Some(count) = line_count {
+    let mut lines = if let Some(number) = item.text_box {
+        slide.text_boxes.iter().rev().nth(number).cloned().unwrap_or_default()
+    } else {
+        let mut boxes = slide.text_boxes.iter().collect::<Vec<_>>();
+        if !item.invert_items {
+            boxes.reverse();
+        }
+        let mut lines = Vec::new();
+        for group in boxes.into_iter().filter(|group| !group.is_empty()) {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.extend(group.iter().cloned());
+        }
+        lines
+    };
+    if let Some(count) = item.line_count {
         lines.truncate(count);
     }
     lines
 }
 
 fn slide_at(slides: &[StageSlide], index: Option<usize>, offset: i64) -> Option<&StageSlide> {
-    let index = index?;
-    let position = index as i64 + offset;
-    if position < 0 {
-        return None;
-    }
-    slides.get(position as usize)
+    slides.get(index?.checked_add_signed(isize::try_from(offset).ok()?)?)
 }
 
 fn tracker_text(slides: &[StageSlide], index: Option<usize>) -> Vec<String> {
@@ -328,6 +337,8 @@ mod tests {
             align: String::new(),
             offset: 0,
             line_count: None,
+            text_box: None,
+            invert_items: false,
             label: "Web".into(),
             lines: Vec::new(),
             variable_id: None,
@@ -344,11 +355,11 @@ mod tests {
     fn next_slide_notes_clock_and_timer_are_on_the_stage() {
         let slides = vec![
             StageSlide {
-                lines: vec!["Amazing".into()],
+                text_boxes: vec![vec!["Amazing".into()]],
                 notes: "Stand".into(),
             },
             StageSlide {
-                lines: vec!["one".into(), "two".into(), "three".into()],
+                text_boxes: vec![vec!["one".into(), "two".into(), "three".into()]],
                 notes: String::new(),
             },
         ];
@@ -358,10 +369,11 @@ mod tests {
         let later = paint_stage(&slides, Some(0), &layout, "12:00:01", "04:59", &context);
         assert_ne!(fingerprint(&first.pixels), fingerprint(&later.pixels));
         assert_eq!(
-            slide_lines(&slides, Some(0), 1, Some(2)),
+            slide_lines(&slides, Some(0), &layout.items[1]),
             vec!["one".to_string(), "two".to_string()]
         );
         assert_eq!(slide_at(&slides, Some(0), 0).unwrap().notes, "Stand");
+        assert!(slide_at(&slides, Some(1), i64::MAX).is_none());
         assert!(first.pixels.iter().any(|byte| *byte != 0x12));
     }
 
@@ -369,11 +381,11 @@ mod tests {
     fn every_freeshow_item_kind_produces_lines() {
         let slides = vec![
             StageSlide {
-                lines: vec!["current".into()],
+                text_boxes: vec![vec!["current".into()]],
                 notes: "note".into(),
             },
             StageSlide {
-                lines: vec!["next".into()],
+                text_boxes: vec![vec!["next".into()]],
                 notes: String::new(),
             },
         ];
@@ -426,9 +438,45 @@ mod tests {
     }
 
     #[test]
+    fn stage_text_can_select_a_box_or_reverse_its_order() {
+        let mut show = freeshow_data::ShowFile::blank("bilingual", "Bilingual");
+        show.show["slides"]["s1"]["items"] = serde_json::json!([
+            {"lines":[{"text":[{"value":"First language"}]}]},
+            {"type":"media","lines":[{"text":[{"value":"Ignore this image"}]}]},
+            {"bindings":["audience"],"lines":[{"text":[{"value":"Room only"}]}]},
+            {"bindings":["stage"],"clickReveal":true,
+                "lines":[{"text":[{"value":"Second language"}]}]}
+        ]);
+
+        let mut item = spec(StageItemKind::Slide);
+        item.text_box = Some(0);
+        let mut slides = [StageSlide {
+            text_boxes: show.stage_text_boxes(0, true, 0, false, None),
+            notes: String::new(),
+        }];
+        assert!(slide_lines(&slides, Some(0), &item).is_empty());
+        item.text_box = Some(1);
+        assert_eq!(slide_lines(&slides, Some(0), &item), ["First language"]);
+
+        slides[0].text_boxes = show.stage_text_boxes(0, true, 0, true, None);
+        item.text_box = None;
+        assert_eq!(
+            slide_lines(&slides, Some(0), &item),
+            ["Second language", "", "First language"]
+        );
+        item.invert_items = true;
+        assert_eq!(
+            slide_lines(&slides, Some(0), &item),
+            ["First language", "", "Second language"]
+        );
+        item.text_box = Some(0);
+        assert_eq!(slide_lines(&slides, Some(0), &item), ["Second language"]);
+    }
+
+    #[test]
     fn a_custom_box_and_a_missing_media_file_are_still_painted() {
         let slides = vec![StageSlide {
-            lines: vec!["line".into()],
+            text_boxes: vec![vec!["line".into()]],
             notes: String::new(),
         }];
         let mut custom = spec(StageItemKind::Custom);

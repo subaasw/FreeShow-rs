@@ -144,7 +144,7 @@ pub fn stage_frame(session: &Session) -> Frame {
         let index = if lines.is_empty() { None } else { Some(0) };
         (
             vec![crate::stage::StageSlide {
-                lines,
+                text_boxes: vec![lines],
                 notes: String::new(),
             }],
             index,
@@ -164,11 +164,14 @@ pub fn stage_frame(session: &Session) -> Frame {
                     .map(|(slide_index, slide)| {
                         let current = current_index == Some(slide_index);
                         crate::stage::StageSlide {
-                            lines: show
-                                .stage_lines(slide_index, current, reveal, clicks, page)
+                            text_boxes: show
+                                .stage_text_boxes(slide_index, current, reveal, clicks, page)
                                 .into_iter()
-                                .map(|line| {
-                                    freeshow_data::fill_variables(&line, &variables)
+                                .map(|lines| {
+                                    lines
+                                        .into_iter()
+                                        .map(|line| freeshow_data::fill_variables(&line, &variables))
+                                        .collect()
                                 })
                                 .collect(),
                             notes: freeshow_data::fill_variables(&slide.notes, &variables),
