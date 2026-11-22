@@ -34,6 +34,8 @@ pub(super) struct Timeline {
     pub duration: f64,
     #[prost(bool, tag = "6")]
     pub r#loop: bool,
+    #[prost(message, optional, tag = "8")]
+    pub audio_action: Option<Action>,
     #[prost(message, repeated, tag = "11")]
     pub cues_v2: Vec<TimelineCue>,
 }
@@ -447,9 +449,14 @@ pub(super) struct MediaAction {
     pub element: Option<Media>,
     #[prost(message, optional, tag = "7")]
     pub video: Option<Video>,
+    #[prost(message, optional, tag = "8")]
+    pub audio: Option<Audio>,
     #[prost(int32, tag = "10")]
     pub layer: i32,
 }
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Audio {}
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct Media {

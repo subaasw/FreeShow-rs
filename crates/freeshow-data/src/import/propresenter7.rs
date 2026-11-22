@@ -190,7 +190,6 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
     show.show["origin"] = json!("propresenter");
     show.show["settings"]["activeLayout"] = json!(active.as_deref().unwrap_or("main"));
     show.show["slides"] = Value::Object(slides);
-    show.show["media"] = Value::Object(media);
     show.show["layouts"] = Value::Object(layouts);
     let layout_key = show.show["settings"]["activeLayout"]
         .as_str()
@@ -203,10 +202,12 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
         });
     if let Some(key) = layout_key
         && let Some(recording) = document.timeline.as_ref()
-        && let Some(timeline) = layout_timeline(recording, &show.layout_steps(), &cue_slides)
+        && let Some(timeline) =
+            layout_timeline(recording, &show.layout_steps(), &cue_slides, &mut media)
     {
         show.show["layouts"][key]["timeline"] = timeline;
     }
+    show.show["media"] = Value::Object(media);
     if !import_warnings.is_empty() {
         show.show["settings"]["importWarnings"] = json!(import_warnings);
     }
@@ -405,15 +406,13 @@ fn layout_timeline(
     timeline: &wire::Timeline,
     steps: &[(String, Value)],
     cue_slides: &HashMap<String, String>,
+    media: &mut Map<String, Value>,
 ) -> Option<Value> {
     let cues = if !timeline.cues_v2.is_empty() {
         &timeline.cues_v2
     } else {
         &timeline.cues
     };
-    if cues.is_empty() {
-        return None;
-    }
     let mut positions = HashMap::<&str, Vec<usize>>::new();
     for (index, (id, node)) in steps.iter().enumerate() {
         if node["disabled"] != true {
@@ -452,10 +451,25 @@ fn layout_timeline(
             "data": data
         }));
     }
-    if actions.is_empty() {
+    let soundtrack = timeline.audio_action.as_ref().and_then(|action| {
+        action_carries_media(action)?;
+        let audio = action.media.as_ref()?;
+        if !action.enabled || action.delay != 0.0 || audio.video.is_some() {
+            return None;
+        }
+        let path = media_source(audio)?;
+        let key = format!("m{}", media.len() + 1);
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        media.insert(key.clone(), json!({"name": name, "path": path}));
+        Some(key)
+    });
+    if actions.is_empty() && soundtrack.is_none() {
         return None;
     }
     let mut value = json!({"actions": actions});
+    if let Some(id) = soundtrack {
+        value["soundtrack"] = json!(id);
+    }
     if timeline.r#loop {
         value["loop"] = json!(true);
     }
@@ -490,15 +504,22 @@ fn background(cue: &wire::Cue) -> Option<CueBackground<'_>> {
             return Some(CueBackground::Clear);
         }
         action_carries_media(action)?;
-        let media = action.media.as_ref().filter(|media| media.layer == 0)?;
-        let url = media.element.as_ref()?.url.as_ref()?;
-        let path = if url.absolute.is_empty() {
-            &url.relative
-        } else {
-            &url.absolute
-        };
-        (!path.is_empty() && !path.contains('\0')).then_some(CueBackground::Media(media, path))
+        let media = action
+            .media
+            .as_ref()
+            .filter(|media| media.layer == 0 && media.audio.is_none())?;
+        Some(CueBackground::Media(media, media_source(media)?))
     })
+}
+
+fn media_source(media: &wire::MediaAction) -> Option<&str> {
+    let url = media.element.as_ref()?.url.as_ref()?;
+    let path = if url.absolute.is_empty() {
+        &url.relative
+    } else {
+        &url.absolute
+    };
+    (!path.is_empty() && !path.contains('\0')).then_some(path)
 }
 
 pub(super) fn resolve_standalone_media(show: &mut ShowFile, source: &std::path::Path) {
@@ -1201,6 +1222,57 @@ mod tests {
         let verse = &show.ordered_slides()[1];
         assert_eq!(verse.lines, ["First line", "Second", "Another text box"]);
         assert_eq!(verse.notes, "• Note for the leader–‘team’");
+    }
+
+    #[test]
+    fn timeline_soundtrack_is_copied_and_linked_with_bundle_media() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        presentation.timeline = Some(wire::Timeline {
+            duration: 5.0,
+            audio_action: Some(wire::Action {
+                enabled: true,
+                kind: wire::ActionType::Media as i32,
+                media: Some(wire::MediaAction {
+                    audio: Some(wire::Audio {}),
+                    element: Some(wire::Media {
+                        url: Some(wire::Url {
+                            relative: "Backing.wav".into(),
+                            absolute: String::new(),
+                        }),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut bundle = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("Song.pro", presentation.encode_to_vec()),
+            ("Backing.wav", b"backing track".to_vec()),
+            ("sky blue.png", b"background".to_vec()),
+        ] {
+            bundle
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut bundle, &bytes).unwrap();
+        }
+        let root = std::env::temp_dir().join(crate::new_id());
+        let shows = super::super::propresenter::import_bundle(
+            &bundle.finish().unwrap().into_inner(),
+            &root,
+        )
+        .unwrap();
+        let show = &shows[0].show;
+        let (timeline, _) = crate::timeline_for_show(show).unwrap();
+        assert_eq!(timeline["actions"], json!([]));
+        assert_eq!(timeline["duration"], 5.0);
+        let soundtrack = timeline["soundtrack"].as_str().unwrap();
+        let path = std::path::Path::new(show["media"][soundtrack]["path"].as_str().unwrap());
+        assert!(path.starts_with(root.canonicalize().unwrap()));
+        assert_eq!(std::fs::read(path).unwrap(), b"backing track");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
