@@ -9,6 +9,12 @@ run a stage layout, play media, and control the show from the remote page.
 
 GPL-3.0-only.
 
+## Architecture
+
+The crate layout, UI-stack decision, performance budgets, and the remaining
+milestones to feature parity are in `docs/MIGRATION_PLAN.md`. This file stays
+the short working plan. Do not replace Slint or the headless compositor.
+
 ## Where the project is
 
 - The workspace builds and its tests pass.
