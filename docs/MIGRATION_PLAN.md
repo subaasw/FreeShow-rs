@@ -183,7 +183,7 @@ Acceptance: a church that already routes a stereo mix to NDI/RTMP/Icecast can al
 
 ### M5. Import parity
 
-- ProPresenter 7: remaining graphics, RTF controls, timelines, and unsupported cue actions.
+- [x] ProPresenter 7: element rotation, rounded rectangles, and other preset shapes as bounding-box fallbacks; presentation timelines on the active layout; unsupported cue actions warn and are not retargeted as media.
 - [x] PowerPoint solid-fill color transforms (saturation, hue, channel, invert, gray, complement) in document order.
 - [x] PowerPoint linear gradients, including theme `gradFill` styles and scheme colors, become a full-slide shape painted with CSS `linear-gradient`. The first stop is stored as `settings.color`. Empty theme `gradFill` entries stay unresolved.
 - [x] PowerPoint tiled and linked media: `a:tile` uses fit `tile` and repeats at the picture's source size; `r:link` http(s) images are stored as remote paths and fetched when presented. Other URL schemes and path traversal stay rejected.

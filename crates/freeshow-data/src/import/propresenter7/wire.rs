@@ -22,6 +22,30 @@ pub(super) struct Presentation {
     pub cues: Vec<Cue>,
     #[prost(message, optional, tag = "14")]
     pub ccli: Option<Ccli>,
+    #[prost(message, optional, tag = "17")]
+    pub timeline: Option<Timeline>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Timeline {
+    #[prost(message, repeated, tag = "1")]
+    pub cues: Vec<TimelineCue>,
+    #[prost(double, tag = "5")]
+    pub duration: f64,
+    #[prost(bool, tag = "6")]
+    pub r#loop: bool,
+    #[prost(message, repeated, tag = "11")]
+    pub cues_v2: Vec<TimelineCue>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct TimelineCue {
+    #[prost(double, tag = "1")]
+    pub trigger_time: f64,
+    #[prost(message, optional, tag = "2")]
+    pub cue_id: Option<Uuid>,
+    #[prost(string, tag = "3")]
+    pub name: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -102,10 +126,71 @@ pub(super) enum CompletionAction {
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct Action {
+    #[prost(enumeration = "ActionType", tag = "9")]
+    pub kind: i32,
     #[prost(message, optional, tag = "20")]
     pub media: Option<MediaAction>,
     #[prost(message, optional, tag = "23")]
     pub slide: Option<SlideAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+pub(super) enum ActionType {
+    Unknown = 0,
+    StageLayout = 1,
+    Media = 2,
+    Timer = 3,
+    Communication = 4,
+    Clear = 5,
+    Prop = 6,
+    Mask = 7,
+    Message = 8,
+    SocialMedia = 9,
+    Multiscreen = 10,
+    PresentationSlide = 11,
+    ForegroundMedia = 12,
+    BackgroundMedia = 13,
+    PresentationDocument = 14,
+    PropSlide = 15,
+    ExternalPresentation = 17,
+    AudienceLook = 18,
+    AudioInput = 19,
+    AudioBinPlaylist = 20,
+    MediaBinPlaylist = 21,
+    SlideDestination = 22,
+    Macro = 23,
+    ClearGroup = 24,
+}
+
+impl ActionType {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::StageLayout => "stage layout",
+            Self::Media => "media",
+            Self::Timer => "timer",
+            Self::Communication => "communication",
+            Self::Clear => "clear",
+            Self::Prop => "prop",
+            Self::Mask => "mask",
+            Self::Message => "message",
+            Self::SocialMedia => "social media",
+            Self::Multiscreen => "multiscreen",
+            Self::PresentationSlide => "slide",
+            Self::ForegroundMedia => "foreground media",
+            Self::BackgroundMedia => "background media",
+            Self::PresentationDocument => "presentation document",
+            Self::PropSlide => "prop slide",
+            Self::ExternalPresentation => "external presentation",
+            Self::AudienceLook => "audience look",
+            Self::AudioInput => "audio input",
+            Self::AudioBinPlaylist => "audio playlist",
+            Self::MediaBinPlaylist => "media playlist",
+            Self::SlideDestination => "slide destination",
+            Self::Macro => "macro",
+            Self::ClearGroup => "clear group",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -172,6 +257,14 @@ pub(super) struct Path {
 pub(super) struct Shape {
     #[prost(enumeration = "ShapeType", tag = "1")]
     pub kind: i32,
+    #[prost(message, optional, tag = "2")]
+    pub rounded_rectangle: Option<RoundedRectangle>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct RoundedRectangle {
+    #[prost(double, tag = "1")]
+    pub roundness: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
@@ -179,6 +272,15 @@ pub(super) enum ShapeType {
     Unknown = 0,
     Rectangle = 1,
     Ellipse = 2,
+    IsoscelesTriangle = 3,
+    RightTriangle = 4,
+    Rhombus = 5,
+    Star = 6,
+    Polygon = 7,
+    Custom = 8,
+    RightArrow = 9,
+    DoubleArrow = 10,
+    RoundedRectangle = 11,
 }
 
 #[derive(Clone, PartialEq, Message)]
