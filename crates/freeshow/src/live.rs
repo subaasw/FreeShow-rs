@@ -93,7 +93,56 @@ pub fn audience_frame(session: &Session) -> Frame {
         }
     }
     paint_overlays(&mut frame, session, false);
+    paint_interaction(&mut frame, session);
+    paint_drawing(&mut frame, session);
     frame
+}
+
+fn paint_interaction(frame: &mut Frame, session: &Session) {
+    let lines = session.interaction_lines();
+    if lines.is_empty() {
+        return;
+    }
+    composite_styled(
+        frame,
+        &lines_slide_at(&lines, true, session.output_width, session.output_height),
+    );
+}
+
+fn paint_drawing(frame: &mut Frame, session: &Session) {
+    let width = session.output_width as f32;
+    let height = session.output_height as f32;
+    let default_color = session.preferences.draw_color();
+    let default_size = session.preferences.draw_size();
+    for stroke in &session.draw_strokes {
+        if stroke.up {
+            continue;
+        }
+        let (x, y) = stroke_point(stroke.x, stroke.y, width, height);
+        let size = if stroke.size > 0.0 {
+            stroke.size
+        } else {
+            default_size
+        };
+        let radius = ((size * width / SOURCE_WIDTH) / 2.0).round() as i32;
+        let color = parse_color(if stroke.color.is_empty() {
+            &default_color
+        } else {
+            &stroke.color
+        })
+        .unwrap_or(Rgba::WHITE);
+        frame.fill_circle(x, y, radius.max(1), color);
+    }
+}
+
+fn stroke_point(x: f32, y: f32, width: f32, height: f32) -> (i32, i32) {
+    if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
+        return ((x * width).round() as i32, (y * height).round() as i32);
+    }
+    (
+        (x * width / SOURCE_WIDTH).round() as i32,
+        (y * height / SOURCE_HEIGHT).round() as i32,
+    )
 }
 
 fn paint_overlays(frame: &mut Frame, session: &Session, under_slide: bool) {

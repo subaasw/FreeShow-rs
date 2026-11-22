@@ -124,6 +124,37 @@ pub struct OutputPreference {
     pub kiosk: bool,
 }
 
+/// A named output scene from `settings_synced.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneSpec {
+    pub id: String,
+    pub name: String,
+    pub overlays: Vec<String>,
+    pub hidden_overlays: Vec<String>,
+    pub media: Option<String>,
+    pub action: Option<String>,
+}
+
+/// A stored interaction: either a quiz prompt or a simple action trigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionSpec {
+    pub id: String,
+    pub name: String,
+    pub questions: Vec<String>,
+    pub action: Option<String>,
+}
+
+/// One point or lift in a draw-on-output stroke, from `drawSettings`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawStroke {
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub color: String,
+    /// When true, this point ends the current stroke.
+    pub up: bool,
+}
+
 impl FreeShowPreferences {
     /// FreeShow's default clock is 24-hour.
     pub fn uses_12_hour_clock(&self) -> bool {
@@ -338,6 +369,122 @@ impl FreeShowPreferences {
     /// Formats a 24-hour `HH:MM:SS` clock, honoring `timeFormat` and seconds.
     pub fn format_clock(&self, clock_24: &str, seconds: bool) -> String {
         format_clock(clock_24, self.uses_12_hour_clock(), seconds)
+    }
+
+    /// The watermark overlay is shown when `special.watermark` is true.
+    pub fn watermark_enabled(&self) -> bool {
+        self.special.get("watermark").and_then(Value::as_bool) == Some(true)
+    }
+
+    /// Scene by id or case-insensitive name.
+    pub fn scene(&self, id_or_name: &str) -> Option<SceneSpec> {
+        let query = id_or_name.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let map = self.scenes.as_object()?;
+        if let Some(entry) = map.get(query) {
+            return Some(scene_spec(query, entry));
+        }
+        let wanted = query.to_ascii_lowercase();
+        map.iter().find_map(|(id, entry)| {
+            let name = entry.get("name").and_then(Value::as_str).unwrap_or(id);
+            (name.eq_ignore_ascii_case(&wanted) || id.eq_ignore_ascii_case(&wanted))
+                .then(|| scene_spec(id, entry))
+        })
+    }
+
+    pub fn scenes(&self) -> Vec<SceneSpec> {
+        let Some(map) = self.scenes.as_object() else {
+            return Vec::new();
+        };
+        map.iter()
+            .map(|(id, entry)| scene_spec(id, entry))
+            .collect()
+    }
+
+    /// Scene ids recorded for `output_id`, then `default`, then a bare list.
+    pub fn active_scene_ids(&self, output_id: &str) -> Vec<String> {
+        if let Some(map) = self.active_scenes.as_object() {
+            for key in [output_id, "default"] {
+                if key.is_empty() {
+                    continue;
+                }
+                if let Some(ids) = scene_id_list(map.get(key)) {
+                    return ids;
+                }
+            }
+            return Vec::new();
+        }
+        scene_id_list(Some(&self.active_scenes)).unwrap_or_default()
+    }
+
+    /// Interaction by id or case-insensitive name.
+    pub fn interaction(&self, id_or_name: &str) -> Option<InteractionSpec> {
+        let query = id_or_name.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let map = self.interactions.as_object()?;
+        if let Some(entry) = map.get(query) {
+            return Some(interaction_spec(query, entry));
+        }
+        let wanted = query.to_ascii_lowercase();
+        map.iter().find_map(|(id, entry)| {
+            let name = entry.get("name").and_then(Value::as_str).unwrap_or(id);
+            (name.eq_ignore_ascii_case(&wanted) || id.eq_ignore_ascii_case(&wanted))
+                .then(|| interaction_spec(id, entry))
+        })
+    }
+
+    pub fn interactions(&self) -> Vec<InteractionSpec> {
+        let Some(map) = self.interactions.as_object() else {
+            return Vec::new();
+        };
+        map.iter()
+            .map(|(id, entry)| interaction_spec(id, entry))
+            .collect()
+    }
+
+    /// Brush strokes stored under `drawSettings.paint.lines` or `drawSettings.lines`.
+    pub fn draw_strokes(&self) -> Vec<DrawStroke> {
+        let paint = self
+            .draw_settings
+            .get("paint")
+            .unwrap_or(&self.draw_settings);
+        let lines = paint
+            .get("lines")
+            .or_else(|| self.draw_settings.get("lines"))
+            .or_else(|| self.draw_settings.get("paintCache"));
+        parse_draw_strokes(lines)
+    }
+
+    pub fn draw_color(&self) -> String {
+        let paint = self
+            .draw_settings
+            .get("paint")
+            .unwrap_or(&self.draw_settings);
+        paint
+            .get("color")
+            .and_then(Value::as_str)
+            .or_else(|| self.draw_settings.get("color").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|color| !color.is_empty())
+            .unwrap_or("#ffff00")
+            .to_string()
+    }
+
+    pub fn draw_size(&self) -> f32 {
+        let paint = self
+            .draw_settings
+            .get("paint")
+            .unwrap_or(&self.draw_settings);
+        paint
+            .get("size")
+            .and_then(json_f32)
+            .or_else(|| self.draw_settings.get("size").and_then(json_f32))
+            .filter(|size| *size > 0.0)
+            .unwrap_or(12.0)
     }
 }
 
@@ -4325,6 +4472,93 @@ impl Library {
         fs::write(path, json.to_string()).is_ok()
     }
 
+    /// Editor text of stored variables as `name=value` lines.
+    pub fn variable_editor_text(&self) -> String {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut lines = Vec::new();
+        for (key, value) in self.variables() {
+            let name = variable_name_id(&key);
+            if name.is_empty() || !seen.insert(name.clone()) {
+                continue;
+            }
+            // Prefer the human name when this key is the raw id of a named variable.
+            let label = self.variable_label(&key).unwrap_or(name);
+            lines.push(format!("{label}={value}"));
+        }
+        lines.join("\n")
+    }
+
+    fn variable_label(&self, key: &str) -> Option<String> {
+        let json = self.synced_json()?;
+        let map = json.get("variables")?.as_object()?;
+        if let Some(name) = map
+            .get(key)
+            .and_then(|variable| variable.get("name"))
+            .and_then(Value::as_str)
+        {
+            return Some(name.to_string());
+        }
+        None
+    }
+
+    /// Creates or updates variables from `name=value` editor lines.
+    pub fn save_variables_text(&self, text: &str) -> bool {
+        let path = self.synced_settings_path();
+        let mut json = fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| serde_json::from_str(&body).ok())
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        if !json.is_object() {
+            json = Value::Object(Map::new());
+        }
+        let variables = json
+            .as_object_mut()
+            .unwrap()
+            .entry("variables")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !variables.is_object() {
+            *variables = Value::Object(Map::new());
+        }
+        let map = variables.as_object_mut().unwrap();
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let value = value.trim();
+            let id = variable_name_id(name);
+            let key = map
+                .iter()
+                .find_map(|(existing, entry)| {
+                    let stored = entry
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(existing);
+                    (stored == name || existing == &id || variable_name_id(stored) == id)
+                        .then(|| existing.clone())
+                })
+                .unwrap_or(id);
+            let entry = map.entry(key).or_insert_with(|| Value::Object(Map::new()));
+            if let Some(entry) = entry.as_object_mut() {
+                entry
+                    .entry("name")
+                    .or_insert_with(|| Value::String(name.to_string()));
+                entry.insert("text".to_string(), Value::String(value.to_string()));
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(path, json.to_string()).is_ok()
+    }
+
     /// Volume and mute of the main audio channel. Missing settings are full volume, unmuted.
     pub fn main_audio(&self) -> (f32, bool) {
         self.channel_audio("main")
@@ -5146,6 +5380,158 @@ fn string_ids(list: &[Value]) -> Vec<String> {
         .filter(|id| !id.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn scene_spec(id: &str, entry: &Value) -> SceneSpec {
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(id)
+        .trim()
+        .to_string();
+    let content = entry.get("content").unwrap_or(entry);
+    let media = content
+        .get("media")
+        .and_then(media_ref)
+        .or_else(|| entry.get("media").and_then(media_ref));
+    let action = entry
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    SceneSpec {
+        id: id.to_string(),
+        name: if name.is_empty() {
+            id.to_string()
+        } else {
+            name
+        },
+        overlays: string_list(content.get("overlays")),
+        hidden_overlays: string_list(content.get("hiddenOverlays")),
+        media,
+        action,
+    }
+}
+
+fn scene_id_list(value: Option<&Value>) -> Option<Vec<String>> {
+    let value = value?;
+    if let Some(list) = value.as_array() {
+        let ids = string_ids(list);
+        return (!ids.is_empty()).then_some(ids);
+    }
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| vec![id.to_string()])
+}
+
+fn media_ref(value: &Value) -> Option<String> {
+    if let Some(path) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        return Some(path.to_string());
+    }
+    for key in ["path", "id", "name"] {
+        if let Some(path) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    scene_id_list(value).unwrap_or_default()
+}
+
+fn interaction_spec(id: &str, entry: &Value) -> InteractionSpec {
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(id)
+        .trim()
+        .to_string();
+    let action = entry
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut questions = Vec::new();
+    if let Some(inputs) = entry.get("inputs").and_then(Value::as_array) {
+        for input in inputs {
+            if let Some(question) = input
+                .get("question")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|question| !question.is_empty())
+            {
+                questions.push(question.to_string());
+            }
+        }
+    }
+    InteractionSpec {
+        id: id.to_string(),
+        name: if name.is_empty() {
+            id.to_string()
+        } else {
+            name
+        },
+        questions,
+        action,
+    }
+}
+
+fn parse_draw_strokes(value: Option<&Value>) -> Vec<DrawStroke> {
+    let Some(list) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            if entry
+                .as_str()
+                .is_some_and(|flag| flag.eq_ignore_ascii_case("mouseup"))
+            {
+                return Some(DrawStroke {
+                    x: 0.0,
+                    y: 0.0,
+                    size: 0.0,
+                    color: String::new(),
+                    up: true,
+                });
+            }
+            let x = entry.get("x").and_then(json_f32)?;
+            let y = entry.get("y").and_then(json_f32)?;
+            Some(DrawStroke {
+                x,
+                y,
+                size: entry.get("size").and_then(json_f32).unwrap_or(12.0),
+                color: entry
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                up: false,
+            })
+        })
+        .collect()
+}
+
+fn json_f32(value: &Value) -> Option<f32> {
+    value
+        .as_f64()
+        .map(|number| number as f32)
+        .or_else(|| value.as_i64().map(|number| number as f32))
+        .or_else(|| value.as_u64().map(|number| number as f32))
+        .or_else(|| value.as_str()?.parse().ok())
 }
 
 /// FreeShow's default library folder, when it already exists on this machine.
