@@ -1,0 +1,480 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Settings, Inspector and Stage editor panels. Every edit calls back with one
+// key/value pair; Rust validates it, writes the library file, and refreshes `data`.
+
+import { CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, Switch, TabWidget } from "std-widgets.slint";
+import { OperatorStyle, BoxButton, HeaderButton, ListRow } from "widgets.slint";
+
+export struct SettingsData {
+    language: string,
+    time-format: string,
+    autosave: string,
+    alert-updates: bool,
+    auto-output: bool,
+    out-locked: bool,
+    full-colors: bool,
+    labels-disabled: bool,
+    group-numbers: bool,
+    split-lines: int,
+    remote-port: int,
+    stage-port: int,
+    max-connections: int,
+    theme: string,
+    profiles: string,
+}
+
+export struct InspectorData {
+    has-item: bool,
+    family: string,
+    font-px: int,
+    bold: bool,
+    italic: bool,
+    color: string,
+    align: string,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    background: string,
+    radius: int,
+}
+
+export struct StageRowData {
+    id: string,
+    kind: string,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    font-px: int,
+    color: string,
+}
+
+component FieldLabel inherits Text {
+    in property <color> text-color;
+    color: root.text-color;
+    font-size: 12px * OperatorStyle.font-scale;
+    vertical-alignment: center;
+    min-width: 96px;
+}
+
+component SettingLabel inherits FieldLabel {
+    width: 160px;
+    horizontal-stretch: 0;
+}
+
+component PanelHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> status;
+    in property <color> text-color;
+    in property <color> close-fill;
+    callback close();
+    spacing: 8px;
+    height: 32px;
+    Text {
+        text: root.title;
+        color: root.text-color;
+        font-size: 15px * OperatorStyle.font-scale;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.status;
+        color: root.text-color;
+        font-size: 12px * OperatorStyle.font-scale;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+    HeaderButton {
+        label: "Close";
+        accent: root.close-fill;
+        text-color: root.text-color;
+        accent-text: root.text-color;
+        clicked => { root.close(); }
+    }
+}
+
+global Fmt {
+    public pure function flag(on: bool) -> string {
+        return on ? "true" : "false";
+    }
+}
+
+export component SettingsPanel inherits Rectangle {
+    in property <SettingsData> data;
+    in property <[string]> themes;
+    in property <[string]> autosave-choices;
+    in property <string> status;
+    in property <color> text-color;
+    in property <color> close-fill;
+    callback apply(string, string);
+    callback close();
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+        PanelHeader {
+            title: "Settings";
+            status: root.status;
+            text-color: root.text-color;
+            close-fill: root.close-fill;
+            close => { root.close(); }
+        }
+        TabWidget {
+            Tab {
+                title: "General";
+                VerticalLayout {
+                alignment: start;
+                GridLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Row {
+                        SettingLabel { text: "Language"; text-color: root.text-color; }
+                        LineEdit {
+                            text: root.data.language;
+                            placeholder-text: "en";
+                            accepted(value) => { root.apply("language", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Time format"; text-color: root.text-color; }
+                        ComboBox {
+                            model: ["24", "12"];
+                            current-value: root.data.time-format;
+                            selected(value) => { root.apply("timeFormat", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Autosave"; text-color: root.text-color; }
+                        ComboBox {
+                            model: root.autosave-choices;
+                            current-value: root.data.autosave;
+                            selected(value) => { root.apply("autosave", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Updates"; text-color: root.text-color; }
+                        Switch {
+                            text: "Alert when a new version is released";
+                            checked: root.data.alert-updates;
+                            toggled => { root.apply("alertUpdates", Fmt.flag(self.checked)); }
+                        }
+                    }
+                }
+                }
+            }
+            Tab {
+                title: "Display";
+                VerticalLayout {
+                alignment: start;
+                GridLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Row {
+                        SettingLabel { text: "Theme"; text-color: root.text-color; }
+                        ComboBox {
+                            colspan: 2;
+                            model: root.themes;
+                            current-value: root.data.theme;
+                            selected(value) => { root.apply("theme", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Outputs"; text-color: root.text-color; }
+                        Switch {
+                            text: "Open output on startup";
+                            checked: root.data.auto-output;
+                            toggled => { root.apply("autoOutput", Fmt.flag(self.checked)); }
+                        }
+                        Switch {
+                            text: "Lock output";
+                            checked: root.data.out-locked;
+                            toggled => { root.apply("outLocked", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Slides"; text-color: root.text-color; }
+                        Switch {
+                            text: "Full group colors";
+                            checked: root.data.full-colors;
+                            toggled => { root.apply("fullColors", Fmt.flag(self.checked)); }
+                        }
+                        Switch {
+                            text: "Group numbers";
+                            checked: root.data.group-numbers;
+                            toggled => { root.apply("groupNumbers", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Labels"; text-color: root.text-color; }
+                        Switch {
+                            text: "Hide button labels";
+                            checked: root.data.labels-disabled;
+                            toggled => { root.apply("labelsDisabled", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Split lines"; text-color: root.text-color; }
+                        SpinBox {
+                            colspan: 2;
+                            minimum: 0;
+                            maximum: 20;
+                            value: root.data.split-lines;
+                            edited(value) => { root.apply("splitLines", value); }
+                        }
+                    }
+                }
+                }
+            }
+            Tab {
+                title: "Connection";
+                VerticalLayout {
+                alignment: start;
+                GridLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Row {
+                        SettingLabel { text: "Remote port"; text-color: root.text-color; }
+                        SpinBox {
+                            minimum: 1024;
+                            maximum: 65535;
+                            value: root.data.remote-port;
+                            edited(value) => { root.apply("remotePort", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Stage port"; text-color: root.text-color; }
+                        SpinBox {
+                            minimum: 1024;
+                            maximum: 65535;
+                            value: root.data.stage-port;
+                            edited(value) => { root.apply("stagePort", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Connections"; text-color: root.text-color; }
+                        SpinBox {
+                            minimum: 0;
+                            maximum: 10000;
+                            value: root.data.max-connections;
+                            edited(value) => { root.apply("maxConnections", value); }
+                        }
+                    }
+                    Row {
+                        Text {
+                            colspan: 2;
+                            text: "Port changes apply the next time FreeShow starts.";
+                            color: root.text-color;
+                            font-size: 12px * OperatorStyle.font-scale;
+                        }
+                    }
+                }
+                }
+            }
+            Tab {
+                title: "Profiles";
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: root.data.profiles;
+                        color: root.text-color;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "Profiles are created in FreeShow and synced through settings_synced.json.";
+                        color: root.text-color;
+                        font-size: 12px * OperatorStyle.font-scale;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component InspectorPanel inherits VerticalLayout {
+    in property <InspectorData> data;
+    in property <color> text-color;
+    callback set(string, string);
+    spacing: 6px;
+    HorizontalLayout {
+        spacing: 6px;
+        LineEdit {
+            horizontal-stretch: 2;
+            enabled: root.data.has-item;
+            text: root.data.family;
+            placeholder-text: "Font family";
+            accepted(value) => { root.set("font-family", value); }
+        }
+        SpinBox {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            minimum: 12;
+            maximum: 400;
+            value: root.data.font-px;
+            edited(value) => { root.set("font-size", value); }
+        }
+        CheckBox {
+            text: "Bold";
+            enabled: root.data.has-item;
+            checked: root.data.bold;
+            toggled => { root.set("bold", Fmt.flag(self.checked)); }
+        }
+        CheckBox {
+            text: "Italic";
+            enabled: root.data.has-item;
+            checked: root.data.italic;
+            toggled => { root.set("italic", Fmt.flag(self.checked)); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Color"; text-color: root.text-color; min-width: 48px; }
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            text: root.data.color;
+            placeholder-text: "#FFFFFF";
+            accepted(value) => { root.set("color", value); }
+        }
+        FieldLabel { text: "Align"; text-color: root.text-color; min-width: 40px; }
+        ComboBox {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            model: ["left", "center", "right", "justify"];
+            current-value: root.data.align == "" ? "center" : root.data.align;
+            selected(value) => { root.set("align", value); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "X"; text-color: root.text-color; min-width: 16px; }
+        SpinBox { enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.x; edited(value) => { root.set("left", value); } }
+        FieldLabel { text: "Y"; text-color: root.text-color; min-width: 16px; }
+        SpinBox { enabled: root.data.has-item; minimum: -8000; maximum: 8000; value: root.data.y; edited(value) => { root.set("top", value); } }
+        FieldLabel { text: "W"; text-color: root.text-color; min-width: 16px; }
+        SpinBox { enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.w; edited(value) => { root.set("width", value); } }
+        FieldLabel { text: "H"; text-color: root.text-color; min-width: 16px; }
+        SpinBox { enabled: root.data.has-item; minimum: 1; maximum: 8000; value: root.data.h; edited(value) => { root.set("height", value); } }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Background"; text-color: root.text-color; min-width: 72px; }
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            text: root.data.background;
+            placeholder-text: "none";
+            accepted(value) => { root.set("background-color", value); }
+        }
+        FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 44px; }
+        SpinBox { enabled: root.data.has-item; minimum: 0; maximum: 2000; value: root.data.radius; edited(value) => { root.set("border-radius", value); } }
+    }
+}
+
+export component StageEditorPanel inherits Rectangle {
+    in property <string> layout-name;
+    in property <[StageRowData]> rows;
+    in property <[string]> add-kinds;
+    in property <string> status;
+    in-out property <int> selected: 0;
+    in property <color> text-color;
+    in property <color> accent;
+    in property <color> accent-text;
+    in property <color> close-fill;
+    callback set(string, string, string);
+    callback add(string);
+    callback remove(string);
+    callback close();
+    property <StageRowData> current: root.rows[min(root.selected, root.rows.length - 1)];
+    property <string> add-kind: "slide";
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+        PanelHeader {
+            title: "Stage editor · " + root.layout-name;
+            status: root.status;
+            text-color: root.text-color;
+            close-fill: root.close-fill;
+            close => { root.close(); }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                width: 240px;
+                spacing: 6px;
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        for row[index] in root.rows: ListRow {
+                            label: row.id + " · " + row.kind;
+                            active: index == root.selected;
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.selected = index; }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.add-kinds;
+                        current-value: root.add-kind;
+                        selected(value) => { root.add-kind = value; }
+                    }
+                    BoxButton {
+                        label: "Add item";
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        accent-text: root.accent-text;
+                        clicked => { root.add(root.add-kind); }
+                    }
+                }
+            }
+            if root.rows.length > 0: VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: start;
+            GridLayout {
+                    spacing: 8px;
+                    Row {
+                        FieldLabel { text: "Left"; text-color: root.text-color; }
+                        SpinBox { minimum: -8000; maximum: 8000; value: root.current.x; edited(value) => { root.set(root.current.id, "left", value); } }
+                        FieldLabel { text: "Top"; text-color: root.text-color; }
+                        SpinBox { minimum: -8000; maximum: 8000; value: root.current.y; edited(value) => { root.set(root.current.id, "top", value); } }
+                    }
+                    Row {
+                        FieldLabel { text: "Width"; text-color: root.text-color; }
+                        SpinBox { minimum: 1; maximum: 8000; value: root.current.w; edited(value) => { root.set(root.current.id, "width", value); } }
+                        FieldLabel { text: "Height"; text-color: root.text-color; }
+                        SpinBox { minimum: 1; maximum: 8000; value: root.current.h; edited(value) => { root.set(root.current.id, "height", value); } }
+                    }
+                    Row {
+                        FieldLabel { text: "Font size"; text-color: root.text-color; }
+                        SpinBox { minimum: 8; maximum: 800; value: root.current.font-px; edited(value) => { root.set(root.current.id, "font-size", value); } }
+                        FieldLabel { text: "Color"; text-color: root.text-color; }
+                        LineEdit {
+                            text: root.current.color;
+                            placeholder-text: "#FFFFFF";
+                            accepted(value) => { root.set(root.current.id, "color", value); }
+                        }
+                    }
+                    Row {
+                        BoxButton {
+                            col: 3;
+                            label: "Remove item";
+                            accent: root.close-fill;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.remove(root.current.id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -14,7 +14,7 @@ pub use settings::{
     AppSettings, SettingsError, WindowPlacement, WindowProfile, config_dir, next_output_monitor,
     output_monitor_index,
 };
-pub use theme::{Rgb, Rgba, ThemePalette, theme_by_name};
+pub use theme::{BUILT_IN_THEMES, Rgb, Rgba, ThemePalette, theme_by_name};
 
 #[cfg(test)]
 mod tests {
