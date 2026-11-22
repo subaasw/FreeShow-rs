@@ -4,9 +4,9 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 
 ## Score
 
-- **Feature-weighted parity: 95.6%**
-- Sub-features: **85 done / 5 partial / 8 not-yet** (98 leaves).
-- Area rows (derived from leaves): **9 done / 8 partial / 0 not-yet** (17 areas).
+- **Feature-weighted parity: 96.3%**
+- Sub-features: **86 done / 4 partial / 8 not-yet** (98 leaves).
+- Area rows (derived from leaves): **10 done / 7 partial / 0 not-yet** (17 areas).
 - Scoring: each leaf has a weight (Sunday-operator impact). `done` scores 1, `partial` scores 1/2, `not-yet` scores 0. The percentage is `100 × Σ(weight × score) / Σ(weight)`. Credential-gated work is included as `not-yet` so the number stays honest about 1.6.8.
 
 ## Areas
@@ -14,7 +14,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Area | Status | Area % | Notes |
 | --- | --- | ---: | --- |
 | Cargo workspace, GPL-3.0, README | done | 100% | 1 done |
-| Slint operator window | partial | 93% | 10 done, 1 partial |
+| Slint operator window | done | 100% | 11 done |
 | Output and stage windows | partial | 97% | 6 done, 1 partial |
 | Theme colors | done | 100% | 3 done |
 | Settings file and logging | done | 100% | 1 done |
@@ -53,7 +53,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Drawer height, always-on-top, kiosk | done | 0.6 | Bottom drawer height and window flags |
 | Named window-layout profiles | done | 0.7 | Stored placements for operator/output/stage |
 | Header Search and panel widths | done | 0.5 | `resized` left/right widths |
-| Full Electron settings/editor suite | partial | 1.5 | Settings page with General/Display/Connection/Profiles tabs (switches, combo boxes, spin boxes) writes validated keys to `settings.json`; Styles, Outputs and the theme editor are not cloned yet |
+| Full Electron settings/editor suite | done | 1.5 | Settings page with General/Display/Theme/Outputs/Styles/Connection/Profiles tabs: Styles adds, picks and edits output styles (background painted on the output), Outputs adds, renames, removes and sets each output's style and window options, and Theme edits colours, font, size and corners, duplicates or resets a theme; all write validated keys to `settings.json` |
 
 ### Output and stage windows
 
@@ -159,7 +159,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Load and paint stage layouts | done | 2 | Includes next-slide, notes, clock, timer |
 | Stage cameras, web, and chart boxes | done | 1.5 |  |
 | Stage as a second NDI/WebRTC picture | done | 1 |  |
-| Every Electron stage-item editor pane | partial | 0.5 | Stage editor page lists items, edits position, size, font size and color, adds/removes items, and saves `Config/stage.json` without dropping other layouts or unknown fields; per-type options (timer, clock, media) are not cloned |
+| Every Electron stage-item editor pane | partial | 0.5 | Stage editor lists items by name, edits position, size, font size, color and align, plus each type's own options (current/next/after-next slide and max lines, clock seconds and date format, which timer to follow, free text), shows a live layout preview with the picked item outlined, and saves `Config/stage.json` (FreeShow `slideOffset`, `clock`, `timer`) without dropping other layouts, unknown fields or styled text runs; media, slide-tracker and variable item options are not cloned |
 
 ### Show importers
 
@@ -226,8 +226,8 @@ M7 is **not** complete. The lists below are the honest leftovers after the no-cr
 - Native MediaShout `.mdb` (not a viable pure-Rust path; XML/SSC/JSON dumps import).
 - Embedded live PowerPoint playback (import already works).
 - A bundled local speech-to-text model (Functions → AI already rewrites a slide through Ollama when `FREESHOW_AI` is set).
-- A full visual clone of every Electron settings, inspector, and stage-editor control (text panes, typography color/align, and `stage.json` save are in).
-- Pixel-perfect Electron window chrome, and every output-window always-on-top / kiosk flag.
+- A full visual clone of every Electron inspector control (shadows, line height, letter spacing, filters, transitions) and the media, slide-tracker and variable stage-item panes. Settings now has Theme, Outputs and Styles tabs, and the stage editor has per-type clock, timer, next-slide and text panes.
+- Pixel-perfect Electron window chrome (native windows are used). Output-window always-on-top and kiosk are set per output from Settings → Outputs.
 - Item box-shadow, pixel radius, and backdrop-filter typography extras called out from M3.
 
 ### Credential-gated leftovers
@@ -244,6 +244,10 @@ M7 is **not** complete. The lists below are the honest leftovers after the no-cr
 
 - Used in the operator UI or import path: `splitLines`, `customFonts`, `resized` panel widths, header Search, `fullColors`, `slidesOptions` columns/mode, `drawer` height, `shortcuts`, `special.guideSeen` / `special.focusMode` / `special.watermark` / `special.outputDelayMs` (real frame buffer, default 0), `activeScenes`, synced `scenes` / `interactions` / `drawSettings` / `playerVideos`, output variables, `effectsLibrary` live effects, `audioEffects` (gain plus the PCM DSP chain), `timeline` zoom plus show-timeline cues, `alertUpdates` banner, and synced `profiles` login.
 - Still stored but not fully used in chrome: `cloudSyncData`, `driveData`, `contentProviderData`, and `ai`. `metronome` and `timecode` drive the footer; `obsData` is used for OBS when `FREESHOW_OBS` is unset.
+
+### Performance check (23 Nov 2026, Asia/Katmandu)
+
+A release `freeshow --check-perf` on the shared Linux box, at 1920×1080, best of five runs: cold open ~12 ms, idle RSS ~31 MB, stills ~377 fps, unsynced 1080p video ~82 fps, Go/Next ~3.0 ms, remote button ~2.9 ms, 1,000-show scan ~11 ms. All under budget. Runs taken while other builds were busy on the box were slower (one run had Go/Next at 55 ms and video at 18 fps), so judge the numbers on a quiet machine. The framed release app with its output and stage windows open idles below 1% CPU on Xvfb.
 
 ### Packaging
 
