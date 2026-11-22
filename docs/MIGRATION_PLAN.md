@@ -174,7 +174,7 @@ Acceptance: a `stage.json` from Electron renders every box type the Sunday opera
 
 ### M4. Network media and multi-picture output
 
-- [x] OMT and WebRTC (WHIP) destinations are read from the library, including stage pictures. OMT uses `omtData.name` or `FreeShow OMT - <output name>` but does not broadcast without the Open Media Transport runtime (not bundled). WebRTC reads `webrtcData.url` and an optional token; a tested WHIP client posts `application/sdp` offers. The webrtcbin encode path is not compiled because CI images lack the GStreamer WebRTC development library.
+- [x] OMT and WebRTC (WHIP) destinations are read from the library, including stage pictures. OMT uses `omtData.name` or `FreeShow OMT - <output name>` but does not broadcast without the Open Media Transport runtime (not bundled). WebRTC reads `webrtcData.url` and an optional token. The default `webrtc` cargo feature links `gstreamer-webrtc` when the host provides `gstreamer-webrtc-1.0` (Ubuntu/Debian `libgstreamer-plugins-bad1.0-dev` plus the `gstreamer1.0-nice` plugin, Homebrew `gstreamer`, and the Windows MSVC devel installer). Enabled outputs encode H.264 through webrtcbin, post a WHIP `application/sdp` offer with a Bearer token when one is stored, apply the answer, and send the matching audience or stage picture.
 - [x] Multiple independent NDI pictures and stage NDI. Grouped NDI stays disabled because ndisink has no discovery-group property.
 - Keep Icecast / RTMP / stereo network routes working; add tests for any new transport at the crate that owns it.
 - [x] Stream-only Lessons.church pages with no direct media URL are published as remote media paths (YouTube, Vimeo, HLS/DASH). Direct HTTP clips play through uridecodebin; player pages are imported but not downloaded.

@@ -19,7 +19,7 @@ SYSTEM = re.compile(r"^(?:linux-vdso|ld-linux|lib(?:c|m|pthread|dl|rt|resolv|uti
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png autodetect rtmp
-videoparsersbad flv x264 videotestsrc audiotestsrc shout2 alsa pulseaudio video4linux2""".split()
+videoparsersbad flv x264 videotestsrc audiotestsrc shout2 alsa pulseaudio video4linux2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 # Winit/wgpu can load these at runtime rather than through DT_NEEDED.
 DISPLAY_LIBS = """libxkbcommon.so.0 libX11.so.6 libXcursor.so.1 libXrandr.so.2
 libXi.so.6 libXext.so.6 libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1""".split()

@@ -855,8 +855,57 @@ fn ndi() -> &'static NdiBroadcast {
     })
 }
 
+struct WebrtcBroadcast {
+    audience: Vec<freeshow_record::WebrtcSender>,
+    stage: Vec<freeshow_record::WebrtcSender>,
+}
+
+impl WebrtcBroadcast {
+    fn open(session: &session::Session) -> Self {
+        let mut audience = Vec::new();
+        let mut stage = Vec::new();
+        for target in session.webrtc_outputs() {
+            let Some(sender) = freeshow_record::WebrtcSender::open(
+                &target.url,
+                target.token.as_deref(),
+                OUTPUT_WIDTH,
+                OUTPUT_HEIGHT,
+            ) else {
+                tracing::warn!("WebRTC output {} did not start", target.id);
+                continue;
+            };
+            if target.stage {
+                stage.push(sender);
+            } else {
+                audience.push(sender);
+            }
+        }
+        Self { audience, stage }
+    }
+
+    fn submit(&self, picture: NetworkPicture, pixels: &[u8], width: u32, height: u32) {
+        let senders = match picture {
+            NetworkPicture::Audience => &self.audience,
+            NetworkPicture::Stage => &self.stage,
+        };
+        for sender in senders {
+            sender.submit(pixels, width, height);
+        }
+    }
+}
+
+static WEBRTC: std::sync::OnceLock<WebrtcBroadcast> = std::sync::OnceLock::new();
+
+fn webrtc_out() -> &'static WebrtcBroadcast {
+    WEBRTC.get_or_init(|| WebrtcBroadcast {
+        audience: Vec::new(),
+        stage: Vec::new(),
+    })
+}
+
 fn submit_network(picture: NetworkPicture, frame: &Frame) {
     ndi().submit(picture, &frame.pixels, frame.width, frame.height);
+    webrtc_out().submit(picture, &frame.pixels, frame.width, frame.height);
     if matches!(picture, NetworkPicture::Audience) {
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
     }
@@ -1541,6 +1590,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("{warning}");
     }
     let _ = NDI.set(NdiBroadcast::open(&session));
+    let _ = WEBRTC.set(WebrtcBroadcast::open(&session));
     session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show

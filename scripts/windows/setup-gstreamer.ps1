@@ -14,3 +14,6 @@ if ($process.ExitCode -ne 0) { throw "GStreamer installer exited with $($process
 if (!(Test-Path "$Destination\lib\pkgconfig\gstreamer-1.0.pc")) {
     throw "GStreamer development files are missing from $Destination"
 }
+if (!(Test-Path "$Destination\lib\pkgconfig\gstreamer-webrtc-1.0.pc")) {
+    throw "GStreamer WebRTC development files are missing from $Destination"
+}

@@ -12,5 +12,11 @@ freeshow-core = { path = "../freeshow-core" }
 freeshow-media = { path = "../freeshow-media" }
 gstreamer = "0.23"
 gstreamer-app = "0.23"
+gstreamer-sdp = { version = "0.23", optional = true }
+gstreamer-webrtc = { version = "0.23", optional = true }
 tracing = "0.1"
 ureq = "2.12"
+
+[features]
+default = ["webrtc"]
+webrtc = ["dep:gstreamer-webrtc", "dep:gstreamer-sdp"]

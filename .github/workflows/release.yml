@@ -35,6 +35,7 @@ jobs:
           pkgconfig="$(brew --prefix)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=$pkgconfig" >> "$GITHUB_ENV"
           echo "gstreamer=$(PKG_CONFIG_PATH="$pkgconfig" pkg-config --modversion gstreamer-1.0)" >> "$GITHUB_OUTPUT"
+          PKG_CONFIG_PATH="$pkgconfig" pkg-config --exists gstreamer-webrtc-1.0
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Restore native compilation cache
