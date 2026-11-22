@@ -184,7 +184,8 @@ Acceptance: a church that already routes a stereo mix to NDI/RTMP/Icecast can al
 ### M5. Import parity
 
 - ProPresenter 7: remaining graphics, RTF controls, timelines, and unsupported cue actions.
-- [x] PowerPoint solid-fill color transforms (saturation, hue, channel, invert, gray, complement) in document order. Gradients, linked or tiled media, and rich objects remain.
+- [x] PowerPoint solid-fill color transforms (saturation, hue, channel, invert, gray, complement) in document order.
+- [x] PowerPoint linear gradients, including theme `gradFill` styles and scheme colors, become a full-slide shape painted with CSS `linear-gradient`. The first stop is stored as `settings.color`. Empty theme `gradFill` entries stay unresolved. Linked or tiled media and rich objects remain.
 - Backgrounds from other import formats still listed as incomplete in `PARITY.md`.
 
 Acceptance: the fixtures in `crates/freeshow-data/tests/fixtures` plus a documented set of real `.pro` / `.pptx` samples present with original backgrounds, typography, and slide order. Unsupported features warn; they never crash or silently retarget media.

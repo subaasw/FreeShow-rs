@@ -16,7 +16,7 @@ use super::{Section, attribute, file_stem_str, local_name, show_file};
 use crate::{DataError, ShowFile};
 
 mod theme;
-use theme::{Color, ThemeReader};
+use theme::{Color, GradientFill, ResolvedFill, ThemeReader};
 
 const XML_LIMIT: u64 = 8 * 1024 * 1024;
 const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
@@ -33,6 +33,11 @@ enum Background {
         part: String,
         crop: [f64; 4],
         inset: [f64; 4],
+    },
+    Gradient(GradientFill),
+    CssGradient {
+        css: String,
+        first: String,
     },
     Unsupported,
 }
@@ -78,12 +83,8 @@ pub(super) fn import(
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
         let (lines, disabled) = slide_text(&xml)?;
-        let fill = match find_background(&mut archive, &mut cached, part, Some(&xml), 0)? {
-            Some(Background::Theme { style, color }) => themes
-                .resolve(&mut archive, part, &xml, style, color.as_ref())?
-                .map(Background::Color),
-            fill => fill,
-        };
+        let found = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
+        let fill = realize_background(&mut themes, &mut archive, part, &xml, found)?;
         if let Some(Background::Picture { part, .. }) = &fill
             && media.is_some()
             && !assets.contains_key(part)
@@ -125,17 +126,7 @@ pub(super) fn import(
             height * 0.78
         ));
         match fill {
-            Some(Background::Color(color)) => {
-                let channels = u32::from_str_radix(&color[1..], 16).map_err(invalid)?;
-                let luminance = 299 * ((channels >> 16) & 255)
-                    + 587 * ((channels >> 8) & 255)
-                    + 114 * (channels & 255);
-                slide["settings"]["color"] = json!(color);
-                if luminance >= 155_000 {
-                    let style = slide["items"][0]["style"].as_str().unwrap();
-                    slide["items"][0]["style"] = json!(format!("{style}color:#000000;"));
-                }
-            }
+            Some(Background::Color(color)) => apply_solid_color(slide, &color)?,
             Some(Background::Picture { part, crop, inset }) if files.contains_key(&part) => {
                 let [left, top, right, bottom] = inset;
                 let style = format!(
@@ -151,6 +142,17 @@ pub(super) fn import(
                     "type":"media", "style":style, "fit":"fill", "src":files[&part],
                     "cropping":{"type":"ppt","left":crop[0],"top":crop[1],"right":crop[2],"bottom":crop[3]}
                 }));
+            }
+            Some(Background::CssGradient { css, first }) => {
+                apply_solid_color(slide, &first)?;
+                slide["items"].as_array_mut().unwrap().insert(
+                    0,
+                    json!({
+                        "type":"shape",
+                        "style":format!("left:0px;top:0px;width:1920px;height:{height}px;background:{css};"),
+                        "lines":[]
+                    }),
+                );
             }
             _ => {}
         }
@@ -277,6 +279,10 @@ fn find_background(
     let mut crop = [0.0; 4];
     let mut inset = [0.0; 4];
     let mut tiled = false;
+    let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
+    let mut gradient_angle = 90.0;
+    let mut gs_pos = None;
+    let mut gs_color = None;
     loop {
         match reader.read_event().map_err(invalid)? {
             Event::Start(element) => {
@@ -288,22 +294,50 @@ fn find_background(
                         (Some("bg"), "bgRef") => {
                             style = attribute(&element, "idx").and_then(|idx| idx.parse().ok());
                         }
-                        (Some("solidFill" | "bgRef"), "srgbClr" | "sysClr" | "schemeClr") => {
-                            color = Color::parse(&name, |key| attribute(&element, key));
+                        (
+                            Some("solidFill" | "bgRef" | "gs"),
+                            "srgbClr" | "sysClr" | "schemeClr",
+                        ) => {
+                            let parsed = Color::parse(&name, |key| attribute(&element, key));
+                            if stack.iter().any(|name| name == "gs") {
+                                gs_color = parsed;
+                            } else {
+                                color = parsed;
+                            }
                         }
                         (Some("srgbClr" | "sysClr" | "schemeClr"), _)
                             if stack.len() >= 2
                                 && matches!(
                                     stack[stack.len() - 2].as_str(),
-                                    "solidFill" | "bgRef"
+                                    "solidFill" | "bgRef" | "gs"
                                 ) =>
                         {
                             let value = attribute(&element, "val");
-                            color = color.and_then(|mut color| {
-                                color
-                                    .add_transform(&name, value.as_deref())
-                                    .then_some(color)
-                            });
+                            let apply = |color: Option<Color>| {
+                                color.and_then(|mut color| {
+                                    color
+                                        .add_transform(&name, value.as_deref())
+                                        .then_some(color)
+                                })
+                            };
+                            if stack.iter().any(|name| name == "gs") {
+                                gs_color = apply(gs_color);
+                            } else {
+                                color = apply(color);
+                            }
+                        }
+                        (Some("gsLst") | Some("gradFill"), "gs") => {
+                            gs_pos = attribute(&element, "pos")
+                                .and_then(|value| theme_percentage(&value));
+                            gs_color = None;
+                        }
+                        (Some("gradFill"), "lin") => {
+                            if let Some(raw) = attribute(&element, "ang")
+                                && let Ok(value) = raw.parse::<f64>()
+                                && value.is_finite()
+                            {
+                                gradient_angle = 90.0 - value / 60_000.0;
+                            }
                         }
                         (Some("blipFill"), "blip") => {
                             picture = relationship_attr(&element, "embed")
@@ -317,6 +351,11 @@ fn find_background(
                 stack.push(name);
             }
             Event::End(_) => {
+                if stack.last().map(String::as_str) == Some("gs")
+                    && let (Some(pos), Some(color)) = (gs_pos.take(), gs_color.take())
+                {
+                    gradient_stops.push((pos.clamp(0.0, 1.0), color));
+                }
                 stack.pop();
                 if depth == Some(stack.len()) {
                     break;
@@ -326,6 +365,13 @@ fn find_background(
             _ => {}
         }
     }
+    let gradient = (gradient_stops.len() >= 2).then(|| {
+        gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
+        GradientFill {
+            angle: gradient_angle,
+            stops: gradient_stops,
+        }
+    });
     let fill = if let Some(id) = picture.filter(|_| !tiled) {
         relationships(archive, part)?
             .into_iter()
@@ -343,6 +389,8 @@ fn find_background(
                 inset,
             })
             .or(Some(Background::Unsupported))
+    } else if let Some(gradient) = gradient {
+        Some(Background::Gradient(gradient))
     } else if style.is_none()
         && let Some(rgb) = color.as_ref().and_then(Color::literal)
     {
@@ -495,6 +543,56 @@ fn percentages(element: &BytesStart<'_>) -> [f64; 4] {
         result[3] = 0.0;
     }
     result
+}
+
+fn realize_background(
+    themes: &mut ThemeReader,
+    archive: &mut Archive<'_>,
+    part: &str,
+    xml: &str,
+    fill: Option<Background>,
+) -> Result<Option<Background>, DataError> {
+    Ok(match fill {
+        Some(Background::Theme { style, color }) => {
+            match themes.resolve(archive, part, xml, style, color.as_ref())? {
+                Some(ResolvedFill::Color(color)) => Some(Background::Color(color)),
+                Some(ResolvedFill::Gradient { css, first }) => {
+                    Some(Background::CssGradient { css, first })
+                }
+                None => None,
+            }
+        }
+        Some(Background::Gradient(fill)) => {
+            match themes.resolve_gradient(archive, part, xml, &fill)? {
+                Some(ResolvedFill::Color(color)) => Some(Background::Color(color)),
+                Some(ResolvedFill::Gradient { css, first }) => {
+                    Some(Background::CssGradient { css, first })
+                }
+                None => None,
+            }
+        }
+        fill => fill,
+    })
+}
+
+fn apply_solid_color(slide: &mut serde_json::Value, color: &str) -> Result<(), DataError> {
+    let channels = u32::from_str_radix(&color[1..], 16).map_err(invalid)?;
+    let luminance =
+        299 * ((channels >> 16) & 255) + 587 * ((channels >> 8) & 255) + 114 * (channels & 255);
+    slide["settings"]["color"] = json!(color);
+    if luminance >= 155_000 {
+        let style = slide["items"][0]["style"].as_str().unwrap();
+        slide["items"][0]["style"] = json!(format!("{style}color:#000000;"));
+    }
+    Ok(())
+}
+
+fn theme_percentage(value: &str) -> Option<f64> {
+    let (number, divisor) = value
+        .strip_suffix('%')
+        .map_or((value, 100_000.0), |value| (value, 100.0));
+    let parsed = number.parse::<f64>().ok()?;
+    parsed.is_finite().then(|| parsed / divisor)
 }
 
 fn invalid(error: impl std::fmt::Display) -> DataError {
@@ -659,6 +757,82 @@ mod tests {
         );
         assert_eq!(fs::read_dir(library.media_dir()).unwrap().count(), 1);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn linear_gradients_become_full_slide_shape_items() {
+        let layout_rel = br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let files = archive(&[
+            (
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill>
+                    <a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst>
+                    <a:lin ang="0"/>
+                </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Local</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide2.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1001"><a:srgbClr val="00AA00"/></p:bgRef></p:bg>
+                    <a:p><a:r><a:t>Theme</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
+            ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#,
+            ),
+            ("ppt/slideMasters/slideMaster1.xml", br#"<p:sldMaster xmlns:p="p"><p:cSld/><p:clrMap bg1="lt1"/></p:sldMaster>"#),
+            (
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme1.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/theme/theme1.xml",
+                br#"<a:theme xmlns:a="a"><a:themeElements>
+                    <a:clrScheme><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1></a:clrScheme>
+                    <a:fmtScheme>
+                        <a:fillStyleLst><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:fillStyleLst>
+                        <a:bgFillStyleLst>
+                            <a:gradFill>
+                                <a:gsLst>
+                                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                                </a:gsLst>
+                                <a:lin ang="0"/>
+                            </a:gradFill>
+                        </a:bgFillStyleLst>
+                    </a:fmtScheme>
+                </a:themeElements></a:theme>"#,
+            ),
+        ]);
+        let show = import("Gradients.pptx", &files, None).unwrap();
+        let first = &show.show["slides"]["s1"];
+        let second = &show.show["slides"]["s2"];
+        let gradient = "linear-gradient(90deg, #FF0000 0%, #0000FF 100%)";
+        assert_eq!(first["settings"]["color"], "#FF0000");
+        assert_eq!(first["items"][0]["type"], "shape");
+        assert!(
+            first["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains(gradient),
+            "{}",
+            first["items"][0]["style"]
+        );
+        assert_eq!(first["items"].as_array().unwrap().len(), 2);
+        assert_eq!(second["settings"]["color"], "#00AA00");
+        assert!(
+            second["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("linear-gradient(90deg, #00AA00 0%, #0000FF 100%)"),
+            "{}",
+            second["items"][0]["style"]
+        );
     }
 
     #[test]

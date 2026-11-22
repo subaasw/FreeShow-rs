@@ -42,6 +42,8 @@ pub struct BoxStyle {
     pub box_shadow: Option<BoxShadow>,
     /// CSS `backdrop-filter` from the item style, or empty.
     pub backdrop: String,
+    /// CSS `linear-gradient()` from `background`, when the fill is not a solid color.
+    pub gradient: Option<LinearGradient>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +74,13 @@ pub struct BoxShadow {
     pub inset: bool,
 }
 
+/// CSS `linear-gradient()` on an item box.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    pub angle_deg: f32,
+    pub stops: Vec<(f32, Rgba)>,
+}
+
 impl Default for BoxStyle {
     fn default() -> Self {
         Self {
@@ -98,6 +107,7 @@ impl Default for BoxStyle {
             radius: 0.0,
             box_shadow: None,
             backdrop: String::new(),
+            gradient: None,
         }
     }
 }
@@ -293,8 +303,16 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     style.color = color;
                 }
             }
-            "background-color" | "background" => {
+            "background-color" => {
                 if let Some(color) = parse_color(value) {
+                    style.background = Some(color);
+                }
+            }
+            "background" => {
+                if let Some(gradient) = parse_linear_gradient(value) {
+                    style.background = Some(gradient.stops[0].1);
+                    style.gradient = Some(gradient);
+                } else if let Some(color) = parse_color(value) {
                     style.background = Some(color);
                 }
             }
@@ -1086,28 +1104,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
         || hue_changes(hue);
     let before = (color_filter || blur >= 0.5 || blend != Blend::Normal)
         .then(|| copy_rect(pixels, slide.output_width, slide.output_height, x, y, w, h));
-    if let Some(background) = style.background {
-        let frame_w = slide.output_width;
-        let frame_h = slide.output_height;
-        if style.elliptical_background {
-            let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
-            for py in y0..y1 {
-                let dy = (py - y) as f32 + 0.5;
-                let dy = 2.0 * dy / h as f32 - 1.0;
-                for px in x0..x1 {
-                    let dx = (px - x) as f32 + 0.5;
-                    let dx = 2.0 * dx / w as f32 - 1.0;
-                    if dx * dx + dy * dy <= 1.0 {
-                        paint(pixels, frame_w, frame_h, px, py, background);
-                    }
-                }
-            }
-        } else if radius > 0 {
-            fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
-        } else {
-            fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
-        }
-    }
+    fill_item_background(pixels, slide, &style, x, y, w, h, radius);
     if let Some(image) = &item.image {
         blit(
             pixels,
@@ -3014,6 +3011,193 @@ fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radius: i32) -> bool {
     ddx * ddx + ddy * ddy > radius * radius
 }
 
+fn fill_item_background(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    style: &BoxStyle,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+) {
+    if style.gradient.is_none() && style.background.is_none() {
+        return;
+    }
+    let frame_w = slide.output_width;
+    let frame_h = slide.output_height;
+    if let Some(gradient) = &style.gradient {
+        let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
+                    paint(
+                        pixels,
+                        frame_w,
+                        frame_h,
+                        px,
+                        py,
+                        sample_linear_gradient(gradient, px, py, x, y, w, h),
+                    );
+                }
+            }
+        }
+        return;
+    }
+    let Some(background) = style.background else {
+        return;
+    };
+    if style.elliptical_background {
+        let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                if in_item_shape(px, py, x, y, w, h, radius, true) {
+                    paint(pixels, frame_w, frame_h, px, py, background);
+                }
+            }
+        }
+    } else if radius > 0 {
+        fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
+    } else {
+        fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
+    }
+}
+
+/// CSS `linear-gradient()`: `0deg` is upward, `90deg` is to the right.
+pub fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
+    let value = value.trim();
+    let inner = value
+        .strip_prefix("linear-gradient(")?
+        .strip_suffix(')')?
+        .trim();
+    let parts = split_gradient_args(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    let mut angle = 180.0;
+    let mut start = 0;
+    if let Some(degrees) = parts[0].trim().strip_suffix("deg")
+        && let Ok(parsed) = degrees.trim().parse::<f32>()
+        && parsed.is_finite()
+    {
+        angle = parsed;
+        start = 1;
+    }
+    let raw = &parts[start..];
+    if raw.len() < 2 {
+        return None;
+    }
+    let last = (raw.len() - 1) as f32;
+    let mut stops = Vec::new();
+    for (index, part) in raw.iter().enumerate() {
+        let part = part.trim();
+        let (color, position) = if let Some((color, percent)) =
+            part.rsplit_once(char::is_whitespace)
+            && let Some(number) = percent.trim().strip_suffix('%')
+            && let Ok(parsed) = number.parse::<f32>()
+            && parsed.is_finite()
+        {
+            (parse_color(color.trim())?, (parsed / 100.0).clamp(0.0, 1.0))
+        } else {
+            (parse_color(part)?, index as f32 / last)
+        };
+        stops.push((position, color));
+    }
+    stops.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Some(LinearGradient {
+        angle_deg: angle,
+        stops,
+    })
+}
+
+fn split_gradient_args(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                if !current.trim().is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn sample_linear_gradient(
+    gradient: &LinearGradient,
+    px: i32,
+    py: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Rgba {
+    if gradient.stops.is_empty() {
+        return Rgba::TRANSPARENT;
+    }
+    if gradient.stops.len() == 1 {
+        return gradient.stops[0].1;
+    }
+    let radians = gradient.angle_deg.to_radians();
+    // Screen y grows downward, so 0deg (up) is (0, -1).
+    let dx = radians.sin();
+    let dy = -radians.cos();
+    let cx = x as f32 + w as f32 / 2.0;
+    let cy = y as f32 + h as f32 / 2.0;
+    let extent = 0.5 * (w as f32 * dx.abs() + h as f32 * dy.abs()).max(1.0);
+    let along = (px as f32 + 0.5 - cx) * dx + (py as f32 + 0.5 - cy) * dy;
+    let t = ((along / extent) * 0.5 + 0.5).clamp(0.0, 1.0);
+    interpolate_stops(&gradient.stops, t)
+}
+
+fn interpolate_stops(stops: &[(f32, Rgba)], t: f32) -> Rgba {
+    if t <= stops[0].0 {
+        return stops[0].1;
+    }
+    if t >= stops[stops.len() - 1].0 {
+        return stops[stops.len() - 1].1;
+    }
+    for pair in stops.windows(2) {
+        let (t0, c0) = pair[0];
+        let (t1, c1) = pair[1];
+        if t >= t0 && t <= t1 {
+            let span = (t1 - t0).max(f32::EPSILON);
+            let f = ((t - t0) / span).clamp(0.0, 1.0);
+            return lerp_rgba(c0, c1, f);
+        }
+    }
+    stops[stops.len() - 1].1
+}
+
+fn lerp_rgba(from: Rgba, to: Rgba, t: f32) -> Rgba {
+    let mix = |a: u8, b: u8| {
+        ((a as f32) * (1.0 - t) + (b as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Rgba {
+        r: mix(from.r, to.r),
+        g: mix(from.g, to.g),
+        b: mix(from.b, to.b),
+        a: mix(from.a, to.a),
+    }
+}
+
 fn fill_rect(
     pixels: &mut [u8],
     frame_w: u32,
@@ -3213,6 +3397,29 @@ mod tests {
         assert!(!rounded.elliptical_background);
         assert_eq!(rounded.backdrop, "blur(10px)");
         assert!(parse_style("border-radius: 50%;").elliptical_background);
+        let gradient = parse_style("background: linear-gradient(90deg, #FF0000 0%, #0000FF 100%);");
+        let fill = gradient.gradient.unwrap();
+        assert_eq!(fill.angle_deg, 90.0);
+        assert_eq!(fill.stops[0].1.r, 255);
+        assert_eq!(fill.stops[1].1.b, 255);
+        assert_eq!(gradient.background.unwrap().r, 255);
+    }
+
+    #[test]
+    fn linear_gradients_are_painted_across_the_item_box() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:linear-gradient(90deg, #FF0000 0%, #0000FF 100%);",
+        ));
+        let left = frame.pixel(0, 270);
+        let right = frame.pixel(959, 270);
+        assert!(
+            left.r > 200 && left.b < 40,
+            "left should be red, got {left:?}"
+        );
+        assert!(
+            right.b > 200 && right.r < 40,
+            "right should be blue, got {right:?}"
+        );
     }
 
     fn style_slide(style: &str) -> StyledSlide {

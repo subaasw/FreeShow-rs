@@ -88,10 +88,14 @@ impl Color {
     }
 
     pub(super) fn literal(&self) -> Option<String> {
-        self.resolve(|_| None).map(hex)
+        self.hex_in(|_| None)
     }
 
-    fn resolve(&self, scheme: impl FnOnce(&str) -> Option<Rgb>) -> Option<Rgb> {
+    pub(super) fn hex_in(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<String> {
+        self.resolve(scheme).map(hex)
+    }
+
+    fn resolve(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<Rgb> {
         let mut rgb = match &self.value {
             ColorValue::Rgb(rgb) => *rgb,
             ColorValue::Scheme(slot) => scheme(slot)?,
@@ -100,6 +104,74 @@ impl Color {
             rgb = transform.apply(rgb);
         }
         Some(rgb)
+    }
+}
+
+/// A resolved slide fill: a solid hex or a CSS linear-gradient.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ResolvedFill {
+    Color(String),
+    Gradient { css: String, first: String },
+}
+
+#[derive(Clone)]
+pub(super) struct GradientFill {
+    /// CSS degrees: 0 is upward, 90 is to the right.
+    pub angle: f64,
+    /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
+    pub stops: Vec<(f64, Color)>,
+}
+
+impl GradientFill {
+    pub(super) fn from_node(fill: roxmltree::Node<'_, '_>) -> Option<Self> {
+        let mut angle = 90.0;
+        if let Some(line) = child(fill, "lin")
+            && let Some(raw) = line.attribute("ang")
+            && let Ok(value) = raw.parse::<f64>()
+            && value.is_finite()
+        {
+            // DrawingML 0 is left-to-right, counter-clockwise; CSS 0 is up, clockwise.
+            angle = 90.0 - value / 60_000.0;
+        }
+        let mut stops = Vec::new();
+        if let Some(list) = child(fill, "gsLst") {
+            for stop in list.children().filter(|node| node.has_tag_name("gs")) {
+                let pos = stop
+                    .attribute("pos")
+                    .and_then(percentage)
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                if let Some(color) = Color::in_node(stop) {
+                    stops.push((pos, color));
+                }
+            }
+        }
+        if stops.len() < 2 {
+            return None;
+        }
+        stops.sort_by(|left, right| left.0.total_cmp(&right.0));
+        Some(Self { angle, stops })
+    }
+
+    pub(super) fn resolve(&self, scheme: impl Fn(&str) -> Option<Rgb>) -> Option<ResolvedFill> {
+        let mut resolved = Vec::new();
+        for (pos, color) in &self.stops {
+            resolved.push((*pos, color.hex_in(&scheme)?));
+        }
+        Some(css_gradient(self.angle, &resolved))
+    }
+}
+
+pub(super) fn css_gradient(angle: f64, stops: &[(f64, String)]) -> ResolvedFill {
+    let first = stops[0].1.clone();
+    let body = stops
+        .iter()
+        .map(|(pos, color)| format!("{color} {}%", (pos * 100.0).round()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ResolvedFill::Gradient {
+        css: format!("linear-gradient({}deg, {body})", angle.round()),
+        first,
     }
 }
 
@@ -313,8 +385,14 @@ type ColorMap = HashMap<String, String>;
 #[derive(Default)]
 struct Theme {
     colors: HashMap<String, Rgb>,
-    fills: Vec<Option<Color>>,
-    backgrounds: Vec<Option<Color>>,
+    fills: Vec<Option<StyleFill>>,
+    backgrounds: Vec<Option<StyleFill>>,
+}
+
+#[derive(Clone)]
+enum StyleFill {
+    Solid(Color),
+    Gradient(GradientFill),
 }
 
 impl Theme {
@@ -333,13 +411,13 @@ impl Theme {
             }
         }
         if let Some(format) = child(elements, "fmtScheme") {
-            theme.fills = solid_styles(format, "fillStyleLst");
-            theme.backgrounds = solid_styles(format, "bgFillStyleLst");
+            theme.fills = style_fills(format, "fillStyleLst");
+            theme.backgrounds = style_fills(format, "bgFillStyleLst");
         }
         Ok(theme)
     }
 
-    fn style(&self, index: u32) -> Option<&Color> {
+    fn style(&self, index: u32) -> Option<&StyleFill> {
         let (list, offset) = match index {
             1..=999 => (&self.fills, 1),
             1001.. => (&self.backgrounds, 1001),
@@ -349,14 +427,18 @@ impl Theme {
     }
 }
 
-fn solid_styles(format: Node<'_, '_>, name: &str) -> Vec<Option<Color>> {
+fn style_fills(format: Node<'_, '_>, name: &str) -> Vec<Option<StyleFill>> {
     child(format, name)
         .into_iter()
         .flat_map(|list| list.children().filter(Node::is_element))
         .map(|fill| {
-            fill.has_tag_name("solidFill")
-                .then(|| Color::in_node(fill))
-                .flatten()
+            if fill.has_tag_name("solidFill") {
+                Color::in_node(fill).map(StyleFill::Solid)
+            } else if fill.has_tag_name("gradFill") {
+                GradientFill::from_node(fill).map(StyleFill::Gradient)
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -387,7 +469,7 @@ impl ThemeReader {
         xml: &str,
         style: Option<u32>,
         color: Option<&Color>,
-    ) -> Result<Option<String>, DataError> {
+    ) -> Result<Option<ResolvedFill>, DataError> {
         if matches!(style, Some(0 | 1000)) {
             return Ok(None);
         }
@@ -408,19 +490,48 @@ impl ThemeReader {
             );
             theme.colors.get(key).copied()
         };
-        let rgb = match style {
-            Some(index) => theme.style(index).and_then(|fill| {
-                fill.resolve(|slot| {
-                    if slot == "phClr" {
-                        color?.resolve(resolve)
-                    } else {
-                        resolve(slot)
-                    }
-                })
-            }),
-            None => color.and_then(|color| color.resolve(resolve)),
+        let scheme = |slot: &str| {
+            if slot == "phClr" {
+                color.and_then(|color| color.resolve(resolve))
+            } else {
+                resolve(slot)
+            }
         };
-        Ok(rgb.map(hex))
+        Ok(match style {
+            Some(index) => match theme.style(index) {
+                Some(StyleFill::Solid(fill)) => fill.hex_in(scheme).map(ResolvedFill::Color),
+                Some(StyleFill::Gradient(fill)) => fill.resolve(scheme),
+                None => None,
+            },
+            None => color.and_then(|color| color.hex_in(scheme).map(ResolvedFill::Color)),
+        })
+    }
+
+    pub(super) fn resolve_gradient(
+        &mut self,
+        archive: &mut Archive<'_>,
+        slide: &str,
+        xml: &str,
+        fill: &GradientFill,
+    ) -> Result<Option<ResolvedFill>, DataError> {
+        let context = self.context(archive, slide, Some(xml), 0)?;
+        let Some(theme) = &context.theme else {
+            return Ok(fill.resolve(|_| None));
+        };
+        let resolve = |slot: &str| {
+            let key = context.colors.get(slot).map_or_else(
+                || match slot {
+                    "bg1" => "lt1",
+                    "bg2" => "lt2",
+                    "tx1" => "dk1",
+                    "tx2" => "dk2",
+                    slot => slot,
+                },
+                String::as_str,
+            );
+            theme.colors.get(key).copied()
+        };
+        Ok(fill.resolve(resolve))
     }
 
     fn load_xml(
