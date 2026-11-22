@@ -12,7 +12,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Router, serve};
+use freeshow_output::Frame;
 use serde_json::Value;
+use tokio::sync::oneshot;
 use socketioxide::SocketIo;
 use socketioxide::extract::{Data, SocketRef};
 
@@ -58,6 +60,7 @@ pub struct AppState {
     /// Password required from network clients. `None` or an empty value is open.
     pub password: Option<String>,
     stage_only: bool,
+    stage_frames: Option<mpsc::SyncSender<StageFrameRequest>>,
 }
 
 impl AppState {
@@ -68,6 +71,7 @@ impl AppState {
                 .map(|password| password.trim().to_string())
                 .filter(|password| !password.is_empty()),
             stage_only: false,
+            stage_frames: None,
         }
     }
 
@@ -105,11 +109,23 @@ impl ShowBus {
     }
 }
 
+/// A pending browser request for the next frame the native stage paints.
+pub struct StageFrameRequest(oneshot::Sender<Frame>);
+
+impl StageFrameRequest {
+    pub fn publish(self, frame: &Frame) {
+        if !self.0.is_closed() {
+            let _ = self.0.send(frame.clone());
+        }
+    }
+}
+
 pub fn spawn(
     snapshot: Arc<Mutex<ShowSnapshot>>,
     commands: mpsc::Sender<Command>,
     password: Option<String>,
     ports: RemotePorts,
+    stage_frames: mpsc::SyncSender<StageFrameRequest>,
 ) {
     let started = std::thread::Builder::new()
         .name("freeshow-remote".into())
@@ -125,7 +141,8 @@ pub fn spawn(
                 }
             };
             runtime.block_on(async move {
-                let state = AppState::new(ShowBus { snapshot, commands }, password);
+                let mut state = AppState::new(ShowBus { snapshot, commands }, password);
+                state.stage_frames = Some(stage_frames);
                 let remote = with_socket(remote_router(state.clone()), state.clone(), "REMOTE");
                 let stage = stage_router(state);
                 tokio::join!(
@@ -143,6 +160,7 @@ pub fn remote_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(remote_page))
         .route("/stage", get(stage_page))
+        .route("/stage-frame", get(stage_frame_png))
         .route("/state", get(state_json))
         .route("/action", post(action))
         .route("/ws", get(ws_upgrade))
@@ -153,6 +171,7 @@ pub fn stage_router(mut state: AppState) -> Router {
     state.stage_only = true;
     let router = Router::new()
         .route("/", get(stage_page))
+        .route("/stage-frame", get(stage_frame_png))
         .route("/state", get(state_json))
         .route("/action", post(action))
         .route("/ws", get(ws_upgrade))
@@ -199,6 +218,37 @@ async fn remote_page() -> Html<&'static str> {
 
 async fn stage_page() -> Html<&'static str> {
     Html(STAGE_PAGE)
+}
+
+async fn stage_frame_png(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    if !state.authorized(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let requests = state.stage_frames.ok_or(StatusCode::NOT_FOUND)?;
+    let (sender, receiver) = oneshot::channel();
+    requests
+        .try_send(StageFrameRequest(sender))
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let png = tokio::task::spawn_blocking(move || frame.encode_png())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        png,
+    ))
 }
 
 async fn state_json(
@@ -628,6 +678,66 @@ mod tests {
         assert_eq!(body["lines"][0], "Amazing grace");
         assert_eq!(body["next_lines"][0], "how sweet");
         assert_eq!(body["notes"], "Stand");
+    }
+
+    #[tokio::test]
+    async fn stage_frames_require_the_password_and_return_the_native_pixels() {
+        let (mut state, commands) = harness();
+        state.password = Some("stage-pass".into());
+        let (sender, receiver) = mpsc::sync_channel::<StageFrameRequest>(1);
+        state.stage_frames = Some(sender);
+        let stage = stage_router(state.clone());
+
+        for password in ["", "wrong"] {
+            let response = stage
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/stage-frame")
+                        .header("x-freeshow-password", password)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+
+        let producer = std::thread::spawn(move || {
+            let frame = Frame {
+                width: 2,
+                height: 1,
+                pixels: vec![255, 0, 0, 255, 0, 255, 0, 128],
+            };
+            for _ in 0..2 {
+                receiver
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .publish(&frame);
+            }
+        });
+        for app in [stage, remote_router(state)] {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/stage-frame")
+                        .header("x-freeshow-password", "stage-pass")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let png = response.into_body().collect().await.unwrap().to_bytes();
+            let raster = freeshow_output::decode_image(&png).unwrap();
+            assert_eq!((raster.width, raster.height), (2, 1));
+            assert_eq!(raster.rgba, [255, 0, 0, 255, 0, 255, 0, 128]);
+        }
+        producer.join().unwrap();
+        assert!(commands.try_recv().is_err());
     }
 
     #[tokio::test]

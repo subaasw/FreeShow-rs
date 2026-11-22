@@ -1966,6 +1966,7 @@ name = "freeshow-remote"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "freeshow-output",
  "futures-util",
  "http-body-util",
  "rust_socketio",

@@ -2071,11 +2071,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     };
+    let (stage_frame_tx, stage_frame_rx) = mpsc::sync_channel(1);
     freeshow_remote::spawn(
         Arc::clone(&snapshot),
         command_tx.clone(),
         remote_password,
         remote_ports,
+        stage_frame_tx,
     );
     freeshow_osc::OscInput::default().start(freeshow_remote::ShowBus {
         snapshot: Arc::clone(&snapshot),
@@ -2319,6 +2321,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             let frame = stage_frame(&clock_session.borrow());
+            if let Ok(request) = stage_frame_rx.try_recv() {
+                request.publish(&frame);
+            }
             *clock_last.borrow_mut() = frame.clone();
             publish(&clock_stage, frame);
         },
