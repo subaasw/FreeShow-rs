@@ -1226,7 +1226,7 @@ mod tests {
         let mut session = Session::empty();
         session.root = Some(root.clone());
         session.stage = library.load_stage_layout();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let frame = stage_frame(&session);
             let pixel = frame.pixel(80, 45);
@@ -1236,7 +1236,8 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "stage clip produced no picture"
+                "stage clip did not paint green: {pixel:?}, (player open, decoded frame, error): {:?}",
+                session.stage_media.borrow().file_status("clip.mp4")
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

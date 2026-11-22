@@ -27,6 +27,17 @@ pub struct StageMedia {
 struct StageFile {
     picture: Option<Raster>,
     video: Option<freeshow_media::VideoPlayer>,
+    error: Option<String>,
+}
+
+impl StageFile {
+    fn report_error(&mut self, source: &str, error: impl ToString) {
+        let error = error.to_string();
+        if self.error.as_deref() != Some(error.as_str()) {
+            tracing::warn!(source, %error, "stage media failed");
+            self.error = Some(error);
+        }
+    }
 }
 
 impl StageMedia {
@@ -35,32 +46,29 @@ impl StageMedia {
         self.files.retain(|src, _| sources.contains(src.as_str()));
         for src in sources {
             let file = self.files.entry(src.to_owned()).or_insert_with(|| {
+                let mut file = StageFile::default();
                 let Some(path) = crate::live::resolve_media(root, src) else {
-                    return StageFile::default();
+                    file.report_error(src, "media path does not exist");
+                    return file;
                 };
                 if freeshow_media::media_kind(&path) == freeshow_media::MediaKind::Video {
-                    let video =
-                        freeshow_media::VideoPlayer::open_with_network(&path, &[], &[]).ok();
-                    StageFile {
-                        picture: None,
-                        video,
+                    match freeshow_media::VideoPlayer::open_with_network(&path, &[], &[]) {
+                        Ok(video) => file.video = Some(video),
+                        Err(error) => file.report_error(src, error),
                     }
                 } else {
-                    let picture = std::fs::read(path)
+                    file.picture = std::fs::read(path)
                         .ok()
                         .and_then(|bytes| freeshow_output::decode_image(&bytes));
-                    StageFile {
-                        picture,
-                        video: None,
-                    }
                 }
+                file
             });
-            if let Some(frame) = file
-                .video
-                .as_mut()
-                .and_then(|player| player.try_next_frame())
-            {
-                file.picture = Some(frame);
+            if let Some(player) = file.video.as_mut() {
+                if let Some(frame) = player.try_next_frame() {
+                    file.picture = Some(frame);
+                } else if let Some(error) = player.take_error() {
+                    file.report_error(src, error);
+                }
             }
         }
     }
@@ -104,6 +112,16 @@ impl StageMedia {
 
     fn picture(&self, src: &str) -> Option<Raster> {
         self.files.get(src)?.picture.clone()
+    }
+
+    #[cfg(test)]
+    pub fn file_status(&self, src: &str) -> Option<(bool, bool, Option<&str>)> {
+        let file = self.files.get(src)?;
+        Some((
+            file.video.is_some(),
+            file.picture.is_some(),
+            file.error.as_deref(),
+        ))
     }
 
     fn camera(&self, name: &str) -> Option<Raster> {
@@ -802,7 +820,7 @@ mod tests {
                         pixels
                     },
                 }),
-                video: None,
+                ..StageFile::default()
             },
         );
         let context = StageContext {
