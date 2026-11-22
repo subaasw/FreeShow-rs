@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 
 use freeshow_data::{StageClockOptions, StageItemKind, StageItemSpec, StageLayout, fill_variables};
 use freeshow_output::{
-    Blend, Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
-    StyledLine, StyledSlide, TextRun, parse_color, render_styled,
+    Blend, Fit, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine, StyledSlide,
+    TextRun, parse_color, render_styled,
 };
+#[cfg(test)]
+use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
 
 pub struct StageSlide {
     pub text_boxes: Vec<Vec<String>>,
@@ -162,7 +164,7 @@ pub struct StageContext<'a> {
     pub twelve_hour: bool,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn paint_stage(
     slides: &[StageSlide],
     index: Option<usize>,

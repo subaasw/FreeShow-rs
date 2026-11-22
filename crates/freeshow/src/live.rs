@@ -4,15 +4,17 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::session::Session;
+#[cfg(test)]
 use freeshow_data::ShowFile;
 use freeshow_output::{
-    Blend, Fit, Frame, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH,
-    StyledItem, StyledLine, StyledSlide, TextRun, blend_mode, blur_frames, clear_frame,
-    composite_styled, crossfade, decode_image, ease_progress, filter_blur, filter_brightness,
-    filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity,
-    filter_saturate, filter_sepia, parse_color, placed_image, render_styled, scale_frames,
-    slide_frames, slide_way, spin_frames,
+    Blend, Fit, Frame, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine,
+    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, crossfade,
+    decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
+    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, parse_color,
+    placed_image, scale_frames, slide_frames, slide_way, spin_frames,
 };
+#[cfg(test)]
+use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH, render_styled};
 
 /// One step of a slide or media transition. `t` is the raw progress from 0 to 1.
 pub fn motion_frame(
@@ -551,34 +553,7 @@ fn local_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-fn show_styled(session: &Session, index: Option<usize>) -> Option<StyledSlide> {
-    let index = index?;
-    let show = session
-        .show_index
-        .and_then(|slot| session.shows.get(slot))?;
-    styled_slide_at(
-        show,
-        index,
-        session.root.as_deref(),
-        true,
-        Some(session.reveal_count),
-        session.click_revealed,
-        session.style_page(),
-        &session_variables(session),
-        session.output_width,
-        session.output_height,
-    )
-}
-
-#[allow(dead_code)]
-fn show_frame(session: &Session, index: Option<usize>) -> Frame {
-    match show_styled(session, index) {
-        Some(slide) => render_styled(&slide),
-        None => clear_frame(session.output_width, session.output_height),
-    }
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn frame_for_slide(
     show: &ShowFile,
@@ -604,6 +579,7 @@ pub fn frame_for_slide(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn frame_for_slide_at(
     show: &ShowFile,
@@ -634,6 +610,7 @@ pub fn frame_for_slide_at(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn styled_slide_at(
     show: &ShowFile,
