@@ -1111,9 +1111,8 @@ fn draw_rotated_item(
     opacity: f32,
 ) -> bool {
     let text::Clip { x, y, w, h } = *bounds;
-    let area = w as usize * h as usize;
-    // shortcut: keep oversized and backdrop-dependent items on the direct path until rotated tiling and backdrop sampling are supported.
-    if area > pixels.len() / 2 || !style.backdrop.trim().is_empty() || item.blend != Blend::Normal {
+    // shortcut: keep backdrop-dependent items on the direct path until rotation supports sampling the underlying slide.
+    if !style.backdrop.trim().is_empty() || item.blend != Blend::Normal {
         return false;
     }
     let scale_x = if slide.source_width > 0.0 {
@@ -1142,34 +1141,71 @@ fn draw_rotated_item(
     if x0 >= x1 || y0 >= y1 || opacity == 0.0 {
         return true;
     }
+    let (sin_x, sin_y) = (sin * ratio, sin / ratio);
+    let sample = |px: i32, py: i32| {
+        let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+        (
+            (half_w + dx * cos + dy * sin_x).floor() as i32,
+            (half_h - dx * sin_y + dy * cos).floor() as i32,
+        )
+    };
+    // Only rasterize the part of the item sampled by the visible output, with room for its blur.
+    let pad = output_spacing(item.blur, slide).clamp(0.0, 24.0).ceil() as i32;
+    let corners = [
+        sample(x0, y0),
+        sample(x1 - 1, y0),
+        sample(x0, y1 - 1),
+        sample(x1 - 1, y1 - 1),
+    ];
+    let [sx0, sy0, sx1, sy1] = corners.iter().fold([w, h, 0, 0], |edges, &(sx, sy)| {
+        [
+            edges[0].min(sx.saturating_sub(pad)),
+            edges[1].min(sy.saturating_sub(pad)),
+            edges[2].max(sx.saturating_add(pad + 1)),
+            edges[3].max(sy.saturating_add(pad + 1)),
+        ]
+    });
+    let (sx0, sy0, sx1, sy1) = (sx0.max(0), sy0.max(0), sx1.min(w), sy1.min(h));
+    if sx0 >= sx1 || sy0 >= sy1 {
+        return true;
+    }
+    let (width, height) = ((sx1 - sx0) as u32, (sy1 - sy0) as u32);
+    let layer_len = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    // shortcut: extreme scale ratios use the direct path until rotated layers can be tiled.
+    if layer_len > pixels.len().saturating_mul(4) {
+        return false;
+    }
     let local = StyledSlide {
-        output_width: w as u32,
-        output_height: h as u32,
-        source_width: w as f32 / scale_x,
-        source_height: h as f32 / scale_y,
+        output_width: width,
+        output_height: height,
+        source_width: width as f32 / scale_x,
+        source_height: height as f32 / scale_y,
         background: Rgba::TRANSPARENT,
         items: Vec::new(),
     };
-    let mut layer = vec![0; area * 4];
+    let mut layer = vec![0; layer_len];
     draw_item_content(
         &mut layer,
         &local,
         item,
         style,
-        text::Clip { x: 0, y: 0, w, h },
+        text::Clip {
+            x: -sx0,
+            y: -sy0,
+            w,
+            h,
+        },
         1.0,
     );
-    let (sin_x, sin_y) = (sin * ratio, sin / ratio);
     for py in y0..y1 {
-        let dy = py as f32 + 0.5 - cy;
         for px in x0..x1 {
-            let dx = px as f32 + 0.5 - cx;
-            let sx = (half_w + dx * cos + dy * sin_x).floor() as i32;
-            let sy = (half_h - dx * sin_y + dy * cos).floor() as i32;
-            if sx < 0 || sy < 0 || sx >= w || sy >= h {
+            let (sx, sy) = sample(px, py);
+            if sx < sx0 || sy < sy0 || sx >= sx1 || sy >= sy1 {
                 continue;
             }
-            let source = (sy as usize * w as usize + sx as usize) * 4;
+            let source = ((sy - sy0) as usize * width as usize + (sx - sx0) as usize) * 4;
             paint(
                 pixels,
                 slide.output_width,
@@ -3057,11 +3093,8 @@ fn blit(
         );
         return;
     }
-    for dy in inset_top.max(0)..(h - inset_bottom.max(0)) {
-        let dest_y = y + dy;
-        if dest_y < 0 || dest_y >= frame_h as i32 {
-            continue;
-        }
+    for dest_y in vis_y0.max(0)..vis_y1.min(frame_h as i32) {
+        let dy = dest_y - y;
         let local_y = if fit == Fit::Tile {
             dy.rem_euclid(draw_h)
         } else {
@@ -3076,11 +3109,8 @@ fn blit(
         }
         let src_row = (sy * image.width) * 4;
         let dest_row = (dest_y as u32 * frame_w) * 4;
-        for dx in inset_left.max(0)..(w - inset_right.max(0)) {
-            let dest_x = x + dx;
-            if dest_x < 0 || dest_x >= frame_w as i32 {
-                continue;
-            }
+        for dest_x in vis_x0.max(0)..vis_x1.min(frame_w as i32) {
+            let dx = dest_x - x;
             let local_x = if fit == Fit::Tile {
                 dx.rem_euclid(draw_w)
             } else {
@@ -3163,12 +3193,13 @@ fn fill_round_rect(
     color: Rgba,
 ) {
     let radius = radius.min(w / 2).min(h / 2).max(0);
-    for dy in 0..h {
-        for dx in 0..w {
-            if outside_round_corner(dx, dy, w, h, radius) {
+    let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            if outside_round_corner(px - x, py - y, w, h, radius) {
                 continue;
             }
-            paint(pixels, frame_w, frame_h, x + dx, y + dy, color);
+            paint(pixels, frame_w, frame_h, px, py, color);
         }
     }
 }
@@ -3780,6 +3811,27 @@ mod tests {
         assert_eq!(frame.pixel(20, 70), parse_color("#0000FF").unwrap());
         assert_eq!(frame.pixel(40, 50), Rgba::TRANSPARENT);
         assert_eq!(frame.pixel(20, 10), Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn oversized_rotated_item_draws_only_the_visible_slice() {
+        let mut slide = style_slide(
+            "left:-499950px;top:40px;width:1000000px;height:40px;transform:rotate(90deg);",
+        );
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = Rgba::TRANSPARENT;
+        slide.items[0].image = Some(Raster {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        });
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(50, 10), parse_color("#FF0000").unwrap());
+        assert_eq!(frame.pixel(50, 90), parse_color("#0000FF").unwrap());
+        assert_eq!(frame.pixel(20, 60), Rgba::TRANSPARENT);
     }
 
     #[test]
