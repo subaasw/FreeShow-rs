@@ -5,6 +5,13 @@
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, Switch, TabWidget } from "std-widgets.slint";
 import { OperatorStyle, BoxButton, HeaderButton, ListRow } from "widgets.slint";
 
+export struct ThemeColorRow {
+    key: string,
+    label: string,
+    hex: string,
+    swatch: color,
+}
+
 export struct SettingsData {
     language: string,
     time-format: string,
@@ -39,6 +46,11 @@ export struct SettingsData {
     style-blur-opacity: int,
     style-lines: int,
     output-names: [string],
+    theme-colors: [ThemeColorRow],
+    theme-font: string,
+    theme-font-size: int,
+    theme-radius: int,
+    theme-edited: bool,
 }
 
 export struct InspectorData {
@@ -204,15 +216,6 @@ export component SettingsPanel inherits Rectangle {
                     padding: 10px;
                     spacing: 8px;
                     Row {
-                        SettingLabel { text: "Theme"; text-color: root.text-color; }
-                        ValueCombo {
-                            colspan: 2;
-                            model: root.themes;
-                            value: root.data.theme;
-                            selected(value) => { root.apply("theme", value); }
-                        }
-                    }
-                    Row {
                         SettingLabel { text: "Outputs"; text-color: root.text-color; }
                         Switch {
                             text: "Open output on startup";
@@ -291,6 +294,90 @@ export component SettingsPanel inherits Rectangle {
                         Text {
                             colspan: 2;
                             text: "Durations are in milliseconds. A show or slide with its own transition keeps it.";
+                            color: root.text-color;
+                            opacity: 0.6;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                }
+            }
+            Tab {
+                title: "Theme";
+                VerticalLayout {
+                alignment: start;
+                GridLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Row {
+                        SettingLabel { text: "Theme"; text-color: root.text-color; }
+                        ValueCombo {
+                            model: root.themes;
+                            value: root.data.theme;
+                            selected(value) => { root.apply("theme", value); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button {
+                                text: "Duplicate";
+                                clicked => { root.apply("themeDuplicate", ""); }
+                            }
+                            Button {
+                                text: "Reset";
+                                enabled: root.data.theme-edited;
+                                clicked => { root.apply("themeReset", ""); }
+                            }
+                        }
+                    }
+                    for row in root.data.theme-colors: Row {
+                        SettingLabel { text: row.label; text-color: root.text-color; }
+                        LineEdit {
+                            text: row.hex;
+                            accepted(value) => { root.apply("themeColor." + row.key, value); }
+                        }
+                        Rectangle {
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: root.text-color.with-alpha(0.3);
+                            background: row.swatch;
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Font"; text-color: root.text-color; }
+                        LineEdit {
+                            colspan: 2;
+                            text: root.data.theme-font;
+                            placeholder-text: "System font";
+                            accepted(value) => { root.apply("themeFont", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Text size %"; text-color: root.text-color; }
+                        SpinBox {
+                            minimum: 50;
+                            maximum: 200;
+                            step-size: 5;
+                            value: root.data.theme-font-size;
+                            edited(value) => { root.apply("themeFontSize", value); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            SettingLabel { text: "Corners px"; text-color: root.text-color; }
+                            SpinBox {
+                                minimum: 0;
+                                maximum: 24;
+                                value: root.data.theme-radius;
+                                edited(value) => { root.apply("themeRadius", value); }
+                            }
+                        }
+                    }
+                    Row {
+                        Rectangle {}
+                        Text {
+                            colspan: 2;
+                            text: "Type a colour such as #242832 and press Enter; the window updates at once. Edits are saved to Config/themes.json. Duplicate makes your own copy of this theme; Reset drops your edits.";
                             color: root.text-color;
                             opacity: 0.6;
                             font-size: 12px;
