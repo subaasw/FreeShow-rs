@@ -14,6 +14,7 @@ use freeshow_data::{
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 
+mod drawer_edit;
 mod library_edit;
 mod panels;
 use freeshow_output::{
@@ -185,6 +186,8 @@ pub struct Session {
     pub draw_strokes: Vec<DrawStroke>,
     pub player_now: Option<String>,
     pub player_videos: Vec<PlayerVideo>,
+    /// A YouTube or Vimeo page being turned into a playable address off the UI thread.
+    pub stream_lookup: Option<std::sync::mpsc::Receiver<(String, Option<String>)>>,
     pub active_effects: Vec<String>,
     pub timeline_cues: Vec<TimelineCue>,
     pub timeline_playing: bool,
@@ -207,7 +210,11 @@ pub struct Session {
     pub scripture: Arc<Vec<freeshow_remote::RemoteBible>>,
     pub media: Vec<MediaEntry>,
     pub audio: Vec<String>,
+    /// Calendar labels, soonest first, with the matching ids in `event_ids`.
     pub events: Vec<String>,
+    pub event_ids: Vec<String>,
+    /// The Calendar event or Player video picked for editing in the drawer form.
+    pub drawer_pick: Option<usize>,
     pub event_catalog: Catalog,
     pub fired_events: Vec<String>,
     pub verse_hits: Vec<VerseHit>,
@@ -411,6 +418,7 @@ impl Session {
             draw_strokes: Vec::new(),
             player_now: None,
             player_videos: Vec::new(),
+            stream_lookup: None,
             active_effects: Vec::new(),
             timeline_cues: Vec::new(),
             timeline_playing: false,
@@ -433,6 +441,8 @@ impl Session {
             media: Vec::new(),
             audio: Vec::new(),
             events: Vec::new(),
+            event_ids: Vec::new(),
+            drawer_pick: None,
             event_catalog: Catalog::empty(),
             fired_events: Vec::new(),
             verse_hits: Vec::new(),
@@ -537,7 +547,7 @@ impl Session {
         let stage = library.load_stage_layout();
         let event_catalog =
             take(library.load_events(), &mut warnings).unwrap_or_else(Catalog::empty);
-        let events = event_catalog.names();
+        let (event_ids, events) = drawer_edit::event_rows(&event_catalog);
         let synced =
             take(library.load_synced_settings(), &mut warnings).unwrap_or_else(Catalog::empty);
         let timers = named_timers(&synced);
@@ -590,6 +600,7 @@ impl Session {
             draw_strokes,
             player_now: None,
             player_videos: Vec::new(),
+            stream_lookup: None,
             active_effects: Vec::new(),
             timeline_cues: Vec::new(),
             timeline_playing: false,
@@ -612,6 +623,8 @@ impl Session {
             media,
             audio,
             events,
+            event_ids,
+            drawer_pick: None,
             event_catalog,
             fired_events: Vec::new(),
             verse_hits: Vec::new(),
@@ -973,12 +986,10 @@ impl Session {
             "player" => self
                 .player_videos
                 .iter()
-                .map(|video| {
-                    if video.kind == "file" || video.path.is_some() {
-                        video.name.clone()
-                    } else {
-                        format!("{} ({})", video.name, video.kind)
-                    }
+                .map(|video| match video.kind.as_str() {
+                    "youtube" => format!("{} (YouTube)", video.name),
+                    "vimeo" => format!("{} (Vimeo)", video.name),
+                    _ => video.name.clone(),
                 })
                 .collect(),
             "audio" => self.audio.clone(),
@@ -1264,7 +1275,14 @@ impl Session {
                 DrawerAction::None
             }
             "media" => self.choose_media(index),
-            "player" => self.choose_player(index),
+            "player" => {
+                self.drawer_pick = Some(index);
+                self.choose_player(index)
+            }
+            "calendar" => {
+                self.drawer_pick = (index < self.event_ids.len()).then_some(index);
+                DrawerAction::None
+            }
             "audio" => self.choose_audio(index),
             "overlays" => self.toggle_overlay(index),
             "templates" => self.choose_template(index),
@@ -1538,15 +1556,71 @@ impl Session {
             return DrawerAction::None;
         };
         self.player_now = Some(video.name.clone());
-        if let Some(path) = video
-            .path
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|path| path.is_file())
-        {
-            let _ = self.play_path(path);
+        let Some(link) = video.path.as_deref() else {
+            self.notice = format!("{} has no link to play", video.name);
+            return DrawerAction::None;
+        };
+        let web = link.starts_with("http://") || link.starts_with("https://");
+        if web && freeshow_media::is_stream_page(link) {
+            if !freeshow_media::ytdlp_available() {
+                self.notice = "Install yt-dlp to play YouTube and Vimeo links".to_string();
+                return DrawerAction::None;
+            }
+            // yt-dlp takes seconds, so the operator window keeps running meanwhile.
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let (name, page) = (video.name.clone(), link.to_string());
+            std::thread::spawn(move || {
+                let _ = sender.send((name, freeshow_media::resolve_stream_page(&page)));
+            });
+            self.stream_lookup = Some(receiver);
+            self.notice = format!("Loading {}…", video.name);
+            return DrawerAction::None;
         }
-        DrawerAction::None
+        if !web && !Path::new(link).is_file() {
+            self.notice = format!("{} is missing: no file at {link}", video.name);
+            return DrawerAction::None;
+        }
+        if !self.play_path(PathBuf::from(link)) {
+            self.notice = format!("{} is not a video this app can play", video.name);
+            return DrawerAction::None;
+        }
+        // Start it now, the same way as clicking a video in the Media tab.
+        match self.pending_play.take() {
+            Some(PendingPlay::Video(path)) => DrawerAction::PlayVideo(path),
+            Some(PendingPlay::Audio(path)) => DrawerAction::PlayAudio(path),
+            Some(other) => {
+                self.pending_play = Some(other);
+                DrawerAction::None
+            }
+            None => DrawerAction::Present,
+        }
+    }
+
+    /// Plays a looked-up YouTube or Vimeo video once yt-dlp answers: `Some(true)` when the
+    /// output should start it, `Some(false)` when only the notice changed, `None` while waiting.
+    pub fn poll_stream_lookup(&mut self) -> Option<bool> {
+        let receiver = self.stream_lookup.as_ref()?;
+        let (name, url) = match receiver.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.stream_lookup = None;
+                return Some(false);
+            }
+        };
+        self.stream_lookup = None;
+        // A different video picked meanwhile wins.
+        if self.player_now.as_deref() != Some(name.as_str()) {
+            return Some(false);
+        }
+        let Some(url) = url else {
+            self.notice = format!("Could not load {name}: check the link, the network and yt-dlp");
+            return Some(false);
+        };
+        self.notice.clear();
+        self.play_video(PathBuf::from(url));
+        self.refresh_output = true;
+        Some(true)
     }
 
     pub fn start_effect(&mut self, id_or_name: &str) -> bool {
@@ -2160,14 +2234,7 @@ impl Session {
                 true
             }
             MediaKind::Video => {
-                self.media_finished = None;
-                self.remember_background(&path);
-                self.remember_video_playback(&path);
-                self.replace_underlay(None);
-                self.blanked = false;
-                self.note_media_layer(&path, MediaKind::Video);
-                self.background_transition = true;
-                self.pending_play = Some(PendingPlay::Video(path));
+                self.play_video(path);
                 true
             }
             MediaKind::Audio => {
@@ -2184,6 +2251,18 @@ impl Session {
             }
             MediaKind::Other => false,
         }
+    }
+
+    fn play_video(&mut self, path: PathBuf) {
+        self.media_paused = false;
+        self.media_finished = None;
+        self.remember_background(&path);
+        self.remember_video_playback(&path);
+        self.replace_underlay(None);
+        self.blanked = false;
+        self.note_media_layer(&path, MediaKind::Video);
+        self.background_transition = true;
+        self.pending_play = Some(PendingPlay::Video(path));
     }
 
     fn remember_background(&mut self, path: &Path) {
@@ -3714,6 +3793,7 @@ impl Session {
         if self.tab != tab {
             self.hold_program();
             self.tab = tab.to_string();
+            self.drawer_pick = None;
         }
     }
 

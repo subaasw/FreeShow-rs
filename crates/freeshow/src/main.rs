@@ -382,6 +382,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         "scripture" => selected(session.visible_drawer_index(session.bible_index)),
         "media" => selected(session.visible_drawer_index(session.media_index)),
         "audio" => selected(session.visible_drawer_index(session.audio_index)),
+        "calendar" | "player" => selected(session.visible_drawer_index(session.drawer_pick)),
         _ => -1,
     });
     ui.set_volume(session.volume * 100.0);
@@ -400,6 +401,25 @@ fn refresh(ui: &ControlWindow, session: &Session) {
             .highlighted_project_item()
             .map_or(-1, |item| item as i32),
     );
+}
+
+/// Loads the picked Calendar event, Player video or RSS feed list into the drawer form.
+fn fill_drawer_form(ui: &ControlWindow, session: &Session) {
+    let form = session.drawer_form();
+    let [a, b, c] = form.fields;
+    ui.set_form_a(a.into());
+    ui.set_form_b(b.into());
+    ui.set_form_c(c.into());
+    let mut shows = vec!["No show to start".to_string()];
+    shows.extend(
+        session
+            .shows
+            .iter()
+            .map(|show| format!("Start {}", show.name())),
+    );
+    ui.set_form_show_names(strings(&shows));
+    ui.set_form_show(form.show as i32);
+    ui.set_form_editing(form.editing);
 }
 
 /// Settings, Inspector and Stage editor data.
@@ -1841,6 +1861,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_for_tab.borrow_mut().switch_tab(tab.as_str());
         if let Some(ui) = ui.upgrade() {
             refresh(&ui, &session_for_tab.borrow());
+            fill_drawer_form(&ui, &session_for_tab.borrow());
         }
     });
 
@@ -3130,9 +3151,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .borrow_mut()
                 .start_due_events(chrono::Utc::now());
             sample_audio(&remote_session, &remote_audio);
+            let looked_up = remote_session.borrow_mut().poll_stream_lookup();
+            if looked_up == Some(false)
+                && let Some(ui) = remote_ui.upgrade()
+            {
+                refresh(&ui, &remote_session.borrow());
+            }
             let moved = {
                 let mut session = remote_session.borrow_mut();
-                session.run_due_cue_completion(std::time::Instant::now()) || session.refresh_output
+                session.run_due_cue_completion(std::time::Instant::now())
+                    || session.refresh_output
+                    || looked_up == Some(true)
             };
             let live_edited = !started
                 && !moved
@@ -3458,6 +3487,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_text_mode(false);
                 }
                 library_done(&ui);
+                if matches!(
+                    action.as_str(),
+                    "new-drawer-entry"
+                        | "save-event"
+                        | "delete-event"
+                        | "save-player"
+                        | "delete-player"
+                        | "save-rss"
+                ) {
+                    fill_drawer_form(&ui, &session.borrow());
+                }
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_sync_drawer_form(move || {
+            if let Some(ui) = ui.upgrade() {
+                fill_drawer_form(&ui, &session.borrow());
             }
         });
     }
@@ -3580,8 +3629,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(request) = current.take_feed_request(std::time::Instant::now()) {
                     let _ = feed_tx.send(request);
                 }
+                let mut fed = false;
                 while let Ok(results) = feed_rx.try_recv() {
                     current.apply_feed_results(results);
+                    fed = true;
+                }
+                // New headlines show up in an open RSS tab without waiting for a click.
+                if fed
+                    && current.tab == "rss"
+                    && let Some(ui) = clock_ui.upgrade()
+                {
+                    ui.set_drawer_rows(drawer_rows(&current));
                 }
                 if let Ok(update) = update_rx.try_recv() {
                     current.apply_update_alert(&update);
