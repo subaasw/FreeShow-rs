@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SYSTEM = ("/usr/lib/", "/System/Library/")
 # These cover the application's local video, camera, mixer, recording and RTMP
 # paths. Optional NDI still needs a separately installed NDI SDK runtime.
-PLUGINS = """coreelements app playback typefindfunctions videoconvertscale
+PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png osxaudio applemedia
 autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc shout2""".split()

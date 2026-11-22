@@ -198,7 +198,7 @@ fn rtmp_pipeline_audio(url: &str, width: u32, height: u32, output: &str) -> Vec<
         .into_iter()
         .map(|encoder| {
             format!(
-                "appsrc name=src is-live=true format=time block=false caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! videoconvert ! {encoder} ! h264parse ! mux.video flvmux name=mux streamable=true latency=100000000 ! rtmpsink location=\"{location}\"{audio}"
+                "appsrc name=src is-live=true format=time block=false caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! videorate skip-to-first=true max-duplication-time=250000000 ! video/x-raw,framerate=30/1 ! videoconvert ! {encoder} ! h264parse ! mux.video flvmux name=mux streamable=true latency=100000000 ! rtmpsink location=\"{location}\"{audio}"
             )
         })
         .collect()
@@ -341,7 +341,12 @@ mod tests {
             let descriptions: Vec<_> =
                 rtmp_pipeline_audio(&path.display().to_string(), 64, 48, &id)
                     .into_iter()
-                    .map(|pipeline| pipeline.replace("rtmpsink location=", "filesink location="))
+                    .map(|pipeline| {
+                        // Reproduce a capture source that reaches the pipeline about every 80 ms.
+                        pipeline
+                            .replace("! videorate ", "! identity sleep-time=80000 ! videorate ")
+                            .replace("rtmpsink location=", "filesink location=")
+                    })
                     .collect();
             let (pipeline, appsrc) = open_pipeline(&descriptions).unwrap();
             let raw = count_buffers(appsrc.static_pad("src").unwrap());
@@ -506,6 +511,7 @@ mod tests {
             "only {} static video frames in FLV ({raw_frames} raw, {encoded_frames} at the mux)",
             video.len()
         );
+        assert!(encoded_frames > raw_frames, "expected frame-rate correction under slow input");
         let first_video = video.first().unwrap().1;
         let last_video = video.last().unwrap().1;
         assert!(

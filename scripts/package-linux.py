@@ -16,7 +16,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 SYSTEM = re.compile(r"^(?:linux-vdso|ld-linux|lib(?:c|m|pthread|dl|rt|resolv|util|anl|mvec|nss_[\w]+))\.so(?:\.|$)")
-PLUGINS = """coreelements app playback typefindfunctions videoconvertscale
+PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png autodetect rtmp
 videoparsersbad flv x264 videotestsrc audiotestsrc shout2 alsa pulseaudio video4linux2""".split()
