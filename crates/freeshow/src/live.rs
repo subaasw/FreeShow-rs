@@ -94,6 +94,41 @@ pub fn slide_thumbnail(
     )
 }
 
+/// An overlay or template drawn small for the drawer, over its own background colour or black.
+pub fn catalog_thumbnail(
+    session: &Session,
+    entry: &serde_json::Value,
+    width: u32,
+    height: u32,
+) -> Frame {
+    let background = entry["settings"]["backgroundColor"]
+        .as_str()
+        .and_then(freeshow_output::parse_color)
+        .unwrap_or(Rgba::BLACK);
+    render_styled(&StyledSlide {
+        output_width: width,
+        output_height: height,
+        source_width: SOURCE_WIDTH,
+        source_height: SOURCE_HEIGHT,
+        background,
+        items: catalog_items(session, entry),
+    })
+}
+
+fn catalog_items(session: &Session, entry: &serde_json::Value) -> Vec<StyledItem> {
+    let variables = session_variables(session);
+    entry
+        .get("items")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| styled_item(item, session.root.as_deref(), None, None, &variables))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The selected slide on its own, for the editor preview. Unlike [`audience_frame`]
 /// it ignores Clear and does not touch what the output records as live.
 pub fn edit_frame(session: &Session) -> Frame {
@@ -463,24 +498,7 @@ fn paint_overlays(frame: &mut Frame, session: &Session, under_slide: bool) {
         if place_under != under_slide {
             continue;
         }
-        let items = overlay
-            .get("items")
-            .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        styled_item(
-                            item,
-                            session.root.as_deref(),
-                            None,
-                            None,
-                            &session_variables(session),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let items = catalog_items(session, overlay);
         composite_styled(
             frame,
             &StyledSlide {
@@ -1411,6 +1429,26 @@ fn lines_slide_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_and_template_thumbnails_use_their_background_and_items() {
+        let root = std::env::temp_dir().join(format!("freeshow-cat-thumb-{}", std::process::id()));
+        let session = Session::open(root);
+        let template = serde_json::json!({
+            "name": "Red",
+            "settings": { "backgroundColor": "#ff0000" },
+            "items": []
+        });
+        let thumb = catalog_thumbnail(&session, &template, 128, 72);
+        assert_eq!((thumb.width, thumb.height), (128, 72));
+        assert_eq!(&thumb.pixels[..3], &[255, 0, 0]);
+        let overlay = serde_json::json!({
+            "name": "Box",
+            "items": [{ "type": "text", "style": "left:0px;top:0px;width:1920px;height:1080px;background-color:#00ff00;", "lines": [] }]
+        });
+        let thumb = catalog_thumbnail(&session, &overlay, 128, 72);
+        assert_eq!(&thumb.pixels[64 * 4 + 36 * 128 * 4..][..3], &[0, 255, 0]);
+    }
 
     #[test]
     fn slide_thumbnails_are_small_and_show_the_text() {
