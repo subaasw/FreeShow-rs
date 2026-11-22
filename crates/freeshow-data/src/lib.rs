@@ -3261,6 +3261,28 @@ impl ProjectsFile {
             .as_array_mut()
     }
 
+    /// Inserts or replaces a project document under `id`.
+    pub fn put_project(&mut self, id: &str, project: Value) -> bool {
+        if id.is_empty() || !project.is_object() {
+            return false;
+        }
+        let projects = self
+            .document
+            .as_object_mut()
+            .and_then(|document| {
+                document
+                    .entry("projects")
+                    .or_insert_with(|| Value::Object(Map::new()));
+                document.get_mut("projects")
+            })
+            .and_then(Value::as_object_mut);
+        let Some(projects) = projects else {
+            return false;
+        };
+        projects.insert(id.to_string(), project);
+        true
+    }
+
     pub fn add_project(&mut self, id: &str, name: &str) -> bool {
         self.add_project_in(id, name, "/")
     }
@@ -3366,6 +3388,12 @@ impl Catalog {
 
     pub fn get(&self, id: &str) -> Option<&Value> {
         self.document.get(id)
+    }
+
+    pub fn insert(&mut self, id: &str, value: Value) {
+        if let Some(document) = self.document.as_object_mut() {
+            document.insert(id.to_string(), value);
+        }
     }
 
     pub fn entries(&self) -> Vec<(String, Value)> {
