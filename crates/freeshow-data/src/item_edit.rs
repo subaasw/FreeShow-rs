@@ -18,7 +18,7 @@ pub struct ItemBox {
     pub radius: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemTypography {
     pub font_px: i32,
     pub family: String,
@@ -26,6 +26,62 @@ pub struct ItemTypography {
     pub italic: bool,
     pub color: String,
     pub align: String,
+    /// Line height as a percent of the font size; 0 leaves the font's own spacing.
+    pub line_height_pct: i32,
+    pub letter_spacing: i32,
+    /// Outline (`-webkit-text-stroke`) width in pixels; 0 is no outline.
+    pub outline_width: i32,
+    pub outline_color: String,
+    pub shadow: TextShadow,
+}
+
+/// A `text-shadow` as FreeShow's editor writes it: offsets, blur and colour.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TextShadow {
+    pub x: i32,
+    pub y: i32,
+    pub blur: i32,
+    pub color: String,
+}
+
+impl TextShadow {
+    /// Reads `2px 2px 10px #000000` (lengths first, then the colour, which may hold spaces).
+    pub fn parse(value: &str) -> Self {
+        let mut shadow = Self::default();
+        let mut rest = value.trim();
+        let mut lengths = Vec::new();
+        while lengths.len() < 3 {
+            let (token, tail) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let number = token.trim_end_matches("px");
+            match number.parse::<f32>() {
+                Ok(length) if !token.is_empty() => {
+                    lengths.push(length.round() as i32);
+                    rest = tail.trim_start();
+                }
+                _ => break,
+            }
+        }
+        if let [x, y, rest_lengths @ ..] = lengths.as_slice() {
+            shadow.x = *x;
+            shadow.y = *y;
+            shadow.blur = rest_lengths.first().copied().unwrap_or(0);
+        }
+        shadow.color = rest.trim().to_string();
+        shadow
+    }
+
+    /// The CSS value, or empty when the shadow shows nothing.
+    pub fn css(&self) -> String {
+        if self.x == 0 && self.y == 0 && self.blur == 0 {
+            return String::new();
+        }
+        let color = if self.color.trim().is_empty() {
+            "#000000"
+        } else {
+            self.color.trim()
+        };
+        format!("{}px {}px {}px {color}", self.x, self.y, self.blur)
+    }
 }
 
 impl ShowFile {
@@ -152,7 +208,83 @@ impl ShowFile {
                 .is_some_and(|value| value.eq_ignore_ascii_case("italic")),
             color: css_value(&style, "color").unwrap_or_default(),
             align: css_value(&style, "text-align").unwrap_or_default(),
+            line_height_pct: css_value(&style, "line-height")
+                .and_then(|value| line_height_percent(&value))
+                .unwrap_or(0),
+            letter_spacing: css_px(&style, "letter-spacing").unwrap_or(0),
+            outline_width: css_px(&style, "-webkit-text-stroke-width")
+                .or_else(|| {
+                    css_value(&style, "-webkit-text-stroke").and_then(|value| {
+                        value
+                            .split_whitespace()
+                            .next()?
+                            .trim_end_matches("px")
+                            .parse::<f32>()
+                            .ok()
+                            .map(|width| width.round() as i32)
+                    })
+                })
+                .unwrap_or(0),
+            outline_color: css_value(&style, "-webkit-text-stroke-color")
+                .or_else(|| {
+                    css_value(&style, "-webkit-text-stroke").and_then(|value| {
+                        value
+                            .split_once(char::is_whitespace)
+                            .map(|(_, color)| color.trim().to_string())
+                    })
+                })
+                .unwrap_or_default(),
+            shadow: css_value(&style, "text-shadow")
+                .map(|value| TextShadow::parse(&value))
+                .unwrap_or_default(),
         }
+    }
+
+    /// Sets the text line height as a percent of the font size; 0 removes it.
+    pub fn set_item_line_height(&mut self, slide_id: &str, index: usize, percent: i32) -> bool {
+        let value = if percent <= 0 {
+            String::new()
+        } else {
+            let em = f64::from(percent.clamp(10, 500)) / 100.0;
+            format!("{em}em")
+        };
+        self.set_item_css(slide_id, index, "line-height", &value)
+    }
+
+    pub fn set_item_letter_spacing(&mut self, slide_id: &str, index: usize, px: i32) -> bool {
+        let value = if px == 0 {
+            String::new()
+        } else {
+            format!("{}px", px.clamp(-300, 100))
+        };
+        self.set_item_css(slide_id, index, "letter-spacing", &value)
+    }
+
+    /// Sets the text outline; a width of 0 removes it.
+    pub fn set_item_outline(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        width: i32,
+        color: &str,
+    ) -> bool {
+        let (width, color) = if width <= 0 {
+            (String::new(), String::new())
+        } else {
+            let color = if color.trim().is_empty() {
+                "#000000"
+            } else {
+                color.trim()
+            };
+            (format!("{}px", width.min(100)), color.to_string())
+        };
+        self.set_item_css(slide_id, index, "-webkit-text-stroke", "")
+            && self.set_item_css(slide_id, index, "-webkit-text-stroke-width", &width)
+            && self.set_item_css(slide_id, index, "-webkit-text-stroke-color", &color)
+    }
+
+    pub fn set_item_shadow(&mut self, slide_id: &str, index: usize, shadow: &TextShadow) -> bool {
+        self.set_item_css(slide_id, index, "text-shadow", &shadow.css())
     }
 
     /// Position, size and box fill of an item, from its `style` (FreeShow's default box when unset).
@@ -352,6 +484,17 @@ fn offset_box(style: &str, dx: i32, dy: i32) -> String {
 }
 
 /// The value of `key` in an inline CSS declaration list.
+/// `1.1em`, `110%` or `1.1` as a whole percent of the font size.
+fn line_height_percent(value: &str) -> Option<i32> {
+    let value = value.trim();
+    let number = if let Some(percent) = value.strip_suffix('%') {
+        percent.trim().parse::<f32>().ok()?
+    } else {
+        value.trim_end_matches("em").trim().parse::<f32>().ok()? * 100.0
+    };
+    Some(number.round() as i32)
+}
+
 pub fn css_value(style: &str, key: &str) -> Option<String> {
     for decl in style.split(';') {
         let decl = decl.trim();
@@ -415,6 +558,63 @@ mod tests {
 
     fn show() -> ShowFile {
         ShowFile::blank("id", "Song")
+    }
+
+    #[test]
+    fn spacing_outline_and_shadow_round_trip_as_freeshow_css() {
+        let mut show = show();
+        assert!(show.set_item_text("s1", 0, "Hi"));
+        assert!(show.set_item_line_height("s1", 0, 110));
+        assert!(show.set_item_letter_spacing("s1", 0, 3));
+        assert!(show.set_item_outline("s1", 0, 6, "#ff0000"));
+        let shadow = TextShadow {
+            x: 2,
+            y: 4,
+            blur: 10,
+            color: "rgb(0 0 0 / 0.5)".into(),
+        };
+        assert!(show.set_item_shadow("s1", 0, &shadow));
+        let style = show
+            .show
+            .pointer("/slides/s1/items/0/lines/0/text/0/style")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert!(style.contains("line-height: 1.1em"), "{style}");
+        assert!(style.contains("letter-spacing: 3px"), "{style}");
+        assert!(
+            style.contains("text-shadow: 2px 4px 10px rgb(0 0 0 / 0.5)"),
+            "{style}"
+        );
+        let typography = show.item_typography("s1", 0);
+        assert_eq!(typography.line_height_pct, 110);
+        assert_eq!(typography.letter_spacing, 3);
+        assert_eq!(
+            (typography.outline_width, typography.outline_color.as_str()),
+            (6, "#ff0000")
+        );
+        assert_eq!(typography.shadow, shadow);
+
+        assert!(show.set_item_line_height("s1", 0, 0));
+        assert!(show.set_item_outline("s1", 0, 0, ""));
+        assert!(show.set_item_shadow("s1", 0, &TextShadow::default()));
+        let typography = show.item_typography("s1", 0);
+        assert_eq!(typography.line_height_pct, 0);
+        assert_eq!(typography.outline_width, 0);
+        assert_eq!(typography.shadow, TextShadow::default());
+    }
+
+    #[test]
+    fn freeshow_shorthand_outline_and_shadow_read_back() {
+        let shadow = TextShadow::parse("0 0 5px #000");
+        assert_eq!((shadow.x, shadow.y, shadow.blur), (0, 0, 5));
+        assert_eq!(shadow.color, "#000");
+        let mut show = show();
+        assert!(show.set_item_text("s1", 0, "Hi"));
+        assert!(show.set_item_css("s1", 0, "-webkit-text-stroke", "3px #00ff00"));
+        let typography = show.item_typography("s1", 0);
+        assert_eq!(typography.outline_width, 3);
+        assert_eq!(typography.outline_color, "#00ff00");
     }
 
     #[test]

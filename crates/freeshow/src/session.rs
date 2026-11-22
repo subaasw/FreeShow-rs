@@ -4071,11 +4071,7 @@ impl Session {
         let Some(show) = self.current_show() else {
             return freeshow_data::ItemTypography {
                 font_px: 100,
-                family: String::new(),
-                bold: false,
-                italic: false,
-                color: String::new(),
-                align: String::new(),
+                ..Default::default()
             };
         };
         let Some(slide_id) = self.slide_index.and_then(|index| {

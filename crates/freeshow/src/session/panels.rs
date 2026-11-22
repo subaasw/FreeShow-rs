@@ -1000,6 +1000,59 @@ impl Session {
                     show.set_item_box_css(slide, item, key, &css)
                 })
             }
+            "line-height" => {
+                let percent = parse_int(&value, 0, 500)? as i32;
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_line_height(slide, item, percent)
+                })
+            }
+            "letter-spacing" => {
+                let px = parse_int(&value, -300, 100)? as i32;
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_letter_spacing(slide, item, px)
+                })
+            }
+            "outline-width" | "outline-color" => {
+                let current = self.item_typography();
+                let (width, color) = if key == "outline-width" {
+                    let width = parse_int(&value, 0, 100)? as i32;
+                    (width, current.outline_color)
+                } else {
+                    if !value.is_empty() && !valid_css_color(&value) {
+                        return Err(format!("invalid color {value:?}"));
+                    }
+                    // Picking a colour with no outline yet gives it a visible width.
+                    (current.outline_width.max(4), value.clone())
+                };
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_outline(slide, item, width, &color)
+                })
+            }
+            "shadow-x" | "shadow-y" | "shadow-blur" | "shadow-color" => {
+                let mut shadow = self.item_typography().shadow;
+                match key {
+                    "shadow-x" => shadow.x = parse_int(&value, -1000, 1000)? as i32,
+                    "shadow-y" => shadow.y = parse_int(&value, -1000, 1000)? as i32,
+                    "shadow-blur" => shadow.blur = parse_int(&value, 0, 500)? as i32,
+                    _ => {
+                        if !value.is_empty() && !valid_css_color(&value) {
+                            return Err(format!("invalid color {value:?}"));
+                        }
+                        shadow.color = value.clone();
+                        if shadow.x == 0 && shadow.y == 0 && shadow.blur == 0 {
+                            shadow = freeshow_data::TextShadow {
+                                x: 2,
+                                y: 2,
+                                blur: 10,
+                                color: value.clone(),
+                            };
+                        }
+                    }
+                }
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_shadow(slide, item, &shadow)
+                })
+            }
             "background-color" => {
                 if !value.is_empty() && !valid_css_color(&value) {
                     return Err(format!("invalid color {value:?}"));

@@ -2558,6 +2558,12 @@ fn line_box(
         let number: f32 = percent.trim().parse().unwrap_or(100.0);
         return (font_px * number / 100.0).round().max(1.0) as i32;
     }
+    // FreeShow's editor writes `line-height: 1.1em`.
+    if let Some(em) = value.strip_suffix("em")
+        && let Ok(number) = em.trim().parse::<f32>()
+    {
+        return (font_px * number).round().max(1.0) as i32;
+    }
     if let Ok(number) = value.parse::<f32>() {
         return (font_px * number).round().max(1.0) as i32;
     }
