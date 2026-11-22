@@ -13,7 +13,7 @@ pub use log::{init_logging, log_file_path};
 pub use settings::{
     AppSettings, SettingsError, config_dir, next_output_monitor, output_monitor_index,
 };
-pub use theme::{Rgb, ThemePalette, theme_by_name};
+pub use theme::{Rgb, Rgba, ThemePalette, theme_by_name};
 
 #[cfg(test)]
 mod tests {
@@ -32,6 +32,42 @@ mod tests {
         assert_eq!(theme.text_invert, Rgb::from_hex(0x131313));
         assert_eq!(theme.secondary_text, Rgb::from_hex(0xf0f0ff));
         assert_eq!(theme.secondary, Rgb::from_hex(0xf0008c));
+        assert_eq!(theme.hover, Rgba::from_rgb_frac(255, 255, 255, 50));
+        assert_eq!(theme.focus, Rgba::from_rgb_frac(255, 255, 255, 100));
+    }
+
+    #[test]
+    fn built_in_hover_and_focus_washes_match_freeshow() {
+        use crate::theme::Rgba;
+        assert_eq!(
+            theme_by_name("light").hover,
+            Rgba::from_rgb_frac(0, 0, 0, 50)
+        );
+        assert_eq!(
+            theme_by_name("light").focus,
+            Rgba::from_rgb_frac(0, 0, 0, 100)
+        );
+        assert_eq!(
+            theme_by_name("black").hover,
+            Rgba::from_rgb_frac(255, 255, 255, 200)
+        );
+        assert_eq!(
+            theme_by_name("black").focus,
+            Rgba::from_rgb_frac(255, 255, 255, 300)
+        );
+        assert_eq!(
+            theme_by_name("charcoal").hover,
+            Rgba::from_rgb_frac(0xd0, 0xd0, 0xd0, 50)
+        );
+        assert_eq!(
+            theme_by_name("papyrus").focus,
+            Rgba::from_rgb_frac(0xea, 0xc6, 0xa4, 300)
+        );
+        assert_eq!(theme_by_name("sea").hover, Rgba::from_rgb_frac(0, 0, 0, 50));
+        assert_eq!(
+            theme_by_name("aqua").focus,
+            Rgba::from_rgb_frac(255, 255, 255, 300)
+        );
     }
 
     #[test]

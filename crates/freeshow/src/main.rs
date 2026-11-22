@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use church_import::ChurchImport;
 use freeshow_ai::SlideAssist;
 use freeshow_cloud::CloudBackup;
-use freeshow_core::{AppSettings, Rgb, ThemePalette};
+use freeshow_core::{AppSettings, Rgb};
 use freeshow_data::{MediaEntry, MediaEntryKind};
 use freeshow_media::{AudioOutput, AudioPlaybackOptions, VideoPlayer};
 use freeshow_obs::ObsControl;
@@ -39,6 +39,9 @@ slint::slint! {
 
     export global OperatorStyle {
         in-out property <float> font-scale: 1;
+        in-out property <color> hover: rgba(255, 255, 255, 0.05);
+        in-out property <color> focus-fill: rgba(255, 255, 255, 0.1);
+        in-out property <length> chrome-radius: 4px;
     }
 
     struct DrawerTab { id: string, label: string, short: string }
@@ -58,7 +61,14 @@ slint::slint! {
         in property <color> accent-text;
         callback clicked();
         height: 58px;
+        border-radius: OperatorStyle.chrome-radius;
         background: root.active ? root.accent : root.primary;
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            background: root.active ? transparent : pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
+        }
         Text {
             text: root.label;
             color: root.active ? root.accent-text : root.text-color;
@@ -68,10 +78,17 @@ slint::slint! {
             wrap: word-wrap;
             width: parent.width - 8px;
         }
-        TouchArea {
+        key-focus := FocusScope {
             width: 100%;
             height: 100%;
-            clicked => { root.clicked(); }
+        }
+        pointer := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                key-focus.focus();
+                root.clicked();
+            }
         }
     }
 
@@ -83,8 +100,14 @@ slint::slint! {
         callback clicked();
         horizontal-stretch: 1;
         height: 28px;
-        border-radius: 4px;
+        border-radius: OperatorStyle.chrome-radius;
         background: root.accent;
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            background: pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
+        }
         Text {
             text: root.label;
             color: root.accent-text;
@@ -92,10 +115,17 @@ slint::slint! {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
-        TouchArea {
+        key-focus := FocusScope {
             width: 100%;
             height: 100%;
-            clicked => { root.clicked(); }
+        }
+        pointer := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                key-focus.focus();
+                root.clicked();
+            }
         }
     }
 
@@ -107,8 +137,14 @@ slint::slint! {
         callback clicked();
         width: 88px;
         height: 32px;
-        border-radius: 4px;
+        border-radius: OperatorStyle.chrome-radius;
         background: root.accent;
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            background: pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent);
+        }
         Text {
             text: root.label;
             color: root.accent-text;
@@ -116,10 +152,17 @@ slint::slint! {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
-        TouchArea {
+        key-focus := FocusScope {
             width: 100%;
             height: 100%;
-            clicked => { root.clicked(); }
+        }
+        pointer := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                key-focus.focus();
+                root.clicked();
+            }
         }
     }
 
@@ -133,7 +176,8 @@ slint::slint! {
         in property <color> accent-text;
         callback clicked();
         height: root.show-thumb ? 48px : 36px;
-        background: root.active ? root.accent : transparent;
+        border-radius: OperatorStyle.chrome-radius;
+        background: root.active ? root.accent : (pointer.has-hover ? OperatorStyle.hover : (key-focus.has-focus ? OperatorStyle.focus-fill : transparent));
         HorizontalLayout {
             padding-left: 8px;
             padding-right: 8px;
@@ -154,10 +198,17 @@ slint::slint! {
                 overflow: elide;
             }
         }
-        TouchArea {
+        key-focus := FocusScope {
             width: 100%;
             height: 100%;
-            clicked => { root.clicked(); }
+        }
+        pointer := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                key-focus.focus();
+                root.clicked();
+            }
         }
     }
 
@@ -571,14 +622,23 @@ fn color(rgb: Rgb) -> slint::Color {
     slint::Color::from_rgb_u8(rgb.r, rgb.g, rgb.b)
 }
 
-fn apply_theme(ui: &ControlWindow, theme: &ThemePalette) {
-    ui.set_primary(color(theme.primary));
-    ui.set_primary_lighter(color(theme.primary_lighter));
-    ui.set_primary_darker(color(theme.primary_darker));
-    ui.set_primary_darkest(color(theme.primary_darkest));
-    ui.set_text_color(color(theme.text));
-    ui.set_accent(color(theme.secondary));
-    ui.set_accent_text(color(theme.secondary_text));
+fn color_rgba(color: freeshow_core::Rgba) -> slint::Color {
+    slint::Color::from_argb_u8(color.a, color.r, color.g, color.b)
+}
+
+fn apply_theme(ui: &ControlWindow, theme: &theme::OperatorTheme) {
+    let palette = &theme.palette;
+    ui.set_primary(color(palette.primary));
+    ui.set_primary_lighter(color(palette.primary_lighter));
+    ui.set_primary_darker(color(palette.primary_darker));
+    ui.set_primary_darkest(color(palette.primary_darkest));
+    ui.set_text_color(color(palette.text));
+    ui.set_accent(color(palette.secondary));
+    ui.set_accent_text(color(palette.secondary_text));
+    let style = ui.global::<OperatorStyle>();
+    style.set_hover(color_rgba(palette.hover));
+    style.set_focus_fill(color_rgba(palette.focus));
+    style.set_chrome_radius(theme.border_radius);
 }
 
 fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
@@ -1474,7 +1534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    apply_theme(&control, &theme.palette);
+    apply_theme(&control, &theme);
     control.set_theme_font_family(theme.font_family.into());
     control
         .global::<OperatorStyle>()
