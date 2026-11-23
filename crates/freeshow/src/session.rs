@@ -2737,7 +2737,10 @@ impl Session {
     }
 
     fn discard_queued_video(&mut self) {
-        if matches!(self.pending_play, Some(PendingPlay::Video(_))) {
+        if matches!(
+            self.pending_play,
+            Some(PendingPlay::Video(_) | PendingPlay::Camera(_))
+        ) {
             self.pending_play = self.pending_also.take();
         }
     }
