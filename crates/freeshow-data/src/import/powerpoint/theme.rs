@@ -138,6 +138,7 @@ pub(super) enum ResolvedFill {
 pub(super) struct GradientFill {
     /// CSS angle for a linear fill.
     pub linear_angle: Option<f64>,
+    pub linear_scaled: bool,
     pub focus: Option<GradientFocus>,
     /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
     pub stops: Vec<(f64, Color)>,
@@ -171,15 +172,12 @@ impl GradientFocus {
 
 impl GradientFill {
     pub(super) fn from_node(fill: roxmltree::Node<'_, '_>) -> Option<Self> {
-        let mut angle = 90.0;
-        if let Some(line) = child(fill, "lin")
-            && let Some(raw) = line.attribute("ang")
-            && let Ok(value) = raw.parse::<f64>()
-            && value.is_finite()
-        {
-            // DrawingML 0 is left-to-right, counter-clockwise; CSS 0 is up, clockwise.
-            angle = 90.0 - value / 60_000.0;
-        }
+        let line = child(fill, "lin");
+        let angle = linear_gradient_angle(line.and_then(|line| line.attribute("ang")));
+        let linear_scaled = matches!(
+            line.and_then(|line| line.attribute("scaled")),
+            Some("1" | "true")
+        );
         let mut stops = Vec::new();
         if let Some(list) = child(fill, "gsLst") {
             for stop in list.children().filter(|node| node.has_tag_name("gs")) {
@@ -210,6 +208,7 @@ impl GradientFill {
         });
         Some(Self {
             linear_angle: path.is_none().then_some(angle),
+            linear_scaled,
             focus,
             stops,
         })
@@ -226,9 +225,12 @@ impl GradientFill {
             .collect::<Vec<_>>()
             .join(", ");
         let mut style = match self.linear_angle {
-            Some(angle) => format!("background:linear-gradient({}deg, {body});", angle.round()),
+            Some(angle) => format!("background:linear-gradient({angle}deg, {body});"),
             None => format!("background:radial-gradient(circle at center, {body});"),
         };
+        if self.linear_angle.is_some() && self.linear_scaled {
+            style.push_str("--pptx-linear-scaled:1;");
+        }
         match self.focus {
             Some(GradientFocus::RadialPoint([x, y])) => {
                 style.push_str(&format!("--pptx-radial-focus:{x:.5} {y:.5};"))
@@ -244,6 +246,15 @@ impl GradientFill {
             transparent: resolved.iter().any(|(_, color)| color.len() == 9),
         })
     }
+}
+
+pub(super) fn linear_gradient_angle(raw: Option<&str>) -> f64 {
+    let angle = raw
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|angle| angle.is_finite())
+        .unwrap_or(0.0);
+    // DrawingML starts at right and CSS starts at up. Both increase clockwise.
+    (90.0 + angle / 60_000.0).rem_euclid(360.0)
 }
 
 pub(super) fn gradient_insets(inset: impl Fn(&str) -> Option<f64>) -> [f64; 4] {

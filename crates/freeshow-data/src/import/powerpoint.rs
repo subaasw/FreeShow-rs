@@ -639,6 +639,7 @@ fn find_background(
     let mut tiled = false;
     let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
     let mut gradient_angle = 90.0;
+    let mut gradient_scaled = false;
     let mut gradient_path = None;
     let mut gradient_insets = [0.0; 4];
     let mut gs_pos = None;
@@ -687,12 +688,12 @@ fn find_background(
                             gs_color = None;
                         }
                         (Some("gradFill"), "lin") => {
-                            if let Some(raw) = attribute(&element, "ang")
-                                && let Ok(value) = raw.parse::<f64>()
-                                && value.is_finite()
-                            {
-                                gradient_angle = 90.0 - value / 60_000.0;
-                            }
+                            gradient_angle =
+                                theme::linear_gradient_angle(attribute(&element, "ang").as_deref());
+                            gradient_scaled = matches!(
+                                attribute(&element, "scaled").as_deref(),
+                                Some("1" | "true")
+                            );
                         }
                         (Some("gradFill"), "path") => {
                             gradient_path =
@@ -734,6 +735,7 @@ fn find_background(
         gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
         GradientFill {
             linear_angle: gradient_path.is_none().then_some(gradient_angle),
+            linear_scaled: gradient_scaled,
             focus: gradient_path
                 .as_deref()
                 .and_then(|path| theme::GradientFocus::from_path(path, gradient_insets)),
@@ -1227,9 +1229,25 @@ mod tests {
                 br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1002"><a:srgbClr val="00AA00"/></p:bgRef></p:bg>
                     <a:p><a:r><a:t>Theme rectangle</a:t></a:r></a:p></p:cSld></p:sld>"#,
             ),
+            (
+                "ppt/slides/slide6.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill>
+                    <a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst>
+                    <a:lin ang="2700000" scaled="true"/>
+                </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Scaled angle</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide7.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1003"><a:srgbClr val="FF0000"/></p:bgRef></p:bg>
+                    <a:p><a:r><a:t>Theme scaled</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
             ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide5.xml.rels", layout_rel),
+            ("ppt/slides/_rels/slide7.xml.rels", layout_rel),
             ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#),
             (
                 "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
@@ -1261,6 +1279,13 @@ mod tests {
                                 </a:gsLst>
                                 <a:path path="rect"><a:fillToRect l="50000" r="50000"/></a:path>
                             </a:gradFill>
+                            <a:gradFill>
+                                <a:gsLst>
+                                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                                </a:gsLst>
+                                <a:lin ang="2730000" scaled="1"/>
+                            </a:gradFill>
                         </a:bgFillStyleLst>
                     </a:fmtScheme>
                 </a:themeElements></a:theme>"#,
@@ -1270,6 +1295,23 @@ mod tests {
         let first = &show.show["slides"]["s1"];
         let second = &show.show["slides"]["s2"];
         let gradient = "linear-gradient(90deg, #FF0000 0%, #0000FF 100%)";
+        assert!(
+            !first["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("--pptx-linear-scaled")
+        );
+        for (slide, angle) in [("s6", "135"), ("s7", "135.5")] {
+            let style = show.show["slides"][slide]["items"][0]["style"]
+                .as_str()
+                .unwrap();
+            assert!(
+                style.contains(&format!(
+                    "linear-gradient({angle}deg, #FF0000 0%, #0000FF 100%);--pptx-linear-scaled:1;"
+                )),
+                "{style}"
+            );
+        }
         assert_eq!(first["settings"]["color"], "#FF0000");
         assert_eq!(first["items"][0]["type"], "shape");
         assert!(

@@ -1305,7 +1305,14 @@ impl Session {
                     ("background-color", "background")
                 };
                 self.edit_current_item(|show, slide, item| {
-                    show.set_item_box_css(slide, item, other_key, "")
+                    [
+                        "--pptx-linear-scaled",
+                        "--pptx-radial-focus",
+                        "--pptx-rectangular-focus",
+                    ]
+                    .into_iter()
+                    .all(|key| show.set_item_box_css(slide, item, key, ""))
+                        && show.set_item_box_css(slide, item, other_key, "")
                         && show.set_item_box_css(slide, item, key, fill)
                 })
             }
@@ -2179,6 +2186,9 @@ mod tests {
         let (dir, mut session) = library("inspector-gradient");
         assert!(session.create_show());
         assert!(session.save_lyrics("Gradient"));
+        assert!(session.edit_current_item(|show, slide, item| {
+            show.set_item_box_css(slide, item, "--pptx-linear-scaled", "1")
+        }));
         let fill = "linear-gradient(90deg, #ff0000 0%, #0000ff 100%)";
         session
             .inspector_set("background-color", "#abcdef")
@@ -2200,6 +2210,8 @@ mod tests {
         assert!(session.pick_first_slide());
         let area = session.inspector_form().item_box;
         assert_eq!(area.background, fill);
+        let style = &session.current_show().unwrap().show["slides"]["s1"]["items"][0]["style"];
+        assert!(!style.as_str().unwrap().contains("--pptx-linear-scaled"));
         let frame = crate::live::edit_frame(&session);
         let y = (area.top + 4) as u32;
         let left = frame.pixel((area.left + 4) as u32, y);
