@@ -232,12 +232,14 @@ impl FreeShowPreferences {
         self.max_connections.unwrap_or(10)
     }
 
-    /// The audience output FreeShow would open: the active one, else the first enabled one.
+    /// Picks an enabled audience output first, keeping the disabled active one if no other is enabled.
     pub fn active_output(&self) -> Option<&OutputPreference> {
-        self.outputs
-            .iter()
-            .find(|output| output.active)
-            .or_else(|| self.outputs.iter().find(|output| output.enabled))
+        let mut audience = self.outputs.iter().filter(|output| !output.stage);
+        audience
+            .clone()
+            .find(|output| output.enabled && output.active)
+            .or_else(|| audience.clone().find(|output| output.enabled))
+            .or_else(|| audience.find(|output| output.active))
     }
 
     /// The output is locked unless this is stored as true.
@@ -263,19 +265,13 @@ impl FreeShowPreferences {
     }
 
     pub fn output_always_on_top(&self) -> bool {
-        self.outputs
-            .iter()
-            .find(|output| output.active && output.enabled)
-            .or_else(|| self.outputs.first())
+        self.active_output()
             .map(|output| output.always_on_top)
             .unwrap_or(true)
     }
 
     pub fn output_kiosk(&self) -> bool {
-        self.outputs
-            .iter()
-            .find(|output| output.active && output.enabled)
-            .or_else(|| self.outputs.first())
+        self.active_output()
             .map(|output| output.kiosk)
             .unwrap_or(false)
     }
@@ -400,14 +396,7 @@ impl FreeShowPreferences {
 
     /// Pixel size of the active or first enabled audience output.
     pub fn configured_output_size(&self) -> Option<(u32, u32)> {
-        let mut audience = self
-            .outputs
-            .iter()
-            .filter(|output| output.enabled && !output.stage);
-        let output = audience
-            .clone()
-            .find(|output| output.active)
-            .or_else(|| audience.next())?;
+        let output = self.active_output().filter(|output| output.enabled)?;
         Some((output.width?, output.height?))
     }
 
@@ -706,14 +695,20 @@ pub fn is_lesson_document(value: &Value) -> bool {
 }
 
 fn active_output_key(outputs: &serde_json::Map<String, Value>) -> Option<String> {
-    outputs
-        .iter()
-        .find(|(_, output)| output.get("active").and_then(Value::as_bool) == Some(true))
-        .or_else(|| {
-            outputs
-                .iter()
-                .find(|(_, output)| output.get("enabled").and_then(Value::as_bool) != Some(false))
+    let mut audience = outputs.iter().filter(|(_, output)| {
+        output.is_object() && output["stageOutput"].as_str().is_none_or(str::is_empty)
+    });
+    audience
+        .clone()
+        .find(|(_, output)| {
+            output["active"].as_bool() == Some(true) && output["enabled"].as_bool() != Some(false)
         })
+        .or_else(|| {
+            audience
+                .clone()
+                .find(|(_, output)| output["enabled"].as_bool() != Some(false))
+        })
+        .or_else(|| audience.find(|(_, output)| output["active"].as_bool() == Some(true)))
         .map(|(key, _)| key.clone())
 }
 
@@ -4644,7 +4639,12 @@ impl Library {
         let Some(outputs) = json.get("outputs").and_then(Value::as_object) else {
             return ("default".into(), String::new());
         };
-        let key = active_output_key(outputs).unwrap_or_else(|| "default".into());
+        let Some(key) = active_output_key(outputs) else {
+            return (
+                available_output_id(outputs.keys().map(String::as_str)),
+                String::new(),
+            );
+        };
         let name = outputs
             .get(&key)
             .and_then(|output| output.get("name"))
@@ -4678,16 +4678,9 @@ impl Library {
         let Some(outputs) = json.get("outputs").and_then(Value::as_object) else {
             return "default".into();
         };
-        let chosen = outputs
-            .iter()
-            .find(|(_, output)| output.get("active").and_then(Value::as_bool) == Some(true))
-            .or_else(|| {
-                outputs.iter().find(|(_, output)| {
-                    output.get("enabled").and_then(Value::as_bool) != Some(false)
-                })
-            });
-        chosen
-            .and_then(|(_, output)| output.get("style").and_then(Value::as_str))
+        active_output_key(outputs)
+            .and_then(|key| outputs.get(&key))
+            .and_then(|output| output["style"].as_str())
             .filter(|style| !style.is_empty())
             .unwrap_or("default")
             .to_string()
@@ -5251,10 +5244,11 @@ impl Library {
             *outputs = Value::Object(serde_json::Map::new());
         }
         let outputs = outputs.as_object_mut().expect("outputs object");
-        let key = active_output_key(outputs).unwrap_or_else(|| "default".into());
+        let key = active_output_key(outputs)
+            .unwrap_or_else(|| available_output_id(outputs.keys().map(String::as_str)));
         let output = outputs
             .entry(key)
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            .or_insert_with(|| serde_json::json!({"name":"Primary","active":true,"enabled":true}));
         if !output.is_object() {
             *output = Value::Object(serde_json::Map::new());
         }
@@ -5787,6 +5781,7 @@ fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
     };
     outputs
         .iter()
+        .filter(|(_, output)| output.is_object())
         .map(|(id, output)| OutputPreference {
             id: id.clone(),
             name: output
@@ -5819,6 +5814,17 @@ fn output_preferences(settings: &Value) -> Vec<OutputPreference> {
                 .is_some_and(|id| !id.is_empty()),
         })
         .collect()
+}
+
+/// An unused id for the first audience output in a library.
+pub fn available_output_id<'a>(taken: impl Iterator<Item = &'a str> + Clone) -> String {
+    if !taken.clone().any(|id| id == "default") {
+        return "default".into();
+    }
+    (2..)
+        .map(|index| format!("output{index}"))
+        .find(|candidate| !taken.clone().any(|id| id == candidate))
+        .expect("an unused output id")
 }
 
 fn stored_value(json: &Value, name: &str) -> Value {
@@ -7410,7 +7416,7 @@ mod tests {
     }
 
     #[test]
-    fn style_transition_reads_the_active_output() {
+    fn style_transition_uses_the_enabled_audience_output() {
         let root = std::env::temp_dir().join(format!(
             "freeshow-rust-style-transition-{}",
             std::process::id()
@@ -7420,7 +7426,11 @@ mod tests {
         let library = Library::open(&root);
         fs::write(
             library.settings_path(),
-            r#"{"outputs":{"default":{"active":true,"style":"main"}}}"#,
+            r#"{"outputs":{
+                "a-stage":{"active":true,"stageOutput":"default","name":"Stage","style":"stage"},
+                "b-disabled":{"active":true,"enabled":false,"style":"disabled"},
+                "c-room":{"name":"Room","style":"main"}
+            }}"#,
         )
         .unwrap();
         fs::write(
@@ -7428,6 +7438,7 @@ mod tests {
             r#"{"styles":{"main":{"name":"Main","transition":{"text":{"type":"scale","duration":250,"easing":"back"},"media":{"type":"spin","duration":1100,"easing":"bounce"}}}}}"#,
         )
         .unwrap();
+        assert_eq!(library.audience_output(), ("c-room".into(), "Room".into()));
         assert_eq!(library.output_style_id(), "main");
         assert_eq!(
             library.style_transition("text"),
@@ -7439,6 +7450,12 @@ mod tests {
             })
         );
         assert_eq!(library.style_transition("media").unwrap().kind, "spin");
+        assert!(library.set_output_style("next"));
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(library.settings_path()).unwrap()).unwrap();
+        assert_eq!(saved["outputs"]["a-stage"]["style"], "stage");
+        assert_eq!(saved["outputs"]["b-disabled"]["style"], "disabled");
+        assert_eq!(saved["outputs"]["c-room"]["style"], "next");
         fs::write(
             library.settings_path(),
             r#"{"outputs":{"default":{"active":true,"style":"missing"}}}"#,
