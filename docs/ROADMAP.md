@@ -77,7 +77,8 @@ the show or reveals lyrics until the password is accepted.
 - [x] Icecast stereo audio on the saved mixer node with operator and slide controls.
 - [x] Separate audience and stage pictures over NDI and WebRTC/WHIP.
 - [x] Route each WebRTC/WHIP output's stereo mix into its Opus track.
-- [ ] Verify OMT with its runtime installed, add NDI groups, and support
+- [x] Send audience and stage video and routed stereo over OMT from the Rust app.
+- [ ] Verify OMT against third-party receivers, add NDI groups, and support
       multiple independent audience pictures.
 - [x] Keep the main volume and mute controls working for paths through Main.
 - [x] Remote channel list, per-channel volume, and independent mute.

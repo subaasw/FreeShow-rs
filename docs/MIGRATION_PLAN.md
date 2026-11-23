@@ -9,12 +9,12 @@
 
 **Architecture:** Keep the current crate split. Domain and file I/O stay headless and testable. A CPU compositor paints audience and stage frames to RGBA. The operator window is Slint; live windows upload compositor frames through wgpu. Optional integrations (NDI, record, MIDI, OSC, PCO, ChurchApps, OBS, AI) fail soft so a Sunday service still runs.
 
-**Tech stack:** Rust 1.92+ (edition 2024), Slint 1.18 (winit + femtovg-wgpu), wgpu 30, GStreamer 1.x (video/cameras/NDI/RTMP), cpal + symphonia (audio files), axum + socketioxide (remote/stage), serde_json + thiserror, tokio (servers only), tracing.
+**Tech stack:** Rust 1.97+ (edition 2024), Slint 1.18 (winit + femtovg-wgpu), wgpu 30, GStreamer 1.x (video/cameras/NDI/RTMP), cpal + symphonia (audio files), axum + socketioxide (remote/stage), serde_json + thiserror, tokio (servers only), tracing.
 
 ## Global constraints
 
 - License is GPL-3.0-only, matching upstream FreeShow.
-- MSRV is `rust-version = "1.92"`. CI uses current stable with `rustfmt` and `clippy`.
+- MSRV is `rust-version = "1.97"`. CI uses current stable with `rustfmt` and `clippy`.
 - On-disk compatibility is mandatory: read and write existing FreeShow library files without dropping unknown JSON fields.
 - Do not change the UI stack or crate layout unless a measured problem requires it.
 - New behavior is tested in the crate that owns it. `cargo test --workspace` stays green.
@@ -72,7 +72,7 @@ Library folders use the same names as Electron: `Shows/`, `Config/` (`projects.j
 
 ### 1.3 Build and quality baseline
 
-- Workspace: Cargo resolver 3, edition 2024, `rust-version = "1.92"`, release uses thin LTO, one codegen unit, and symbol stripping.
+- Workspace: Cargo resolver 3, edition 2024, `rust-version = "1.97"`, release uses thin LTO, one codegen unit, and symbol stripping.
 - Tests: about 270 unit/integration tests plus a few ignored smoke tests (RTMP loopback, NDI SDK).
 - Existing CI (`.github/workflows/{release,gate,package-*}.yml`) is packaging-heavy: it compiles and runs tests, then builds and verifies installers. It does **not** run `rustfmt` or `clippy`, and macOS unit tests are not on the default pull-request path (they sit in the three-platform release workflow).
 - `thiserror` is used in `freeshow-data`. Other crates still use ad-hoc error enums (`MediaError`, `SettingsError`). Standardize gradually; do not rewrite every crate at once.
@@ -176,7 +176,7 @@ Acceptance: a `stage.json` from Electron renders every box type the Sunday opera
 
 ### M4. Network media and multi-picture output
 
-- [x] OMT and WebRTC (WHIP) destinations are read from the library, including stage pictures. OMT uses `omtData.name` or `FreeShow OMT - <output name>` but does not broadcast without the Open Media Transport runtime (not bundled). WebRTC reads `webrtcData.url` and an optional token. The default `webrtc` cargo feature links `gstreamer-webrtc` when the host provides `gstreamer-webrtc-1.0` (Ubuntu/Debian `libgstreamer-plugins-bad1.0-dev` plus the `gstreamer1.0-nice` plugin, Homebrew `gstreamer`, and the Windows MSVC devel installer). Enabled outputs encode H.264 through webrtcbin, post a WHIP `application/sdp` offer with a Bearer token when one is stored, apply the answer, and send the matching audience or stage picture.
+- [x] OMT and WebRTC (WHIP) destinations are read from the library, including stage pictures. The Rust OMT sender advertises `omtData.name` or `FreeShow OMT - <output name>` and sends VMX1 video and routed stereo audio. WebRTC reads `webrtcData.url` and an optional token. The default `webrtc` cargo feature links `gstreamer-webrtc` when the host provides `gstreamer-webrtc-1.0` (Ubuntu/Debian `libgstreamer-plugins-bad1.0-dev` plus the `gstreamer1.0-nice` plugin, Homebrew `gstreamer`, and the Windows MSVC devel installer). Enabled outputs encode H.264 through webrtcbin, post a WHIP `application/sdp` offer with a Bearer token when one is stored, apply the answer, and send the matching audience or stage picture.
 - [x] Multiple independent NDI pictures and stage NDI. Grouped outputs share one sender per (group, stage) and advertise `{name} [{group}]`.
 - Keep Icecast / RTMP / stereo network routes working; add tests for any new transport at the crate that owns it.
 - [x] Stream-only Lessons.church pages with no direct media URL are published as remote media paths (YouTube, Vimeo, HLS/DASH). Direct HTTP clips play through uridecodebin. YouTube/Vimeo player pages resolve with `yt-dlp -g` when that binary is present, then play through the same HTTP path.
@@ -211,7 +211,7 @@ Close the remaining gaps versus FreeShow 1.6.8 so a Sunday operator can run a se
 - [x] Remaining importers: MediaShout, Quelea, SoftProjector, EasySlides, VerseView, VideoPsalm, CSV, image-only shows, and project packages, each with a small fixture and tests. Native MediaShout `.mdb` and Canva presentations stay out (Canva needs an account).
 - [x] Read the remaining `settings.json` keys listed in `PARITY.md`, with tests against fixtures. `outLocked` and `lockedOverlays` also take effect; drawer and similar chrome still use the stored objects in later M7 work.
 - [ ] Operator chrome extras that remain are documented as sub-features in `PARITY.md` (not every Electron settings/inspector/stage-editor GUI control). Header Search, panel widths, `splitLines`, `customFonts`, `fullColors`, `slidesOptions`, the bottom drawer, first-run guide, focus mode, undo/redo, the shortcut editor, always-on-top, kiosk, named window-layout profiles, output scenes/`activeScenes`, watermark, interactions, variables, draw-on-output, the Player tab, PDF-as-show, live effects, the `audioEffects` DSP chain, the timeline editor, HTML/web boxes, weather boxes with a 600s Open-Meteo timer, an RSS drawer/ticker, spellcheck, profile login, `alertUpdates` chrome, text settings/inspector/stage-editor panes, and GitHub Releases check and verified download (SHA-256 sidecar, then handed to the OS installer) are in. M7 is not complete.
-- [ ] Capture and I/O: webhook/REST, Companion/HTTP+WS, grouped NDI, NDI/OMT receive and source discovery (soft-fail without the plugin), auto-started RTMP, Linux virtual camera, platform-gated Spout/Syphon, GStreamer Blackmagic send, and Stream Deck USB HID (pure-Rust hidraw, feature `hid`) are in, plus a real output-delay frame buffer (default 0). OMT broadcast still needs the unbundled runtime. Credential-gated cloud/STT remain. PDF, project-package, and screenshot export are in; OBS also reads library `obsData`. `--check-service` walks a Sunday import/present/REST/Companion/stage path. CI package jobs on Linux, Windows, and macOS are unsigned and run `--check-perf`.
+- [ ] Capture and I/O: webhook/REST, Companion/HTTP+WS, grouped NDI, NDI/OMT receive and source discovery (soft-fail without the plugin), auto-started RTMP, Linux virtual camera, platform-gated Spout/Syphon, GStreamer Blackmagic send, and Stream Deck USB HID (pure-Rust hidraw, feature `hid`) are in, plus a real output-delay frame buffer (default 0). OMT sends from the built-in Rust SDK. Cross-machine receiver interoperability still needs verification. Credential-gated cloud/STT remain. PDF, project-package, and screenshot export are in; OBS also reads library `obsData`. `--check-service` walks a Sunday import/present/REST/Companion/stage path. CI package jobs on Linux, Windows, and macOS are unsigned and run `--check-perf`.
 - [x] Measure remote-button latency against the ≤16 ms budget and include it in `--check-perf`. A later release run on this box measured `remote_ms` 3.56 and `next_ms` 4.10 at 1920×1080, after speeding up still blit, in-place lyric paint, and glyph caching.
 - Cloud providers (Canva, OnStage, Amazing Life) and AI speech-to-text come last, and only if they need no credentials; otherwise they stay documented.
 

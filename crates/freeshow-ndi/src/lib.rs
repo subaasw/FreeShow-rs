@@ -5,7 +5,9 @@ use std::sync::mpsc;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
 
+mod omt;
 mod receive;
+pub use omt::OmtSender;
 pub use receive::{
     NetworkReceiver, NetworkSource, SourceKind, element_available, ndi_receive_available,
     ndi_receive_pipeline, ndi_sources, omt_receive_available, omt_receive_pipeline, omt_sources,

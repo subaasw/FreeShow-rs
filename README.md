@@ -65,7 +65,7 @@ assets/      app icons and desktop entry
 
 ## Build and run
 
-Requirements: Rust 1.92+ (pinned by `rust-toolchain.toml`) and GStreamer 1.x
+Requirements: Rust 1.97+ (`rust-toolchain.toml` selects stable) and GStreamer 1.x
 development packages.
 
 - **Ubuntu/Debian:** `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libasound2-dev libudev-dev libfontconfig1-dev libxkbcommon-dev` plus the GStreamer good/bad/ugly/libav plugins.
