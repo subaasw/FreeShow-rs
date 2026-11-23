@@ -482,6 +482,8 @@ pub(super) struct Url {
 pub(super) struct Video {
     #[prost(int32, tag = "1")]
     pub playback: i32,
+    #[prost(int32, tag = "2")]
+    pub end_behavior: i32,
 }
 
 #[derive(Clone, PartialEq, Message)]

@@ -615,6 +615,16 @@ fn insert_media(
     let mut entry = json!({"name": name, "path": path});
     if let Some(video) = &action.video {
         entry["loop"] = json!(video.playback == 1);
+        let end = match video.end_behavior {
+            1 => Some("black"),
+            2 => Some("clear"),
+            3 => Some("fade_black"),
+            4 => Some("fade_clear"),
+            _ => None,
+        };
+        if let Some(end) = end {
+            entry["endBehavior"] = json!(end);
+        }
     }
     if let Some(audio) = &action.audio {
         entry["loop"] = json!(audio.playback == 1);
@@ -1534,7 +1544,10 @@ mod tests {
                             ..Default::default()
                         }),
                     }),
-                    video: Some(wire::Video { playback: 1 }),
+                    video: Some(wire::Video {
+                        playback: 1,
+                        end_behavior: 4,
+                    }),
                     always_retrigger: true,
                     ..Default::default()
                 }),
@@ -1622,6 +1635,7 @@ mod tests {
         assert_eq!(show.show["media"][background]["path"], "Loop.mp4");
         assert_eq!(show.show["media"][background]["loop"], true);
         assert_eq!(show.show["media"][background]["retrigger"], true);
+        assert_eq!(show.show["media"][background]["endBehavior"], "fade_clear");
         assert_eq!(cues[2].time_ms, 2000);
         assert_eq!(cues[2].kind, "clear_background");
         assert_eq!(cues[3].time_ms, 2250);

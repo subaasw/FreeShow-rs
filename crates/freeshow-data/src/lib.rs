@@ -2904,11 +2904,15 @@ impl ShowFile {
     /// Loop, mute, and video type stored on the show media entry for this path.
     /// Loop and mute default to on. The video type is only set when the file stores one.
     pub fn media_flags(&self, path: &str) -> Option<(bool, bool, Option<String>)> {
-        let media = self.show.get("media")?.as_object()?;
-        media
+        self.media_entry(path).map(Self::media_entry_flags)
+    }
+
+    fn media_entry(&self, path: &str) -> Option<&Value> {
+        self.show
+            .get("media")?
+            .as_object()?
             .values()
             .find(|value| value["path"].as_str() == Some(path))
-            .map(Self::media_entry_flags)
     }
 
     /// Prefers this slide's own media entry when the same path is used in both layers.
@@ -2917,6 +2921,11 @@ impl ShowFile {
         index: usize,
         path: &str,
     ) -> Option<(bool, bool, Option<String>)> {
+        self.backdrop_media_entry_at(index, path)
+            .map(Self::media_entry_flags)
+    }
+
+    pub fn backdrop_media_entry_at(&self, index: usize, path: &str) -> Option<&Value> {
         self.layout_node_at(index)
             .and_then(|node| {
                 node["background"]
@@ -2924,11 +2933,11 @@ impl ShowFile {
                     .and_then(|id| self.show["media"].get(id))
             })
             .filter(|entry| entry["path"].as_str() == Some(path))
-            .map(Self::media_entry_flags)
-            .or_else(|| self.media_flags(path))
+            .or_else(|| self.media_entry(path))
     }
 
-    fn media_entry_flags(value: &Value) -> (bool, bool, Option<String>) {
+    /// Reads the loop, mute, and layer settings from a show media entry.
+    pub fn media_entry_flags(value: &Value) -> (bool, bool, Option<String>) {
         let loops = value["loop"] != false;
         let muted = value["muted"] != false;
         let video_type = value["videoType"]
