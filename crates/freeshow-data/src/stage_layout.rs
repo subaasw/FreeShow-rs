@@ -323,24 +323,37 @@ fn built_in_stage() -> StageLayout {
 }
 
 pub fn load_stage_file(path: &Path) -> StageLayout {
-    let Ok(text) = fs::read_to_string(path) else {
-        return default_stage();
-    };
-    parse_stage(&text).unwrap_or_else(|_| default_stage())
+    load_stage_with_id(path).1
 }
 
+pub(crate) fn load_stage_with_id(path: &Path) -> (Option<String>, StageLayout) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return (None, default_stage());
+    };
+    parse_stage_with_id(&text).unwrap_or_else(|_| (None, default_stage()))
+}
+
+#[cfg(test)]
 pub fn parse_stage(text: &str) -> Result<StageLayout, ()> {
+    parse_stage_with_id(text).map(|(_, layout)| layout)
+}
+
+fn parse_stage_with_id(text: &str) -> Result<(Option<String>, StageLayout), ()> {
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
     if value.get("items").is_some_and(Value::is_object) {
         // A single layout object rather than FreeShow's `{ id: layout }` map.
-        return layout_from(&value);
+        return layout_from(&value).map(|layout| (None, layout));
     }
     let object = value.as_object().ok_or(())?;
-    let layout = object
-        .values()
-        .find(|layout| layout.get("disabled").and_then(Value::as_bool) != Some(true))
-        .ok_or(())?;
-    layout_from(layout)
+    object
+        .iter()
+        .filter(|(_, layout)| layout.get("disabled").and_then(Value::as_bool) != Some(true))
+        .find_map(|(id, layout)| {
+            layout_from(layout)
+                .ok()
+                .map(|layout| (Some(id.clone()), layout))
+        })
+        .ok_or(())
 }
 
 /// Saves `layout` into `stage.json` without losing anything this app does not model.
@@ -351,6 +364,14 @@ pub fn parse_stage(text: &str) -> Result<StageLayout, ()> {
 /// kept. A file that exists but does not parse is refused rather than replaced.
 /// The write goes through a temp file and a rename.
 pub fn write_stage_layout(path: &std::path::Path, layout: &StageLayout) -> std::io::Result<()> {
+    write_stage_layout_at(path, None, layout)
+}
+
+pub(crate) fn write_stage_layout_at(
+    path: &Path,
+    id: Option<&str>,
+    layout: &StageLayout,
+) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -374,7 +395,11 @@ pub fn write_stage_layout(path: &std::path::Path, layout: &StageLayout) -> std::
         Err(err) if err.kind() == ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
         Err(err) => return Err(err),
     };
-    let target = if root.get("items").is_some_and(Value::is_object) {
+    let target = if let Some(id) = id {
+        root.get_mut(id)
+            .filter(|target| target.get("items").is_some_and(Value::is_object))
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no stage layout {id:?}")))?
+    } else if root.get("items").is_some_and(Value::is_object) {
         &mut root
     } else {
         let key = root
@@ -881,9 +906,6 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
                     .to_string(),
             },
         });
-    }
-    if items.is_empty() {
-        return Err(());
     }
     Ok(StageLayout {
         name,

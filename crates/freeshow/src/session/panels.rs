@@ -1441,12 +1441,14 @@ impl Session {
         {
             return Err(format!("no audience output {value:?}"));
         }
-        let item = self
+        let index = self
             .stage
             .items
-            .iter_mut()
-            .find(|item| item.id == id)
+            .iter()
+            .position(|item| item.id == id)
             .ok_or_else(|| format!("no stage item {id:?}"))?;
+        let item = &mut self.stage.items[index];
+        let previous = item.clone();
         match key {
             "align" => {
                 let align = value.trim();
@@ -1584,14 +1586,21 @@ impl Session {
         if self.save_stage_layout() {
             Ok(())
         } else {
+            self.stage.items[index] = previous;
             Err("could not save stage.json".into())
         }
     }
 
     pub fn remove_stage_item(&mut self, id: &str) -> bool {
-        let before = self.stage.items.len();
-        self.stage.items.retain(|item| item.id != id);
-        self.stage.items.len() != before && self.save_stage_layout()
+        let Some(index) = self.stage.items.iter().position(|item| item.id == id) else {
+            return false;
+        };
+        let item = self.stage.items.remove(index);
+        if self.save_stage_layout() {
+            return true;
+        }
+        self.stage.items.insert(index, item);
+        false
     }
 }
 
@@ -1872,6 +1881,28 @@ mod tests {
         assert!(saved.contains("400px"), "{saved}");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
+    }
+
+    #[test]
+    fn a_missing_stage_layout_does_not_redirect_or_apply_edits() {
+        let (dir, _) = library("stage-missing");
+        let path = freeshow_data::Library::open(dir.path()).stage_path();
+        std::fs::write(
+            &path,
+            r#"{"a":{"items":{"text":{"type":"text","lines":["Before"]}}},"b":{"items":{}}}"#,
+        )
+        .unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        let stage = session.stage.clone();
+        let shortened = r#"{"b":{"items":{}}}"#;
+        std::fs::write(&path, shortened).unwrap();
+
+        assert!(session.stage_set("text", "text", "After").is_err());
+        assert!(session.stage_set("text", "left", "20").is_err());
+        assert!(session.add_stage_item("text", "").is_none());
+        assert!(!session.remove_stage_item("text"));
+        assert_eq!(session.stage, stage);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), shortened);
     }
 
     #[test]

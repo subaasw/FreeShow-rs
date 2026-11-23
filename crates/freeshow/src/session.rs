@@ -333,6 +333,7 @@ pub struct Session {
     timed_seconds: Option<f64>,
     pending_cue_completion: Option<PendingCueCompletion>,
     pub stage: StageLayout,
+    stage_layout_id: Option<String>,
     pub stage_media: std::cell::RefCell<crate::stage::StageMedia>,
     pub timer_left: u64,
     pub timer_deadline: Option<Instant>,
@@ -546,6 +547,7 @@ impl Session {
             timed_seconds: None,
             pending_cue_completion: None,
             stage: default_stage(),
+            stage_layout_id: None,
             stage_media: Default::default(),
             timer_left: 300,
             timer_deadline: None,
@@ -588,7 +590,7 @@ impl Session {
             &mut warnings,
         )
         .unwrap_or_default();
-        let stage = library.load_stage_layout();
+        let (stage_layout_id, stage) = library.load_stage_layout_with_id();
         let event_catalog =
             take(library.load_events(), &mut warnings).unwrap_or_else(Catalog::empty);
         let (event_ids, events) = drawer_edit::event_rows(&event_catalog, &shows);
@@ -734,6 +736,7 @@ impl Session {
             timed_seconds: None,
             pending_cue_completion: None,
             stage,
+            stage_layout_id,
             stage_media: Default::default(),
             timer_left: 300,
             timer_deadline: None,
@@ -3037,6 +3040,7 @@ impl Session {
             }
             if let Some(layout) = library.stage_layout(&layout_id) {
                 self.stage = layout;
+                self.stage_layout_id = Some(layout_id);
             }
         }
     }
@@ -6574,11 +6578,15 @@ impl Session {
     }
 
     pub fn set_stage_item_style(&mut self, id: &str, style: &str) -> bool {
-        let Some(item) = self.stage.items.iter_mut().find(|item| item.id == id) else {
+        let Some(index) = self.stage.items.iter().position(|item| item.id == id) else {
             return false;
         };
-        item.style = style.to_string();
-        self.save_stage_layout()
+        let previous = std::mem::replace(&mut self.stage.items[index].style, style.into());
+        if self.save_stage_layout() {
+            return true;
+        }
+        self.stage.items[index].style = previous;
+        false
     }
 
     pub fn add_stage_item(&mut self, kind: &str, style: &str) -> Option<String> {
@@ -6637,14 +6645,19 @@ impl Session {
             clock: freeshow_data::StageClockOptions::default(),
             tracker: freeshow_data::StageTrackerOptions::default(),
         });
-        self.save_stage_layout().then_some(id)
+        if self.save_stage_layout() {
+            return Some(id);
+        }
+        self.stage.items.pop();
+        None
     }
 
     fn save_stage_layout(&self) -> bool {
         let Some(root) = &self.root else {
             return true;
         };
-        freeshow_data::write_stage_layout(&root.join("Config").join("stage.json"), &self.stage)
+        Library::open(root)
+            .save_stage_layout(self.stage_layout_id.as_deref(), &self.stage)
             .is_ok()
     }
 
@@ -9524,6 +9537,8 @@ Second line"
         .unwrap();
         let mut session = Session::open(root.clone());
         assert_eq!(session.stage.name, "Main");
+        let library = Library::open(&root);
+        let original = library.stage_layout("default").unwrap();
         let before = crate::live::stage_frame(&session);
         assert!(session.create_show());
         let show_id = session.current_show().unwrap().id.clone();
@@ -9555,8 +9570,14 @@ Second line"
         assert!(stored.contains("\"stageOutput\":\"notes\""));
         session.select_slide(1);
         assert_eq!(session.stage.name, "Notes");
-        let reopened = Session::open(root.clone());
+        session.stage_set("notes", "left", "77").unwrap();
+        assert_eq!(library.stage_layout("default").unwrap(), original);
+        let mut reopened = Session::open(root.clone());
         assert_eq!(reopened.stage.name, "Notes");
+        assert_eq!(reopened.stage_rows()[0].left, 77);
+        assert!(reopened.remove_stage_item("notes"));
+        assert!(Session::open(root.clone()).stage.items.is_empty());
+        assert_eq!(library.stage_layout("default").unwrap(), original);
         let _ = std::fs::remove_dir_all(&root);
     }
 
