@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use roxmltree::{Document, Node};
 
-use super::{Archive, invalid, read_xml, relationships, text::TextBody};
+use super::{Archive, SlideSize, invalid, read_xml, relationships, text::TextBody};
 use crate::DataError;
 
 #[derive(Clone)]
@@ -743,7 +743,7 @@ impl ThemeReader {
         archive: &mut Archive<'_>,
         slide: &str,
         xml: &str,
-        px_per_point: f64,
+        size: &SlideSize,
     ) -> Result<HashMap<u64, ObjectStyle>, DataError> {
         if !xml.contains("spPr") {
             return Ok(HashMap::new());
@@ -793,7 +793,7 @@ impl ThemeReader {
                 None if direct.is_some() => Some(String::new()),
                 None => None,
             };
-            let text = TextBody::read(shape, &context, px_per_point);
+            let text = TextBody::read(shape, &context, size);
             if fill.is_some() || text.is_some() {
                 styles.insert(shape.range().start as u64, ObjectStyle { fill, text });
             }

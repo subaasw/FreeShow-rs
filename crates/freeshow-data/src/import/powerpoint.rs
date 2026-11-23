@@ -90,7 +90,7 @@ pub(super) fn import(
         if slide_xml_bytes > 64 * 1024 * 1024 {
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
-        let object_styles = themes.object_styles(&mut archive, part, &xml, size.px_y(12_700.0))?;
+        let object_styles = themes.object_styles(&mut archive, part, &xml, &size)?;
         let mut content = slide_content(&xml, &size, object_styles)?;
         let lines = std::mem::take(&mut content.lines);
         let disabled = content.hidden;
@@ -551,6 +551,10 @@ impl SlideObject {
             ObjectKind::Text => {
                 style.push_str("text-align:center;font-size:60px;");
                 let (align, lines) = if let Some(text) = self.style.text {
+                    let [left, top, right, bottom] = text.insets;
+                    style.push_str(&format!(
+                        "--pptx-text-insets:{left} {top} {right} {bottom};"
+                    ));
                     (text.align, text.lines)
                 } else {
                     (String::new(), self.lines.iter().map(|line| {
@@ -1801,7 +1805,7 @@ mod tests {
                     </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef>
                         <a:fontRef idx="major"><a:schemeClr val="accent1"/></a:fontRef>
                     </p:style>
-                    <p:txBody><a:bodyPr anchor="b"/><a:lstStyle>
+                    <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100"/><a:lstStyle>
                         <a:lvl1pPr algn="r"><a:defRPr sz="2400" b="1"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
                     </a:lstStyle>
                     <a:p><a:pPr><a:defRPr i="true"/></a:pPr>
@@ -1849,6 +1853,7 @@ mod tests {
         assert!(direct.contains("--pptx-gradient-fixed:1;"));
         assert!(direct.contains("transform:rotate(45deg);"));
         assert!(direct.contains("--pptx-fill-flip-x:1;"));
+        assert!(direct.contains("--pptx-text-insets:0 2 4 6;"));
         assert_eq!(items[0]["align"], "align-items:flex-end;");
         assert_eq!(items[0]["lines"][0]["align"], "right");
         assert_eq!(
@@ -1874,7 +1879,9 @@ mod tests {
         assert!(themed.contains("border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)"), "{themed}");
         assert!(themed.contains("--pptx-shape-ellipse:1;"));
         assert!(themed.contains("--pptx-gradient-fixed:1;"));
-        assert!(!items[2]["style"].as_str().unwrap().contains("background:"));
+        let transparent = items[2]["style"].as_str().unwrap();
+        assert!(!transparent.contains("background:"));
+        assert!(transparent.contains("--pptx-text-insets:14.4 7.2 14.4 7.2;"));
     }
 
     #[test]
