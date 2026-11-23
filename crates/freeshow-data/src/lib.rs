@@ -4368,12 +4368,21 @@ impl Library {
     }
 
     pub fn load_stage_layout(&self) -> StageLayout {
+        self.load_stage_layout_with_id().1
+    }
+
+    /// The active stage layout and its map key when stored by id.
+    pub fn load_stage_layout_with_id(&self) -> (Option<String>, StageLayout) {
         if let Some(id) = self.assigned_stage_id()
             && let Some(layout) = self.stage_layout(&id)
         {
-            return layout;
+            return (Some(id), layout);
         }
-        stage_layout::load_stage_file(&self.stage_path())
+        stage_layout::load_stage_with_id(&self.stage_path())
+    }
+
+    pub fn save_stage_layout(&self, id: Option<&str>, layout: &StageLayout) -> std::io::Result<()> {
+        stage_layout::write_stage_layout_at(&self.stage_path(), id, layout)
     }
 
     /// One layout from `Config/stage.json`.
