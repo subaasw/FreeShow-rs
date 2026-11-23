@@ -62,6 +62,8 @@ export struct InspectorData {
     font-px: int,
     bold: bool,
     italic: bool,
+    underline: bool,
+    strike: bool,
     color: string,
     align: string,
     x: int,
@@ -798,6 +800,21 @@ export component InspectorPanel inherits VerticalLayout {
             model: ["left", "center", "right", "justify"];
             value: root.data.align == "" ? "center" : root.data.align;
             selected(value) => { root.set("align", value); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        CheckBox {
+            text: "Underline";
+            enabled: root.data.has-item;
+            checked: root.data.underline;
+            toggled => { root.set("underline", Fmt.flag(self.checked)); }
+        }
+        CheckBox {
+            text: "Strikethrough";
+            enabled: root.data.has-item;
+            checked: root.data.strike;
+            toggled => { root.set("line-through", Fmt.flag(self.checked)); }
         }
     }
     HorizontalLayout {

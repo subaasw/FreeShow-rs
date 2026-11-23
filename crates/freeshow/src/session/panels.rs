@@ -1110,6 +1110,12 @@ impl Session {
                 let on = parse_bool(&value)?;
                 self.edit_current_item(|show, slide, item| show.set_item_italic(slide, item, on))
             }
+            "underline" | "line-through" => {
+                let on = parse_bool(&value)?;
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_text_decoration(slide, item, key, on)
+                })
+            }
             "color" => {
                 if !valid_css_color(&value) {
                     return Err(format!("invalid color {value:?}"));
@@ -1880,6 +1886,52 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn inspector_decorations_preserve_mixed_lyric_run_styles() {
+        let (dir, mut session) = library("inspector-decoration");
+        assert!(session.create_show());
+        assert!(session.edit_current_item(|show, slide, index| {
+            let item = &mut show.show["slides"][slide]["items"][index];
+            item["style"] = serde_json::json!("text-decoration:line-through;");
+            item["lines"] = serde_json::json!([{"text":[
+                {"value":"A","style":"text-decoration-line:line-through;color:#ff0000;"},
+                {"value":"B","style":"text-decoration:underline overline wavy #00ff00;"},
+                {"value":"C","style":"font-style:italic;"}
+            ]}]);
+            true
+        }));
+        session.inspector_set("underline", "true").unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.select_drawer(0);
+        assert!(session.pick_first_slide());
+        let typography = session.inspector_form().typography;
+        assert!(typography.underline && typography.strike);
+        let runs =
+            &session.current_show().unwrap().show["slides"]["s1"]["items"][0]["lines"][0]["text"];
+        let style = |index: usize| runs[index]["style"].as_str().unwrap();
+        assert!(style(0).contains("color:#ff0000;"));
+        assert!(style(1).contains("text-decoration:underline overline wavy #00ff00;"));
+        assert!(style(2).contains("text-decoration-line: line-through underline;"));
+        session.inspector_set("line-through", "false").unwrap();
+        let typography = session.inspector_form().typography;
+        assert!(typography.underline && !typography.strike);
+        session.inspector_set("underline", "false").unwrap();
+        let runs =
+            &session.current_show().unwrap().show["slides"]["s1"]["items"][0]["lines"][0]["text"];
+        assert!(
+            runs[0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("text-decoration-line: none;")
+        );
+        assert!(
+            runs[1]["style"]
+                .as_str()
+                .unwrap()
+                .contains("text-decoration-line: overline;")
+        );
     }
 
     #[test]

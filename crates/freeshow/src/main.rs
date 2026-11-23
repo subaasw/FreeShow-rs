@@ -705,6 +705,8 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         font_px: inspector.typography.font_px,
         bold: inspector.typography.bold,
         italic: inspector.typography.italic,
+        underline: inspector.typography.underline,
+        strike: inspector.typography.strike,
         color: inspector.typography.color.into(),
         align: inspector.typography.align.into(),
         x: inspector.item_box.left,
