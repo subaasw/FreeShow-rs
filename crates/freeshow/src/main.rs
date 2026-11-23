@@ -753,6 +753,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             font_px: row.font_px,
             color: row.color.into(),
             title: row.title.into(),
+            label: row.label.into(),
             align: row.align.into(),
             offset: row.offset,
             line_count: row.line_count,

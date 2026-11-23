@@ -210,6 +210,7 @@ pub struct StageRow {
     pub color: String,
     /// What the operator calls this item, such as "Next slide" or "Clock".
     pub title: String,
+    pub label: String,
     pub align: String,
     /// Slides ahead of the live one: 0 is the current slide, 1 the next.
     pub offset: i32,
@@ -270,7 +271,11 @@ pub(crate) fn stage_item_title(item: &freeshow_data::StageItemSpec) -> String {
             n if n > 1 => format!("Slide +{n}"),
             n => format!("Slide {n}"),
         },
-        Kind::Notes => "Slide notes".to_string(),
+        Kind::Notes => match item.offset {
+            0 => "Slide notes".into(),
+            1 => "Next slide notes".into(),
+            n => format!("Slide {n:+} notes"),
+        },
         Kind::Clock => "Clock".to_string(),
         Kind::Timer => "Timer".to_string(),
         Kind::Text => match item.lines.first().map(|line| line.trim()) {
@@ -1287,6 +1292,7 @@ impl Session {
                     font_px: px("font-size", 100),
                     color: freeshow_data::css_value(&item.style, "color").unwrap_or_default(),
                     title: stage_item_title(item),
+                    label: item.label.clone(),
                     align: if item.align.is_empty() {
                         "center".to_string()
                     } else {
@@ -1352,6 +1358,7 @@ impl Session {
             key,
             "align"
                 | "enabled"
+                | "label"
                 | "offset"
                 | "line-count"
                 | "include-media"
@@ -1479,6 +1486,7 @@ impl Session {
         let previous = item.clone();
         match key {
             "enabled" => item.enabled = parse_bool(value)?,
+            "label" => item.label = value.trim().into(),
             "align" => {
                 let align = value.trim();
                 if !matches!(align, "left" | "center" | "right") {
@@ -2179,6 +2187,28 @@ mod tests {
         assert!(!session.remove_stage_item("text"));
         assert_eq!(session.stage, stage);
         assert_eq!(std::fs::read_to_string(path).unwrap(), shortened);
+    }
+
+    #[test]
+    fn stage_box_labels_and_notes_offsets_survive_reopening() {
+        let (dir, mut session) = library("stage-box-label");
+        let id = session.add_stage_item("notes", "left:10px;").unwrap();
+        session.stage_set(&id, "offset", "1").unwrap();
+        assert_eq!(session.stage_item_name(&id), "Next slide notes");
+        session.stage_set(&id, "label", "  Speaker cue  ").unwrap();
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        let row = reopened
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.offset, 1);
+        assert_eq!(row.title, "Speaker cue");
+        assert_eq!(row.label, "Speaker cue");
+        reopened.stage_set(&id, "label", "").unwrap();
+        let reopened = Session::open(dir.path().to_path_buf());
+        assert_eq!(reopened.stage_item_name(&id), "Next slide notes");
     }
 
     #[test]
