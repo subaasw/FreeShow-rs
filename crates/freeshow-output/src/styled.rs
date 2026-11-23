@@ -50,6 +50,7 @@ pub struct BoxStyle {
     rotation_deg: f32,
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
+    pptx_linear_scaled: bool,
     pptx_radial_focus: Option<[f32; 2]>,
     pptx_rectangular_focus: Option<[f32; 4]>,
 }
@@ -179,6 +180,7 @@ impl Default for BoxStyle {
             backdrop: String::new(),
             rotation_deg: 0.0,
             gradient: None,
+            pptx_linear_scaled: false,
             pptx_radial_focus: None,
             pptx_rectangular_focus: None,
         }
@@ -389,6 +391,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     style.background = Some(color);
                 }
             }
+            "--pptx-linear-scaled" => style.pptx_linear_scaled = value == "1",
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
             "--shape-fill-polygon" => {
                 style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
@@ -3462,8 +3465,13 @@ fn fill_item_background(
         let radius_to_corner = (w as f32).hypot(h as f32) / 2.0;
         let linear = gradient.linear_angle_deg.map(|angle| {
             // Screen y grows downward. CSS 0deg points up.
-            let (dx, cos) = angle.to_radians().sin_cos();
-            let dy = -cos;
+            let (mut dx, cos) = angle.to_radians().sin_cos();
+            let mut dy = -cos;
+            if style.pptx_linear_scaled {
+                // PowerPoint scales the gradient as if stretching a square fill.
+                dx /= w as f32;
+                dy /= h as f32;
+            }
             let length = (w as f32 * dx.abs() + h as f32 * dy.abs()).max(1.0);
             (dx / length, dy / length)
         });
@@ -4068,6 +4076,27 @@ mod tests {
             right.b > 200 && right.r < 40,
             "right should be blue, got {right:?}"
         );
+    }
+
+    #[test]
+    fn powerpoint_scaled_linear_gradient_stretches_the_square_fill() {
+        let style = "left:0px;top:0px;width:1920px;height:1080px;background:linear-gradient(135deg, #FF0000 0%, #0000FF 100%);";
+        let ordinary = render_styled(&style_slide(style));
+        let scaled = render_styled(&style_slide(&format!("{style}--pptx-linear-scaled:1;")));
+        let scaled_top_right = scaled.pixel(959, 0);
+        let scaled_bottom_left = scaled.pixel(0, 539);
+        assert!(
+            (126..=129).contains(&scaled_top_right.b),
+            "{scaled_top_right:?}"
+        );
+        assert!(
+            (126..=129).contains(&scaled_bottom_left.b),
+            "{scaled_bottom_left:?}"
+        );
+        assert!(ordinary.pixel(959, 0).b > 155);
+        assert!(ordinary.pixel(0, 539).b < 100);
+        assert!(scaled.pixel(0, 0).r > 250);
+        assert!(scaled.pixel(959, 539).b > 250);
     }
 
     #[test]
