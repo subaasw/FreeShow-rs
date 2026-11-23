@@ -1266,11 +1266,23 @@ impl Session {
                 })
             }
             "background-color" => {
-                if !value.is_empty() && !valid_css_color(&value) {
-                    return Err(format!("invalid color {value:?}"));
+                let fill = if value.eq_ignore_ascii_case("none") {
+                    ""
+                } else {
+                    &value
+                };
+                let gradient = freeshow_output::valid_box_gradient(fill);
+                if !gradient && !fill.is_empty() && !valid_css_color(fill) {
+                    return Err(format!("invalid box fill {value:?}"));
                 }
+                let (key, other_key) = if gradient {
+                    ("background", "background-color")
+                } else {
+                    ("background-color", "background")
+                };
                 self.edit_current_item(|show, slide, item| {
-                    show.set_item_box_css(slide, item, "background-color", &value)
+                    show.set_item_box_css(slide, item, other_key, "")
+                        && show.set_item_box_css(slide, item, key, fill)
                 })
             }
             "box-shadow" => {
@@ -1850,6 +1862,51 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn inspector_gradient_fill_survives_reopening_and_can_be_replaced_or_cleared() {
+        let (dir, mut session) = library("inspector-gradient");
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Gradient"));
+        let fill = "linear-gradient(90deg, #ff0000 0%, #0000ff 100%)";
+        session
+            .inspector_set("background-color", "#abcdef")
+            .unwrap();
+        session.inspector_set("background-color", fill).unwrap();
+        for invalid in [
+            "linear-gradient(#ff0000)",
+            "radial-gradient(ellipse, red, blue)",
+            "linear-gradient(red, blue);top:0",
+        ] {
+            assert!(
+                session.inspector_set("background-color", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.select_drawer(0);
+        assert!(session.pick_first_slide());
+        let area = session.inspector_form().item_box;
+        assert_eq!(area.background, fill);
+        let frame = crate::live::edit_frame(&session);
+        let y = (area.top + 4) as u32;
+        let left = frame.pixel((area.left + 4) as u32, y);
+        let right = frame.pixel((area.left + area.width - 5) as u32, y);
+        assert!(left.r > 200 && left.b < 40);
+        assert!(right.b > 200 && right.r < 40);
+
+        session
+            .inspector_set("background-color", "#abcdef")
+            .unwrap();
+        assert_eq!(session.inspector_form().item_box.background, "#abcdef");
+        assert_eq!(
+            crate::live::edit_frame(&session).pixel((area.left + 4) as u32, y),
+            freeshow_output::parse_color("#abcdef").unwrap()
+        );
+        session.inspector_set("background-color", "none").unwrap();
+        assert!(session.inspector_form().item_box.background.is_empty());
     }
 
     #[test]

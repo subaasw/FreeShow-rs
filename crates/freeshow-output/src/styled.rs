@@ -3631,6 +3631,11 @@ fn parse_rectangular_focus(value: &str) -> Option<[f32; 4]> {
         .then_some(edges)
 }
 
+/// Whether the value can be saved as a native slide box gradient.
+pub fn valid_box_gradient(value: &str) -> bool {
+    !value.contains(';') && parse_gradient(value).is_some()
+}
+
 fn parse_gradient(value: &str) -> Option<Gradient> {
     let value = value.trim().strip_suffix(')')?;
     let (inner, radial) = if let Some(inner) = value.strip_prefix("linear-gradient(") {

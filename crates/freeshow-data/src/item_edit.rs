@@ -478,13 +478,20 @@ impl ShowFile {
             .filter(|style| !style.trim().is_empty())
             .unwrap_or(DEFAULT_BOX);
         let fallback = |key| css_px(DEFAULT_BOX, key).unwrap_or(0);
+        let background = css_value(style, "background");
         ItemBox {
             left: css_px(style, "left").unwrap_or_else(|| fallback("left")),
             top: css_px(style, "top").unwrap_or_else(|| fallback("top")),
             width: css_px(style, "width").unwrap_or_else(|| fallback("width")),
             height: css_px(style, "height").unwrap_or_else(|| fallback("height")),
-            background: css_value(style, "background-color")
-                .or_else(|| css_value(style, "background"))
+            background: background
+                .as_ref()
+                .filter(|value| {
+                    value.starts_with("linear-gradient(") || value.starts_with("radial-gradient(")
+                })
+                .cloned()
+                .or_else(|| css_value(style, "background-color"))
+                .or(background)
                 .unwrap_or_default(),
             radius: css_px(style, "border-radius").unwrap_or(0),
             box_shadow: css_value(style, "box-shadow").unwrap_or_default(),
