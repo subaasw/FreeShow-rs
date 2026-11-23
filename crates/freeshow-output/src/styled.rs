@@ -225,6 +225,8 @@ pub struct StyledLine {
     pub wrapped: bool,
     /// DrawingML line height, space before, and space after, in slide pixels or percent of font size.
     pub pptx_spacing: [Option<String>; 3],
+    /// Left margin, right margin, and signed first-line indent, in slide pixels.
+    pub pptx_margins: [i32; 3],
     /// Source pixels to lift the painted glyphs. The line box stays put.
     pub shift_y: i32,
 }
@@ -1518,6 +1520,8 @@ fn draw_item_content(
     ));
     let text_bottom = text_y.saturating_add(text_h).min(y.saturating_add(h));
     for (index, (line, &[height, before, after])) in visual.iter().zip(&spacing).enumerate() {
+        let (indent, row_w) = paragraph_row(line.pptx_margins, slide, text_w);
+        let row_x = text_x.saturating_add(indent);
         let mut line_style = style.clone();
         if let Some(align) = align_in(&line.align) {
             line_style.align = align;
@@ -1566,9 +1570,9 @@ fn draw_item_content(
                 pixels,
                 slide.output_width,
                 slide.output_height,
-                text_x,
+                row_x,
                 cursor_y,
-                text_w,
+                row_w,
                 bar_h,
                 Radii::uniform(radius),
                 color,
@@ -1608,14 +1612,14 @@ fn draw_item_content(
             && spaces > 0
             && visual.get(index + 1).is_some_and(|next| !next.line_bar);
         let justify_extra = if justify {
-            (text_w - text_width).max(0) as f32 / spaces as f32
+            (row_w - text_width).max(0) as f32 / spaces as f32
         } else {
             0.0
         };
         let mut cursor_x = match line_style.align {
-            Align::Left | Align::Justify => text_x as f32,
-            Align::Center => text_x as f32 + (text_w - text_width) as f32 / 2.0,
-            Align::Right => text_x as f32 + (text_w - text_width) as f32,
+            Align::Left | Align::Justify => row_x as f32,
+            Align::Center => row_x as f32 + (row_w - text_width) as f32 / 2.0,
+            Align::Right => row_x as f32 + (row_w - text_width) as f32,
         };
         let origin = cursor_x;
         let spacer = runs.iter().find(|(run, _)| run.place_on.is_none());
@@ -2457,6 +2461,17 @@ fn wrap_lines(
         .collect()
 }
 
+fn paragraph_row(margins: [i32; 3], slide: &StyledSlide, width: i32) -> (i32, i32) {
+    let [left, right, indent] = margins;
+    let horizontal = |value| scale(value as f32, slide.output_width, slide.source_width);
+    let left = horizontal(left.saturating_add(indent)).clamp(-width, width);
+    let right = horizontal(right).clamp(0, width);
+    (
+        left,
+        width.saturating_sub(left).saturating_sub(right).max(0),
+    )
+}
+
 fn split_line(
     line: &StyledLine,
     item_style: &str,
@@ -2476,34 +2491,45 @@ fn split_line(
     if words.is_empty() {
         return vec![line.clone()];
     }
+    let [left, right, _] = line.pptx_margins;
+    let (_, mut row_limit) = paragraph_row(line.pptx_margins, slide, max_width);
+    let (_, continuation_limit) = paragraph_row([left, right, 0], slide, max_width);
     let total: i32 = words
         .iter()
         .map(|(text, css)| piece_width(text, css, item_style, slide))
         .sum();
-    if total <= max_width {
+    if total <= row_limit {
         return vec![line.clone()];
     }
     let mut rows: Vec<Vec<(String, String)>> = vec![Vec::new()];
-    let mut width = 0;
+    let mut width: i32 = 0;
     for (text, css) in words {
         let word = piece_width(&text, &css, item_style, slide);
-        if word > max_width {
-            for chunk in break_piece(&text, &css, item_style, slide, max_width) {
+        if width.saturating_add(word) > row_limit && rows.last().is_some_and(|row| !row.is_empty())
+        {
+            rows.push(Vec::new());
+            width = 0;
+            row_limit = continuation_limit;
+        }
+        if word > row_limit {
+            for chunk in break_piece(
+                &text,
+                &css,
+                item_style,
+                slide,
+                [row_limit, continuation_limit],
+            ) {
                 if rows.last().is_some_and(|row| !row.is_empty()) {
                     rows.push(Vec::new());
+                    row_limit = continuation_limit;
                 }
                 width = piece_width(&chunk, &css, item_style, slide);
                 rows.last_mut().unwrap().push((chunk, css.clone()));
             }
             continue;
         }
-        let row_has_words = rows.last().is_some_and(|row| !row.is_empty());
-        if width > 0 && width + word > max_width && row_has_words {
-            rows.push(Vec::new());
-            width = 0;
-        }
         rows.last_mut().unwrap().push((text, css));
-        width += word;
+        width = width.saturating_add(word);
     }
     let last = rows.len() - 1;
     rows.into_iter()
@@ -2517,6 +2543,11 @@ fn split_line(
                 line.pptx_spacing[1].clone().filter(|_| index == 0),
                 line.pptx_spacing[2].clone().filter(|_| index == last),
             ],
+            pptx_margins: if index == 0 {
+                line.pptx_margins
+            } else {
+                [left, right, 0]
+            },
             shift_y: line.shift_y,
             runs: merge_words(row),
         })
@@ -2548,7 +2579,7 @@ fn break_piece(
     css: &str,
     item_style: &str,
     slide: &StyledSlide,
-    max_width: i32,
+    [mut max_width, continuation_width]: [i32; 2],
 ) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -2557,6 +2588,7 @@ fn break_piece(
         trial.push(ch);
         if !current.is_empty() && piece_width(&trial, css, item_style, slide) > max_width {
             chunks.push(std::mem::take(&mut current));
+            max_width = continuation_width;
         }
         current.push(ch);
     }
@@ -4299,6 +4331,7 @@ mod tests {
                     line_bar: true,
                     wrapped: false,
                     pptx_spacing: Default::default(),
+                    pptx_margins: [0; 3],
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
@@ -4906,6 +4939,7 @@ mod tests {
                     line_bar: true,
                     wrapped: false,
                     pptx_spacing: Default::default(),
+                    pptx_margins: [0; 3],
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
@@ -5049,6 +5083,42 @@ mod tests {
             wrapped.last().unwrap().pptx_spacing,
             [Some("150%".into()), None, Some("6px".into())]
         );
+    }
+
+    #[test]
+    fn powerpoint_hanging_indent_changes_the_wrap_width_only_on_the_first_row() {
+        let mut slide = shadow_slide("font-size:20px;");
+        let item = &mut slide.items[0];
+        item.line_bg = Some(Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        item.lines[0].runs[0].text = "ONE TWO THREE FOUR FIVE SIX".into();
+        item.lines[0].pptx_margins = [40, 30, -25];
+        item.lines[0].pptx_spacing = [Some("20px".into()), None, None];
+        let frame = render_styled(&slide);
+        for (x, y, red) in [
+            (14, 0, 0),
+            (15, 0, 255),
+            (129, 0, 255),
+            (130, 0, 0),
+            (39, 20, 0),
+            (40, 20, 255),
+            (129, 20, 255),
+            (130, 20, 0),
+        ] {
+            assert_eq!(frame.pixel(x, y).r, red, "pixel {x},{y}");
+        }
+
+        let first_width = piece_width("MM", "font-size:20px;", "", &slide);
+        let line = &mut slide.items[0].lines[0];
+        line.runs[0].text = "MMMMMMMMMMMM".into();
+        line.pptx_margins = [10, 30, 120 - first_width];
+        let rows = wrap_lines(&slide.items[0].lines, "", &slide, 160);
+        assert_eq!(rows[0].runs[0].text, "MM");
+        assert!(rows[1].runs[0].text.len() > rows[0].runs[0].text.len());
     }
 
     #[test]
@@ -5890,6 +5960,7 @@ mod tests {
             line_bar: true,
             wrapped: false,
             pptx_spacing: Default::default(),
+            pptx_margins: [0; 3],
             shift_y: 0,
                     runs: vec![TextRun {
                         text: "Hi".into(),
@@ -5988,6 +6059,7 @@ mod tests {
             line_bar: true,
             wrapped: false,
             pptx_spacing: Default::default(),
+            pptx_margins: [0; 3],
             shift_y: 0,
                     runs: vec![TextRun {
                         text: "Hi".into(),
