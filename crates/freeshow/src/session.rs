@@ -1993,13 +1993,16 @@ impl Session {
             "scene" => cue.data.as_deref().is_some_and(|id| self.start_scene(id)),
             "effect" => cue.data.as_deref().is_some_and(|id| self.start_effect(id)),
             "clear_background" if !self.preferences.out_locked() => {
+                let slide_hidden = self.slide_hidden;
                 self.clear_background();
+                self.slide_hidden = slide_hidden;
                 true
             }
             "clear_audio" if !self.preferences.out_locked() => {
                 self.stop_audio();
                 true
             }
+            "clear_slide" => self.clear_slide_layer(),
             "clear" => {
                 self.clear_output();
                 true
@@ -2023,8 +2026,9 @@ impl Session {
             return false;
         };
         let retrigger = media["retrigger"] == true;
+        let hide_slide = foreground || self.slide_hidden;
         let shown = match media_kind(&path) {
-            MediaKind::Image => self.show_background_still(&path, foreground, retrigger),
+            MediaKind::Image => self.show_background_still(&path, hide_slide, retrigger),
             MediaKind::Video if path.is_file() => {
                 let loops = media["loop"] != false;
                 let muted = media["muted"] != false;
@@ -2038,9 +2042,9 @@ impl Session {
                     || self.media_loop != loops
                     || self.media_muted != muted
                 {
-                    self.queue_background_video(&path, Some((loops, muted)), foreground);
+                    self.queue_background_video(&path, Some((loops, muted)), hide_slide);
                 } else {
-                    self.slide_hidden = foreground;
+                    self.slide_hidden = hide_slide;
                 }
                 true
             }
@@ -2582,6 +2586,16 @@ impl Session {
         self.slide_hidden = false;
         self.background_transition = true;
         self.discard_queued_video();
+    }
+
+    fn clear_slide_layer(&mut self) -> bool {
+        if self.preferences.out_locked() {
+            return false;
+        }
+        self.slide_hidden = true;
+        self.pending_cue_completion = None;
+        self.timed_seconds = None;
+        true
     }
 
     fn discard_queued_video(&mut self) {
@@ -4447,11 +4461,7 @@ impl Session {
                 self.clear_output();
             }
             freeshow_remote::Command::ClearSlide => {
-                if self.preferences.out_locked() {
-                    return;
-                }
-                self.slide_hidden = true;
-                self.pending_cue_completion = None;
+                self.clear_slide_layer();
             }
             freeshow_remote::Command::ClearBackground => {
                 if self.preferences.out_locked() {
@@ -7600,7 +7610,7 @@ Second line"
     }
 
     #[test]
-    fn imported_timeline_clears_background_and_audio_at_their_own_times() {
+    fn imported_timeline_clears_layers_at_their_own_times() {
         let mut show = ShowFile::blank("clear", "Clear");
         let slide = show.ordered_slides()[0].id.clone();
         show.show["slides"][&slide]["items"] = serde_json::json!([
@@ -7610,7 +7620,9 @@ Second line"
         show.show["origin"] = serde_json::json!("propresenter");
         show.show["layouts"]["main"]["timeline"] = serde_json::json!({"actions": [
             {"time": 1000, "name": "Background off", "type": "clear_background"},
-            {"time": 1500, "name": "Audio off", "type": "clear_audio"}
+            {"time": 1500, "name": "Audio off", "type": "clear_audio"},
+            {"time": 1750, "name": "Slide off", "type": "clear_slide"},
+            {"time": 1900, "name": "Background off again", "type": "clear_background"}
         ]});
         let mut session = Session::empty();
         session.shows = vec![show];
@@ -7663,6 +7675,28 @@ Second line"
         ));
         assert_eq!(session.slide_index, Some(0));
         assert!(session.program_content.borrow().is_some());
+        session.replace_underlay(Some(Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 255, 255],
+        }));
+        session.playing_audio = Some(audio.clone());
+        session.active_overlays.push("watermark".to_string());
+        session.timed_seconds = Some(3.0);
+        assert!(!session.tick_timeline(start + Duration::from_millis(1749)));
+        assert!(!session.slide_hidden);
+        assert!(session.tick_timeline(start + Duration::from_millis(1750)));
+        let cleared = crate::live::audience_frame(&session);
+        assert_ne!(cleared.pixel(0, 0), before.pixel(0, 0));
+        assert!(session.underlay.is_some());
+        assert_ne!(crate::live::stage_frame(&session).pixels, stage.pixels);
+        assert_eq!(session.slide_index, Some(0));
+        assert_eq!(session.playing_audio.as_ref(), Some(&audio));
+        assert_eq!(session.active_overlays, ["watermark"]);
+        assert!(session.next_timer_seconds().is_none());
+        assert!(session.tick_timeline(start + Duration::from_millis(1900)));
+        assert!(session.underlay.is_none());
+        assert!(session.slide_hidden);
         assert!(!session.timeline_playing);
     }
 
@@ -7749,6 +7783,7 @@ Second line"
         let start = session.timeline_started.unwrap();
         assert!(session.tick_timeline(start));
         assert_eq!(session.background_path.as_ref(), Some(&still));
+        assert!(!session.slide_hidden);
         assert!(session.underlay.is_some());
         assert!(!session.tick_timeline(start + Duration::from_millis(499)));
         assert!(session.tick_timeline(start + Duration::from_millis(500)));
@@ -7762,12 +7797,13 @@ Second line"
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Video(path)), None] if path == video)
         );
+        assert!(session.clear_slide_layer());
         assert!(session.tick_timeline(start + Duration::from_millis(900)));
         assert!(session.media_loop);
         assert!(matches!(session.take_plays(), [None, None]));
         assert_eq!(session.background_path.as_ref(), Some(&still));
         assert_eq!(session.slide_index, Some(0));
-        assert!(!session.slide_hidden);
+        assert!(session.slide_hidden);
         std::fs::remove_dir_all(root).unwrap();
     }
 

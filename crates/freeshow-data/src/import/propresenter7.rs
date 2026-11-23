@@ -328,6 +328,13 @@ fn add_slide(
     {
         clear.push("clear_audio");
     }
+    if cue
+        .actions
+        .iter()
+        .any(|action| immediate_clear_target(action) == Some(wire::ClearTarget::Slide))
+    {
+        clear.push("clear_slide");
+    }
     match cue_picture(cue) {
         Some(CuePicture::Clear) => clear.push("clear_background"),
         Some(CuePicture::Media(media_action, path, foreground)) => {
@@ -427,6 +434,7 @@ fn layout_timeline(
                 let kind = match target {
                     wire::ClearTarget::Audio => "clear_audio",
                     wire::ClearTarget::Background => "clear_background",
+                    wire::ClearTarget::Slide => "clear_slide",
                     _ => continue,
                 };
                 (kind, json!({}))
@@ -516,8 +524,10 @@ fn clear_target(action: &wire::Action) -> Option<wire::ClearTarget> {
         .clear
         .as_ref()
         .filter(|clear| clear.destination == 0)?;
-    match clear.target() {
-        target @ (wire::ClearTarget::Audio | wire::ClearTarget::Background) => Some(target),
+    match wire::ClearTarget::try_from(clear.target).ok()? {
+        target @ (wire::ClearTarget::Audio
+        | wire::ClearTarget::Background
+        | wire::ClearTarget::Slide) => Some(target),
         wire::ClearTarget::All => None,
     }
 }
@@ -907,7 +917,11 @@ mod tests {
         let background = clear(wire::ClearTarget::Background as i32);
         let audio = clear(wire::ClearTarget::Audio as i32);
         presentation.cues[1].enabled = true;
-        presentation.cues[1].actions = vec![background.clone(), audio.clone()];
+        presentation.cues[1].actions = vec![
+            background.clone(),
+            audio.clone(),
+            clear(wire::ClearTarget::Slide as i32),
+        ];
         presentation.cues[2].actions.insert(1, background.clone());
         presentation.cues[0].actions.extend([
             wire::Action {
@@ -941,6 +955,7 @@ mod tests {
         assert_eq!(show.backdrop_at(2), crate::SlideBackdrop::Clear);
         assert!(!show.clears_audio_at(1));
         assert!(show.clears_audio_at(2));
+        assert!(show.clears_slide_at(2));
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(
@@ -1437,6 +1452,7 @@ mod tests {
                 timed_video,
                 timed_foreground,
                 timed_clear(2.5, 0.0, wire::ClearTarget::Audio, 0),
+                timed_clear(2.5, 0.125, wire::ClearTarget::Slide, 0),
                 timed_clear(2.75, 0.0, wire::ClearTarget::Audio, 1),
                 timed_clear(2.9, -0.1, wire::ClearTarget::Audio, 0),
                 timed_clear(3.0, f64::INFINITY, wire::ClearTarget::Audio, 0),
@@ -1484,7 +1500,7 @@ mod tests {
         assert_eq!(timeline["actions"][0]["type"], "slide");
         assert_eq!(timeline["actions"][0]["data"]["id"], "s1");
         let cues = crate::timeline_cues_from_show(&show.show);
-        assert_eq!(cues.len(), 5);
+        assert_eq!(cues.len(), 6);
         assert_eq!(cues[0].time_ms, 1500);
         assert_eq!(cues[0].slide_index, Some(1));
         assert_eq!(cues[1].time_ms, 1750);
@@ -1514,10 +1530,12 @@ mod tests {
         ));
         assert_eq!(cues[4].time_ms, 2500);
         assert_eq!(cues[4].kind, "clear_audio");
+        assert_eq!(cues[5].time_ms, 2625);
+        assert_eq!(cues[5].kind, "clear_slide");
         assert_eq!(
             crate::timeline_text_from(&cues),
             format!(
-                "1.500 slide:s1\n1.750 background:{background}\n2.000 clear_background\n2.250 foreground:{foreground}\n2.500 clear_audio"
+                "1.500 slide:s1\n1.750 background:{background}\n2.000 clear_background\n2.250 foreground:{foreground}\n2.500 clear_audio\n2.625 clear_slide"
             )
         );
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();

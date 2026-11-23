@@ -161,6 +161,7 @@ pub(super) enum ClearTarget {
     All = 0,
     Audio = 1,
     Background = 2,
+    Slide = 5,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
