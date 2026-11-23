@@ -6601,6 +6601,7 @@ impl Session {
             "output" => freeshow_data::StageItemKind::CurrentOutput,
             "camera" => freeshow_data::StageItemKind::Camera,
             "chart" => freeshow_data::StageItemKind::Chart,
+            "web" => freeshow_data::StageItemKind::Web,
             _ => freeshow_data::StageItemKind::Slide,
         };
         self.stage.items.push(freeshow_data::StageItemSpec {

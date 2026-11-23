@@ -10,13 +10,13 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 13] = [
+pub const STAGE_ADD_KINDS: [&str; 14] = [
     "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable", "qr",
-    "output", "camera", "chart",
+    "output", "camera", "chart", "web",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 13] = [
+pub const STAGE_ADD_NAMES: [&str; 14] = [
     "Current slide",
     "Next slide",
     "Slide notes",
@@ -30,6 +30,7 @@ pub const STAGE_ADD_NAMES: [&str; 13] = [
     "Output picture",
     "Camera",
     "Chart",
+    "Web preview",
 ];
 
 /// Library `settings.json` values shown in Settings.
@@ -227,6 +228,7 @@ pub struct StageRow {
     pub chart_kind: String,
     pub chart_data: String,
     pub chart_hole_size: i32,
+    pub web_url: String,
     /// A text item's words, one line per line.
     pub text: String,
     pub seconds: bool,
@@ -283,7 +285,10 @@ pub(crate) fn stage_item_title(item: &freeshow_data::StageItemSpec) -> String {
             .map_or_else(|| "Camera".to_string(), |name| format!("Camera: {name}")),
         Kind::CurrentOutput => "Output picture".to_string(),
         Kind::QrCode => "QR code".to_string(),
-        Kind::Web => "Web page".to_string(),
+        Kind::Web => item
+            .url
+            .as_deref()
+            .map_or_else(|| "Web preview".into(), freeshow_output::display_url),
         Kind::Chart => "Chart".to_string(),
         Kind::Custom => item.id.clone(),
     }
@@ -1321,6 +1326,7 @@ impl Session {
                         .chart
                         .as_ref()
                         .map_or(0, |chart| i32::from(chart.hole_size)),
+                    web_url: item.url.clone().unwrap_or_default(),
                     text: item.lines.join("\n"),
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
@@ -1356,6 +1362,7 @@ impl Session {
                 | "chart-kind"
                 | "chart-data"
                 | "chart-hole-size"
+                | "web-url"
                 | "text"
                 | "seconds"
                 | "date-format"
@@ -1492,6 +1499,10 @@ impl Session {
                 let size = parse_int(value, 0, 90)? as u8;
                 item.chart.get_or_insert_with(Default::default).hole_size = size;
             }
+            "web-url" if item.kind == freeshow_data::StageItemKind::Web => {
+                let url = value.trim();
+                item.url = (!url.is_empty()).then(|| url.into());
+            }
             "qr-text" | "qr-color" | "qr-background"
                 if item.kind == freeshow_data::StageItemKind::QrCode =>
             {
@@ -1528,6 +1539,11 @@ impl Session {
             }
             "src" => {
                 let src = value.trim();
+                if item.kind == freeshow_data::StageItemKind::Web
+                    && (src.contains("://") || src.starts_with("www."))
+                {
+                    return Err("enter an image file path for the still".into());
+                }
                 item.src = (!src.is_empty()).then(|| src.to_string());
             }
             "tracker-type" => {
@@ -2017,6 +2033,71 @@ mod tests {
         let chart = &saved[&layout]["items"][&id]["chart"];
         assert_eq!(chart["data"], "A: 5\nB: 6");
         assert_eq!(chart["extension"], true);
+    }
+
+    #[test]
+    fn stage_web_previews_keep_url_and_still_edits_after_reopening() {
+        let (dir, mut session) = library("stage-web");
+        let id = session
+            .add_stage_item("web", "left:0px;top:0px;width:320px;height:180px;")
+            .unwrap();
+        let path = freeshow_data::Library::open(dir.path()).stage_path();
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let layout = saved.as_object().unwrap().keys().next().unwrap().clone();
+        let item = &mut saved[&layout]["items"][&id];
+        item["web"] = serde_json::json!({"url": "https://old.example", "extension": true});
+        item["src"] = serde_json::json!("https://old.example");
+        std::fs::write(&path, saved.to_string()).unwrap();
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        let row = session
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.web_url, "https://old.example");
+        assert!(row.src.is_empty());
+
+        let image = freeshow_output::Frame {
+            width: 16,
+            height: 9,
+            pixels: [192, 16, 84, 255].repeat(16 * 9),
+        };
+        std::fs::write(dir.path().join("preview.png"), image.encode_png().unwrap()).unwrap();
+        let address = "https://example.test/schedule";
+        session.stage_set(&id, "web-url", address).unwrap();
+        session.stage_set(&id, "src", "preview.png").unwrap();
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        let row = session
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.kind, "web");
+        assert_eq!(row.web_url, address);
+        assert_eq!(row.src, "preview.png");
+        assert_eq!(
+            crate::live::stage_frame(&session).pixel(310, 165),
+            image.pixel(0, 0)
+        );
+
+        session.stage_set(&id, "src", "").unwrap();
+        assert_eq!(
+            crate::live::stage_frame(&session).pixel(310, 165),
+            freeshow_output::parse_color("#1a1a24").unwrap()
+        );
+        session.stage_set(&id, "web-url", "").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved[&layout]["items"][&id]["web"],
+            serde_json::json!({"extension": true})
+        );
+        let reloaded = freeshow_data::Library::open(dir.path()).load_stage_layout();
+        let item = reloaded.items.iter().find(|item| item.id == id).unwrap();
+        assert!(item.url.is_none() && item.src.is_none());
     }
 
     #[test]

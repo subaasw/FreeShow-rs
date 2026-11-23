@@ -487,6 +487,7 @@ fn merge_item_options(
         "currentOutput",
         "device",
         "chart",
+        "web",
     ] {
         let Some(Value::Object(fresh)) = modeled.get(group) else {
             continue;
@@ -515,6 +516,12 @@ fn merge_item_options(
                     }
                 }
             }
+            if group == "web" {
+                target.remove("url");
+                if !fresh.contains_key("src") {
+                    target.remove("src");
+                }
+            }
         }
     }
     if let Some(id) = modeled.get("timer").and_then(|timer| timer.get("id")) {
@@ -537,6 +544,13 @@ fn merge_item_options(
             *target = Value::Object(serde_json::Map::new());
         }
         target["id"] = id.clone();
+    }
+    if modeled.contains_key("web") {
+        // A URL can also be stored at the top level in older stage files.
+        item.remove("url");
+        if !modeled.contains_key("src") {
+            item.remove("src");
+        }
     }
     for key in ["src", "fit", "flipped", "flippedY"] {
         if let Some(value) = modeled.get(key) {
@@ -626,6 +640,13 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
                     "holeSize": chart.hole_size,
                 }),
             );
+        }
+        if item.kind == StageItemKind::Web {
+            let mut web = serde_json::Map::new();
+            if let Some(url) = &item.url {
+                web.insert("src".into(), Value::String(url.clone()));
+            }
+            object.insert("web".into(), Value::Object(web));
         }
         if let Some(timer) = &item.timer_id {
             object.insert("timer".into(), serde_json::json!({ "id": timer }));
@@ -794,7 +815,9 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
             src: item_value
                 .get("src")
                 .and_then(Value::as_str)
-                .filter(|src| !src.is_empty())
+                .filter(|src| {
+                    !src.is_empty() && (kind != StageItemKind::Web || !looks_like_url(src))
+                })
                 .map(str::to_string),
             device_name: item_value
                 .pointer("/device/name")

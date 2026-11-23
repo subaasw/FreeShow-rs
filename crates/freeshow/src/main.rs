@@ -747,6 +747,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             chart_kind: row.chart_kind.into(),
             chart_data: row.chart_data.into(),
             chart_hole_size: row.chart_hole_size,
+            web_url: row.web_url.into(),
             text: row.text.into(),
             seconds: row.seconds,
             date_format: row.date_format.into(),
