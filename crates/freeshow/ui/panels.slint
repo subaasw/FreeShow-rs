@@ -111,6 +111,9 @@ export struct StageRowData {
     include-media: bool,
     text-box: int,
     invert-items: bool,
+    qr-text: string,
+    qr-color: string,
+    qr-background: string,
     text: string,
     seconds: bool,
     date-format: string,
@@ -1164,6 +1167,27 @@ export component StageEditorPanel inherits Rectangle {
                             placeholder-text: "Theme accent";
                             shown: root.current.tracker-accent;
                             accepted(value) => { root.set(root.current.id, "tracker-accent", value); }
+                        }
+                    }
+                    if root.current.kind == "qr": Row {
+                        FieldLabel { text: "QR content"; text-color: root.text-color; }
+                        ValueEdit {
+                            colspan: 3;
+                            shown: root.current.qr-text;
+                            accepted(value) => { root.set(root.current.id, "qr-text", value); }
+                        }
+                    }
+                    if root.current.kind == "qr": Row {
+                        FieldLabel { text: "Code color"; text-color: root.text-color; }
+                        ValueEdit {
+                            shown: root.current.qr-color;
+                            accepted(value) => { root.set(root.current.id, "qr-color", value); }
+                        }
+                        FieldLabel { text: "Background"; text-color: root.text-color; }
+                        ValueEdit {
+                            placeholder-text: "Transparent";
+                            shown: root.current.qr-background;
+                            accepted(value) => { root.set(root.current.id, "qr-background", value); }
                         }
                     }
                     if root.current.kind == "text": Row {

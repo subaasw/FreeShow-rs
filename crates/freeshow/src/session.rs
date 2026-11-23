@@ -6597,6 +6597,7 @@ impl Session {
             "media" => freeshow_data::StageItemKind::Media,
             "tracker" => freeshow_data::StageItemKind::SlideTracker,
             "variable" => freeshow_data::StageItemKind::Variable,
+            "qr" => freeshow_data::StageItemKind::QrCode,
             _ => freeshow_data::StageItemKind::Slide,
         };
         self.stage.items.push(freeshow_data::StageItemSpec {
@@ -6625,7 +6626,7 @@ impl Session {
             fit: None,
             flip_x: false,
             flip_y: false,
-            qr: None,
+            qr: (kind == freeshow_data::StageItemKind::QrCode).then(freeshow_data::QrItem::default),
             url: None,
             chart: None,
             clock: freeshow_data::StageClockOptions::default(),

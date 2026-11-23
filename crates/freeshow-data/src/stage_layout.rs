@@ -78,7 +78,20 @@ pub struct QrItem {
     pub background: String,
 }
 
+impl Default for QrItem {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            color: Self::DEFAULT_COLOR.into(),
+            background: Self::DEFAULT_BACKGROUND.into(),
+        }
+    }
+}
+
 impl QrItem {
+    const DEFAULT_COLOR: &str = "#000000";
+    const DEFAULT_BACKGROUND: &str = "#FFFFFF";
+
     pub fn parse(item: &Value) -> Option<Self> {
         let data = item.get("qr_code")?;
         Some(Self {
@@ -86,12 +99,12 @@ impl QrItem {
             color: data
                 .get("color")
                 .and_then(Value::as_str)
-                .unwrap_or("#000000")
+                .unwrap_or(Self::DEFAULT_COLOR)
                 .into(),
             background: data
                 .get("background")
                 .and_then(Value::as_str)
-                .unwrap_or("#FFFFFF")
+                .unwrap_or(Self::DEFAULT_BACKGROUND)
                 .into(),
         })
     }
@@ -457,7 +470,7 @@ fn merge_item_options(
             item.insert(key.into(), value.clone());
         }
     }
-    for group in ["clock", "tracker"] {
+    for group in ["clock", "tracker", "qr_code"] {
         let Some(Value::Object(fresh)) = modeled.get(group) else {
             continue;
         };
@@ -547,6 +560,16 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
                 tracker["accent"] = Value::String(item.tracker.accent.clone());
             }
             object.insert("tracker".into(), tracker);
+        }
+        if let Some(qr) = &item.qr {
+            object.insert(
+                "qr_code".into(),
+                serde_json::json!({
+                    "text": qr.text,
+                    "color": qr.color,
+                    "background": qr.background,
+                }),
+            );
         }
         if let Some(timer) = &item.timer_id {
             object.insert("timer".into(), serde_json::json!({ "id": timer }));
