@@ -96,6 +96,7 @@ export struct InspectorData {
 }
 
 export struct StageRowData {
+    enabled: bool,
     id: string,
     kind: string,
     x: int,
@@ -1102,7 +1103,7 @@ export component StageEditorPanel inherits Rectangle {
                     VerticalLayout {
                         alignment: start;
                         for row[index] in root.rows: ListRow {
-                            label: row.title;
+                            label: row.enabled ? row.title : row.title + " (hidden)";
                             active: index == root.selected;
                             accent: root.accent;
                             text-color: root.text-color;
@@ -1117,6 +1118,14 @@ export component StageEditorPanel inherits Rectangle {
                 spacing: 10px;
             GridLayout {
                     spacing: 8px;
+                    Row {
+                        Switch {
+                            colspan: 4;
+                            text: "Show on stage";
+                            checked: root.current.enabled;
+                            toggled => { root.set(root.current.id, "enabled", Fmt.flag(self.checked)); }
+                        }
+                    }
                     Row {
                         FieldLabel { text: "Left"; text-color: root.text-color; }
                         ValueSpin { minimum: -8000; maximum: 8000; shown: root.current.x; edited(value) => { root.set(root.current.id, "left", value); } }

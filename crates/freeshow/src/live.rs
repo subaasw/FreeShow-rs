@@ -520,7 +520,7 @@ pub fn stage_frame(session: &Session) -> Frame {
         .stage
         .items
         .iter()
-        .any(|item| item.kind == freeshow_data::StageItemKind::CurrentOutput)
+        .any(|item| item.enabled && item.kind == freeshow_data::StageItemKind::CurrentOutput)
         .then(|| {
             let (id, name) = session.audience();
             let frame = audience_frame(session);
@@ -619,6 +619,9 @@ pub fn stage_frame(session: &Session) -> Frame {
         && let Some(show) = show_slot.and_then(|slot| session.shows.get(slot))
     {
         for item in &session.stage.items {
+            if !item.enabled {
+                continue;
+            }
             if item.kind != freeshow_data::StageItemKind::Slide
                 || !item.include_media
                 || item.offset == 0
@@ -644,8 +647,11 @@ pub fn stage_frame(session: &Session) -> Frame {
         .items
         .iter()
         .filter(|item| {
-            item.kind == freeshow_data::StageItemKind::Media
-                || item.kind == freeshow_data::StageItemKind::Web
+            item.enabled
+                && matches!(
+                    item.kind,
+                    freeshow_data::StageItemKind::Media | freeshow_data::StageItemKind::Web
+                )
         })
         .filter_map(|item| item.src.as_deref())
         .chain(still_backgrounds.values().map(String::as_str));
@@ -656,7 +662,7 @@ pub fn stage_frame(session: &Session) -> Frame {
             .stage
             .items
             .iter()
-            .filter(|item| item.kind == freeshow_data::StageItemKind::Camera)
+            .filter(|item| item.enabled && item.kind == freeshow_data::StageItemKind::Camera)
             .filter_map(|item| item.device_name.as_deref()),
     );
     crate::stage::paint_stage_at(

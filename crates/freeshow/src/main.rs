@@ -743,6 +743,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         .stage_rows()
         .into_iter()
         .map(|row| StageRowData {
+            enabled: row.enabled,
             id: row.id.into(),
             kind: row.kind.into(),
             x: row.left,

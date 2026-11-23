@@ -6651,6 +6651,7 @@ impl Session {
         };
         self.stage.items.push(freeshow_data::StageItemSpec {
             kind,
+            enabled: true,
             id: id.clone(),
             style: style.to_string(),
             align: String::new(),

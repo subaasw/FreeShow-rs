@@ -231,6 +231,7 @@ fn parse_chart_value(text: &str) -> Option<f64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageItemSpec {
     pub kind: StageItemKind,
+    pub enabled: bool,
     /// The key this item has in `stage.json`.
     pub id: String,
     pub style: String,
@@ -373,7 +374,7 @@ pub(crate) fn write_stage_layout_at(
     layout: &StageLayout,
 ) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
-    let fresh = serialized_layout(layout)?;
+    let fresh = layout_value(layout);
     let mut root = read_stage_object(path)?;
     let target = if let Some(id) = id {
         root.get_mut(id)
@@ -405,7 +406,7 @@ pub(crate) fn write_stage_layout_at(
 }
 
 pub(crate) fn create_stage_layout(path: &Path, layout: &StageLayout) -> std::io::Result<String> {
-    append_stage_layout(path, read_stage_object(path)?, serialized_layout(layout)?)
+    append_stage_layout(path, read_stage_object(path)?, layout_value(layout))
 }
 
 pub(crate) fn duplicate_stage_layout(
@@ -428,7 +429,7 @@ pub(crate) fn duplicate_stage_layout(
     {
         root["default"].clone()
     } else {
-        serialized_layout(layout)?
+        layout_value(layout)
     };
     let name = copy["name"].as_str().unwrap_or(&layout.name);
     copy["name"] = Value::String(format!("{name} copy"));
@@ -442,7 +443,7 @@ fn append_stage_layout(path: &Path, mut root: Value, layout: Value) -> std::io::
     if root.get("items").is_some_and(Value::is_object) {
         root = serde_json::json!({ "default": root });
     } else if root.as_object().is_some_and(serde_json::Map::is_empty) {
-        root["default"] = serialized_layout(&default_stage())?;
+        root["default"] = layout_value(&default_stage());
     }
     let mut id = crate::new_id();
     while root.get(&id).is_some() {
@@ -451,12 +452,6 @@ fn append_stage_layout(path: &Path, mut root: Value, layout: Value) -> std::io::
     root[&id] = layout;
     write_stage_object(path, &root)?;
     Ok(id)
-}
-
-fn serialized_layout(layout: &StageLayout) -> std::io::Result<Value> {
-    let mut fresh: Value =
-        serde_json::from_str(&serialize_stage(layout)).map_err(std::io::Error::other)?;
-    Ok(fresh["default"].take())
 }
 
 fn read_stage_object(path: &Path) -> std::io::Result<Value> {
@@ -507,6 +502,7 @@ fn merge_layout(target: &mut Value, fresh: &Value) {
         .cloned()
         .unwrap_or_default();
     let original_order = item_order(target, &existing);
+    let mut previous_models = None;
     let mut items = serde_json::Map::new();
     let mut order = Vec::new();
     if let Some(fresh_items) = fresh.get("items").and_then(Value::as_object) {
@@ -523,35 +519,51 @@ fn merge_layout(target: &mut Value, fresh: &Value) {
                 Some(Value::Object(old)) => old.clone(),
                 _ => serde_json::Map::new(),
             };
-            for key in MODELED {
-                match modeled.get(key) {
-                    Some(value) => {
-                        item.insert(key.to_string(), value.clone());
-                    }
-                    None => {
-                        item.remove(key);
+            let was_hidden = item.get("enabled").and_then(Value::as_bool) == Some(false);
+            let hidden = modeled.get("enabled").and_then(Value::as_bool) == Some(false);
+            // Keep the original data if the editor only changes visibility or stacking.
+            let preserve = (hidden || was_hidden)
+                && previous_models
+                    .get_or_insert_with(|| {
+                        layout_from(target)
+                            .map_or(Value::Null, |layout| layout_value(&layout)["items"].take())
+                    })
+                    .get(id)
+                    .and_then(Value::as_object)
+                    .is_some_and(|previous| {
+                        previous
+                            .iter()
+                            .filter(|(key, _)| key.as_str() != "enabled")
+                            .eq(modeled.iter().filter(|(key, _)| key.as_str() != "enabled"))
+                    });
+            if !preserve {
+                for key in MODELED {
+                    match modeled.get(key) {
+                        Some(value)
+                            if key != "type" || value != "custom" || !item.contains_key(key) =>
+                        {
+                            item.insert(key.to_string(), value.clone());
+                        }
+                        Some(_) => {}
+                        None => {
+                            item.remove(key);
+                        }
                     }
                 }
+                // Earlier builds wrote the slide offset under this name; FreeShow reads `slideOffset`.
+                item.remove("offset");
+                merge_item_options(&mut item, modeled);
             }
-            // Earlier builds wrote the slide offset under this name; FreeShow reads `slideOffset`.
-            item.remove("offset");
-            merge_item_options(&mut item, modeled);
+            if hidden || was_hidden {
+                item.insert("enabled".into(), Value::Bool(!hidden));
+            }
             items.insert(id.to_string(), Value::Object(item));
             order.push(Value::String(id.to_string()));
         }
     }
-    // Retain saved items outside the editor's order, and keep hidden boxes in their old slots.
-    for (index, id) in original_order.iter().enumerate() {
-        if existing
-            .get(id)
-            .is_some_and(|item| item["enabled"].as_bool() == Some(false))
-            && !items.contains_key(id)
-        {
-            order.insert(index.min(order.len()), Value::String(id.clone()));
-        }
-    }
+    // Retain saved items outside the editor's order.
     for (id, item) in existing {
-        if item["enabled"].as_bool() == Some(false) || !original_order.contains(&id) {
+        if !original_order.contains(&id) {
             items.entry(id).or_insert(item);
         }
     }
@@ -658,6 +670,11 @@ fn merge_item_options(
 }
 
 pub fn serialize_stage(layout: &StageLayout) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({"default": layout_value(layout)}))
+        .unwrap_or_else(|_| "{}".into())
+}
+
+fn layout_value(layout: &StageLayout) -> Value {
     let mut items = serde_json::Map::new();
     let mut order = Vec::new();
     for (index, item) in layout.items.iter().enumerate() {
@@ -669,6 +686,9 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
         order.push(Value::String(id.clone()));
         let mut object = serde_json::Map::new();
         object.insert("type".into(), Value::String(kind_name(item.kind).into()));
+        if !item.enabled {
+            object.insert("enabled".into(), Value::Bool(false));
+        }
         object.insert("style".into(), Value::String(item.style.clone()));
         if !item.align.is_empty() {
             object.insert("align".into(), Value::String(item.align.clone()));
@@ -782,9 +802,7 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
     root_layout.insert("settings".into(), Value::Object(settings));
     root_layout.insert("itemOrder".into(), Value::Array(order));
     root_layout.insert("items".into(), Value::Object(items));
-    let mut file = serde_json::Map::new();
-    file.insert("default".into(), Value::Object(root_layout));
-    serde_json::to_string_pretty(&Value::Object(file)).unwrap_or_else(|_| "{}".into())
+    Value::Object(root_layout)
 }
 
 fn kind_name(kind: StageItemKind) -> &'static str {
@@ -831,9 +849,6 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
         let Some(item_value) = items_value.get(&id) else {
             continue;
         };
-        if item_value.get("enabled").and_then(Value::as_bool) == Some(false) {
-            continue;
-        }
         let kind = kind_of(&id, item_value);
         let legacy = item_value
             .get("type")
@@ -858,6 +873,7 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
             .map(str::to_string);
         items.push(StageItemSpec {
             kind,
+            enabled: item_value["enabled"].as_bool() != Some(false),
             id: id.clone(),
             style: item_value
                 .get("style")
@@ -1007,6 +1023,7 @@ fn looks_like_url(text: &str) -> bool {
 fn item(kind: StageItemKind, style: &str, offset: i64, line_count: Option<usize>) -> StageItemSpec {
     StageItemSpec {
         kind,
+        enabled: true,
         id: String::new(),
         style: style.to_string(),
         align: String::new(),
@@ -1129,7 +1146,7 @@ mod tests {
         .unwrap();
         let mut layout = load_stage_file(&path);
         assert_eq!(layout.name, "Live");
-        layout.items[0].style = "left:500px;top:1px;width:10px;height:10px;".into();
+        layout.items[1].style = "left:500px;top:1px;width:10px;height:10px;".into();
         write_stage_layout(&path, &layout).unwrap();
         let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["old"]["name"], "Old");
@@ -1144,7 +1161,7 @@ mod tests {
                 .contains("500px")
         );
         assert_eq!(saved["live"]["items"]["h"]["enabled"], false);
-        assert_eq!(load_stage_file(&path).items[0].style, layout.items[0].style);
+        assert_eq!(load_stage_file(&path).items[1].style, layout.items[1].style);
         fs::write(&path, "{ broken").unwrap();
         assert!(write_stage_layout(&path, &layout).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ broken");
