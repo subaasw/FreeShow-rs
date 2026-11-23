@@ -1273,6 +1273,14 @@ impl Session {
                     show.set_item_box_css(slide, item, "background-color", &value)
                 })
             }
+            "box-shadow" => {
+                if !freeshow_output::valid_box_shadow(&value) {
+                    return Err(format!("invalid box shadow {value:?}"));
+                }
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_box_css(slide, item, "box-shadow", &value)
+                })
+            }
             other => return Err(format!("unknown inspector field {other:?}")),
         };
         if ok {

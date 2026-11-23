@@ -114,7 +114,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space |
 | Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
 | Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
-| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, color, align, X/Y/W/H, background and radius; shadows, line height, letter spacing, filters and transitions still use stored CSS |
+| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, color, align, X/Y/W/H, background, radius, text and box shadows, line height, letter spacing, item filters, and slide transitions |
 
 ### Audience compositor
 
