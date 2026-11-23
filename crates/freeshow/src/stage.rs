@@ -205,6 +205,7 @@ pub fn paint_stage_at(
     let items = layout
         .items
         .iter()
+        .filter(|item| item.enabled)
         .filter_map(|item| {
             let mut lines = lines_for(item, slides, index, clock, timer, context);
             let output_preview = item.kind == StageItemKind::CurrentOutput;
@@ -598,6 +599,7 @@ mod tests {
     fn spec(kind: StageItemKind) -> StageItemSpec {
         StageItemSpec {
             kind,
+            enabled: true,
             id: "custom".into(),
             style: "left:0px;top:0px;width:600px;height:120px;font-size:48px;".into(),
             align: String::new(),

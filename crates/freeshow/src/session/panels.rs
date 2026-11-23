@@ -199,6 +199,7 @@ pub struct InspectorForm {
 /// One stage item row in the Stage editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageRow {
+    pub enabled: bool,
     pub id: String,
     pub kind: String,
     pub left: i32,
@@ -1276,6 +1277,7 @@ impl Session {
                     freeshow_data::css_px(&item.style, key).unwrap_or(default)
                 };
                 StageRow {
+                    enabled: item.enabled,
                     id: item.id.clone(),
                     kind: stage_kind_name(&item.kind).to_string(),
                     left: px("left", 0),
@@ -1349,6 +1351,7 @@ impl Session {
         if matches!(
             key,
             "align"
+                | "enabled"
                 | "offset"
                 | "line-count"
                 | "include-media"
@@ -1475,6 +1478,7 @@ impl Session {
         let item = &mut self.stage.items[index];
         let previous = item.clone();
         match key {
+            "enabled" => item.enabled = parse_bool(value)?,
             "align" => {
                 let align = value.trim();
                 if !matches!(align, "left" | "center" | "right") {
@@ -1968,7 +1972,35 @@ mod tests {
         );
         assert!(session.move_stage_item("red", false).is_err());
         assert_eq!(session.move_stage_item("red", true).unwrap(), 1);
+        assert_eq!(session.move_stage_item("red", true).unwrap(), 2);
         let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(
+            pixel(&session),
+            freeshow_output::parse_color("#c80000").unwrap()
+        );
+        assert!(
+            !session
+                .stage_rows()
+                .iter()
+                .find(|row| row.id == "clock1")
+                .unwrap()
+                .enabled
+        );
+        session.stage_set("red", "enabled", "false").unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(
+            pixel(&session),
+            freeshow_output::parse_color("#0000c8").unwrap()
+        );
+        assert!(
+            !session
+                .stage_rows()
+                .iter()
+                .find(|row| row.id == "red")
+                .unwrap()
+                .enabled
+        );
+        session.stage_set("red", "enabled", "true").unwrap();
         assert_eq!(
             pixel(&session),
             freeshow_output::parse_color("#c80000").unwrap()
@@ -1979,13 +2011,13 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             saved["stage"]["itemOrder"],
-            serde_json::json!(["blue", "clock1", "red", id])
+            serde_json::json!(["clock1", "blue", "red", id])
         );
         assert_eq!(saved["stage"]["items"]["clock1"], hidden);
         assert_eq!(saved["stage"]["items"]["unlisted"], unlisted);
         std::fs::write(&path, "{bad json").unwrap();
         assert!(session.move_stage_item("red", false).is_err());
-        assert_eq!(session.stage.items[1].id, "red");
+        assert_eq!(session.stage.items[2].id, "red");
     }
 
     #[test]
@@ -2017,7 +2049,15 @@ mod tests {
         session.stage_set("notes", "left", "42").unwrap();
         let reopened = Session::open(dir.path().to_path_buf());
         assert_eq!(reopened.stage.name, "Original copy");
-        assert_eq!(reopened.stage_rows()[0].left, 42);
+        assert_eq!(
+            reopened
+                .stage_rows()
+                .iter()
+                .find(|row| row.id == "notes")
+                .unwrap()
+                .left,
+            42
+        );
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["source"], original);
