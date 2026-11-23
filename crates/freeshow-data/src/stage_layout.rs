@@ -470,7 +470,7 @@ fn merge_item_options(
             item.insert(key.into(), value.clone());
         }
     }
-    for group in ["clock", "tracker", "qr_code"] {
+    for group in ["clock", "tracker", "qr_code", "currentOutput"] {
         let Some(Value::Object(fresh)) = modeled.get(group) else {
             continue;
         };
@@ -487,6 +487,9 @@ fn merge_item_options(
             // An accent cleared in the editor goes back to the theme colour.
             if group == "tracker" && !fresh.contains_key("accent") {
                 target.remove("accent");
+            }
+            if group == "currentOutput" && !fresh.contains_key("source") {
+                target.remove("source");
             }
         }
     }
@@ -560,6 +563,13 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
                 tracker["accent"] = Value::String(item.tracker.accent.clone());
             }
             object.insert("tracker".into(), tracker);
+        }
+        if item.kind == StageItemKind::CurrentOutput {
+            let mut output = serde_json::json!({ "showLabel": item.show_output_label });
+            if let Some(source) = &item.output_source {
+                output["source"] = Value::String(source.clone());
+            }
+            object.insert("currentOutput".into(), output);
         }
         if let Some(qr) = &item.qr {
             object.insert(

@@ -114,6 +114,8 @@ export struct StageRowData {
     qr-text: string,
     qr-color: string,
     qr-background: string,
+    output-source: string,
+    show-output-label: bool,
     text: string,
     seconds: bool,
     date-format: string,
@@ -958,6 +960,8 @@ export component StageEditorPanel inherits Rectangle {
     // Variable choices: "" shows nothing, then each variable's id.
     in property <[string]> variable-ids;
     in property <[string]> variable-names;
+    in property <[string]> output-ids;
+    in property <[string]> output-names;
     in property <image> preview;
     in property <string> status;
     in-out property <int> selected: 0;
@@ -1188,6 +1192,24 @@ export component StageEditorPanel inherits Rectangle {
                             placeholder-text: "Transparent";
                             shown: root.current.qr-background;
                             accepted(value) => { root.set(root.current.id, "qr-background", value); }
+                        }
+                    }
+                    if root.current.kind == "output": Row {
+                        FieldLabel { text: "Preview source"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 3;
+                            property <int> source-index: ComboIndex.find(root.output-ids, root.current.output-source);
+                            model: root.output-names;
+                            value: self.source-index >= 0 ? root.output-names[self.source-index] : "Missing output (" + root.current.output-source + ")";
+                            selected(value) => { root.set(root.current.id, "output-source", root.output-ids[self.current-index]); }
+                        }
+                    }
+                    if root.current.kind == "output": Row {
+                        Switch {
+                            colspan: 4;
+                            text: "Show output name";
+                            checked: root.current.show-output-label;
+                            toggled => { root.set(root.current.id, "show-output-label", Fmt.flag(self.checked)); }
                         }
                     }
                     if root.current.kind == "text": Row {
