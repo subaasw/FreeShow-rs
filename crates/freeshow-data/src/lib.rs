@@ -398,13 +398,22 @@ impl FreeShowPreferences {
             .unwrap_or(30.0)
     }
 
-    /// Pixel size of the active (or first enabled) output, when `bounds` were stored.
+    /// Pixel size of the active or first enabled audience output.
     pub fn configured_output_size(&self) -> Option<(u32, u32)> {
-        let output = self
+        let mut audience = self
             .outputs
             .iter()
-            .find(|output| output.active && output.enabled)
-            .or_else(|| self.outputs.iter().find(|output| output.enabled))?;
+            .filter(|output| output.enabled && !output.stage);
+        let output = audience
+            .clone()
+            .find(|output| output.active)
+            .or_else(|| audience.next())?;
+        Some((output.width?, output.height?))
+    }
+
+    /// Pixel size of the first configured stage output, which supplies the native stage layout.
+    pub fn configured_stage_size(&self) -> Option<(u32, u32)> {
+        let output = self.outputs.iter().find(|output| output.stage)?;
         Some((output.width?, output.height?))
     }
 

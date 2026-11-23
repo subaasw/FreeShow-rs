@@ -665,6 +665,7 @@ pub fn stage_frame(session: &Session) -> Frame {
             .filter(|item| item.enabled && item.kind == freeshow_data::StageItemKind::Camera)
             .filter_map(|item| item.device_name.as_deref()),
     );
+    let (width, height) = session.stage_output_size();
     crate::stage::paint_stage_at(
         &slides,
         index,
@@ -691,8 +692,8 @@ pub fn stage_frame(session: &Session) -> Frame {
             still_backgrounds: Some(&still_backgrounds),
             twelve_hour: session.preferences.uses_12_hour_clock(),
         },
-        session.output_width,
-        session.output_height,
+        width,
+        height,
     )
 }
 
@@ -2048,20 +2049,24 @@ mod tests {
     }
 
     #[test]
-    fn configured_output_bounds_size_the_framebuffer() {
+    fn separate_audience_and_stage_bounds_size_the_framebuffers() {
         let root =
             std::env::temp_dir().join(format!("freeshow-output-size-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Shows")).unwrap();
         std::fs::write(
             root.join("settings.json"),
-            r#"{"outputs":{"default":{"enabled":true,"active":true,"name":"Main","style":"default","bounds":{"x":0,"y":0,"width":1280,"height":960}}}}"#,
+            r#"{"outputs":{
+                "a-stage":{"stageOutput":"default","bounds":{"width":1024,"height":768}},
+                "b-audience":{"name":"Main","bounds":{"width":1280,"height":720}},
+                "c-stage":{"stageOutput":"other","bounds":{"width":1920,"height":1080}}
+            }}"#,
         )
         .unwrap();
         let mut session = crate::session::Session::open(root.clone());
-        assert_eq!((session.output_width, session.output_height), (1280, 960));
+        assert_eq!((session.output_width, session.output_height), (1280, 720));
         let frame = audience_frame(&session);
-        assert_eq!((frame.width, frame.height), (1280, 960));
+        assert_eq!((frame.width, frame.height), (1280, 720));
         session.stage.items.clear();
         session
             .add_stage_item(
@@ -2070,10 +2075,18 @@ mod tests {
             )
             .unwrap();
         let stage = stage_frame(&session);
-        assert_eq!((stage.width, stage.height), (1280, 960));
-        assert_eq!(stage.pixel(320, 240), parse_color("#ff0000").unwrap());
-        assert_ne!(stage.pixel(319, 240), stage.pixel(320, 240));
-        assert_ne!(stage.pixel(320, 239), stage.pixel(320, 240));
+        assert_eq!((stage.width, stage.height), (1024, 768));
+        assert_eq!(stage.pixel(256, 192), parse_color("#ff0000").unwrap());
+        assert_ne!(stage.pixel(255, 192), stage.pixel(256, 192));
+        assert_ne!(stage.pixel(256, 191), stage.pixel(256, 192));
+
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"outputs":{"main":{"bounds":{"width":1280,"height":720}},"stage":{"stageOutput":"default"}}}"#,
+        )
+        .unwrap();
+        let session = crate::session::Session::open(root.clone());
+        assert_eq!(session.stage_output_size(), (1280, 720));
         let _ = std::fs::remove_dir_all(&root);
     }
 

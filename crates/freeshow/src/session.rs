@@ -186,6 +186,7 @@ pub struct Session {
     /// Audience framebuffer size: 1920×1080, or the active output's stored bounds.
     pub output_width: u32,
     pub output_height: u32,
+    configured_stage_size: Option<(u32, u32)>,
     pub audio_device_map: std::collections::BTreeMap<String, String>,
     pub shows: Vec<ShowFile>,
     pub projects: ProjectsFile,
@@ -425,6 +426,11 @@ fn export_stem(name: &str) -> String {
 }
 
 impl Session {
+    pub fn stage_output_size(&self) -> (u32, u32) {
+        self.configured_stage_size
+            .unwrap_or((self.output_width, self.output_height))
+    }
+
     pub fn empty() -> Self {
         Self {
             root: None,
@@ -432,6 +438,7 @@ impl Session {
             preferences: FreeShowPreferences::default(),
             output_width: OUTPUT_WIDTH,
             output_height: OUTPUT_HEIGHT,
+            configured_stage_size: None,
             audio_device_map: Default::default(),
             shows: Vec::new(),
             projects: ProjectsFile::empty(),
@@ -602,6 +609,9 @@ impl Session {
             .configured_output_size()
             .map(|(width, height)| aligned_output_size(width, height))
             .unwrap_or((OUTPUT_WIDTH, OUTPUT_HEIGHT));
+        let configured_stage_size = preferences
+            .configured_stage_size()
+            .map(|(width, height)| aligned_output_size(width, height));
         let active_overlays = preferences.locked_overlay_ids(&library.audience_output().0);
         freeshow_output::register_custom_fonts(&preferences.custom_font_files());
         let focus_mode = preferences.focus_mode_setting();
@@ -621,6 +631,7 @@ impl Session {
             preferences,
             output_width,
             output_height,
+            configured_stage_size,
             audio_device_map: Default::default(),
             shows,
             projects,

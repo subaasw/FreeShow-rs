@@ -895,12 +895,13 @@ impl NdiBroadcast {
             if !opened.insert(key) {
                 continue;
             }
-            let sender = freeshow_ndi::NdiSender::open_routed(
-                &source_name,
-                session.output_width,
-                session.output_height,
-                &target.id,
-            );
+            let (width, height) = if target.stage {
+                session.stage_output_size()
+            } else {
+                (session.output_width, session.output_height)
+            };
+            let sender =
+                freeshow_ndi::NdiSender::open_routed(&source_name, width, height, &target.id);
             if target.stage {
                 stage.push(sender);
             } else {
@@ -940,11 +941,16 @@ impl WebrtcBroadcast {
         let mut audience = Vec::new();
         let mut stage = Vec::new();
         for target in session.webrtc_outputs() {
+            let (width, height) = if target.stage {
+                session.stage_output_size()
+            } else {
+                (session.output_width, session.output_height)
+            };
             let Some(sender) = freeshow_record::WebrtcSender::open_routed(
                 &target.url,
                 target.token.as_deref(),
-                session.output_width,
-                session.output_height,
+                width,
+                height,
                 &target.id,
             ) else {
                 tracing::warn!("WebRTC output {} did not start", target.id);
@@ -1974,9 +1980,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let stage_weak = stage.as_weak();
     let stage_redraw = stage.as_weak();
+    let (stage_width, stage_height) = session.stage_output_size();
     let stage_slot = attach_frame(
         stage.window(),
-        clear_frame(output_width, output_height),
+        clear_frame(stage_width, stage_height),
         move |image| {
             if let Some(stage) = stage_weak.upgrade() {
                 stage.set_frame(image);
@@ -2029,7 +2036,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stage_fade = Rc::new(slint::Timer::default());
     let next_slide = Rc::new(slint::Timer::default());
     let last_output = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
-    let last_stage = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
+    let last_stage = Rc::new(RefCell::new(clear_frame(stage_width, stage_height)));
     {
         // Even an empty output starts in the style's background colour.
         let audience = audience_frame(&session);
