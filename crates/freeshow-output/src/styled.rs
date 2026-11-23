@@ -271,7 +271,7 @@ pub struct StyledItem {
     pub blur: f32,
     /// CSS `mix-blend-mode`. `Normal` paints the item over the slide.
     pub blend: Blend,
-    /// Percentage edges hidden from an item picture. `clip` is false for a PowerPoint crop.
+    /// Percentage edges hidden from an item picture. PowerPoint crops trim the source before fitting.
     pub crop: Crop,
 }
 
@@ -298,9 +298,6 @@ impl Default for Crop {
 
 impl Crop {
     fn clamped(self) -> Self {
-        if !self.clip {
-            return Self::default();
-        }
         let mut top = self.top.clamp(0.0, 99.0);
         let mut right = self.right.clamp(0.0, 99.0);
         let mut bottom = self.bottom.clamp(0.0, 99.0);
@@ -322,7 +319,7 @@ impl Crop {
             right,
             bottom,
             left,
-            clip: true,
+            clip: self.clip,
         }
     }
 }
@@ -3251,25 +3248,29 @@ fn blit(
     }
     let frame_w = slide.output_width;
     let frame_h = slide.output_height;
+    let crop = crop.clamped();
+    let ((source_x, source_w), (source_y, source_h)) = if crop.clip {
+        ((0, image.width), (0, image.height))
+    } else {
+        (
+            cropped_source_axis(image.width, crop.left, crop.right),
+            cropped_source_axis(image.height, crop.top, crop.bottom),
+        )
+    };
     let (draw_w, draw_h, ox, oy) = if fit == Fit::Tile {
         (
-            scale(image.width as f32, slide.output_width, slide.source_width).max(1),
-            scale(
-                image.height as f32,
-                slide.output_height,
-                slide.source_height,
-            )
-            .max(1),
+            scale(source_w as f32, slide.output_width, slide.source_width).max(1),
+            scale(source_h as f32, slide.output_height, slide.source_height).max(1),
             0,
             0,
         )
     } else {
-        fitted(image.width, image.height, w, h, fit)
+        fitted(source_w, source_h, w, h, fit)
     };
     if draw_w <= 0 || draw_h <= 0 {
         return;
     }
-    let crop = crop.clamped();
+    let crop = if crop.clip { crop } else { Crop::default() };
     let inset_left = (w as f32 * crop.left / 100.0).round() as i32;
     let inset_right = (w as f32 * crop.right / 100.0).round() as i32;
     let inset_top = (h as f32 * crop.top / 100.0).round() as i32;
@@ -3311,11 +3312,11 @@ fn blit(
         if local_y < 0 || local_y >= draw_h {
             continue;
         }
-        let mut sy = (local_y as u32 * image.height) / draw_h as u32;
+        let mut sy = (local_y as u32 * source_h) / draw_h as u32;
         if flip_y {
-            sy = image.height - 1 - sy;
+            sy = source_h - 1 - sy;
         }
-        let src_row = (sy * image.width) * 4;
+        let src_row = ((source_y + sy) * image.width) * 4;
         let dest_row = (dest_y as u32 * frame_w) * 4;
         for dest_x in vis_x0.max(0)..vis_x1.min(frame_w as i32) {
             let dx = dest_x - x;
@@ -3327,11 +3328,11 @@ fn blit(
             if local_x < 0 || local_x >= draw_w {
                 continue;
             }
-            let mut sx = (local_x as u32 * image.width) / draw_w as u32;
+            let mut sx = (local_x as u32 * source_w) / draw_w as u32;
             if flip_x {
-                sx = image.width - 1 - sx;
+                sx = source_w - 1 - sx;
             }
-            let src = (src_row + sx * 4) as usize;
+            let src = (src_row + (source_x + sx) * 4) as usize;
             if src + 3 >= image.rgba.len() {
                 continue;
             }
@@ -3339,6 +3340,13 @@ fn blit(
             source_over(&mut pixels[dst..dst + 4], &image.rgba[src..src + 4]);
         }
     }
+}
+
+fn cropped_source_axis(size: u32, before: f32, after: f32) -> (u32, u32) {
+    let start = (size as f32 * before / 100.0).round() as u32;
+    let start = start.min(size - 1);
+    let end = (size as f32 * (100.0 - after) / 100.0).round() as u32;
+    (start, end.clamp(start + 1, size) - start)
 }
 
 fn fitted(image_w: u32, image_h: u32, box_w: i32, box_h: i32, fit: Fit) -> (i32, i32, i32, i32) {

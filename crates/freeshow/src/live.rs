@@ -2049,6 +2049,38 @@ mod tests {
     }
 
     #[test]
+    fn powerpoint_media_uses_the_saved_source_crop() {
+        let root = std::env::temp_dir().join(freeshow_data::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let image = Frame {
+            width: 2,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255, 0, 255, 0, 255],
+        };
+        std::fs::write(root.join("picture.png"), image.encode_png().unwrap()).unwrap();
+        let mut show = ShowFile::blank("ppt-picture", "PowerPoint picture");
+        show.show["slides"]["s1"]["items"] = serde_json::json!([{
+            "type": "media",
+            "src": "picture.png",
+            "fit": "fill",
+            "style": "left:0px;top:0px;width:1920px;height:1080px;",
+            "cropping": {"type":"ppt","left":50,"top":50}
+        }]);
+        let render = |show: &ShowFile| {
+            frame_for_slide_at(show, 0, Some(&root), false, None, true, None, &[], 4, 4)
+        };
+        let frame = render(&show);
+        for pixel in frame.pixels.chunks_exact(4) {
+            assert_eq!(pixel, [0, 255, 0, 255]);
+        }
+        show.show["slides"]["s1"]["items"][0]["cropping"]["type"] = serde_json::json!("native");
+        let frame = render(&show);
+        assert_eq!(frame.pixel(0, 0), Rgba::BLACK);
+        assert_eq!(frame.pixel(3, 3).g, 255);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn separate_audience_and_stage_bounds_size_the_framebuffers() {
         let root =
             std::env::temp_dir().join(format!("freeshow-output-size-{}", std::process::id()));
