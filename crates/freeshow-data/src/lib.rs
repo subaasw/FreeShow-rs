@@ -1566,8 +1566,19 @@ impl ShowFile {
 
     /// Audio files this slide starts, from layout `audio` ids in `media`.
     pub fn audio_at(&self, index: usize) -> Vec<String> {
-        let steps = self.layout_steps();
-        let Some((_, node)) = steps.get(index) else {
+        self.audio_media_at(index)
+            .into_iter()
+            .filter_map(|media| {
+                media["path"]
+                    .as_str()
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    pub fn audio_media_at(&self, index: usize) -> Vec<&Value> {
+        let Some(node) = self.layout_node_at(index) else {
             return Vec::new();
         };
         node.get("audio")
@@ -1576,11 +1587,7 @@ impl ShowFile {
                 ids.iter()
                     .filter_map(|id| {
                         let id = id.as_str()?;
-                        self.show
-                            .pointer(&format!("/media/{id}/path"))
-                            .and_then(Value::as_str)
-                            .filter(|path| !path.is_empty())
-                            .map(str::to_string)
+                        self.show["media"].get(id)
                     })
                     .collect()
             })

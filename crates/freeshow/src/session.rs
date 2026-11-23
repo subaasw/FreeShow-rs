@@ -257,6 +257,7 @@ pub struct Session {
     /// A second playback for the same slide, so a video and an audio file can both start.
     pub pending_also: Option<PendingPlay>,
     pub playing_audio: Option<PathBuf>,
+    audio_loop_override: Option<bool>,
     /// The audio playlist started by a slide, when one is running.
     playlist_id: Option<String>,
     playlist_index: usize,
@@ -482,6 +483,7 @@ impl Session {
             pending_play: None,
             pending_also: None,
             playing_audio: None,
+            audio_loop_override: None,
             playlist_id: None,
             playlist_index: 0,
             playlist_songs: Vec::new(),
@@ -667,6 +669,7 @@ impl Session {
             pending_play: None,
             pending_also: None,
             playing_audio: None,
+            audio_loop_override: None,
             playlist_id: None,
             playlist_index: 0,
             playlist_songs: Vec::new(),
@@ -1926,9 +1929,11 @@ impl Session {
                 .is_none_or(|end| elapsed < end || track.delay_ms == 0)
             && std::mem::take(&mut track.restart)
         {
-            track.owned = true;
             let path = track.path.clone();
             self.queue_audio(path);
+            if let Some(track) = &mut self.timeline_soundtrack {
+                track.owned = true;
+            }
             changed = true;
         }
         while self.timeline_playing && self.timeline_fired < self.timeline_cues.len() {
@@ -1998,6 +2003,10 @@ impl Session {
             "next" | "next_slide" | "go" => self.advance_show(),
             "previous" | "previous_slide" => self.retreat_show(),
             "slide" => self.run_timeline_slide(cue),
+            "audio" if !self.preferences.out_locked() => cue
+                .data
+                .as_deref()
+                .is_some_and(|id| self.run_timeline_audio(id)),
             "background" | "foreground" if !self.preferences.out_locked() => {
                 cue.data.as_deref().is_some_and(|id| {
                     self.run_timeline_picture(id, cue.kind.eq_ignore_ascii_case("foreground"))
@@ -2031,6 +2040,25 @@ impl Session {
             "clear" | "clear_all" => self.clear_all_layers(),
             _ => false,
         }
+    }
+
+    fn run_timeline_audio(&mut self, id: &str) -> bool {
+        let Some(media) = self
+            .current_show()
+            .and_then(|show| show.show["media"].get(id))
+        else {
+            return false;
+        };
+        let Some(path) = media["path"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|path| media_kind(path) == MediaKind::Audio && path.is_file())
+        else {
+            return false;
+        };
+        let looping = media["loop"].as_bool();
+        let retrigger = media["retrigger"] == true;
+        self.queue_cue_audio(path, looping, retrigger)
     }
 
     fn run_timeline_picture(&mut self, id: &str, foreground: bool) -> bool {
@@ -2545,10 +2573,7 @@ impl Session {
             .pending_also
             .take()
             .or_else(|| self.pending_play.take())
-            .filter(|play| {
-                matches!(play, PendingPlay::StopAudio)
-                    || matches!(play, PendingPlay::Audio(path) if self.timeline_owns_audio(path))
-            });
+            .filter(|play| matches!(play, PendingPlay::StopAudio | PendingPlay::Audio(_)));
         self.pending_play = Some(PendingPlay::Video(path.to_path_buf()));
     }
 
@@ -3047,9 +3072,7 @@ impl Session {
         let Some(path) = self.playlist_songs.get(self.playlist_index).cloned() else {
             return;
         };
-        self.playing_audio = Some(path.clone());
-        self.audio_paused = false;
-        self.keep_video_then(PendingPlay::Audio(path));
+        self.queue_audio(path);
     }
 
     /// The song that just ended belongs to the running playlist, so the next one is queued.
@@ -3340,6 +3363,7 @@ impl Session {
 
     fn stop_audio(&mut self) {
         self.playing_audio = None;
+        self.audio_loop_override = None;
         self.audio_paused = false;
         self.keep_video_then(PendingPlay::StopAudio);
     }
@@ -3368,25 +3392,43 @@ impl Session {
 
     /// Starts the first audio file listed on this slide, unless that file is already playing.
     fn start_slide_audio(&mut self) {
-        let path = self.current_show().and_then(|show| {
+        let audio = self.current_show().and_then(|show| {
             self.slide_index.and_then(|index| {
-                show.audio_at(index)
-                    .into_iter()
-                    .find(|path| media_kind(Path::new(path)) == MediaKind::Audio)
+                show.audio_media_at(index).into_iter().find_map(|media| {
+                    let path = PathBuf::from(media["path"].as_str()?);
+                    (media_kind(&path) == MediaKind::Audio).then_some((
+                        path,
+                        media["loop"].as_bool(),
+                        media["retrigger"] == true,
+                    ))
+                })
             })
         });
-        let Some(path) = path else {
-            return;
-        };
-        let path = PathBuf::from(path);
-        if self.playing_audio.as_ref() == Some(&path) && !self.audio_paused {
-            return;
+        if let Some((path, looping, retrigger)) = audio {
+            self.queue_cue_audio(path, looping, retrigger);
+        }
+    }
+
+    fn queue_cue_audio(&mut self, path: PathBuf, looping: Option<bool>, retrigger: bool) -> bool {
+        if !retrigger
+            && self.playing_audio.as_ref() == Some(&path)
+            && !self.audio_paused
+            && self.audio_loop_override == looping
+            && !self.timeline_owns_audio(&path)
+        {
+            return false;
         }
         self.queue_audio(path);
+        self.audio_loop_override = looping;
+        true
     }
 
     fn queue_audio(&mut self, path: PathBuf) {
         self.media_finished = None;
+        self.audio_loop_override = None;
+        if let Some(track) = &mut self.timeline_soundtrack {
+            track.owned = false;
+        }
         self.playing_audio = Some(path.clone());
         self.audio_paused = false;
         self.keep_video_then(PendingPlay::Audio(path));
@@ -3487,10 +3529,7 @@ impl Session {
         if self.playing_audio.as_ref() == Some(&path) && !self.audio_paused {
             return;
         }
-        self.media_finished = None;
-        self.playing_audio = Some(path.clone());
-        self.audio_paused = false;
-        self.keep_video_then(PendingPlay::Audio(path));
+        self.queue_audio(path);
     }
 
     /// Plays the first sound effect on this slide. A running playlist resumes when it ends.
@@ -3509,10 +3548,7 @@ impl Session {
             None
         };
         self.effect_playing = Some(path.clone());
-        self.playing_audio = Some(path.clone());
-        self.audio_paused = false;
-        self.media_finished = None;
-        self.keep_video_then(PendingPlay::Audio(path));
+        self.queue_audio(path);
     }
 
     /// The file that ended was a sound effect, so the playlist song starts again.
@@ -3530,9 +3566,7 @@ impl Session {
         let Some(back) = self.effect_return.take() else {
             return true;
         };
-        self.playing_audio = Some(back.clone());
-        self.audio_paused = false;
-        self.keep_video_then(PendingPlay::Audio(back));
+        self.queue_audio(back);
         true
     }
 
@@ -3920,6 +3954,9 @@ impl Session {
 
     /// The file that is playing repeats when `media.json` says so.
     pub fn audio_should_loop(&self) -> bool {
+        if let Some(looping) = self.audio_loop_override {
+            return self.playing_audio.is_some() && looping;
+        }
         self.playing_audio
             .as_ref()
             .filter(|path| !self.timeline_owns_audio(path))
@@ -5524,9 +5561,7 @@ impl Session {
         }
         self.slide_hidden = false;
         if let Some(audio) = soundtrack {
-            self.playing_audio = Some(audio.clone());
-            self.audio_paused = false;
-            self.pending_play = Some(PendingPlay::Audio(audio));
+            self.queue_audio(audio);
         }
         shown
     }
@@ -7927,6 +7962,55 @@ Second line"
         session.select_slide(1);
         assert!(!session.slide_hidden);
         assert!(session.underlay.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imported_timeline_audio_cues_keep_their_settings_beside_a_video_cue() {
+        let root = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let song = root.join("song.wav");
+        let cue = root.join("cue.wav");
+        let video = root.join("video.mp4");
+        for path in [&song, &cue, &video] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let mut show = ShowFile::blank("audio-cues", "Audio cues");
+        show.show["origin"] = serde_json::json!("propresenter");
+        show.show["media"] = serde_json::json!({
+            "bed": {"path": song}, "cue": {"path": cue, "loop": true},
+            "restart": {"path": cue, "loop": false, "retrigger": true}, "video": {"path": video},
+        });
+        show.show["layouts"]["main"]["timeline"] = serde_json::json!({"soundtrack": "bed", "actions": [
+            {"time": 500, "type": "audio", "data": {"id": "cue"}},
+            {"time": 500, "type": "background", "data": {"id": "video"}},
+            {"time": 700, "type": "audio", "data": {"id": "cue"}},
+            {"time": 1000, "type": "audio", "data": {"id": "restart"}}
+        ]});
+        let mut session = Session::empty();
+        session.shows = vec![show];
+        assert!(session.present_show_id("audio-cues"));
+        assert!(session.save_timeline(&session.timeline_text()));
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(start));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(path)), None] if path == song)
+        );
+        assert!(session.tick_timeline(start + Duration::from_millis(500)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Video(path)), Some(PendingPlay::Audio(audio))] if path == video && audio == cue)
+        );
+        assert!(session.audio_should_loop());
+        assert!(!session.tick_timeline(start + Duration::from_millis(700)));
+        assert!(matches!(session.take_plays(), [None, None]));
+        assert!(session.tick_timeline(start + Duration::from_millis(1000)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == cue)
+        );
+        assert!(!session.audio_should_loop());
+        assert_eq!(session.playing_audio.as_ref(), Some(&cue));
+        assert_eq!(session.slide_index, Some(0));
         std::fs::remove_dir_all(root).unwrap();
     }
 

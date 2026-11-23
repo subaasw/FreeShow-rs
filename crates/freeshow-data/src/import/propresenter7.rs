@@ -40,6 +40,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
         });
         if action.is_none()
             && cue_picture(cue).is_none()
+            && cue_audio(cue).is_none()
             && !cue
                 .actions
                 .iter()
@@ -350,6 +351,14 @@ fn add_slide(
         }
         None => {}
     }
+    if !clear.contains(&"clear_all")
+        && let Some((audio, path)) = cue_audio(cue)
+    {
+        node["audio"] = json!([insert_media(media, audio, path, false)]);
+        if action.is_none() && node["background"].is_null() {
+            settings["actionOnly"] = json!(true);
+        }
+    }
     if !clear.is_empty() {
         node["actions"]["slideActions"] = json!([{"triggers":clear}]);
         if action.is_none() {
@@ -446,13 +455,15 @@ fn layout_timeline(
                     wire::ClearTarget::All => "clear_all",
                 };
                 (kind, json!({}))
+            } else if let Some((audio, path)) = audio_media(action) {
+                (
+                    "audio",
+                    json!({"id": insert_media(media, audio, path, false)}),
+                )
             } else if action.enabled
                 && let Some((picture, path, foreground)) = picture_media(action)
             {
                 let id = insert_media(media, picture, path, foreground);
-                if picture.always_retrigger {
-                    media[&id]["retrigger"] = json!(true);
-                }
                 (
                     if foreground {
                         "foreground"
@@ -567,6 +578,32 @@ fn picture_media(action: &wire::Action) -> Option<(&wire::MediaAction, &str, boo
     Some((media, media_source(media)?, foreground))
 }
 
+fn audio_media(action: &wire::Action) -> Option<(&wire::MediaAction, &str)> {
+    action_carries_media(action)?;
+    let media = action
+        .media
+        .as_ref()
+        .filter(|media| action.enabled && media.audio.is_some())?;
+    Some((media, media_source(media)?))
+}
+
+fn cue_audio(cue: &wire::Cue) -> Option<(&wire::MediaAction, &str)> {
+    for action in cue.actions.iter().rev() {
+        if matches!(
+            immediate_clear_target(action),
+            Some(wire::ClearTarget::Audio | wire::ClearTarget::All)
+        ) {
+            break;
+        }
+        if action.delay == 0.0
+            && let Some(audio) = audio_media(action)
+        {
+            return Some(audio);
+        }
+    }
+    None
+}
+
 fn insert_media(
     media: &mut Map<String, Value>,
     action: &wire::MediaAction,
@@ -578,6 +615,12 @@ fn insert_media(
     let mut entry = json!({"name": name, "path": path});
     if let Some(video) = &action.video {
         entry["loop"] = json!(video.playback == 1);
+    }
+    if let Some(audio) = &action.audio {
+        entry["loop"] = json!(audio.playback == 1);
+    }
+    if action.always_retrigger {
+        entry["retrigger"] = json!(true);
     }
     if foreground {
         entry["videoType"] = json!("foreground");
@@ -1309,6 +1352,61 @@ mod tests {
     }
 
     #[test]
+    fn imports_standalone_and_timed_audio_actions() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let audio = wire::Action {
+            kind: wire::ActionType::Media as i32,
+            enabled: true,
+            media: Some(wire::MediaAction {
+                element: Some(wire::Media {
+                    url: Some(wire::Url {
+                        relative: "Cue.wav".into(),
+                        ..Default::default()
+                    }),
+                }),
+                audio: Some(wire::Audio { playback: 1 }),
+                always_retrigger: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        presentation.cues[1].actions = vec![audio.clone()];
+        presentation.cues[1].enabled = true;
+        presentation.timeline = Some(wire::Timeline {
+            cues_v2: vec![wire::TimelineCue {
+                trigger_time: 1.0,
+                action: Some(wire::Action {
+                    delay: 0.25,
+                    ..audio
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let show = crate::import::import_show("Audio.pro", &presentation.encode_to_vec()).unwrap();
+        let slides = show.ordered_slides();
+        let index = (0..slides.len())
+            .find(|&index| show.audio_at(index) == ["Cue.wav"])
+            .unwrap();
+        assert_eq!(
+            show.show["slides"][&slides[index].id]["settings"]["actionOnly"],
+            true
+        );
+        assert!(
+            !matches!(show.backdrop_at(index), crate::SlideBackdrop::Picture { path, .. } if path == "Cue.wav")
+        );
+        let cues = crate::timeline_cues_from_show(&show.show);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].time_ms, 1250);
+        assert_eq!(cues[0].kind, "audio");
+        let media = &show.show["media"][cues[0].data.as_deref().unwrap()];
+        assert_eq!(media["path"], "Cue.wav");
+        assert_eq!(media["loop"], true);
+        assert_eq!(media["retrigger"], true);
+    }
+
+    #[test]
     fn timeline_soundtrack_is_copied_and_linked_with_bundle_media() {
         let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
         let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
@@ -1319,7 +1417,7 @@ mod tests {
                 enabled: true,
                 kind: wire::ActionType::Media as i32,
                 media: Some(wire::MediaAction {
-                    audio: Some(wire::Audio {}),
+                    audio: Some(wire::Audio { playback: 0 }),
                     element: Some(wire::Media {
                         url: Some(wire::Url {
                             relative: "Backing.wav".into(),
