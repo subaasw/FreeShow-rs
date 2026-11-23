@@ -10,12 +10,12 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 9] = [
-    "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable",
+pub const STAGE_ADD_KINDS: [&str; 10] = [
+    "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable", "qr",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 9] = [
+pub const STAGE_ADD_NAMES: [&str; 10] = [
     "Current slide",
     "Next slide",
     "Slide notes",
@@ -25,6 +25,7 @@ pub const STAGE_ADD_NAMES: [&str; 9] = [
     "Picture or video",
     "Slide number",
     "Variable",
+    "QR code",
 ];
 
 /// Library `settings.json` values shown in Settings.
@@ -211,6 +212,9 @@ pub struct StageRow {
     pub include_media: bool,
     pub text_box: i32,
     pub invert_items: bool,
+    pub qr_text: String,
+    pub qr_color: String,
+    pub qr_background: String,
     /// A text item's words, one line per line.
     pub text: String,
     pub seconds: bool,
@@ -1273,6 +1277,18 @@ impl Session {
                         .text_box
                         .map_or(0, |index| index.saturating_add(1).min(99) as i32),
                     invert_items: item.invert_items,
+                    qr_text: item
+                        .qr
+                        .as_ref()
+                        .map_or_else(String::new, |qr| qr.text.clone()),
+                    qr_color: item
+                        .qr
+                        .as_ref()
+                        .map_or_else(String::new, |qr| qr.color.clone()),
+                    qr_background: item
+                        .qr
+                        .as_ref()
+                        .map_or_else(String::new, |qr| qr.background.clone()),
                     text: item.lines.join("\n"),
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
@@ -1297,6 +1313,9 @@ impl Session {
                 | "include-media"
                 | "text-box"
                 | "invert-items"
+                | "qr-text"
+                | "qr-color"
+                | "qr-background"
                 | "text"
                 | "seconds"
                 | "date-format"
@@ -1398,6 +1417,27 @@ impl Session {
                 item.text_box = number.checked_sub(1);
             }
             "invert-items" => item.invert_items = parse_bool(value)?,
+            "qr-text" | "qr-color" | "qr-background"
+                if item.kind == freeshow_data::StageItemKind::QrCode =>
+            {
+                let value = if key == "qr-text" {
+                    value
+                } else {
+                    value.trim()
+                };
+                if key != "qr-text"
+                    && !(key == "qr-background" && value.is_empty())
+                    && freeshow_output::parse_color(value).is_none()
+                {
+                    return Err(format!("invalid QR color {value:?}"));
+                }
+                let qr = item.qr.get_or_insert_with(Default::default);
+                match key {
+                    "qr-text" => qr.text = value.into(),
+                    "qr-color" => qr.color = value.into(),
+                    _ => qr.background = value.into(),
+                }
+            }
             "text" => {
                 item.lines = value
                     .lines()
@@ -1766,6 +1806,54 @@ mod tests {
         let item = saved.items.iter().find(|item| item.id == id).unwrap();
         assert!(!item.include_media && !item.invert_items);
         assert_eq!(item.text_box, None);
+    }
+
+    #[test]
+    fn stage_qr_options_reopen_and_render() {
+        let (dir, mut session) = library("stage-qr");
+        let id = session
+            .add_stage_item("qr", "left:0px;top:0px;width:320px;height:160px;")
+            .unwrap();
+        session.stage_set(&id, "qr-text", "  Welcome  ").unwrap();
+        assert!(session.stage_set(&id, "qr-color", "invalid").is_err());
+        session.stage_set(&id, "qr-color", "#d02483").unwrap();
+        session.stage_set(&id, "qr-background", "#f3e9dc").unwrap();
+
+        let path = freeshow_data::Library::open(dir.path()).stage_path();
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let layout_id = saved.as_object().unwrap().keys().next().unwrap().clone();
+        saved[&layout_id]["items"][&id]["qr_code"]["custom"] = serde_json::json!(true);
+        std::fs::write(&path, saved.to_string()).unwrap();
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        let row = reopened
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.kind, "qr");
+        assert_eq!(row.qr_text, "  Welcome  ");
+        assert_eq!(row.qr_color, "#d02483");
+        assert_eq!(row.qr_background, "#f3e9dc");
+        let frame = crate::live::stage_frame(&reopened);
+        assert!(
+            frame
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == [208, 36, 131, 255])
+        );
+        assert_eq!(
+            frame.pixel(80, 0),
+            freeshow_output::parse_color("#f3e9dc").unwrap()
+        );
+
+        reopened.stage_set(&id, "qr-background", "").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let qr = &saved[&layout_id]["items"][&id]["qr_code"];
+        assert_eq!(qr["background"], "");
+        assert_eq!(qr["custom"], true);
     }
 
     #[test]
