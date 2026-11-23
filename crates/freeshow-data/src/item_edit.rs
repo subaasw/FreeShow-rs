@@ -18,6 +18,8 @@ pub struct ItemBox {
     pub box_shadow: String,
     pub backdrop_filter: String,
     pub radius: String,
+    /// Crop edges in left, right, top, bottom order for a picture source.
+    pub crop: Option<[String; 4]>,
     /// `top`, `center` or `bottom`, from the box `align-items`.
     pub valign: String,
     /// Clockwise turn in whole degrees, from the box `transform: rotate()`.
@@ -480,8 +482,8 @@ impl ShowFile {
 
     /// Position, size and box fill of an item, from its `style` (FreeShow's default box when unset).
     pub fn item_box(&self, slide_id: &str, index: usize) -> ItemBox {
-        let style = self
-            .item(slide_id, index)
+        let item = self.item(slide_id, index);
+        let style = item
             .and_then(|item| item.get("style"))
             .and_then(Value::as_str)
             .filter(|style| !style.trim().is_empty())
@@ -505,6 +507,16 @@ impl ShowFile {
             radius: css_value(style, "border-radius").unwrap_or_default(),
             box_shadow: css_value(style, "box-shadow").unwrap_or_default(),
             backdrop_filter: css_value(style, "backdrop-filter").unwrap_or_default(),
+            crop: item.filter(|item| has_picture_source(item)).map(|item| {
+                ["left", "right", "top", "bottom"].map(|edge| {
+                    let value = &item["cropping"][edge];
+                    value
+                        .as_f64()
+                        .map(|number| number.to_string())
+                        .or_else(|| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "0".into())
+                })
+            }),
             // FreeShow keeps vertical alignment in the item's `align` CSS, not its `style`.
             valign: match self
                 .item(slide_id, index)
@@ -531,6 +543,33 @@ impl ShowFile {
                 })
                 .map_or(0, |degrees| degrees.round() as i32),
         }
+    }
+
+    /// Updates one edge while retaining the saved crop mode and other edges.
+    pub fn set_item_crop_edge(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        edge: &str,
+        percent: f64,
+    ) -> bool {
+        if !matches!(edge, "left" | "right" | "top" | "bottom")
+            || !(0.0..=99.0).contains(&percent)
+            || !self.item(slide_id, index).is_some_and(has_picture_source)
+        {
+            return false;
+        }
+        let Some(item) = self.item_mut(slide_id, index) else {
+            return false;
+        };
+        let crop = item
+            .entry("cropping")
+            .or_insert_with(|| serde_json::json!({}));
+        if !crop.is_object() {
+            *crop = serde_json::json!({});
+        }
+        crop[edge] = Value::from(percent);
+        true
     }
 
     /// Sets one declaration on the item box `style` (not the text runs). An empty value removes it.
@@ -746,6 +785,16 @@ impl ShowFile {
         };
         index < items.len()
     }
+}
+
+fn has_picture_source(item: &Value) -> bool {
+    item["src"]
+        .as_str()
+        .is_some_and(|src| !src.trim().is_empty())
+        && !matches!(
+            item["type"].as_str(),
+            Some("web" | "website" | "html" | "weather" | "qr_code")
+        )
 }
 
 fn text_decoration(style: &str) -> Option<&str> {
