@@ -8461,6 +8461,23 @@ Second line"
         assert_eq!(session.inspector_form().item_box.box_shadow, box_shadow);
         session.inspector_set("box-shadow", "").unwrap();
         assert!(session.inspector_form().item_box.box_shadow.is_empty());
+        let backdrop = "blur(8px) saturate(125%) hue-rotate(-0.5turn)";
+        session.inspector_set("backdrop-filter", backdrop).unwrap();
+        for invalid in [
+            "blur(-5px)",
+            "opacity(NaN)",
+            "drop-shadow(1px 2px)",
+            "blur(4px);top:0",
+            "contrast(2",
+        ] {
+            assert!(
+                session.inspector_set("backdrop-filter", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(session.inspector_form().item_box.backdrop_filter, backdrop);
+        session.inspector_set("backdrop-filter", "none").unwrap();
+        assert!(session.inspector_form().item_box.backdrop_filter.is_empty());
         session.inspector_set("blur", "3").unwrap();
         session.inspector_set("grayscale", "100").unwrap();
         session.inspector_set("opacity", "60").unwrap();

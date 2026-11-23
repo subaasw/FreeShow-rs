@@ -2103,24 +2103,24 @@ pub fn filter_hue_rotate(filter: &str) -> f32 {
         let Some(end) = rest.find(')') else {
             break;
         };
-        degrees = angle_degrees(rest[..end].trim());
+        degrees = angle_degrees(rest[..end].trim()).unwrap_or(0.0);
         rest = &rest[end + 1..];
     }
     degrees
 }
 
-fn angle_degrees(token: &str) -> f32 {
-    if let Some(number) = token.strip_suffix("deg") {
-        number.trim().parse().unwrap_or(0.0)
-    } else if let Some(number) = token.strip_suffix("turn") {
-        number.trim().parse::<f32>().unwrap_or(0.0) * 360.0
-    } else if let Some(number) = token.strip_suffix("rad") {
-        number.trim().parse::<f32>().unwrap_or(0.0).to_degrees()
-    } else if let Some(number) = token.strip_suffix("grad") {
-        number.trim().parse::<f32>().unwrap_or(0.0) * 0.9
-    } else {
-        token.parse().unwrap_or(0.0)
-    }
+fn angle_degrees(token: &str) -> Option<f32> {
+    let (number, scale) = [
+        ("deg", 1.0),
+        ("turn", 360.0),
+        ("grad", 0.9),
+        ("rad", 180.0 / std::f32::consts::PI),
+    ]
+    .into_iter()
+    .find_map(|(suffix, scale)| token.strip_suffix(suffix).map(|number| (number, scale)))
+    .unwrap_or((token, 1.0));
+    let degrees = number.trim().parse::<f32>().ok()? * scale;
+    degrees.is_finite().then_some(degrees)
 }
 
 fn hue_changes(degrees: f32) -> bool {
@@ -2910,6 +2910,43 @@ fn apply_backdrop(
             }
         }
     }
+}
+
+/// Checks the filter functions supported by the native backdrop compositor.
+pub fn valid_backdrop_filter(mut filter: &str) -> bool {
+    filter = filter.trim();
+    if filter.eq_ignore_ascii_case("none") {
+        return true;
+    }
+    while !filter.is_empty() {
+        let Some((name, body)) = filter.split_once('(') else {
+            return false;
+        };
+        let Some((value, tail)) = body.split_once(')') else {
+            return false;
+        };
+        let value = value.trim();
+        let non_negative = |suffix: &str| {
+            value
+                .strip_suffix(suffix)
+                .unwrap_or(value)
+                .trim()
+                .parse::<f32>()
+                .is_ok_and(|amount| amount.is_finite() && amount >= 0.0)
+        };
+        let valid = match name {
+            "blur" => non_negative("px"),
+            "hue-rotate" => angle_degrees(value).is_some(),
+            "opacity" | "grayscale" | "invert" | "sepia" | "brightness" | "contrast"
+            | "saturate" => non_negative("%"),
+            _ => return false,
+        };
+        if !valid {
+            return false;
+        }
+        filter = tail.trim_start();
+    }
+    true
 }
 
 fn filter_pixel(
@@ -4741,6 +4778,7 @@ mod tests {
         assert!(channel_ink(&spun, 1) > 80);
         assert!(channel_ink(&spun, 2) > 80);
         assert!((filter_hue_rotate("hue-rotate(180deg)") - 180.0).abs() < 0.001);
+        assert_eq!(filter_hue_rotate("hue-rotate(100grad)"), 90.0);
     }
 
     #[test]

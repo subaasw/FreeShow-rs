@@ -1281,6 +1281,19 @@ impl Session {
                     show.set_item_box_css(slide, item, "box-shadow", &value)
                 })
             }
+            "backdrop-filter" => {
+                if !freeshow_output::valid_backdrop_filter(&value) {
+                    return Err(format!("invalid backdrop filter {value:?}"));
+                }
+                let css = if value.eq_ignore_ascii_case("none") {
+                    ""
+                } else {
+                    &value
+                };
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_box_css(slide, item, "backdrop-filter", css)
+                })
+            }
             other => return Err(format!("unknown inspector field {other:?}")),
         };
         if ok {

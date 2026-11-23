@@ -16,6 +16,7 @@ pub struct ItemBox {
     pub height: i32,
     pub background: String,
     pub box_shadow: String,
+    pub backdrop_filter: String,
     pub radius: i32,
     /// `top`, `center` or `bottom`, from the box `align-items`.
     pub valign: String,
@@ -487,6 +488,7 @@ impl ShowFile {
                 .unwrap_or_default(),
             radius: css_px(style, "border-radius").unwrap_or(0),
             box_shadow: css_value(style, "box-shadow").unwrap_or_default(),
+            backdrop_filter: css_value(style, "backdrop-filter").unwrap_or_default(),
             // FreeShow keeps vertical alignment in the item's `align` CSS, not its `style`.
             valign: match self
                 .item(slide_id, index)

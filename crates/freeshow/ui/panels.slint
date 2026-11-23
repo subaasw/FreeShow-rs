@@ -71,6 +71,7 @@ export struct InspectorData {
     background: string,
     radius: int,
     box-shadow: string,
+    backdrop-filter: string,
     line-height: int,
     letter-spacing: int,
     outline-width: int,
@@ -841,6 +842,17 @@ export component InspectorPanel inherits VerticalLayout {
             shown: root.data.box-shadow;
             placeholder-text: "0 4px 12px #0008";
             accepted(value) => { root.set("box-shadow", value); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Backdrop filter"; text-color: root.text-color; }
+        ValueEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            shown: root.data.backdrop-filter;
+            placeholder-text: "blur(8px)";
+            accepted(value) => { root.set("backdrop-filter", value); }
         }
     }
     HorizontalLayout {
