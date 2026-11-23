@@ -52,6 +52,7 @@ pub struct BoxStyle {
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_linear_scaled: bool,
+    pptx_gradient_fixed: bool,
     pptx_gradient_gamma: bool,
     pptx_gradient_tile: Option<[f32; 4]>,
     pptx_fill_flip_x: bool,
@@ -189,6 +190,7 @@ impl Default for BoxStyle {
             pptx_group_matrix: None,
             gradient: None,
             pptx_linear_scaled: false,
+            pptx_gradient_fixed: false,
             pptx_gradient_gamma: false,
             pptx_gradient_tile: None,
             pptx_fill_flip_x: false,
@@ -406,6 +408,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 }
             }
             "--pptx-linear-scaled" => style.pptx_linear_scaled = value == "1",
+            "--pptx-gradient-fixed" => style.pptx_gradient_fixed = value == "1",
             "--pptx-gradient-gamma" => style.pptx_gradient_gamma = value == "1",
             "--pptx-fill-flip-x" => style.pptx_fill_flip_x = value == "1",
             "--pptx-fill-flip-y" => style.pptx_fill_flip_y = value == "1",
@@ -1197,7 +1200,15 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
             in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background)
         });
     }
-    draw_item_content(pixels, slide, item, &style, bounds, opacity, item.blend);
+    draw_item_content(
+        pixels, slide, item, &style, bounds, opacity, item.blend, None,
+    );
+}
+
+#[derive(Clone, Copy)]
+struct GradientSpace {
+    matrix: [f32; 4],
+    size: [f32; 2],
 }
 
 fn draw_transformed_item(
@@ -1342,6 +1353,25 @@ fn draw_transformed_item(
         items: Vec::new(),
     };
     let mut layer = vec![0; layer_len];
+    let gradient_space = if style.pptx_gradient_fixed && style.gradient.is_some() {
+        let (gx, gy) = if style.elliptical_background {
+            (
+                (a * half_w).hypot(c * half_h),
+                (b * half_w).hypot(d * half_h),
+            )
+        } else {
+            (extent_x, extent_y)
+        };
+        let size = [2.0 * gx, 2.0 * gy];
+        size.iter()
+            .all(|axis| axis.is_finite() && *axis >= f32::MIN_POSITIVE)
+            .then_some(GradientSpace {
+                matrix: [a / raster_x, b / raster_x, c / raster_y, d / raster_y],
+                size,
+            })
+    } else {
+        None
+    };
     draw_item_content(
         &mut layer,
         &local,
@@ -1355,6 +1385,7 @@ fn draw_transformed_item(
         },
         1.0,
         Blend::Normal,
+        gradient_space,
     );
     for py in y0..y1 {
         for px in x0..x1 {
@@ -1393,6 +1424,7 @@ fn draw_item_content(
     bounds: text::Clip,
     opacity: f32,
     blend: Blend,
+    gradient_space: Option<GradientSpace>,
 ) {
     let text::Clip { x, y, w, h } = bounds;
     let radius = item_radius(style, slide, w, h);
@@ -1432,7 +1464,7 @@ fn draw_item_content(
         || hue_changes(hue);
     let before = (color_filter || blur >= 0.5 || blend != Blend::Normal)
         .then(|| copy_rect(pixels, slide.output_width, slide.output_height, x, y, w, h));
-    fill_item_background(pixels, slide, style, x, y, w, h, radius);
+    fill_item_background(pixels, slide, style, x, y, w, h, radius, gradient_space);
     if let Some(image) = &item.image {
         blit(
             pixels,
@@ -3519,6 +3551,7 @@ fn fill_item_background(
     w: i32,
     h: i32,
     radius: Radii,
+    gradient_space: Option<GradientSpace>,
 ) {
     if style.gradient.is_none() && style.background.is_none() {
         return;
@@ -3530,21 +3563,22 @@ fn fill_item_background(
     {
         let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
         let (box_w, box_h) = (w as f32, h as f32);
+        let [gradient_w, gradient_h] = gradient_space.map_or([box_w, box_h], |space| space.size);
         let tile = style
             .pptx_gradient_tile
             .and_then(|[left, top, right, bottom]| {
                 let geometry = [
-                    box_w * left,
-                    box_h * top,
-                    box_w * (1.0 - left - right),
-                    box_h * (1.0 - top - bottom),
+                    gradient_w * left,
+                    gradient_h * top,
+                    gradient_w * (1.0 - left - right),
+                    gradient_h * (1.0 - top - bottom),
                 ];
                 (geometry.iter().all(|value| value.is_finite())
                     && geometry[2] >= f32::MIN_POSITIVE
                     && geometry[3] >= f32::MIN_POSITIVE)
                     .then_some(geometry)
             });
-        let [_, _, fill_w, fill_h] = tile.unwrap_or([0.0, 0.0, box_w, box_h]);
+        let [_, _, fill_w, fill_h] = tile.unwrap_or([0.0, 0.0, gradient_w, gradient_h]);
         let local_x = |px: i32| {
             let offset = px as f32 - x as f32 + 0.5;
             if style.pptx_fill_flip_x {
@@ -3561,15 +3595,17 @@ fn fill_item_background(
                 offset
             }
         };
-        let tile_coordinates = tile.map(|[left, top, _, _]| {
-            let columns = (x0..x1)
-                .map(|px| mirrored_tile_coordinate(local_x(px) - left, fill_w))
-                .collect::<Vec<_>>();
-            let rows = (y0..y1)
-                .map(|py| mirrored_tile_coordinate(local_y(py) - top, fill_h))
-                .collect::<Vec<_>>();
-            (columns, rows)
-        });
+        let tile_coordinates =
+            tile.filter(|_| gradient_space.is_none())
+                .map(|[left, top, _, _]| {
+                    let columns = (x0..x1)
+                        .map(|px| mirrored_tile_coordinate(local_x(px) - left, fill_w))
+                        .collect::<Vec<_>>();
+                    let rows = (y0..y1)
+                        .map(|py| mirrored_tile_coordinate(local_y(py) - top, fill_h))
+                        .collect::<Vec<_>>();
+                    (columns, rows)
+                });
         let (cx, cy) = (fill_w / 2.0, fill_h / 2.0);
         let radius_to_corner = fill_w.hypot(fill_h) / 2.0;
         let ellipse_radius = if style.pptx_shape_ellipse {
@@ -3606,6 +3642,24 @@ fn fill_item_background(
         let mut draw_stop = |px, py| {
             let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
                 (columns[(px - x0) as usize], rows[(py - y0) as usize])
+            } else if let Some(GradientSpace {
+                matrix: [a, b, c, d],
+                ..
+            }) = gradient_space
+            {
+                // The layer still clips in object coordinates. Only the gradient uses slide coordinates.
+                let dx = local_x(px) - box_w / 2.0;
+                let dy = local_y(py) - box_h / 2.0;
+                let gx = a * dx + c * dy + gradient_w / 2.0;
+                let gy = b * dx + d * dy + gradient_h / 2.0;
+                if let Some([left, top, _, _]) = tile {
+                    (
+                        mirrored_tile_coordinate(gx - left, fill_w),
+                        mirrored_tile_coordinate(gy - top, fill_h),
+                    )
+                } else {
+                    (gx, gy)
+                }
             } else {
                 (local_x(px), local_y(py))
             };
@@ -5393,6 +5447,21 @@ mod tests {
         assert_eq!(frame.pixel(1, 0), colors[5]);
         assert_eq!(frame.pixel(0, 1), colors[1]);
         assert_eq!(frame.pixel(1, 1), colors[4]);
+    }
+
+    #[test]
+    fn powerpoint_fixed_gradient_keeps_slide_axes_under_object_transforms() {
+        for transform in ["transform:rotate(90deg);", "--pptx-group-matrix:0 -2 1 0;"] {
+            let style = format!(
+                "left:60px;top:80px;width:80px;height:40px;background:linear-gradient(90deg, #f00 0%, #00f 100%);{transform}"
+            );
+            let rotated = render_styled(&style_slide(&style));
+            assert_eq!(rotated.pixel(41, 50), rotated.pixel(58, 50));
+            let fixed = render_styled(&style_slide(&format!("{style}--pptx-gradient-fixed:1;")));
+            assert!(fixed.pixel(41, 50).r > 210);
+            assert!(fixed.pixel(58, 50).b > 210);
+            assert_eq!(fixed.pixel(30, 50), Rgba::BLACK);
+        }
     }
 
     #[test]

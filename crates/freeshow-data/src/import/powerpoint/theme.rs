@@ -139,6 +139,7 @@ pub(super) struct GradientFill {
     /// CSS angle for a linear fill.
     pub linear_angle: Option<f64>,
     pub linear_scaled: bool,
+    pub fixed_orientation: bool,
     pub focus: Option<GradientFocus>,
     pub tile_insets: [f64; 4],
     /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
@@ -220,6 +221,7 @@ impl GradientFill {
         Some(Self {
             linear_angle: path.is_none().then_some(angle),
             linear_scaled,
+            fixed_orientation: matches!(fill.attribute("rotWithShape"), Some("0" | "false")),
             focus,
             tile_insets: gradient_insets(|key| {
                 tile.and_then(|tile| tile.attribute(key))
@@ -258,6 +260,9 @@ impl GradientFill {
         };
         if self.linear_angle.is_some() && self.linear_scaled {
             style.push_str("--pptx-linear-scaled:1;");
+        }
+        if self.fixed_orientation {
+            style.push_str("--pptx-gradient-fixed:1;");
         }
         if self.tile_insets != [0.0; 4] {
             let [left, top, right, bottom] = self.tile_insets;

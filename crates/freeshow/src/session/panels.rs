@@ -1307,6 +1307,7 @@ impl Session {
                 self.edit_current_item(|show, slide, item| {
                     [
                         "--pptx-linear-scaled",
+                        "--pptx-gradient-fixed",
                         "--pptx-gradient-tile",
                         "--pptx-gradient-gamma",
                         "--pptx-radial-focus",
@@ -2192,6 +2193,7 @@ mod tests {
         assert!(session.save_lyrics("Gradient"));
         assert!(session.edit_current_item(|show, slide, item| {
             show.set_item_box_css(slide, item, "--pptx-linear-scaled", "1")
+                && show.set_item_box_css(slide, item, "--pptx-gradient-fixed", "1")
                 && show.set_item_box_css(slide, item, "--pptx-gradient-tile", "0.5 0 0 0")
                 && show.set_item_box_css(slide, item, "--pptx-gradient-gamma", "1")
         }));
@@ -2218,6 +2220,7 @@ mod tests {
         assert_eq!(area.background, fill);
         let style = &session.current_show().unwrap().show["slides"]["s1"]["items"][0]["style"];
         assert!(!style.as_str().unwrap().contains("--pptx-linear-scaled"));
+        assert!(!style.as_str().unwrap().contains("--pptx-gradient-fixed"));
         assert!(!style.as_str().unwrap().contains("--pptx-gradient-tile"));
         assert!(!style.as_str().unwrap().contains("--pptx-gradient-gamma"));
         let frame = crate::live::edit_frame(&session);
