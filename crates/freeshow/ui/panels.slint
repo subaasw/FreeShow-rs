@@ -122,6 +122,7 @@ export struct StageRowData {
     chart-kind: string,
     chart-data: string,
     chart-hole-size: int,
+    web-url: string,
     text: string,
     seconds: bool,
     date-format: string,
@@ -1241,6 +1242,23 @@ export component StageEditorPanel inherits Rectangle {
                             text: "Show output name";
                             checked: root.current.show-output-label;
                             toggled => { root.set(root.current.id, "show-output-label", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    if root.current.kind == "web": Row {
+                        FieldLabel { text: "Page address"; text-color: root.text-color; }
+                        ValueEdit {
+                            colspan: 3;
+                            shown: root.current.web-url;
+                            accepted(value) => { root.set(root.current.id, "web-url", value); }
+                        }
+                    }
+                    if root.current.kind == "web": Row {
+                        FieldLabel { text: "Still image"; text-color: root.text-color; }
+                        ValueEdit {
+                            colspan: 3;
+                            placeholder-text: "Optional file path";
+                            shown: root.current.src;
+                            accepted(value) => { root.set(root.current.id, "src", value); }
                         }
                     }
                     if root.current.kind == "chart": Row {
