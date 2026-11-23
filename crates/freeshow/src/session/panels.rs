@@ -574,6 +574,9 @@ impl Session {
         if !wrote {
             return Err("could not write the style".into());
         }
+        if let Some(preferences) = self.reload_preferences() {
+            self.preferences = preferences;
+        }
         self.refresh_style_look();
         if let Some(path) = self.background_path.clone() {
             self.remember_background(&path);
@@ -865,7 +868,7 @@ impl Session {
             .collect();
         if outputs.is_empty() {
             // A library that never stored an output plays FreeShow's default "Primary" one.
-            vec![("default".into(), "Primary".into())]
+            vec![(self.audience().0, "Primary".into())]
         } else {
             outputs
         }
@@ -1012,6 +1015,7 @@ impl Session {
 
     /// A library that never had an output stored gets FreeShow's default "Primary" output.
     fn add_default_output(&mut self) -> Result<String, String> {
+        let mut id = String::new();
         let wrote = self.patch_settings(|settings| {
             if !settings
                 .get("outputs")
@@ -1019,17 +1023,22 @@ impl Session {
             {
                 settings["outputs"] = serde_json::json!({});
             }
-            settings["outputs"]["default"] = serde_json::json!({
-                "enabled": true,
-                "active": true,
-                "name": "Primary",
-                "color": "#F0008C",
-                "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
-                "alwaysOnTop": true,
-            });
+            let outputs = settings["outputs"].as_object_mut().expect("outputs object");
+            id = freeshow_data::available_output_id(outputs.keys().map(String::as_str));
+            outputs.insert(
+                id.clone(),
+                serde_json::json!({
+                    "enabled": true,
+                    "active": true,
+                    "name": "Primary",
+                    "color": "#F0008C",
+                    "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+                    "alwaysOnTop": true,
+                }),
+            );
         });
         if wrote && self.preferences.active_output().is_some() {
-            Ok("default".into())
+            Ok(id)
         } else {
             Err("could not write settings.json".into())
         }
@@ -1915,6 +1924,34 @@ mod tests {
         .unwrap();
         assert_eq!(saved["transitionData"]["media"]["duration"], 1200);
         assert_eq!(saved["unknownKey"]["keep"], 1);
+    }
+
+    #[test]
+    fn editing_audience_settings_does_not_reuse_the_stage_output_id() {
+        let (dir, _) = library("stage-only-output");
+        let path = dir.path().join("settings.json");
+        let stage =
+            serde_json::json!({"name":"Stage","active":true,"stageOutput":"notes","kiosk":true});
+        std::fs::write(
+            &path,
+            serde_json::json!({"outputs":{"default":stage}}).to_string(),
+        )
+        .unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(session.audience().0, "output2");
+        assert_eq!(
+            session.audience_outputs(),
+            vec![("output2".into(), "Primary".into())]
+        );
+        assert_eq!(session.output_window_flags(), (true, false));
+        session.apply_setting("outputAlwaysOnTop", "false").unwrap();
+        assert_eq!(session.settings_form().output_name, "Primary");
+        assert_eq!(session.output_window_flags(), (false, false));
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["outputs"]["default"], stage);
+        assert_eq!(saved["outputs"]["output2"]["alwaysOnTop"], false);
     }
 
     #[test]

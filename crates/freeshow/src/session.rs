@@ -3393,8 +3393,8 @@ impl Session {
             return;
         };
         let library = Library::open(&root);
-        if library.output_style_id() != style {
-            let _ = library.set_output_style(&style);
+        if library.output_style_id() != style && library.set_output_style(&style) {
+            self.preferences = library.preferences();
             self.refresh_style_look();
         }
     }
