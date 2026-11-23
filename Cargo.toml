@@ -6,7 +6,7 @@ members = ["crates/freeshow-core", "crates/freeshow-output", "crates/freeshow-da
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-rust-version = "1.92"
+rust-version = "1.97"
 publish = false
 
 [profile.release]

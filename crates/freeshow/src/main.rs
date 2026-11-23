@@ -898,15 +898,17 @@ enum NetworkPicture {
     Stage,
 }
 
-struct NdiBroadcast {
+#[derive(Default)]
+struct LanBroadcast {
     audience: Vec<freeshow_ndi::NdiSender>,
     stage: Vec<freeshow_ndi::NdiSender>,
+    omt_audience: Vec<freeshow_ndi::OmtSender>,
+    omt_stage: Vec<freeshow_ndi::OmtSender>,
 }
 
-impl NdiBroadcast {
+impl LanBroadcast {
     fn open(session: &session::Session) -> Self {
-        let mut audience = Vec::new();
-        let mut stage = Vec::new();
+        let mut broadcast = Self::default();
         let mut opened = std::collections::BTreeSet::new();
         for target in session.ndi_outputs() {
             let source_name = target.grouped_name();
@@ -926,33 +928,41 @@ impl NdiBroadcast {
             let sender =
                 freeshow_ndi::NdiSender::open_routed(&source_name, width, height, &target.id);
             if target.stage {
-                stage.push(sender);
+                broadcast.stage.push(sender);
             } else {
-                audience.push(sender);
+                broadcast.audience.push(sender);
             }
         }
-        Self { audience, stage }
+        for target in session.omt_outputs() {
+            let (width, height) = if target.stage {
+                session.stage_output_size()
+            } else {
+                (session.output_width, session.output_height)
+            };
+            match freeshow_ndi::OmtSender::open_routed(&target.name, width, height, &target.id) {
+                Ok(sender) if target.stage => broadcast.omt_stage.push(sender),
+                Ok(sender) => broadcast.omt_audience.push(sender),
+                Err(error) => tracing::warn!(%error, "OMT output {} did not start", target.id),
+            }
+        }
+        broadcast
     }
 
     fn submit(&self, picture: NetworkPicture, pixels: &[u8], width: u32, height: u32) {
-        let senders = match picture {
-            NetworkPicture::Audience => &self.audience,
-            NetworkPicture::Stage => &self.stage,
+        let (ndi, omt) = match picture {
+            NetworkPicture::Audience => (&self.audience, &self.omt_audience),
+            NetworkPicture::Stage => (&self.stage, &self.omt_stage),
         };
-        for sender in senders {
+        for sender in ndi {
+            sender.submit(pixels, width, height);
+        }
+        for sender in omt {
             sender.submit(pixels, width, height);
         }
     }
 }
 
-static NDI: std::sync::OnceLock<NdiBroadcast> = std::sync::OnceLock::new();
-
-fn ndi() -> &'static NdiBroadcast {
-    NDI.get_or_init(|| NdiBroadcast {
-        audience: Vec::new(),
-        stage: Vec::new(),
-    })
-}
+static LAN: std::sync::OnceLock<LanBroadcast> = std::sync::OnceLock::new();
 
 struct WebrtcBroadcast {
     audience: Vec<freeshow_record::WebrtcSender>,
@@ -1009,7 +1019,9 @@ fn webrtc_out() -> &'static WebrtcBroadcast {
 }
 
 fn submit_network(picture: NetworkPicture, frame: &Frame) {
-    ndi().submit(picture, &frame.pixels, frame.width, frame.height);
+    if let Some(lan) = LAN.get() {
+        lan.submit(picture, &frame.pixels, frame.width, frame.height);
+    }
     webrtc_out().submit(picture, &frame.pixels, frame.width, frame.height);
     if matches!(picture, NetworkPicture::Audience) {
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
@@ -1911,17 +1923,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for warning in &session.warnings {
         tracing::warn!("{warning}");
     }
-    let _ = NDI.set(NdiBroadcast::open(&session));
+    let _ = LAN.set(LanBroadcast::open(&session));
     let _ = HARDWARE.set(HardwareBroadcast::open(&session));
     let _network_in = open_network_receive(&session);
     let _ = WEBRTC.set(WebrtcBroadcast::open(&session));
-    for target in session.omt_outputs() {
-        tracing::warn!(
-            "OMT output {} ({}) is configured, but the Open Media Transport runtime is not bundled",
-            target.id,
-            target.name
-        );
-    }
     session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
     if let Some(path) = &launch.show
@@ -2070,8 +2075,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         publish(&preview_slot, audience);
         publish_stage(&stage_slot, stage);
     }
-    let _ = ndi();
-
     if settings.show_output || session.preferences.auto_output() {
         output.show()?;
         place_output(output.window(), settings.output_screen);

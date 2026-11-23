@@ -11,4 +11,5 @@ description = "NDI audience output for freeshow-rust"
 freeshow-media = { path = "../freeshow-media" }
 gstreamer = "0.23"
 gstreamer-app = "0.23"
+openmediatransport = "0.4"
 tracing = "0.1"

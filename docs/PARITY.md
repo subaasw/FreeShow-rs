@@ -186,7 +186,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Timecode (MTC/LTC) | done | 0.4 |  |
 | NDI send, including stage and groups | done | 0.8 | One sender per (group, stage); source name `{name} [{group}]` |
 | NDI/OMT receive | done | 0.6 | DeviceMonitor plus `FREESHOW_NDI_SOURCES` / `FREESHOW_OMT_SOURCES`; empty when the plugin is missing |
-| OMT broadcast | partial | 0.3 | Configured, but the runtime is not bundled |
+| OMT broadcast | partial | 0.3 | Built-in Rust VMX1 video and routed stereo for audience and stage outputs. Loopback tested. Third-party receiver interoperability remains unverified |
 | WebRTC/WHIP send | done | 0.5 | H.264 video and stereo Opus from each saved `network_sub_<output-id>` route |
 | Auto-started RTMP | done | 0.5 | From `rtmpData` destinations or `special.autoRtmp`, plus `FREESHOW_RTMP` |
 | File recording and Icecast | done | 0.4 |  |
@@ -222,7 +222,7 @@ M7 is **not** complete. The lists below are the honest leftovers after the no-cr
 
 ### No-credential leftovers
 
-- OMT broadcast, which still needs the unbundled Open Media Transport runtime (receive/discovery soft-fail when the plugin is absent; the runtime is not bundled).
+- OMT broadcast needs a cross-machine test with a third-party receiver. OMT input still depends on an external GStreamer plugin.
 - Native MediaShout `.mdb` (not a viable pure-Rust path; XML/SSC/JSON dumps import).
 - Embedded live PowerPoint playback (import already works).
 - A bundled local speech-to-text model (Functions → AI already rewrites a slide through Ollama when `FREESHOW_AI` is set).
