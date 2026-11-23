@@ -149,6 +149,7 @@ pub enum DrawerAction {
 
 struct TimelineSoundtrack {
     path: PathBuf,
+    delay_ms: u64,
     restart: bool,
     owned: bool,
 }
@@ -1759,7 +1760,13 @@ impl Session {
                     .as_str()
                     .and_then(|id| show.show["media"][id]["path"].as_str())
                     .map(PathBuf::from)
-                    .filter(|path| media_kind(path) == MediaKind::Audio && path.is_file());
+                    .filter(|path| media_kind(path) == MediaKind::Audio && path.is_file())
+                    .map(|path| TimelineSoundtrack {
+                        path,
+                        delay_ms: timeline["soundtrackDelayMs"].as_u64().unwrap_or_default(),
+                        restart: true,
+                        owned: false,
+                    });
                 Some((timeline["loop"] == true, end, soundtrack))
             })
             .unwrap_or_default();
@@ -1770,11 +1777,7 @@ impl Session {
                 .is_none()
                 .then_some(last_cue.max(u64::from(looping)))
         });
-        self.timeline_soundtrack = soundtrack.map(|path| TimelineSoundtrack {
-            path,
-            restart: true,
-            owned: false,
-        });
+        self.timeline_soundtrack = soundtrack;
     }
 
     pub fn timeline_text(&self) -> String {
@@ -1867,6 +1870,10 @@ impl Session {
         self.timeline_playing = false;
         self.timeline_started = None;
         self.timeline_fired = 0;
+        self.stop_timeline_soundtrack()
+    }
+
+    fn stop_timeline_soundtrack(&mut self) -> bool {
         let stop_audio = self.timeline_soundtrack.as_mut().is_some_and(|track| {
             std::mem::take(&mut track.owned) && self.playing_audio.as_ref() == Some(&track.path)
         });
@@ -1888,6 +1895,10 @@ impl Session {
         let elapsed = now.saturating_duration_since(started).as_millis() as u64;
         let mut changed = false;
         if let Some(track) = &mut self.timeline_soundtrack
+            && elapsed >= track.delay_ms
+            && self
+                .timeline_end_ms
+                .is_none_or(|end| elapsed < end || track.delay_ms == 0)
             && std::mem::take(&mut track.restart)
         {
             track.owned = true;
@@ -1914,6 +1925,13 @@ impl Session {
                 // Keep the original phase and skip entirely missed repetitions.
                 self.timeline_started = Some(now - Duration::from_millis(elapsed % period));
                 self.timeline_fired = 0;
+                if self
+                    .timeline_soundtrack
+                    .as_ref()
+                    .is_some_and(|track| track.delay_ms > 0)
+                {
+                    changed |= self.stop_timeline_soundtrack();
+                }
                 if let Some(track) = &mut self.timeline_soundtrack {
                     track.restart = true;
                 }
@@ -1926,11 +1944,12 @@ impl Session {
 
     fn timeline_soundtrack_active(&self) -> bool {
         self.timeline_soundtrack.as_ref().is_some_and(|track| {
-            self.timeline_owns_audio(&track.path)
-                && !self
-                    .media_finished
-                    .as_ref()
-                    .is_some_and(|(path, audio)| *audio && Path::new(path) == track.path)
+            track.restart
+                || (self.timeline_owns_audio(&track.path)
+                    && !self
+                        .media_finished
+                        .as_ref()
+                        .is_some_and(|(path, audio)| *audio && Path::new(path) == track.path))
         })
     }
 
@@ -7856,11 +7875,14 @@ Second line"
 
         // An audio-only timeline remains active until the track ends when duration is absent.
         let timeline = &mut session.shows[0].show["layouts"]["main"]["timeline"];
-        *timeline = serde_json::json!({"soundtrack": "backing", "actions": []});
+        *timeline =
+            serde_json::json!({"soundtrack": "backing", "soundtrackDelayMs": 100, "actions": []});
         assert!(session.start_timeline());
         let start = session.timeline_started.unwrap();
-        assert!(session.tick_timeline(start));
+        assert!(!session.tick_timeline(start + Duration::from_millis(99)));
         assert!(session.timeline_playing);
+        assert!(matches!(session.take_plays(), [None, None]));
+        assert!(session.tick_timeline(start + Duration::from_millis(100)));
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == path)
         );
@@ -7871,6 +7893,26 @@ Second line"
             session.take_plays(),
             [Some(PendingPlay::StopAudio), None]
         ));
+        let timeline = &mut session.shows[0].show["layouts"]["main"]["timeline"];
+        timeline["duration"] = serde_json::json!(1.0);
+        timeline["loop"] = serde_json::json!(true);
+        assert!(session.start_timeline());
+        let start = session.timeline_started.unwrap();
+        assert!(session.tick_timeline(start + Duration::from_millis(100)));
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::Audio(_)), None]
+        ));
+        assert!(session.tick_timeline(start + Duration::from_secs(1)));
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::StopAudio), None]
+        ));
+        assert!(!session.tick_timeline(start + Duration::from_millis(1099)));
+        assert!(session.tick_timeline(start + Duration::from_millis(1100)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == path)
+        );
         std::fs::remove_file(path).unwrap();
     }
 
