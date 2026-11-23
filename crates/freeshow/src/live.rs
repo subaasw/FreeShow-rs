@@ -1746,31 +1746,53 @@ mod tests {
     }
 
     #[test]
-    fn current_output_boxes_preview_the_audience_and_honor_the_saved_source() {
+    fn current_output_boxes_honor_edited_sources_and_labels_after_reopening() {
         let temporary = std::env::temp_dir().join(freeshow_data::new_id());
         std::fs::create_dir_all(&temporary).unwrap();
         let library = freeshow_data::Library::open(&temporary);
         std::fs::write(
             library.settings_path(),
-            r#"{"outputs":{"screen":{"name":"Room","active":true}}}"#,
+            r#"{"outputs":{"screen":{"name":"Room","active":true},"aux":{"name":"Lobby"}}}"#,
         )
         .unwrap();
         let stage_path = library.stage_path();
         std::fs::create_dir_all(stage_path.parent().unwrap()).unwrap();
         std::fs::write(
-            stage_path,
+            &stage_path,
             r##"{"stage":{"settings":{"color":"#222"},"items":{
                 "current_output":{"style":"left:0px;top:0px;width:320px;height:180px;"},
                 "named":{"type":"current_output","style":"left:320px;top:0px;width:320px;height:180px;",
                     "currentOutput":{"source":"screen","showLabel":true}},
                 "other":{"type":"current_output","style":"left:640px;top:0px;width:320px;height:180px;",
-                    "currentOutput":{"source":"aux"}}
+                    "currentOutput":{"source":"aux","extension":true}}
             }}}"##,
         )
         .unwrap();
-        let mut session = Session::empty();
-        session.root = Some(temporary.clone());
-        session.stage = library.load_stage_layout();
+        let mut session = Session::open(temporary.clone());
+        let new_box = session
+            .add_stage_item("output", "left:960px;top:0px;width:320px;height:180px;")
+            .unwrap();
+        session
+            .stage_set(&new_box, "output-source", "screen")
+            .unwrap();
+        session
+            .stage_set(&new_box, "show-output-label", "true")
+            .unwrap();
+        assert!(
+            session
+                .stage_set(&new_box, "output-source", "missing")
+                .is_err()
+        );
+
+        let mut session = Session::open(temporary.clone());
+        let row = session
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == new_box)
+            .unwrap();
+        assert_eq!(row.kind, "output");
+        assert_eq!(row.output_source, "screen");
+        assert!(row.show_output_label);
         session.blanked = false;
         session.slide_hidden = true;
         session.replace_underlay(Some(Raster {
@@ -1785,6 +1807,26 @@ mod tests {
         assert_eq!(stage.pixel(480, 50), picture);
         assert_eq!(stage.pixel(800, 50), parse_color("#222").unwrap());
         assert!((70..180).any(|y| (320..640).any(|x| stage.pixel(x, y).g > 200)));
+        assert_eq!(stage.pixel(1120, 50), picture);
+        assert!((70..180).any(|y| (960..1280).any(|x| stage.pixel(x, y).g > 200)));
+
+        session.stage_set("other", "output-source", "").unwrap();
+        let reloaded = library.load_stage_layout();
+        assert!(
+            reloaded
+                .items
+                .iter()
+                .find(|item| item.id == "other")
+                .unwrap()
+                .output_source
+                .is_none()
+        );
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(stage_path).unwrap()).unwrap();
+        assert_eq!(
+            saved["stage"]["items"]["other"]["currentOutput"]["extension"],
+            true
+        );
         std::fs::remove_dir_all(temporary).unwrap();
     }
 

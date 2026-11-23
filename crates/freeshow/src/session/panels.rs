@@ -10,12 +10,13 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 10] = [
+pub const STAGE_ADD_KINDS: [&str; 11] = [
     "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable", "qr",
+    "output",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 10] = [
+pub const STAGE_ADD_NAMES: [&str; 11] = [
     "Current slide",
     "Next slide",
     "Slide notes",
@@ -26,6 +27,7 @@ pub const STAGE_ADD_NAMES: [&str; 10] = [
     "Slide number",
     "Variable",
     "QR code",
+    "Output picture",
 ];
 
 /// Library `settings.json` values shown in Settings.
@@ -215,6 +217,8 @@ pub struct StageRow {
     pub qr_text: String,
     pub qr_color: String,
     pub qr_background: String,
+    pub output_source: String,
+    pub show_output_label: bool,
     /// A text item's words, one line per line.
     pub text: String,
     pub seconds: bool,
@@ -822,7 +826,7 @@ impl Session {
     }
 
     /// Audience outputs (not stage displays) as `(id, shown name)`.
-    fn audience_outputs(&self) -> Vec<(String, String)> {
+    pub(crate) fn audience_outputs(&self) -> Vec<(String, String)> {
         let outputs: Vec<(String, String)> = self
             .preferences
             .outputs
@@ -1289,6 +1293,8 @@ impl Session {
                         .qr
                         .as_ref()
                         .map_or_else(String::new, |qr| qr.background.clone()),
+                    output_source: item.output_source.clone().unwrap_or_default(),
+                    show_output_label: item.show_output_label,
                     text: item.lines.join("\n"),
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
@@ -1316,6 +1322,8 @@ impl Session {
                 | "qr-text"
                 | "qr-color"
                 | "qr-background"
+                | "output-source"
+                | "show-output-label"
                 | "text"
                 | "seconds"
                 | "date-format"
@@ -1388,6 +1396,12 @@ impl Session {
             .into_iter()
             .map(|(id, _)| id)
             .collect();
+        if key == "output-source"
+            && !value.is_empty()
+            && !self.audience_outputs().iter().any(|(id, _)| id == value)
+        {
+            return Err(format!("no audience output {value:?}"));
+        }
         let item = self
             .stage
             .items
@@ -1417,6 +1431,12 @@ impl Session {
                 item.text_box = number.checked_sub(1);
             }
             "invert-items" => item.invert_items = parse_bool(value)?,
+            "output-source" if item.kind == freeshow_data::StageItemKind::CurrentOutput => {
+                item.output_source = (!value.is_empty()).then(|| value.to_string());
+            }
+            "show-output-label" if item.kind == freeshow_data::StageItemKind::CurrentOutput => {
+                item.show_output_label = parse_bool(value)?;
+            }
             "qr-text" | "qr-color" | "qr-background"
                 if item.kind == freeshow_data::StageItemKind::QrCode =>
             {

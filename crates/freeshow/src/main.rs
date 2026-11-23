@@ -739,6 +739,8 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             qr_text: row.qr_text.into(),
             qr_color: row.qr_color.into(),
             qr_background: row.qr_background.into(),
+            output_source: row.output_source.into(),
+            show_output_label: row.show_output_label,
             text: row.text.into(),
             seconds: row.seconds,
             date_format: row.date_format.into(),
@@ -773,6 +775,14 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     }
     ui.set_stage_variable_ids(strings(&variable_ids));
     ui.set_stage_variable_names(strings(&variable_names));
+    let mut output_ids = vec![String::new()];
+    let mut output_names = vec!["Follow active output".to_string()];
+    for (id, name) in session.audience_outputs() {
+        output_names.push(format!("{name} ({id})"));
+        output_ids.push(id);
+    }
+    ui.set_stage_output_ids(strings(&output_ids));
+    ui.set_stage_output_names(strings(&output_names));
 }
 
 /// Closing an output or stage window with its title-bar button hides it and
