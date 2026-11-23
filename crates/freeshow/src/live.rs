@@ -1078,6 +1078,18 @@ fn styled_line(line: &serde_json::Value, variables: &[(String, String)]) -> Styl
                 .and_then(|value| i32::try_from(value).ok())
                 .unwrap_or(0)
         }),
+        pptx_bullet: line.get("pptxBullet").and_then(|bullet| {
+            Some(TextRun {
+                text: bullet.get("value")?.as_str()?.into(),
+                style: bullet
+                    .get("style")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .into(),
+                place_on: None,
+                paint: true,
+            })
+        }),
         shift_y: 0,
         runs: line
             .get("text")
@@ -1153,6 +1165,7 @@ fn chord_line(item: &serde_json::Value, line: &serde_json::Value) -> Option<Styl
         wrapped: false,
         pptx_spacing: Default::default(),
         pptx_margins: [0; 3],
+        pptx_bullet: None,
         shift_y: json_number(item.pointer("/chords/offsetY"))
             .unwrap_or(0.0)
             .round() as i32,
@@ -1415,6 +1428,7 @@ fn lines_slide_at(
                     wrapped: false,
                     pptx_spacing: Default::default(),
                     pptx_margins: [0; 3],
+                    pptx_bullet: None,
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: line.clone(),

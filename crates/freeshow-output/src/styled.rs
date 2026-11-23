@@ -227,6 +227,7 @@ pub struct StyledLine {
     pub pptx_spacing: [Option<String>; 3],
     /// Left margin, right margin, and signed first-line indent, in slide pixels.
     pub pptx_margins: [i32; 3],
+    pub pptx_bullet: Option<TextRun>,
     /// Source pixels to lift the painted glyphs. The line box stays put.
     pub shift_y: i32,
 }
@@ -1520,7 +1521,17 @@ fn draw_item_content(
     ));
     let text_bottom = text_y.saturating_add(text_h).min(y.saturating_add(h));
     for (index, (line, &[height, before, after])) in visual.iter().zip(&spacing).enumerate() {
-        let (indent, row_w) = paragraph_row(line.pptx_margins, slide, text_w);
+        let bullet = line
+            .pptx_bullet
+            .as_ref()
+            .map(|bullet| bullet_style(line, bullet, style));
+        let bullet_width = line
+            .pptx_bullet
+            .as_ref()
+            .zip(bullet.as_ref())
+            .map(|(marker, style)| bullet_width(marker, style, slide));
+        let (indent, row_w, bullet_gap) =
+            paragraph_text_row(line.pptx_margins, slide, text_w, bullet_width);
         let row_x = text_x.saturating_add(indent);
         let mut line_style = style.clone();
         if let Some(align) = align_in(&line.align) {
@@ -1649,6 +1660,22 @@ fn draw_item_content(
                 slide.output_height,
                 slide.source_height,
             ) as f32;
+        if let Some((marker, style)) = line.pptx_bullet.as_ref().zip(bullet.as_ref()) {
+            text::draw(
+                pixels,
+                slide.output_width,
+                slide.output_height,
+                &marker.text,
+                style.color,
+                scale(style.font_px, slide.output_height, slide.source_height).max(1) as f32,
+                origin - bullet_gap as f32,
+                baseline,
+                &clip,
+                bullet_face(style),
+                0.0,
+                0.0,
+            );
+        }
         for (run, run_style) in &runs {
             let size =
                 scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
@@ -2472,6 +2499,61 @@ fn paragraph_row(margins: [i32; 3], slide: &StyledSlide, width: i32) -> (i32, i3
     )
 }
 
+fn paragraph_text_row(
+    margins: [i32; 3],
+    slide: &StyledSlide,
+    width: i32,
+    bullet: Option<i32>,
+) -> (i32, i32, i32) {
+    let (left, room) = paragraph_row(margins, slide, width);
+    let Some(bullet) = bullet else {
+        return (left, room, 0);
+    };
+    let [margin, right, _] = margins;
+    let (body, _) = paragraph_row([margin, right, 0], slide, width);
+    let gap = body.saturating_sub(left).max(bullet);
+    (
+        left.saturating_add(gap),
+        room.saturating_sub(gap).max(0),
+        gap,
+    )
+}
+
+fn bullet_style(line: &StyledLine, bullet: &TextRun, item: &BoxStyle) -> BoxStyle {
+    let mut style = item.clone();
+    if let Some(first) = line.runs.iter().find(|run| !run.text.is_empty()) {
+        apply_run_style(&mut style, &first.style);
+    }
+    apply_run_style(&mut style, &bullet.style);
+    if let Some(factor) = css_value(&bullet.style, "--pptx-bullet-scale")
+        .and_then(|value| value.strip_suffix('%'))
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| (25.0..=400.0).contains(value))
+    {
+        style.font_px *= factor / 100.0;
+    }
+    style
+}
+
+fn bullet_face(style: &BoxStyle) -> text::Typeface<'_> {
+    text::Typeface {
+        family: &style.font_family,
+        bold: style.bold,
+        italic: style.italic,
+    }
+}
+
+fn bullet_width(bullet: &TextRun, style: &BoxStyle, slide: &StyledSlide) -> i32 {
+    let size = scale(style.font_px, slide.output_height, slide.source_height).max(1) as f32;
+    text::measure(
+        &format!("{} ", bullet.text),
+        size,
+        bullet_face(style),
+        0.0,
+        0.0,
+    )
+}
+
 fn split_line(
     line: &StyledLine,
     item_style: &str,
@@ -2492,7 +2574,14 @@ fn split_line(
         return vec![line.clone()];
     }
     let [left, right, _] = line.pptx_margins;
-    let (_, mut row_limit) = paragraph_row(line.pptx_margins, slide, max_width);
+    let bullet = line.pptx_bullet.as_ref().map(|bullet| {
+        bullet_width(
+            bullet,
+            &bullet_style(line, bullet, &parse_style(item_style)),
+            slide,
+        )
+    });
+    let (_, mut row_limit, _) = paragraph_text_row(line.pptx_margins, slide, max_width, bullet);
     let (_, continuation_limit) = paragraph_row([left, right, 0], slide, max_width);
     let total: i32 = words
         .iter()
@@ -2548,6 +2637,7 @@ fn split_line(
             } else {
                 [left, right, 0]
             },
+            pptx_bullet: line.pptx_bullet.clone().filter(|_| index == 0),
             shift_y: line.shift_y,
             runs: merge_words(row),
         })
@@ -4332,6 +4422,7 @@ mod tests {
                     wrapped: false,
                     pptx_spacing: Default::default(),
                     pptx_margins: [0; 3],
+                    pptx_bullet: None,
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
@@ -4940,6 +5031,7 @@ mod tests {
                     wrapped: false,
                     pptx_spacing: Default::default(),
                     pptx_margins: [0; 3],
+                    pptx_bullet: None,
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
@@ -5119,6 +5211,34 @@ mod tests {
         let rows = wrap_lines(&slide.items[0].lines, "", &slide, 160);
         assert_eq!(rows[0].runs[0].text, "MM");
         assert!(rows[1].runs[0].text.len() > rows[0].runs[0].text.len());
+    }
+
+    #[test]
+    fn powerpoint_bullet_paints_once_and_keeps_the_hanging_indent() {
+        let mut slide = shadow_slide("font-size:20px;color:#fff;");
+        let line = &mut slide.items[0].lines[0];
+        line.runs[0].text = "ONE TWO THREE FOUR FIVE SIX".into();
+        line.pptx_margins = [50, 15, -38];
+        line.pptx_spacing = [Some("24px".into()), None, None];
+        line.pptx_bullet = Some(TextRun {
+            text: "X".into(),
+            style: "color:#f00;--pptx-bullet-scale:75%;".into(),
+            place_on: None,
+            paint: true,
+        });
+        let frame = render_styled(&slide);
+        let red = |x, y| {
+            let pixel = frame.pixel(x, y);
+            pixel.r > 150 && pixel.g == 0
+        };
+        assert!((0..24).any(|y| (12..50).any(|x| red(x, y))));
+        assert!((24..80).all(|y| (0..160).all(|x| !red(x, y))));
+        assert!((24..80).all(|y| (0..47).all(|x| frame.pixel(x, y).r == 0)));
+        assert!((24..48).any(|y| (50..145).any(|x| frame.pixel(x, y).g > 150)));
+        let rows = wrap_lines(&slide.items[0].lines, "", &slide, 160);
+        assert!(rows.len() > 1);
+        assert!(rows[0].pptx_bullet.is_some());
+        assert!(rows[1..].iter().all(|row| row.pptx_bullet.is_none()));
     }
 
     #[test]
@@ -5961,6 +6081,7 @@ mod tests {
             wrapped: false,
             pptx_spacing: Default::default(),
             pptx_margins: [0; 3],
+            pptx_bullet: None,
             shift_y: 0,
                     runs: vec![TextRun {
                         text: "Hi".into(),
@@ -6060,6 +6181,7 @@ mod tests {
             wrapped: false,
             pptx_spacing: Default::default(),
             pptx_margins: [0; 3],
+            pptx_bullet: None,
             shift_y: 0,
                     runs: vec![TextRun {
                         text: "Hi".into(),
