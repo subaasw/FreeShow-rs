@@ -714,6 +714,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         background: inspector.item_box.background.into(),
         radius: inspector.item_box.radius,
         box_shadow: inspector.item_box.box_shadow.into(),
+        backdrop_filter: inspector.item_box.backdrop_filter.into(),
         line_height: inspector.typography.line_height_pct,
         letter_spacing: inspector.typography.letter_spacing,
         outline_width: inspector.typography.outline_width,
