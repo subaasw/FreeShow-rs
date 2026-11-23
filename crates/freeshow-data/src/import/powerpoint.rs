@@ -1806,9 +1806,11 @@ mod tests {
                         <a:fontRef idx="major"><a:schemeClr val="accent1"/></a:fontRef>
                     </p:style>
                     <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100"/><a:lstStyle>
-                        <a:lvl1pPr algn="r"><a:defRPr sz="2400" b="1"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
+                        <a:lvl1pPr algn="r"><a:spcBef><a:spcPct val="25000"/></a:spcBef>
+                            <a:defRPr sz="2400" b="1"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
                     </a:lstStyle>
-                    <a:p><a:pPr><a:defRPr i="true"/></a:pPr>
+                    <a:p><a:pPr><a:lnSpc><a:spcPct val="150%"/></a:lnSpc>
+                        <a:spcAft><a:spcPts val="200"/></a:spcAft><a:defRPr i="true"/></a:pPr>
                         <a:r><a:t xml:space="preserve">Caption </a:t></a:r>
                         <a:r><a:rPr b="0" sz="1800" u="sng" strike="sngStrike" spc="50">
                             <a:latin typeface="+mj-lt"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
@@ -1856,6 +1858,14 @@ mod tests {
         assert!(direct.contains("--pptx-text-insets:0 2 4 6;"));
         assert_eq!(items[0]["align"], "align-items:flex-end;");
         assert_eq!(items[0]["lines"][0]["align"], "right");
+        assert_eq!(
+            items[0]["lines"][0]["pptxSpacing"],
+            json!(["150%", "25%", null])
+        );
+        assert_eq!(
+            items[0]["lines"][1]["pptxSpacing"],
+            json!(["150%", null, "4px"])
+        );
         assert_eq!(
             items[0]["lines"][0]["text"][0],
             json!({

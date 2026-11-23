@@ -325,6 +325,7 @@ pub fn paint_stage_at(
                         },
                         line_bar: true,
                         wrapped: false,
+                        pptx_spacing: Default::default(),
                         shift_y: 0,
                         runs: vec![TextRun {
                             text: line,

@@ -223,6 +223,8 @@ pub struct StyledLine {
     /// A later visual row of a lyric that wrapped. It keeps the line background
     /// and does not open the gap that sits between lyrics.
     pub wrapped: bool,
+    /// DrawingML line height, space before, and space after, in slide pixels or percent of font size.
+    pub pptx_spacing: [Option<String>; 3],
     /// Source pixels to lift the painted glyphs. The line box stays put.
     pub shift_y: i32,
 }
@@ -1507,9 +1509,15 @@ fn draw_item_content(
     } else {
         Vec::new()
     };
-    let mut cursor_y =
-        text_y.saturating_add(vertical_offset(item, &visual, style, slide, text_h, gap));
-    for (index, line) in visual.iter().enumerate() {
+    let spacing: Vec<_> = visual
+        .iter()
+        .map(|line| pptx_spacing(line, style, slide))
+        .collect();
+    let mut cursor_y = text_y.saturating_add(vertical_offset(
+        item, &visual, &spacing, style, slide, text_h, gap,
+    ));
+    let text_bottom = text_y.saturating_add(text_h).min(y.saturating_add(h));
+    for (index, (line, &[height, before, after])) in visual.iter().zip(&spacing).enumerate() {
         let mut line_style = style.clone();
         if let Some(align) = align_in(&line.align) {
             line_style.align = align;
@@ -1544,7 +1552,12 @@ fn draw_item_content(
             bold: height_bold,
             italic: false,
         };
-        let bar_h = line_box(&height_css, &item.style, font_px, line_face, slide);
+        let bar_h =
+            height.unwrap_or_else(|| line_box(&height_css, &item.style, font_px, line_face, slide));
+        cursor_y = cursor_y.saturating_add(before.unwrap_or(0));
+        if cursor_y >= text_bottom {
+            break;
+        }
         if (line.line_bar || line.wrapped)
             && let Some(color) = item.line_bg
         {
@@ -1769,15 +1782,14 @@ fn draw_item_content(
                 cursor_x += width as f32;
             }
         }
-        cursor_y += bar_h;
+        cursor_y = cursor_y
+            .saturating_add(bar_h)
+            .saturating_add(after.unwrap_or(0));
         let later_bar = visual[index + 1..]
             .iter()
             .any(|next| next.line_bar && !next.runs.is_empty());
         if line.line_bar && later_bar {
-            cursor_y += gap;
-        }
-        if cursor_y >= text_y.saturating_add(text_h).min(y.saturating_add(h)) {
-            break;
+            cursor_y = cursor_y.saturating_add(gap);
         }
     }
     if let Some(before) = before {
@@ -2493,12 +2505,18 @@ fn split_line(
         rows.last_mut().unwrap().push((text, css));
         width += word;
     }
+    let last = rows.len() - 1;
     rows.into_iter()
         .enumerate()
         .map(|(index, row)| StyledLine {
             align: line.align.clone(),
             line_bar: line.line_bar && index == 0,
             wrapped: index > 0,
+            pptx_spacing: [
+                line.pptx_spacing[0].clone(),
+                line.pptx_spacing[1].clone().filter(|_| index == 0),
+                line.pptx_spacing[2].clone().filter(|_| index == last),
+            ],
             shift_y: line.shift_y,
             runs: merge_words(row),
         })
@@ -2596,21 +2614,26 @@ fn piece_width(text: &str, css: &str, item_style: &str, slide: &StyledSlide) -> 
 fn vertical_offset(
     item: &StyledItem,
     lines: &[StyledLine],
+    spacing: &[[Option<i32>; 3]],
     style: &BoxStyle,
     slide: &StyledSlide,
     box_h: i32,
     gap: i32,
 ) -> i32 {
-    let mut content = 0;
+    let mut content: i32 = 0;
     let mut counted = 0;
-    for line in lines {
-        let Some(bar_h) = line_bar_height(line, style, slide, &item.style) else {
+    for (line, &[height, before, after]) in lines.iter().zip(spacing) {
+        let Some(bar_h) = height.or_else(|| line_bar_height(line, style, slide, &item.style))
+        else {
             continue;
         };
-        content += bar_h;
+        content = content
+            .saturating_add(bar_h)
+            .saturating_add(before.unwrap_or(0))
+            .saturating_add(after.unwrap_or(0));
         counted += 1;
         if line.line_bar {
-            content += gap;
+            content = content.saturating_add(gap);
         }
     }
     if counted > 0 {
@@ -2628,6 +2651,30 @@ fn vertical_offset(
         VAlign::End => spare,
         VAlign::Center => spare / 2,
     }
+}
+
+fn pptx_spacing(line: &StyledLine, style: &BoxStyle, slide: &StyledSlide) -> [Option<i32>; 3] {
+    let font_size = || {
+        line.runs
+            .iter()
+            .filter(|run| run.paint && !run.text.is_empty())
+            .map(|run| {
+                css_value(&run.style, "font-size")
+                    .and_then(px)
+                    .unwrap_or(style.font_px)
+            })
+            .fold(0.0, f32::max)
+    };
+    line.pptx_spacing.each_ref().map(|value| {
+        let value = value.as_deref()?;
+        let source_px = if let Some(percent) = value.strip_suffix('%') {
+            font_size() * percent.parse::<f32>().ok()? / 100.0
+        } else {
+            value.strip_suffix("px")?.parse().ok()?
+        };
+        (source_px.is_finite() && source_px >= 0.0)
+            .then(|| scale(source_px, slide.output_height, slide.source_height))
+    })
 }
 
 fn line_bar_height(
@@ -4251,6 +4298,7 @@ mod tests {
                     align: "text-align: left;".into(),
                     line_bar: true,
                     wrapped: false,
+                    pptx_spacing: Default::default(),
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
@@ -4857,6 +4905,7 @@ mod tests {
                     align: "left".into(),
                     line_bar: true,
                     wrapped: false,
+                    pptx_spacing: Default::default(),
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: "A".into(),
@@ -4955,6 +5004,51 @@ mod tests {
         assert_eq!(frame.pixels, render_styled(&reference).pixels);
         assert_eq!(frame.pixel(159, 79).b, 255);
         assert!((25..50).any(|y| (32..124).any(|x| frame.pixel(x, y).r > 200)));
+    }
+
+    #[test]
+    fn powerpoint_paragraph_spacing_uses_the_largest_font_and_wraps_once() {
+        let mut slide = shadow_slide("font-size:10px;");
+        let item = &mut slide.items[0];
+        item.align = "align-items:flex-end;".into();
+        item.line_bg = Some(Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        let line = &mut item.lines[0];
+        let mut large = line.runs[0].clone();
+        large.text = "A LARGE RUN".into();
+        large.style = "font-size:20px;".into();
+        line.runs.push(large);
+        line.pptx_spacing = [Some("150%".into()), Some("4px".into()), Some("6px".into())];
+        let mut next = line.clone();
+        next.pptx_spacing = [Some("20px".into()), None, None];
+        item.lines.push(next);
+        let frame = render_styled(&slide);
+        for (y, red) in [
+            (23, 0),
+            (24, 255),
+            (53, 255),
+            (54, 0),
+            (59, 0),
+            (60, 255),
+            (79, 255),
+        ] {
+            assert_eq!(frame.pixel(159, y).r, red, "row {y}");
+        }
+
+        let wrapped = wrap_lines(&slide.items[0].lines[..1], "", &slide, 40);
+        assert!(wrapped.len() > 1);
+        assert_eq!(
+            wrapped[0].pptx_spacing,
+            [Some("150%".into()), Some("4px".into()), None]
+        );
+        assert_eq!(
+            wrapped.last().unwrap().pptx_spacing,
+            [Some("150%".into()), None, Some("6px".into())]
+        );
     }
 
     #[test]
@@ -5795,6 +5889,7 @@ mod tests {
                     align: String::new(),
             line_bar: true,
             wrapped: false,
+            pptx_spacing: Default::default(),
             shift_y: 0,
                     runs: vec![TextRun {
                         text: "Hi".into(),
@@ -5892,6 +5987,7 @@ mod tests {
                     align: String::new(),
             line_bar: true,
             wrapped: false,
+            pptx_spacing: Default::default(),
             shift_y: 0,
                     runs: vec![TextRun {
                         text: "Hi".into(),
