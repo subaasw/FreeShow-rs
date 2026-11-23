@@ -1100,11 +1100,7 @@ fn open_network_receive(session: &session::Session) -> Option<freeshow_ndi::Netw
             session.output_width,
             session.output_height,
         ),
-        freeshow_ndi::SourceKind::Omt => freeshow_ndi::NetworkReceiver::open_omt(
-            &name,
-            session.output_width,
-            session.output_height,
-        ),
+        freeshow_ndi::SourceKind::Omt => freeshow_ndi::NetworkReceiver::open_omt(&name),
     };
     receiver.is_live().then_some(receiver)
 }
@@ -1925,7 +1921,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = LAN.set(LanBroadcast::open(&session));
     let _ = HARDWARE.set(HardwareBroadcast::open(&session));
-    let _network_in = open_network_receive(&session);
+    let network_in = open_network_receive(&session);
+    session.network_background = network_in.is_some();
     let _ = WEBRTC.set(WebrtcBroadcast::open(&session));
     session.audio_device_map = settings.audio_devices.clone();
     let theme = theme::operator_theme(settings.theme.as_deref(), &session.preferences);
@@ -2093,6 +2090,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audio_out: Rc<RefCell<Option<AudioOutput>>> = Rc::new(RefCell::new(None));
     let video_player: Rc<RefCell<Option<VideoPlayer>>> = Rc::new(RefCell::new(None));
     let video_timer = Rc::new(slint::Timer::default());
+    let network_timer = Rc::new(slint::Timer::default());
+    if let Some(receiver) = network_in {
+        let mut receiver = Some(receiver);
+        let timer = Rc::downgrade(&network_timer);
+        let session = Rc::clone(&session);
+        let output_fade = Rc::clone(&output_fade);
+        let stage_fade = Rc::clone(&stage_fade);
+        let output_slot = Rc::clone(&output_slot);
+        let preview_slot = Rc::clone(&preview_slot);
+        let stage_slot = Rc::clone(&stage_slot);
+        let last_output = Rc::clone(&last_output);
+        let last_stage = Rc::clone(&last_stage);
+        network_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(33),
+            move || {
+                let mut current = session.borrow_mut();
+                if !current.network_background {
+                    receiver.take();
+                    if let Some(timer) = timer.upgrade() {
+                        timer.stop();
+                    }
+                    return;
+                }
+                if output_fade.running() || stage_fade.running() {
+                    return;
+                }
+                let Some((width, height, rgba)) =
+                    receiver.as_ref().and_then(|input| input.next_frame())
+                else {
+                    return;
+                };
+                if current.update_network_background(freeshow_output::Raster {
+                    width,
+                    height,
+                    rgba,
+                }) {
+                    let audience = audience_frame(&current);
+                    let stage = stage_frame(&current);
+                    *last_output.borrow_mut() = audience.clone();
+                    *last_stage.borrow_mut() = stage.clone();
+                    publish_audience(&output_slot, audience.clone());
+                    publish(&preview_slot, audience);
+                    publish_stage(&stage_slot, stage);
+                }
+            },
+        );
+    }
     let metronome_timer = Rc::new(slint::Timer::default());
     {
         let session = Rc::clone(&session);

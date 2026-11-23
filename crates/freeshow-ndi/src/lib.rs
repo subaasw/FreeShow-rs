@@ -10,8 +10,7 @@ mod receive;
 pub use omt::OmtSender;
 pub use receive::{
     NetworkReceiver, NetworkSource, SourceKind, element_available, ndi_receive_available,
-    ndi_receive_pipeline, ndi_sources, omt_receive_available, omt_receive_pipeline, omt_sources,
-    parse_source_list,
+    ndi_receive_pipeline, ndi_sources, omt_sources, parse_source_list,
 };
 
 /// Sends the audience picture to an NDI receiver. The show keeps running when

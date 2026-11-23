@@ -256,6 +256,7 @@ pub struct Session {
     pub media_index: Option<usize>,
     pub audio_index: Option<usize>,
     pub underlay: Option<Raster>,
+    pub network_background: bool,
     /// Path the current still underlay was decoded from, if any.
     underlay_from: Option<PathBuf>,
     pub background_fit: Fit,
@@ -499,6 +500,7 @@ impl Session {
             media_index: None,
             audio_index: None,
             underlay: None,
+            network_background: false,
             underlay_from: None,
             background_fit: Fit::Contain,
             background_flip_x: false,
@@ -692,6 +694,7 @@ impl Session {
             media_index: None,
             audio_index: None,
             underlay: None,
+            network_background: false,
             underlay_from: None,
             background_fit: Fit::Contain,
             background_flip_x: false,
@@ -1428,11 +1431,20 @@ impl Session {
     pub fn replace_underlay(&mut self, raster: Option<Raster>) {
         self.underlay = raster;
         self.underlay_from = None;
+        self.network_background = false;
+    }
+
+    pub fn update_network_background(&mut self, raster: Raster) -> bool {
+        if !self.network_background || self.blanked {
+            return false;
+        }
+        self.underlay = Some(raster);
+        true
     }
 
     fn set_still_underlay(&mut self, path: PathBuf, raster: Option<Raster>) {
-        self.underlay_from = raster.is_some().then_some(path);
-        self.underlay = raster;
+        self.replace_underlay(raster);
+        self.underlay_from = self.underlay.is_some().then_some(path);
     }
 
     pub fn clear_output(&mut self) {
@@ -2401,6 +2413,9 @@ impl Session {
 
     pub fn play_named(&mut self, name: &str) -> bool {
         if let Some(camera) = name.strip_prefix("Camera: ") {
+            if self.network_background {
+                self.replace_underlay(None);
+            }
             self.blanked = false;
             self.media_paused = false;
             self.background_transition = true;
@@ -4012,17 +4027,13 @@ impl Session {
         if let Some(name) = env_nonempty("FREESHOW_OMT_IN") {
             return Some((freeshow_ndi::SourceKind::Omt, name));
         }
-        let name = special_text(
-            &self.preferences.special,
-            &["ndiInput", "ndiSource", "omtInput", "omtSource"],
-        )?;
-        let omt = special_text(&self.preferences.special, &["omtInput", "omtSource"]).is_some();
-        let kind = if omt {
-            freeshow_ndi::SourceKind::Omt
-        } else {
-            freeshow_ndi::SourceKind::Ndi
-        };
-        Some((kind, name))
+        let special = &self.preferences.special;
+        special_text(special, &["ndiInput", "ndiSource"])
+            .map(|name| (freeshow_ndi::SourceKind::Ndi, name))
+            .or_else(|| {
+                special_text(special, &["omtInput", "omtSource"])
+                    .map(|name| (freeshow_ndi::SourceKind::Omt, name))
+            })
     }
 
     fn output_flag(&self, kind: &str) -> bool {
@@ -6760,11 +6771,7 @@ impl Session {
 
     pub fn network_sources(&self) -> Vec<freeshow_ndi::NetworkSource> {
         let mut sources = freeshow_ndi::ndi_sources();
-        for source in freeshow_ndi::omt_sources() {
-            if !sources.iter().any(|existing| existing.name == source.name) {
-                sources.push(source);
-            }
-        }
+        sources.extend(freeshow_ndi::omt_sources());
         sources
     }
 }
