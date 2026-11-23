@@ -30,6 +30,8 @@ pub struct ItemTypography {
     pub family: String,
     pub bold: bool,
     pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
     pub color: String,
     pub align: String,
     /// Line height as a percent of the font size; 0 leaves the font's own spacing.
@@ -316,6 +318,7 @@ impl ShowFile {
 
     pub fn item_typography(&self, slide_id: &str, index: usize) -> ItemTypography {
         let style = self.item_style_text(slide_id, index);
+        let decoration = text_decoration(&style).unwrap_or_default();
         ItemTypography {
             font_px: css_px(&style, "font-size").unwrap_or(DEFAULT_FONT_PX),
             family: css_value(&style, "font-family").unwrap_or_default(),
@@ -323,6 +326,12 @@ impl ShowFile {
                 .is_some_and(|value| value.eq_ignore_ascii_case("bold") || value == "700"),
             italic: css_value(&style, "font-style")
                 .is_some_and(|value| value.eq_ignore_ascii_case("italic")),
+            underline: decoration
+                .split_whitespace()
+                .any(|line| line == "underline"),
+            strike: decoration
+                .split_whitespace()
+                .any(|line| line == "line-through"),
             color: css_value(&style, "color").unwrap_or_default(),
             align: css_value(&style, "text-align").unwrap_or_default(),
             line_height_pct: css_value(&style, "line-height")
@@ -572,6 +581,47 @@ impl ShowFile {
         )
     }
 
+    /// Changes one decoration on every run while retaining each run's other decoration lines.
+    pub fn set_item_text_decoration(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        line: &str,
+        enabled: bool,
+    ) -> bool {
+        if !matches!(line, "underline" | "line-through") {
+            return false;
+        }
+        let inherited = self
+            .item(slide_id, index)
+            .and_then(|item| item["style"].as_str())
+            .and_then(text_decoration)
+            .unwrap_or_default()
+            .to_string();
+        self.edit_item_run_styles(slide_id, index, |style| {
+            let mut lines: Vec<_> = text_decoration(style)
+                .unwrap_or(&inherited)
+                .split_whitespace()
+                .filter(|existing| {
+                    *existing != line
+                        && matches!(
+                            *existing,
+                            "underline" | "overline" | "line-through" | "blink"
+                        )
+                })
+                .collect();
+            if enabled {
+                lines.push(line);
+            }
+            let value = if lines.is_empty() {
+                "none".into()
+            } else {
+                lines.join(" ")
+            };
+            css_set(style, "text-decoration-line", &value)
+        })
+    }
+
     pub fn set_item_color(&mut self, slide_id: &str, index: usize, color: &str) -> bool {
         self.set_item_css(slide_id, index, "color", color)
     }
@@ -608,6 +658,15 @@ impl ShowFile {
     }
 
     fn set_item_css(&mut self, slide_id: &str, index: usize, key: &str, value: &str) -> bool {
+        self.edit_item_run_styles(slide_id, index, |style| css_set(style, key, value))
+    }
+
+    fn edit_item_run_styles(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        edit: impl Fn(&str) -> String,
+    ) -> bool {
         if !self.ensure_item(slide_id, index) {
             return false;
         }
@@ -642,15 +701,9 @@ impl ShowFile {
                 let Some(part) = part.as_object_mut() else {
                     continue;
                 };
-                let style = part
-                    .get("style")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                part.insert(
-                    "style".to_string(),
-                    Value::String(css_set(&style, key, value)),
-                );
+                let style = part.get("style").and_then(Value::as_str).unwrap_or("");
+                let style = edit(style);
+                part.insert("style".to_string(), Value::String(style));
                 wrote = true;
             }
         }
@@ -693,6 +746,15 @@ impl ShowFile {
         };
         index < items.len()
     }
+}
+
+fn text_decoration(style: &str) -> Option<&str> {
+    style
+        .rsplit(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .find_map(|(key, value)| {
+            matches!(key.trim(), "text-decoration" | "text-decoration-line").then(|| value.trim())
+        })
 }
 
 fn offset_box(style: &str, dx: i32, dy: i32) -> String {
