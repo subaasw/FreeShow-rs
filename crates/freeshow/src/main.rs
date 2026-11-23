@@ -2328,8 +2328,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
             let ui = control.as_weak();
-            control.on_stage_layout_create(move || {
-                let result = session.borrow_mut().create_stage_layout();
+            control.on_stage_layout_create(move |duplicate| {
+                let result = session.borrow_mut().create_stage_layout(duplicate);
                 if result.is_ok()
                     && let Some(ui) = ui.upgrade()
                 {

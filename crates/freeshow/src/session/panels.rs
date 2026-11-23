@@ -1989,6 +1989,41 @@ mod tests {
     }
 
     #[test]
+    fn duplicating_a_stage_layout_keeps_the_full_saved_layout_and_isolates_edits() {
+        let (dir, _) = library("stage-duplicate");
+        let library = freeshow_data::Library::open(dir.path());
+        let path = library.stage_path();
+        let original = serde_json::json!({
+            "name": "Original",
+            "settings":{"color":"#2468ac","custom":[1,2]},
+            "items":{
+                "notes":{"type":"slide_notes","style":"left:7px;"},
+                "hidden":{"type":"clock","enabled":false,"custom":true}
+            },
+            "itemOrder":["hidden","notes"]
+        });
+        std::fs::write(&path, serde_json::json!({"source":original}).to_string()).unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.create_stage_layout(true).unwrap();
+        let id = session.stage_layout_id.clone().unwrap();
+        assert_ne!(id, "source");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut expected = original.clone();
+        expected["name"] = serde_json::json!("Original copy");
+        assert_eq!(saved[&id], expected);
+        assert_eq!(saved["source"], original);
+
+        session.stage_set("notes", "left", "42").unwrap();
+        let reopened = Session::open(dir.path().to_path_buf());
+        assert_eq!(reopened.stage.name, "Original copy");
+        assert_eq!(reopened.stage_rows()[0].left, 42);
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["source"], original);
+    }
+
+    #[test]
     fn creating_and_editing_a_stage_layout_preserves_a_legacy_layout() {
         let (dir, _) = library("stage-create");
         let library = freeshow_data::Library::open(dir.path());
@@ -2000,7 +2035,7 @@ mod tests {
         });
         std::fs::write(&path, legacy.to_string()).unwrap();
         let mut session = Session::open(dir.path().to_path_buf());
-        session.create_stage_layout().unwrap();
+        session.create_stage_layout(false).unwrap();
         let id = session.stage_layout_id.clone().unwrap();
         assert!(session.stage.items.is_empty());
         assert_eq!(session.stage.name, "New layout");
@@ -2028,7 +2063,7 @@ mod tests {
         assert_eq!(saved["default"], legacy);
 
         std::fs::write(&path, "{bad json").unwrap();
-        assert!(session.create_stage_layout().is_err());
+        assert!(session.create_stage_layout(false).is_err());
         assert_eq!(session.stage.name, "Rehearsal");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{bad json");
     }

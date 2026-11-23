@@ -405,7 +405,40 @@ pub(crate) fn write_stage_layout_at(
 }
 
 pub(crate) fn create_stage_layout(path: &Path, layout: &StageLayout) -> std::io::Result<String> {
-    let mut root = read_stage_object(path)?;
+    append_stage_layout(path, read_stage_object(path)?, serialized_layout(layout)?)
+}
+
+pub(crate) fn duplicate_stage_layout(
+    path: &Path,
+    source: Option<&str>,
+    layout: &StageLayout,
+) -> std::io::Result<String> {
+    let root = read_stage_object(path)?;
+    let mut copy = if let Some(id) = source {
+        root.get(id)
+            .filter(|entry| entry["items"].is_object())
+            .cloned()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "stage layout is missing")
+            })?
+    } else if root["items"].is_object() {
+        root.clone()
+    } else if root["default"]["items"].is_object()
+        && root["default"]["disabled"].as_bool() != Some(true)
+    {
+        root["default"].clone()
+    } else {
+        serialized_layout(layout)?
+    };
+    let name = copy["name"].as_str().unwrap_or(&layout.name);
+    copy["name"] = Value::String(format!("{name} copy"));
+    if copy["disabled"].as_bool() == Some(true) {
+        copy["disabled"] = Value::Bool(false);
+    }
+    append_stage_layout(path, root, copy)
+}
+
+fn append_stage_layout(path: &Path, mut root: Value, layout: Value) -> std::io::Result<String> {
     if root.get("items").is_some_and(Value::is_object) {
         root = serde_json::json!({ "default": root });
     } else if root.as_object().is_some_and(serde_json::Map::is_empty) {
@@ -415,7 +448,7 @@ pub(crate) fn create_stage_layout(path: &Path, layout: &StageLayout) -> std::io:
     while root.get(&id).is_some() {
         id = crate::new_id();
     }
-    root[&id] = serialized_layout(layout)?;
+    root[&id] = layout;
     write_stage_object(path, &root)?;
     Ok(id)
 }
