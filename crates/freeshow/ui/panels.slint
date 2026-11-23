@@ -983,7 +983,7 @@ export component StageEditorPanel inherits Rectangle {
     in property <color> close-fill;
     callback set(string, string, string);
     callback select-layout(string);
-    callback create-layout();
+    callback create-layout(bool);
     callback add(string);
     callback move-item(string, bool);
     callback remove(string);
@@ -1046,12 +1046,22 @@ export component StageEditorPanel inherits Rectangle {
                         }
                     }
                 }
-                BoxButton {
-                    label: "New layout";
-                    accent: root.accent;
-                    text-color: root.text-color;
-                    accent-text: root.accent-text;
-                    clicked => { if (text-save.running) { text-save.save(); } root.create-layout(); }
+                HorizontalLayout {
+                    spacing: 6px;
+                    BoxButton {
+                        label: "New layout";
+                        accent: root.accent;
+                        text-color: root.text-color;
+                        accent-text: root.accent-text;
+                        clicked => { if (text-save.running) { text-save.save(); } root.create-layout(false); }
+                    }
+                    BoxButton {
+                        label: "Duplicate layout";
+                        accent: root.close-fill;
+                        text-color: root.text-color;
+                        accent-text: root.text-color;
+                        clicked => { if (text-save.running) { text-save.save(); } root.create-layout(true); }
+                    }
                 }
                 HorizontalLayout {
                     spacing: 6px;

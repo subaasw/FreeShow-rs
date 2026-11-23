@@ -4389,6 +4389,14 @@ impl Library {
         stage_layout::create_stage_layout(&self.stage_path(), layout)
     }
 
+    pub fn duplicate_stage_layout(
+        &self,
+        source: Option<&str>,
+        layout: &StageLayout,
+    ) -> std::io::Result<String> {
+        stage_layout::duplicate_stage_layout(&self.stage_path(), source, layout)
+    }
+
     /// One layout from `Config/stage.json`.
     pub fn stage_layout(&self, id: &str) -> Option<stage_layout::StageLayout> {
         let text = fs::read_to_string(self.stage_path()).ok()?;

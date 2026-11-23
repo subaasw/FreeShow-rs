@@ -3045,20 +3045,25 @@ impl Session {
         self.select_stage_layout(output.as_deref(), id)
     }
 
-    pub fn create_stage_layout(&mut self) -> Result<String, String> {
+    pub fn create_stage_layout(&mut self, duplicate: bool) -> Result<String, String> {
         let root = self.root.as_deref().ok_or("open a library first")?;
-        let layout = StageLayout {
-            name: "New layout".into(),
-            background: default_stage().background,
-            items: Vec::new(),
-        };
-        let id = Library::open(root)
-            .create_stage_layout(&layout)
-            .map_err(|err| format!("could not create stage layout: {err}"))?;
-        if self.select_primary_stage_layout(&id).is_ok() {
-            return Ok(format!("Created {}", layout.name));
+        let library = Library::open(root);
+        let id = if duplicate {
+            library.duplicate_stage_layout(self.stage_layout_id.as_deref(), &self.stage)
+        } else {
+            library.create_stage_layout(&StageLayout {
+                name: "New layout".into(),
+                background: default_stage().background,
+                items: Vec::new(),
+            })
         }
-        self.stage = layout;
+        .map_err(|err| format!("could not create stage layout: {err}"))?;
+        if self.select_primary_stage_layout(&id).is_ok() {
+            return Ok(format!("Created {}", self.stage.name));
+        }
+        self.stage = library
+            .stage_layout(&id)
+            .ok_or("created stage layout is missing")?;
         self.stage_layout_id = Some(id);
         Ok("Created layout. Could not save its selection".into())
     }

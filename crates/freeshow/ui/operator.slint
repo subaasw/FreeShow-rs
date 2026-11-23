@@ -142,7 +142,7 @@ export component ControlWindow inherits Window {
     in-out property <int> stage-selected: 0;
     callback stage-set(string, string, string);
     callback stage-layout-select(string);
-    callback stage-layout-create();
+    callback stage-layout-create(bool);
     callback stage-add(string);
     callback stage-move(string, bool);
     callback stage-remove(string);
@@ -1170,7 +1170,7 @@ export component ControlWindow inherits Window {
             close-fill: root.primary-lighter;
             set(id, key, value) => { root.stage-set(id, key, value); }
             select-layout(id) => { root.stage-layout-select(id); }
-            create-layout => { root.stage-layout-create(); }
+            create-layout(duplicate) => { root.stage-layout-create(duplicate); }
             add(kind) => { root.stage-add(kind); }
             move-item(id, forward) => { root.stage-move(id, forward); }
             remove(id) => { root.stage-remove(id); }
