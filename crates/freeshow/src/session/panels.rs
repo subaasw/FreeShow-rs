@@ -50,6 +50,8 @@ pub struct SettingsForm {
     pub output_name: String,
     pub output_always_on_top: bool,
     pub output_kiosk: bool,
+    /// Picture size of the active output, as `WIDTHxHEIGHT`.
+    pub output_resolution: String,
     /// The library-wide slide text and media transitions: kind and milliseconds.
     pub text_transition: String,
     pub text_duration: i32,
@@ -130,6 +132,7 @@ pub fn setting_label(key: &str) -> &str {
         "outputNew" => "new output",
         "outputDelete" => "output removal",
         "outputName" => "output name",
+        "outputResolution" => "output resolution",
         "themeFont" => "theme font",
         "themeFontSize" => "theme text size",
         "themeRadius" => "corner radius",
@@ -375,6 +378,10 @@ impl Session {
                 .unwrap_or_else(|| "Primary".into()),
             output_always_on_top: self.output_window_flags().0,
             output_kiosk: self.output_window_flags().1,
+            output_resolution: prefs
+                .active_output()
+                .and_then(|output| Some(format!("{}x{}", output.width?, output.height?)))
+                .unwrap_or_else(|| "1920x1080".into()),
             text_transition: self.library_transition(false).kind,
             text_duration: self.library_transition(false).duration_ms as i32,
             media_transition: self.library_transition(true).kind,
@@ -622,7 +629,7 @@ impl Session {
             | "styleTemplate" => {
                 return self.apply_style_setting(key, value);
             }
-            "outputPick" | "outputNew" | "outputDelete" | "outputName" => {
+            "outputPick" | "outputNew" | "outputDelete" | "outputName" | "outputResolution" => {
                 return self.apply_output_setting(key, value);
             }
             "themeFont" | "themeFontSize" | "themeRadius" | "themeDuplicate" | "themeReset" => {
@@ -919,6 +926,32 @@ impl Session {
                     return Err("an output name is 1–60 characters".into());
                 }
                 return self.patch_output(&active, "name", json!(value));
+            }
+            "outputResolution" => {
+                let (width, height) = value
+                    .split_once(['x', '×'])
+                    .and_then(|(w, h)| {
+                        Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+                    })
+                    .filter(|(w, h)| (320..=7680).contains(w) && (240..=4320).contains(h))
+                    .ok_or("a resolution is WIDTHxHEIGHT, such as 1280x720")?;
+                // Only the size changes; the window keeps its stored position.
+                self.patch_settings(|settings| {
+                    if let Some(output) = settings
+                        .get_mut("outputs")
+                        .and_then(|outputs| outputs.get_mut(&active))
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        let bounds = output
+                            .entry("bounds")
+                            .or_insert_with(|| json!({ "x": 0, "y": 0 }));
+                        if !bounds.is_object() {
+                            *bounds = json!({ "x": 0, "y": 0 });
+                        }
+                        bounds["width"] = json!(width);
+                        bounds["height"] = json!(height);
+                    }
+                })
             }
             other => return Err(format!("unknown setting {other:?}")),
         };
@@ -1516,6 +1549,17 @@ mod tests {
         assert_eq!(form.output_name, "Lobby");
         session.apply_setting("outputPick", "Primary").unwrap();
         assert_eq!(session.settings_form().output_name, "Primary");
+        assert_eq!(session.settings_form().output_resolution, "1920x1080");
+        session
+            .apply_setting("outputResolution", "1280x720")
+            .unwrap();
+        assert_eq!(session.settings_form().output_resolution, "1280x720");
+        assert_eq!(
+            session.preferences.configured_output_size(),
+            Some((1280, 720))
+        );
+        assert!(session.apply_setting("outputResolution", "huge").is_err());
+        assert!(session.apply_setting("outputResolution", "10x10").is_err());
         session.apply_setting("outputDelete", "").unwrap();
         assert_eq!(
             session.settings_form().output_names,
