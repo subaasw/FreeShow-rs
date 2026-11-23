@@ -1807,6 +1807,8 @@ mod tests {
                     </p:style>
                     <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100"/><a:lstStyle>
                         <a:lvl1pPr algn="r" marL="127000" marR="63500"><a:spcBef><a:spcPct val="25000"/></a:spcBef>
+                            <a:buClr><a:schemeClr val="accent1"/></a:buClr><a:buSzPct val="75000"/>
+                            <a:buFont typeface="Symbol"/><a:buChar char="&#xf0b7;"/>
                             <a:defRPr sz="2400" b="1"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
                     </a:lstStyle>
                     <a:p><a:pPr indent="-63500"><a:lnSpc><a:spcPct val="150%"/></a:lnSpc>
@@ -1817,7 +1819,7 @@ mod tests {
                             <a:highlight><a:srgbClr val="FFFF00"/></a:highlight>
                         </a:rPr><a:t>accent</a:t></a:r>
                         <a:br/><a:fld id="field"><a:t>Cached field</a:t></a:fld>
-                    </a:p><a:p/><a:p><a:pPr algn="ctr"/><a:r><a:t>Final</a:t></a:r></a:p>
+                    </a:p><a:p/><a:p><a:pPr algn="ctr"><a:buNone/></a:pPr><a:r><a:t>Final</a:t></a:r></a:p>
                     </p:txBody></p:sp>
                     <p:sp><p:spPr>
                         <a:xfrm><a:ext cx="4572000" cy="1371600"/></a:xfrm>
@@ -1860,6 +1862,13 @@ mod tests {
         assert_eq!(items[0]["lines"][0]["align"], "right");
         assert_eq!(items[0]["lines"][0]["pptxMargins"], json!([20, 10, -10]));
         assert_eq!(items[0]["lines"][1]["pptxMargins"], json!([20, 10, 0]));
+        assert_eq!(
+            items[0]["lines"][0]["pptxBullet"],
+            json!({"value":"•", "style":"color:#00AA00;--pptx-bullet-scale:75%;"})
+        );
+        for index in 1..4 {
+            assert!(items[0]["lines"][index].get("pptxBullet").is_none());
+        }
         assert_eq!(
             items[0]["lines"][0]["pptxSpacing"],
             json!(["150%", "25%", null])

@@ -66,6 +66,7 @@ impl TextBody {
             let first = lines.len();
             let style = |run| run_style(run, defaults, font_ref, context, px_per_point);
             let mut runs = Vec::new();
+            let mut paragraph_has_text = false;
             for run in paragraph.children().filter(Node::is_element) {
                 let value = match run.tag_name().name() {
                     "r" | "fld" => child(run, "t").and_then(|text| text.text()),
@@ -81,11 +82,17 @@ impl TextBody {
                     _ => None,
                 };
                 if let Some(value) = value.filter(|value| !value.is_empty()) {
-                    has_text |= !value.trim().is_empty();
+                    paragraph_has_text |= !value.trim().is_empty();
                     runs.push(json!({"value": value, "style": style(child(run, "rPr"))}));
                 }
             }
             lines.push(line(alignment, runs, style(child(paragraph, "endParaRPr"))));
+            has_text |= paragraph_has_text;
+            if paragraph_has_text
+                && let Some(bullet) = character_bullet(properties, context, px_per_point)
+            {
+                lines[first]["pptxBullet"] = bullet;
+            }
             let last = lines.len() - 1;
             for (index, line) in lines.iter_mut().enumerate().skip(first) {
                 let before = before.as_deref().filter(|_| index == first);
@@ -120,23 +127,83 @@ impl TextBody {
     }
 }
 
+fn character_bullet(
+    properties: [Option<Node<'_, '_>>; 3],
+    context: &Context,
+    px_per_point: f64,
+) -> Option<Value> {
+    let property = |names: &[&str]| {
+        properties.into_iter().flatten().find_map(|node| {
+            node.children()
+                .filter(Node::is_element)
+                .find(|child| names.contains(&child.tag_name().name()))
+        })
+    };
+    let marker = property(&["buNone", "buChar", "buAutoNum", "buBlip"])?;
+    if !marker.has_tag_name("buChar") {
+        return None;
+    }
+    let value = marker
+        .attribute("char")
+        .filter(|value| !value.trim().is_empty())?;
+    let font = property(&["buFont", "buFontTx"])
+        .and_then(|node| node.attribute("typeface"))
+        .and_then(|name| context.font_family(name));
+    let (value, font) = match (value, font) {
+        ("\u{f0b7}", Some(font)) if font.eq_ignore_ascii_case("Symbol") => ("•", None),
+        _ => (value, font),
+    };
+    let mut style = String::new();
+    if let Some(font) = font {
+        style.push_str(&format!("font-family:{font};"));
+    }
+    if let Some(color) = property(&["buClr", "buClrTx"]).and_then(|node| context.text_color(node)) {
+        style.push_str(&format!("color:{color};"));
+    }
+    if let Some(node) = property(&["buSzPts", "buSzPct", "buSzTx"])
+        && let Some(value) = node.attribute("val")
+    {
+        match node.tag_name().name() {
+            "buSzPts" => {
+                if let Ok(value) = value.parse::<u32>()
+                    && (100..=400_000).contains(&value)
+                {
+                    let px = f64::from(value) * px_per_point / 100.0;
+                    style.push_str(&format!("font-size:{px}px;"));
+                }
+            }
+            "buSzPct" => {
+                if let Some(value) =
+                    percentage(value).filter(|value| (25.0..=400.0).contains(value))
+                {
+                    style.push_str(&format!("--pptx-bullet-scale:{value}%;"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(json!({"value": value, "style": style}))
+}
+
 fn spacing(node: Node<'_, '_>, px_per_point: f64) -> Option<String> {
     let value = node.first_element_child()?;
     let number = value.attribute("val")?;
     match value.tag_name().name() {
-        "spcPts" => {
-            let points = number.parse::<u32>().ok()?;
-            Some(format!("{}px", f64::from(points) * px_per_point / 100.0))
-        }
-        "spcPct" => {
-            let percent = match number.strip_suffix('%') {
-                Some(number) => number.parse::<f64>().ok()?,
-                None => f64::from(number.parse::<u32>().ok()?) / 1000.0,
-            };
-            (percent.is_finite() && percent >= 0.0).then(|| format!("{percent}%"))
-        }
+        "spcPts" => Some(format!(
+            "{}px",
+            f64::from(number.parse::<u32>().ok()?) * px_per_point / 100.0
+        )),
+        "spcPct" => percentage(number).map(|value| format!("{value}%")),
         _ => None,
     }
+}
+
+fn percentage(number: &str) -> Option<f64> {
+    let percent = match number.strip_suffix('%') {
+        Some(number) => number.parse::<f64>().ok()?,
+        None => f64::from(number.parse::<u32>().ok()?) / 1000.0,
+    };
+    (percent.is_finite() && percent >= 0.0).then_some(percent)
 }
 
 fn line(alignment: &str, mut runs: Vec<Value>, blank_style: String) -> Value {
