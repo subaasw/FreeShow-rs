@@ -75,6 +75,9 @@ export struct InspectorData {
     box-shadow: string,
     backdrop-filter: string,
     has-picture: bool,
+    picture-fit: string,
+    picture-flip-x: bool,
+    picture-flip-y: bool,
     crop-left: string,
     crop-right: string,
     crop-top: string,
@@ -857,6 +860,29 @@ export component InspectorPanel inherits VerticalLayout {
     }
     if root.data.has-item && root.data.has-picture: VerticalLayout {
         spacing: 4px;
+        HorizontalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Picture fit"; text-color: root.text-color; }
+            ValueCombo {
+                horizontal-stretch: 1;
+                model: ["contain", "cover", "fill", "tile"];
+                value: root.data.picture-fit == "blur" || root.data.picture-fit == "" ? "contain" : root.data.picture-fit;
+                selected(value) => { root.set("picture-fit", value); }
+            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            CheckBox {
+                text: "Flip horizontally";
+                checked: root.data.picture-flip-x;
+                toggled => { root.set("picture-flip-x", Fmt.flag(self.checked)); }
+            }
+            CheckBox {
+                text: "Flip vertically";
+                checked: root.data.picture-flip-y;
+                toggled => { root.set("picture-flip-y", Fmt.flag(self.checked)); }
+            }
+        }
         FieldLabel { text: "Picture crop (%)"; text-color: root.text-color; }
         HorizontalLayout {
             spacing: 6px;
