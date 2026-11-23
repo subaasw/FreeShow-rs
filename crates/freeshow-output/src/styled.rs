@@ -54,6 +54,7 @@ pub struct BoxStyle {
     pptx_gradient_gamma: bool,
     pptx_gradient_tile: Option<[f32; 4]>,
     pptx_radial_focus: Option<[f32; 2]>,
+    pptx_radial_ellipse: Option<[f32; 4]>,
     pptx_rectangular_focus: Option<[f32; 4]>,
 }
 
@@ -186,6 +187,7 @@ impl Default for BoxStyle {
             pptx_gradient_gamma: false,
             pptx_gradient_tile: None,
             pptx_radial_focus: None,
+            pptx_radial_ellipse: None,
             pptx_rectangular_focus: None,
         }
     }
@@ -401,6 +403,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 style.pptx_gradient_tile = parse_rect_insets(value);
             }
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
+            "--pptx-radial-ellipse" => style.pptx_radial_ellipse = parse_radial_ellipse(value),
             "--shape-fill-polygon" => {
                 style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
             }
@@ -3546,6 +3549,12 @@ fn fill_item_background(
                         let dot = dx * fx + dy * fy;
                         let distance_squared = dx * dx + dy * dy;
                         ((dot * dot + distance_squared * remaining).sqrt() + dot) / remaining
+                    } else if let Some(ellipse) = style.pptx_radial_ellipse {
+                        radial_ellipse_position(
+                            offset_x / radius_to_corner,
+                            offset_y / radius_to_corner,
+                            ellipse,
+                        )
                     } else {
                         (offset_x * offset_x + offset_y * offset_y).sqrt() / radius_to_corner
                     }
@@ -3672,6 +3681,54 @@ fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
     let x = components.next()?.parse::<f32>().ok()?;
     let y = components.next()?.parse::<f32>().ok()?;
     (components.next().is_none() && x * x + y * y < 1.0).then_some([x, y])
+}
+
+fn parse_radial_ellipse(value: &str) -> Option<[f32; 4]> {
+    let ellipse @ [cx, cy, rx, ry] = parse_rect_insets(value)?;
+    (rx >= 0.0
+        && ry >= 0.0
+        && cx.abs() + rx <= 1.0 + f32::EPSILON
+        && cy.abs() + ry <= 1.0 + f32::EPSILON)
+        .then_some(ellipse)
+}
+
+fn radial_ellipse_position(x: f32, y: f32, [cx, cy, rx, ry]: [f32; 4]) -> f32 {
+    let distance_squared = x * x + y * y;
+    if distance_squared >= 1.0 {
+        return 1.0;
+    }
+    if cx == 0.0 && cy == 0.0 && rx == ry {
+        return if rx < 1.0 {
+            (distance_squared.sqrt() - rx).max(0.0) / (1.0 - rx)
+        } else {
+            0.0
+        };
+    }
+    // A stop at t is on the ellipse whose bounds interpolate between the focus and the outer circle.
+    let contains = |t: f32| {
+        let dx = (x - cx * (1.0 - t)).abs();
+        let dy = (y - cy * (1.0 - t)).abs();
+        let a = rx + t * (1.0 - rx);
+        let b = ry + t * (1.0 - ry);
+        if dx > a || dy > b {
+            return false;
+        }
+        let (nx, ny, radii) = (dx * b, dy * a, a * b);
+        nx * nx + ny * ny <= radii * radii
+    };
+    if contains(0.0) {
+        return 0.0;
+    }
+    let (mut inside, mut outside) = (1.0, 0.0);
+    for _ in 0..12 {
+        let midpoint = (inside + outside) * 0.5;
+        if contains(midpoint) {
+            inside = midpoint;
+        } else {
+            outside = midpoint;
+        }
+    }
+    (inside + outside) * 0.5
 }
 
 fn mirrored_tile_coordinate(offset: f32, size: f32) -> f32 {
@@ -4247,6 +4304,20 @@ mod tests {
         assert!(focus.r > 245 && focus.b < 10, "{focus:?}");
         assert!((165..=175).contains(&center.r), "{center:?}");
         assert!(corner.r < 10 && corner.b > 245, "{corner:?}");
+    }
+
+    #[test]
+    fn powerpoint_radial_ellipse_preserves_the_focus_area() {
+        let ellipse = [-0.25, 0.0, 0.25, 0.5];
+        assert_eq!(radial_ellipse_position(-0.25, 0.4, ellipse), 0.0);
+        for x in [0.4, -0.7] {
+            assert!((radial_ellipse_position(x, 0.0, ellipse) - 0.4).abs() < 0.001);
+        }
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%);--pptx-radial-ellipse:-0.25 0 0.25 0.5;",
+        ));
+        assert_eq!(frame.pixel(337, 320), parse_color("#FF0000").unwrap());
+        assert!(frame.pixel(959, 539).b > 250);
     }
 
     #[test]

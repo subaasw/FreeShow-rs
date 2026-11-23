@@ -148,22 +148,29 @@ pub(super) struct GradientFill {
 #[derive(Clone)]
 pub(super) enum GradientFocus {
     RadialPoint([f64; 2]),
+    RadialEllipse([f64; 4]),
     Rectangle([f64; 4]),
 }
 
 impl GradientFocus {
     pub(super) fn from_path(path: &str, [left, top, right, bottom]: [f64; 4]) -> Option<Self> {
+        let edges = [left, top, right, bottom];
+        if left + right > 1.0 || top + bottom > 1.0 {
+            return None;
+        }
         match path {
             "circle" if (left + right - 1.0).abs() < 1e-9 && (top + bottom - 1.0).abs() < 1e-9 => {
                 let (x, y) = (left - right, top - bottom);
                 (x * x + y * y < 1.0 && (x != 0.0 || y != 0.0)).then_some(Self::RadialPoint([x, y]))
             }
-            "rect"
-                if [left, top, right, bottom].iter().all(|edge| *edge >= 0.0)
-                    && left + right <= 1.0
-                    && top + bottom <= 1.0 =>
-            {
-                Some(Self::Rectangle([left, top, right, bottom]))
+            "circle" if edges.iter().all(|edge| *edge >= 0.0) => {
+                let (x, y) = (left - right, top - bottom);
+                let (rx, ry) = (1.0 - left - right, 1.0 - top - bottom);
+                Some(Self::RadialEllipse([x, y, rx.max(0.0), ry.max(0.0)]))
+            }
+            // The anchor shape for a slide background is a rectangle.
+            "rect" | "shape" if edges.iter().all(|edge| *edge >= 0.0) => {
+                Some(Self::Rectangle(edges))
             }
             // shortcut: extended radial focuses and non-nested paths use the centered fill until their geometry is supported.
             _ => None,
@@ -203,8 +210,8 @@ impl GradientFill {
         let focus = path.and_then(|path| {
             let rect = child(path, "fillToRect");
             GradientFocus::from_path(
-                path.attribute("path").unwrap_or("rect"),
-                gradient_insets(|key| {
+                path.attribute("path").unwrap_or("shape"),
+                focus_insets(|key| {
                     rect.and_then(|rect| rect.attribute(key))
                         .and_then(percentage)
                 }),
@@ -259,6 +266,9 @@ impl GradientFill {
             Some(GradientFocus::RadialPoint([x, y])) => {
                 style.push_str(&format!("--pptx-radial-focus:{x:.5} {y:.5};"))
             }
+            Some(GradientFocus::RadialEllipse([x, y, rx, ry])) => {
+                style.push_str(&format!("--pptx-radial-ellipse:{x} {y} {rx} {ry};"))
+            }
             Some(GradientFocus::Rectangle([l, t, r, b])) => style.push_str(&format!(
                 "--pptx-rectangular-focus:{l:.5} {t:.5} {r:.5} {b:.5};"
             )),
@@ -286,6 +296,10 @@ pub(super) fn linear_gradient_angle(raw: Option<&str>) -> f64 {
 
 pub(super) fn gradient_insets(inset: impl Fn(&str) -> Option<f64>) -> [f64; 4] {
     ["l", "t", "r", "b"].map(|key| inset(key).unwrap_or(0.0))
+}
+
+pub(super) fn focus_insets(inset: impl Fn(&str) -> Option<f64>) -> [f64; 4] {
+    ["l", "t", "r", "b"].map(|key| inset(key).unwrap_or(0.5))
 }
 
 pub(super) fn percentage(value: &str) -> Option<f64> {

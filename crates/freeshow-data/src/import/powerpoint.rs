@@ -644,7 +644,7 @@ fn find_background(
     let mut gradient_scaled = false;
     let mut gradient_tile = [0.0; 4];
     let mut gradient_path = None;
-    let mut gradient_insets = [0.0; 4];
+    let mut focus_insets = [0.5; 4];
     let mut gs_pos = None;
     let mut gs_color = None;
     loop {
@@ -707,10 +707,10 @@ fn find_background(
                         }
                         (Some("gradFill"), "path") => {
                             gradient_path =
-                                Some(attribute(&element, "path").unwrap_or_else(|| "rect".into()));
+                                Some(attribute(&element, "path").unwrap_or_else(|| "shape".into()));
                         }
                         (Some("path"), "fillToRect") if gradient_path.is_some() => {
-                            gradient_insets = theme::gradient_insets(|key| {
+                            focus_insets = theme::focus_insets(|key| {
                                 attribute(&element, key).and_then(|value| theme::percentage(&value))
                             });
                         }
@@ -751,7 +751,7 @@ fn find_background(
                 tile_insets: gradient_tile,
                 focus: gradient_path
                     .as_deref()
-                    .and_then(|path| theme::GradientFocus::from_path(path, gradient_insets)),
+                    .and_then(|path| theme::GradientFocus::from_path(path, focus_insets)),
                 stops: gradient_stops,
             }
         });
@@ -1292,6 +1292,22 @@ mod tests {
                 br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1003"><a:srgbClr val="FF0000"/></p:bgRef></p:bg>
                     <a:p><a:r><a:t>Theme scaled</a:t></a:r></a:p></p:cSld></p:sld>"#,
             ),
+            (
+                "ppt/slides/slide8.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst>
+                    <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst><a:path path="shape"/></a:gradFill></p:bgPr></p:bg>
+                    <a:p><a:r><a:t>Shape path</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide9.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst>
+                    <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst><a:path path="circle"><a:fillToRect l="25000" t="25000" r="50000" b="25000"/></a:path>
+                    </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Ellipse focus</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
             ("ppt/slides/_rels/slide1.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide2.xml.rels", layout_rel),
             ("ppt/slides/_rels/slide5.xml.rels", layout_rel),
@@ -1421,7 +1437,8 @@ mod tests {
         );
         for (slide, focus) in [
             ("s4", "0.30000 0.20000 0.10000 0.40000"),
-            ("s5", "0.50000 0.00000 0.50000 0.00000"),
+            ("s5", "0.50000 0.50000 0.50000 0.50000"),
+            ("s8", "0.50000 0.50000 0.50000 0.50000"),
         ] {
             assert!(
                 show.show["slides"][slide]["items"][0]["style"]
@@ -1430,6 +1447,12 @@ mod tests {
                     .contains(&format!("--pptx-rectangular-focus:{focus};"))
             );
         }
+        assert!(
+            show.show["slides"]["s9"]["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("--pptx-radial-ellipse:-0.25 0 0.25 0.5;")
+        );
     }
 
     #[test]

@@ -1310,6 +1310,7 @@ impl Session {
                         "--pptx-gradient-tile",
                         "--pptx-gradient-gamma",
                         "--pptx-radial-focus",
+                        "--pptx-radial-ellipse",
                         "--pptx-rectangular-focus",
                     ]
                     .into_iter()
