@@ -37,7 +37,8 @@ impl TextBody {
                 .filter(|level| *level < 9)
                 .unwrap_or(0);
             let level = list.and_then(|list| child(list, &format!("lvl{}pPr", level + 1)));
-            let alignment = match [para, level]
+            let properties = [para, level, list.and_then(|list| child(list, "defPPr"))];
+            let alignment = match properties
                 .into_iter()
                 .flatten()
                 .find_map(|props| props.attribute("algn"))
@@ -47,7 +48,14 @@ impl TextBody {
                 Some("just" | "justLow" | "dist" | "thaiDist") => "justify",
                 _ => "left",
             };
-            let defaults = [para, level].map(|node| node.and_then(|node| child(node, "defRPr")));
+            let defaults = properties.map(|node| node.and_then(|node| child(node, "defRPr")));
+            let [height, before, after] = ["lnSpc", "spcBef", "spcAft"].map(|key| {
+                properties
+                    .into_iter()
+                    .flatten()
+                    .find_map(|node| spacing(child(node, key)?, px_per_point))
+            });
+            let first = lines.len();
             let style = |run| run_style(run, defaults, font_ref, context, px_per_point);
             let mut runs = Vec::new();
             for run in paragraph.children().filter(Node::is_element) {
@@ -70,6 +78,14 @@ impl TextBody {
                 }
             }
             lines.push(line(alignment, runs, style(child(paragraph, "endParaRPr"))));
+            let last = lines.len() - 1;
+            for (index, line) in lines.iter_mut().enumerate().skip(first) {
+                let before = before.as_deref().filter(|_| index == first);
+                let after = after.as_deref().filter(|_| index == last);
+                if height.is_some() || before.is_some() || after.is_some() {
+                    line["pptxSpacing"] = json!([height, before, after]);
+                }
+            }
         }
         has_text.then(|| {
             let inset = |key, default| {
@@ -92,6 +108,25 @@ impl TextBody {
     }
 }
 
+fn spacing(node: Node<'_, '_>, px_per_point: f64) -> Option<String> {
+    let value = node.first_element_child()?;
+    let number = value.attribute("val")?;
+    match value.tag_name().name() {
+        "spcPts" => {
+            let points = number.parse::<u32>().ok()?;
+            Some(format!("{}px", f64::from(points) * px_per_point / 100.0))
+        }
+        "spcPct" => {
+            let percent = match number.strip_suffix('%') {
+                Some(number) => number.parse::<f64>().ok()?,
+                None => f64::from(number.parse::<u32>().ok()?) / 1000.0,
+            };
+            (percent.is_finite() && percent >= 0.0).then(|| format!("{percent}%"))
+        }
+        _ => None,
+    }
+}
+
 fn line(alignment: &str, mut runs: Vec<Value>, blank_style: String) -> Value {
     if runs.is_empty() {
         // A space reserves the line height without painting a glyph.
@@ -102,12 +137,12 @@ fn line(alignment: &str, mut runs: Vec<Value>, blank_style: String) -> Value {
 
 fn run_style(
     run: Option<Node<'_, '_>>,
-    defaults: [Option<Node<'_, '_>>; 2],
+    defaults: [Option<Node<'_, '_>>; 3],
     font_ref: Option<Node<'_, '_>>,
     context: &Context,
     px_per_point: f64,
 ) -> String {
-    let layers = [run, defaults[0], defaults[1]];
+    let layers = [run, defaults[0], defaults[1], defaults[2]];
     let attribute = |key| {
         layers
             .into_iter()

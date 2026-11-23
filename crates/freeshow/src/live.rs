@@ -1061,6 +1061,7 @@ fn session_variables(session: &Session) -> Vec<(String, String)> {
 }
 
 fn styled_line(line: &serde_json::Value, variables: &[(String, String)]) -> StyledLine {
+    let spacing = line.get("pptxSpacing").and_then(|value| value.as_array());
     StyledLine {
         align: line
             .get("align")
@@ -1069,6 +1070,7 @@ fn styled_line(line: &serde_json::Value, variables: &[(String, String)]) -> Styl
             .to_string(),
         line_bar: true,
         wrapped: false,
+        pptx_spacing: std::array::from_fn(|index| spacing?.get(index)?.as_str().map(str::to_owned)),
         shift_y: 0,
         runs: line
             .get("text")
@@ -1142,6 +1144,7 @@ fn chord_line(item: &serde_json::Value, line: &serde_json::Value) -> Option<Styl
             .to_string(),
         line_bar: false,
         wrapped: false,
+        pptx_spacing: Default::default(),
         shift_y: json_number(item.pointer("/chords/offsetY"))
             .unwrap_or(0.0)
             .round() as i32,
@@ -1402,6 +1405,7 @@ fn lines_slide_at(
                     align: String::new(),
                     line_bar: true,
                     wrapped: false,
+                    pptx_spacing: Default::default(),
                     shift_y: 0,
                     runs: vec![TextRun {
                         text: line.clone(),
