@@ -815,6 +815,7 @@ fn find_background(
     let mut gradient_stop_count = 0;
     let mut gradient_angle = 90.0;
     let mut gradient_scaled = false;
+    let mut gradient_fixed = false;
     let mut gradient_tile = [0.0; 4];
     let mut gradient_path = None;
     let mut focus_insets = [0.5; 4];
@@ -830,6 +831,12 @@ fn find_background(
                     match (stack.last().map(String::as_str), name.as_str()) {
                         (Some("bg"), "bgRef") => {
                             style = attribute(&element, "idx").and_then(|idx| idx.parse().ok());
+                        }
+                        (Some("bgPr"), "gradFill") => {
+                            gradient_fixed = matches!(
+                                attribute(&element, "rotWithShape").as_deref(),
+                                Some("0" | "false")
+                            );
                         }
                         (
                             Some("solidFill" | "bgRef" | "gs"),
@@ -921,6 +928,7 @@ fn find_background(
             GradientFill {
                 linear_angle: gradient_path.is_none().then_some(gradient_angle),
                 linear_scaled: gradient_scaled,
+                fixed_orientation: gradient_fixed,
                 tile_insets: gradient_tile,
                 focus: gradient_path
                     .as_deref()
@@ -1781,7 +1789,7 @@ mod tests {
                     <p:sp><p:spPr>
                         <a:xfrm rot="2700000" flipH="1"><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
                         <a:prstGeom prst="rect"/>
-                        <a:gradFill><a:gsLst>
+                        <a:gradFill rotWithShape="false"><a:gsLst>
                             <a:gs pos="0"><a:schemeClr val="accent1"/></a:gs>
                             <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                         </a:gsLst><a:lin ang="2700000" scaled="1"/></a:gradFill>
@@ -1803,7 +1811,7 @@ mod tests {
             ("ppt/slideMasters/_rels/master.xml.rels", br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme.xml"/></Relationships>"#),
             ("ppt/theme/theme.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
                 <a:clrScheme><a:accent1><a:srgbClr val="00AA00"/></a:accent1></a:clrScheme>
-                <a:fmtScheme><a:fillStyleLst><a:gradFill><a:gsLst>
+                <a:fmtScheme><a:fillStyleLst><a:gradFill rotWithShape="0"><a:gsLst>
                     <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
                     <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                 </a:gsLst><a:path path="shape"/></a:gradFill></a:fillStyleLst></a:fmtScheme>
@@ -1818,12 +1826,14 @@ mod tests {
             "{direct}"
         );
         assert!(direct.contains("--pptx-linear-scaled:1;"));
+        assert!(direct.contains("--pptx-gradient-fixed:1;"));
         assert!(direct.contains("transform:rotate(45deg);"));
         assert!(direct.contains("--pptx-fill-flip-x:1;"));
         assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Caption");
         let themed = items[1]["style"].as_str().unwrap();
         assert!(themed.contains("border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)"), "{themed}");
         assert!(themed.contains("--pptx-shape-ellipse:1;"));
+        assert!(themed.contains("--pptx-gradient-fixed:1;"));
         assert!(!items[2]["style"].as_str().unwrap().contains("background:"));
     }
 
