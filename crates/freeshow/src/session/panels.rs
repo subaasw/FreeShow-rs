@@ -1343,6 +1343,9 @@ impl Session {
 
     /// Sets one geometry or text field on a stage item and saves `Config/stage.json`.
     pub fn stage_set(&mut self, id: &str, key: &str, value: &str) -> Result<(), String> {
+        if id.is_empty() {
+            return self.stage_set_layout(key, value.trim());
+        }
         if matches!(
             key,
             "align"
@@ -1400,6 +1403,28 @@ impl Session {
         } else {
             Err("could not save stage.json".into())
         }
+    }
+
+    fn stage_set_layout(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let field = match key {
+            "layout-name" if !value.is_empty() => &mut self.stage.name,
+            "layout-name" => return Err("enter a stage layout name".into()),
+            "layout-background" if freeshow_output::parse_color(value).is_some() => {
+                &mut self.stage.background
+            }
+            "layout-background" => return Err(format!("invalid stage background {value:?}")),
+            _ => return Err(format!("unknown stage layout field {key:?}")),
+        };
+        let previous = std::mem::replace(field, value.into());
+        if self.save_stage_layout() {
+            return Ok(());
+        }
+        if key == "layout-name" {
+            self.stage.name = previous;
+        } else {
+            self.stage.background = previous;
+        }
+        Err("could not save stage.json".into())
     }
 
     /// The editor name of the stage item `id`, or the id when it is gone.
@@ -1881,6 +1906,51 @@ mod tests {
         assert!(saved.contains("400px"), "{saved}");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
+    }
+
+    #[test]
+    fn creating_and_editing_a_stage_layout_preserves_a_legacy_layout() {
+        let (dir, _) = library("stage-create");
+        let library = freeshow_data::Library::open(dir.path());
+        let path = library.stage_path();
+        let legacy = serde_json::json!({
+            "name": "Existing",
+            "settings": {"color": "#111111", "custom": true},
+            "items": {"clock": {"type": "clock"}},
+        });
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.create_stage_layout().unwrap();
+        let id = session.stage_layout_id.clone().unwrap();
+        assert!(session.stage.items.is_empty());
+        assert_eq!(session.stage.name, "New layout");
+        session
+            .stage_set("", "layout-name", "  Rehearsal  ")
+            .unwrap();
+        session
+            .stage_set("", "layout-background", "#2468ac")
+            .unwrap();
+        assert!(
+            session
+                .stage_set("", "layout-background", "invalid")
+                .is_err()
+        );
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(session.stage_layout_id.as_deref(), Some(id.as_str()));
+        assert_eq!(session.stage.name, "Rehearsal");
+        assert_eq!(
+            crate::live::stage_frame(&session).pixel(0, 0),
+            freeshow_output::parse_color("#2468ac").unwrap()
+        );
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["default"], legacy);
+
+        std::fs::write(&path, "{bad json").unwrap();
+        assert!(session.create_stage_layout().is_err());
+        assert_eq!(session.stage.name, "Rehearsal");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{bad json");
     }
 
     #[test]

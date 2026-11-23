@@ -612,6 +612,27 @@ fn fill_drawer_form(ui: &ControlWindow, session: &Session) {
 }
 
 /// Settings, Inspector and Stage editor data.
+fn refresh_stage_layout_choices(ui: &ControlWindow, session: &Session) {
+    let layouts = session
+        .root
+        .as_deref()
+        .map(|root| freeshow_data::Library::open(root).stage_layout_choices())
+        .unwrap_or_default();
+    let (ids, names): (Vec<_>, Vec<_>) = layouts
+        .iter()
+        .map(|(id, name)| {
+            let label = if layouts.iter().filter(|(_, other)| other == name).count() > 1 {
+                format!("{name} ({id})")
+            } else {
+                name.clone()
+            };
+            (id.clone(), label)
+        })
+        .unzip();
+    ui.set_stage_layout_ids(strings(&ids));
+    ui.set_stage_layout_names(strings(&names));
+}
+
 fn refresh_panels(ui: &ControlWindow, session: &Session) {
     STAGE_DIRTY.set(true);
     let settings = session.settings_form();
@@ -717,6 +738,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         text_case: inspector.typography.text_case.into(),
     });
     ui.set_stage_layout_name(session.stage.name.clone().into());
+    ui.set_stage_layout_background(session.stage.background.clone().into());
     let rows: Vec<StageRowData> = session
         .stage_rows()
         .into_iter()
@@ -2305,9 +2327,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
+            let ui = control.as_weak();
+            control.on_stage_layout_create(move || {
+                let result = session.borrow_mut().create_stage_layout();
+                if result.is_ok()
+                    && let Some(ui) = ui.upgrade()
+                {
+                    ui.set_stage_selected(0);
+                    refresh_stage_layout_choices(&ui, &session.borrow());
+                }
+                done(result);
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
+            let ui = control.as_weak();
             control.on_stage_set(move |id, key, value| {
                 let result = session.borrow_mut().stage_set(&id, &key, &value);
-                let name = session.borrow().stage_item_name(&id);
+                let current = session.borrow();
+                if result.is_ok()
+                    && key == "layout-name"
+                    && let Some(ui) = ui.upgrade()
+                {
+                    refresh_stage_layout_choices(&ui, &current);
+                }
+                let name = if id.is_empty() {
+                    current.stage.name.clone()
+                } else {
+                    current.stage_item_name(&id)
+                };
+                drop(current);
                 done(result.map(|()| format!("Saved {name}")));
             });
         }
@@ -2358,24 +2408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     names.insert(0, "No camera selected".into());
                     ui.set_stage_camera_names(strings(&names));
                     let current = session.borrow();
-                    let layouts = current
-                        .root
-                        .as_deref()
-                        .map(|root| freeshow_data::Library::open(root).stage_layout_choices())
-                        .unwrap_or_default();
-                    let names: Vec<_> = layouts
-                        .iter()
-                        .map(|(id, name)| {
-                            if layouts.iter().filter(|(_, other)| other == name).count() > 1 {
-                                format!("{name} ({id})")
-                            } else {
-                                name.clone()
-                            }
-                        })
-                        .collect();
-                    let ids: Vec<_> = layouts.into_iter().map(|(id, _)| id).collect();
-                    ui.set_stage_layout_ids(strings(&ids));
-                    ui.set_stage_layout_names(strings(&names));
+                    refresh_stage_layout_choices(&ui, &current);
                     refresh_panels(&ui, &current);
                 }
             });

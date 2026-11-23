@@ -4385,6 +4385,10 @@ impl Library {
         stage_layout::write_stage_layout_at(&self.stage_path(), id, layout)
     }
 
+    pub fn create_stage_layout(&self, layout: &StageLayout) -> std::io::Result<String> {
+        stage_layout::create_stage_layout(&self.stage_path(), layout)
+    }
+
     /// One layout from `Config/stage.json`.
     pub fn stage_layout(&self, id: &str) -> Option<stage_layout::StageLayout> {
         let text = fs::read_to_string(self.stage_path()).ok()?;

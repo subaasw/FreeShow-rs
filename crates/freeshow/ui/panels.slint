@@ -956,6 +956,7 @@ export component InspectorPanel inherits VerticalLayout {
 
 export component StageEditorPanel inherits Rectangle {
     in property <string> layout-name;
+    in property <string> layout-background;
     in property <string> layout-id;
     in property <[string]> layout-ids;
     in property <[string]> layout-names;
@@ -982,6 +983,7 @@ export component StageEditorPanel inherits Rectangle {
     in property <color> close-fill;
     callback set(string, string, string);
     callback select-layout(string);
+    callback create-layout();
     callback add(string);
     callback remove(string);
     callback close();
@@ -1040,6 +1042,31 @@ export component StageEditorPanel inherits Rectangle {
                             root.select-layout(root.layout-ids[self.current-index]);
                             self.follow();
                         }
+                    }
+                }
+                BoxButton {
+                    label: "New layout";
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { if (text-save.running) { text-save.save(); } root.create-layout(); }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Name"; text-color: root.text-color; min-width: 78px; }
+                    ValueEdit {
+                        horizontal-stretch: 1;
+                        shown: root.layout-name;
+                        accepted(value) => { root.set("", "layout-name", value); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Background"; text-color: root.text-color; min-width: 78px; }
+                    ValueEdit {
+                        horizontal-stretch: 1;
+                        shown: root.layout-background;
+                        accepted(value) => { root.set("", "layout-background", value); }
                     }
                 }
                 HorizontalLayout {
