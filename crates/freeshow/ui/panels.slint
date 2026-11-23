@@ -69,7 +69,7 @@ export struct InspectorData {
     w: int,
     h: int,
     background: string,
-    radius: int,
+    radius: string,
     box-shadow: string,
     backdrop-filter: string,
     line-height: int,
@@ -858,7 +858,13 @@ export component InspectorPanel inherits VerticalLayout {
     HorizontalLayout {
         spacing: 6px;
         FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 2000; shown: root.data.radius; edited(value) => { root.set("border-radius", value); } }
+        ValueEdit {
+            horizontal-stretch: 1;
+            enabled: root.data.has-item;
+            shown: root.data.radius;
+            placeholder-text: "0";
+            accepted(value) => { root.set("border-radius", value); }
+        }
         FieldLabel { text: "Line %"; text-color: root.text-color; min-width: 32px; }
         ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.line-height; edited(value) => { root.set("line-height", value); } }
     }

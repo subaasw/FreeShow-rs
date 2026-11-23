@@ -1149,14 +1149,32 @@ impl Session {
                     show.set_item_text_case(slide, item, &value)
                 })
             }
-            "left" | "top" | "width" | "height" | "border-radius" => {
+            "left" | "top" | "width" | "height" => {
                 let (min, max) = match key {
                     "width" | "height" => (1, 8000),
-                    "border-radius" => (0, 2000),
                     _ => (-8000, 8000),
                 };
                 let px = parse_int(&value, min, max)?;
                 let css = format!("{px}px");
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_box_css(slide, item, key, &css)
+                })
+            }
+            "border-radius" => {
+                if !value.is_empty() && !freeshow_output::valid_box_radius(&value) {
+                    return Err(format!("invalid corner radius {value:?}"));
+                }
+                let css = value
+                    .split_whitespace()
+                    .map(|token| {
+                        if token.ends_with("px") || token.ends_with('%') {
+                            token.to_string()
+                        } else {
+                            format!("{token}px")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 self.edit_current_item(|show, slide, item| {
                     show.set_item_box_css(slide, item, key, &css)
                 })
@@ -1862,6 +1880,50 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn inspector_keeps_percentage_and_per_corner_radii() {
+        let (dir, mut session) = library("inspector-radius");
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Rounded"));
+        session
+            .inspector_set("background-color", "#ff0000")
+            .unwrap();
+        session.inspector_set("border-radius", "50%").unwrap();
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.select_drawer(0);
+        assert!(session.pick_first_slide());
+        let area = session.inspector_form().item_box;
+        assert_eq!(area.radius, "50%");
+        let frame = crate::live::edit_frame(&session);
+        let red = freeshow_output::parse_color("#ff0000").unwrap();
+        assert_ne!(frame.pixel(area.left as u32, area.top as u32), red);
+        assert_eq!(
+            frame.pixel((area.left + area.width / 2) as u32, (area.top + 5) as u32),
+            red
+        );
+
+        session
+            .inspector_set("border-radius", "16 20% 8px 4%")
+            .unwrap();
+        let mixed = "16px 20% 8px 4%";
+        for invalid in [
+            "-1px",
+            "NaN",
+            "1px 2px 3px 4px 5px",
+            "20px / 30px",
+            "24px;top:0",
+        ] {
+            assert!(
+                session.inspector_set("border-radius", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(session.inspector_form().item_box.radius, mixed);
+        session.inspector_set("border-radius", "").unwrap();
+        assert!(session.inspector_form().item_box.radius.is_empty());
     }
 
     #[test]

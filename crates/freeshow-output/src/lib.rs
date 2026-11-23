@@ -20,7 +20,7 @@ pub use styled::{
     filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity, filter_saturate,
     filter_sepia, fit_raster, image_frame, over, parse_color, parse_style, placed_image,
     render_styled, scale_frames, slide_frames, slide_way, spin_frames, valid_backdrop_filter,
-    valid_box_gradient, valid_box_shadow, with_underlay,
+    valid_box_gradient, valid_box_radius, valid_box_shadow, with_underlay,
 };
 
 use font8x8::{BASIC_FONTS, LATIN_FONTS, UnicodeFonts};
