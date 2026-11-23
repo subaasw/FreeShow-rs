@@ -133,6 +133,7 @@ export component ControlWindow inherits Window {
     in property <[string]> stage-variable-names;
     in property <[string]> stage-output-ids;
     in property <[string]> stage-output-names;
+    in property <[string]> stage-camera-names;
     in property <string> stage-status;
     in-out property <int> stage-selected: 0;
     callback stage-set(string, string, string);
@@ -1148,6 +1149,7 @@ export component ControlWindow inherits Window {
             variable-names: root.stage-variable-names;
             output-ids: root.stage-output-ids;
             output-names: root.stage-output-names;
+            camera-names: root.stage-camera-names;
             preview: root.stage-preview;
             status: root.stage-status;
             selected <=> root.stage-selected;

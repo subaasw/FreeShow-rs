@@ -10,13 +10,13 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 11] = [
+pub const STAGE_ADD_KINDS: [&str; 12] = [
     "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable", "qr",
-    "output",
+    "output", "camera",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 11] = [
+pub const STAGE_ADD_NAMES: [&str; 12] = [
     "Current slide",
     "Next slide",
     "Slide notes",
@@ -28,6 +28,7 @@ pub const STAGE_ADD_NAMES: [&str; 11] = [
     "Variable",
     "QR code",
     "Output picture",
+    "Camera",
 ];
 
 /// Library `settings.json` values shown in Settings.
@@ -219,6 +220,9 @@ pub struct StageRow {
     pub qr_background: String,
     pub output_source: String,
     pub show_output_label: bool,
+    pub device_name: String,
+    pub flip_x: bool,
+    pub flip_y: bool,
     /// A text item's words, one line per line.
     pub text: String,
     pub seconds: bool,
@@ -269,7 +273,10 @@ pub(crate) fn stage_item_title(item: &freeshow_data::StageItemSpec) -> String {
         Kind::Variable => "Variable".to_string(),
         Kind::SlideTracker => "Slide number".to_string(),
         Kind::Media => "Picture or video".to_string(),
-        Kind::Camera => "Camera".to_string(),
+        Kind::Camera => item
+            .device_name
+            .as_deref()
+            .map_or_else(|| "Camera".to_string(), |name| format!("Camera: {name}")),
         Kind::CurrentOutput => "Output picture".to_string(),
         Kind::QrCode => "QR code".to_string(),
         Kind::Web => "Web page".to_string(),
@@ -1295,6 +1302,9 @@ impl Session {
                         .map_or_else(String::new, |qr| qr.background.clone()),
                     output_source: item.output_source.clone().unwrap_or_default(),
                     show_output_label: item.show_output_label,
+                    device_name: item.device_name.clone().unwrap_or_default(),
+                    flip_x: item.flip_x,
+                    flip_y: item.flip_y,
                     text: item.lines.join("\n"),
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
@@ -1324,6 +1334,9 @@ impl Session {
                 | "qr-background"
                 | "output-source"
                 | "show-output-label"
+                | "camera-device"
+                | "flip-x"
+                | "flip-y"
                 | "text"
                 | "seconds"
                 | "date-format"
@@ -1436,6 +1449,16 @@ impl Session {
             }
             "show-output-label" if item.kind == freeshow_data::StageItemKind::CurrentOutput => {
                 item.show_output_label = parse_bool(value)?;
+            }
+            "camera-device" if item.kind == freeshow_data::StageItemKind::Camera => {
+                item.device_name = (!value.is_empty()).then(|| value.to_string());
+                item.device_type = item.device_name.as_ref().map(|_| "camera".into());
+            }
+            "flip-x" if item.kind == freeshow_data::StageItemKind::Camera => {
+                item.flip_x = parse_bool(value)?;
+            }
+            "flip-y" if item.kind == freeshow_data::StageItemKind::Camera => {
+                item.flip_y = parse_bool(value)?;
             }
             "qr-text" | "qr-color" | "qr-background"
                 if item.kind == freeshow_data::StageItemKind::QrCode =>
@@ -1874,6 +1897,46 @@ mod tests {
         let qr = &saved[&layout_id]["items"][&id]["qr_code"];
         assert_eq!(qr["background"], "");
         assert_eq!(qr["custom"], true);
+    }
+
+    #[test]
+    fn stage_camera_edits_keep_the_device_and_orientation_after_reopening() {
+        let (dir, mut session) = library("stage-camera");
+        let id = session.add_stage_item("camera", "left:10px;").unwrap();
+        session
+            .stage_set(&id, "camera-device", "Front Camera")
+            .unwrap();
+        session.stage_set(&id, "fit", "cover").unwrap();
+        session.stage_set(&id, "flip-x", "true").unwrap();
+        session.stage_set(&id, "flip-y", "true").unwrap();
+
+        let library = freeshow_data::Library::open(dir.path());
+        let path = library.stage_path();
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let layout = saved.as_object().unwrap().keys().next().unwrap().clone();
+        assert_eq!(saved[&layout]["items"][&id]["device"]["type"], "camera");
+        saved[&layout]["items"][&id]["device"]["extension"] = serde_json::json!(1);
+        std::fs::write(&path, saved.to_string()).unwrap();
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        let row = reopened
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.kind, "camera");
+        assert_eq!(row.device_name, "Front Camera");
+        assert_eq!(row.fit, "cover");
+        assert!(row.flip_x && row.flip_y);
+        reopened.stage_set(&id, "camera-device", "").unwrap();
+        reopened.stage_set(&id, "flip-x", "false").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let item = &saved[&layout]["items"][&id];
+        assert_eq!(item["device"], serde_json::json!({"extension": 1}));
+        assert_eq!(item["flipped"], false);
+        assert_eq!(item["flippedY"], true);
     }
 
     #[test]
