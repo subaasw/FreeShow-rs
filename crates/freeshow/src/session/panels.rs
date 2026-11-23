@@ -1415,6 +1415,19 @@ impl Session {
         }
     }
 
+    pub fn stage_box_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.stage.items.iter().rposition(|item| {
+            let px =
+                |key, default| freeshow_data::css_px(&item.style, key).unwrap_or(default) as f32;
+            let (left, top) = (px("left", 0), px("top", 0));
+            item.enabled
+                && x >= left
+                && x < left + px("width", 1920)
+                && y >= top
+                && y < top + px("height", 1080)
+        })
+    }
+
     pub fn set_stage_box_geometry(
         &mut self,
         id: &str,
@@ -2004,6 +2017,8 @@ mod tests {
 
         let mut session = Session::open(dir.path().to_path_buf());
         let pixel = |session: &Session| crate::live::stage_frame(session).pixel(10, 10);
+        assert_eq!(session.stage_box_at(10.5, 10.5), Some(2));
+        assert_eq!(session.stage_box_at(160.0, 10.0), None);
         assert_eq!(
             pixel(&session),
             freeshow_output::parse_color("#0000c8").unwrap()
@@ -2011,6 +2026,10 @@ mod tests {
         assert!(session.move_stage_item("red", false).is_err());
         assert_eq!(session.move_stage_item("red", true).unwrap(), 1);
         assert_eq!(session.move_stage_item("red", true).unwrap(), 2);
+        assert_eq!(
+            session.stage.items[session.stage_box_at(10.0, 10.0).unwrap()].id,
+            "red"
+        );
         let mut session = Session::open(dir.path().to_path_buf());
         assert_eq!(
             pixel(&session),
@@ -2026,6 +2045,10 @@ mod tests {
         );
         session.stage_set("red", "enabled", "false").unwrap();
         let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(
+            session.stage.items[session.stage_box_at(10.0, 10.0).unwrap()].id,
+            "blue"
+        );
         assert_eq!(
             pixel(&session),
             freeshow_output::parse_color("#0000c8").unwrap()

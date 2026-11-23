@@ -2314,6 +2314,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let after_stage_edit = Rc::new(after_stage_edit);
         {
             let session = Rc::clone(&session);
+            control.on_stage_box_at(move |x, y| {
+                session
+                    .borrow()
+                    .stage_box_at(x, y)
+                    .map_or(-1, |index| index as i32)
+            });
+        }
+        {
+            let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
             control.on_stage_geometry(move |id, first, second, resize| {
                 let saved = session
