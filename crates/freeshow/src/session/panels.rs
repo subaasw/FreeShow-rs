@@ -1415,16 +1415,31 @@ impl Session {
         }
     }
 
-    pub fn position_stage_item(&mut self, id: &str, left: i32, top: i32) -> bool {
+    pub fn set_stage_box_geometry(
+        &mut self,
+        id: &str,
+        first: i32,
+        second: i32,
+        resize: bool,
+    ) -> bool {
         let Some(item) = self.stage.items.iter().find(|item| item.id == id) else {
             return false;
         };
+        let (horizontal, vertical, minimum) = if resize {
+            ("width", "height", 1)
+        } else {
+            ("left", "top", -8000)
+        };
         let style = freeshow_data::css_set(
             &item.style,
-            "left",
-            &format!("{}px", left.clamp(-8000, 8000)),
+            horizontal,
+            &format!("{}px", first.clamp(minimum, 8000)),
         );
-        let style = freeshow_data::css_set(&style, "top", &format!("{}px", top.clamp(-8000, 8000)));
+        let style = freeshow_data::css_set(
+            &style,
+            vertical,
+            &format!("{}px", second.clamp(minimum, 8000)),
+        );
         self.set_stage_item_style(id, &style)
     }
 
@@ -1939,7 +1954,8 @@ mod tests {
         session.stage_set(&id, "left", "400").unwrap();
         session.stage_set(&id, "color", "#ff0000").unwrap();
         assert!(session.stage_set(&id, "color", "not a color!").is_err());
-        assert!(session.position_stage_item(&id, 410, -90));
+        assert!(session.set_stage_box_geometry(&id, 410, -90, false));
+        assert!(session.set_stage_box_geometry(&id, 450, 180, true));
         let mut session = Session::open(dir.path().to_path_buf());
         let row = session
             .stage_rows()
@@ -1947,7 +1963,7 @@ mod tests {
             .find(|row| row.id == id)
             .unwrap();
         assert_eq!((row.kind.as_str(), row.left, row.top), ("clock", 410, -90));
-        assert_eq!((row.width, row.height), (300, 100));
+        assert_eq!((row.width, row.height), (450, 180));
         assert_eq!(row.color, "#ff0000");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
@@ -2197,7 +2213,8 @@ mod tests {
 
         assert!(session.stage_set("text", "text", "After").is_err());
         assert!(session.stage_set("text", "left", "20").is_err());
-        assert!(!session.position_stage_item("text", 20, 30));
+        assert!(!session.set_stage_box_geometry("text", 20, 30, false));
+        assert!(!session.set_stage_box_geometry("text", 300, 200, true));
         assert!(session.add_stage_item("text", "").is_none());
         assert!(!session.remove_stage_item("text"));
         assert_eq!(session.stage, stage);

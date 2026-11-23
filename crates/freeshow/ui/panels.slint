@@ -988,7 +988,7 @@ export component StageEditorPanel inherits Rectangle {
     callback create-layout(bool);
     callback add(string);
     callback move-item(string, bool);
-    callback position-item(string, int, int);
+    callback edit-geometry(string, int, int, bool);
     callback remove(string);
     callback close();
     property <int> current-index: min(root.selected, root.rows.length - 1);
@@ -1452,12 +1452,19 @@ export component StageEditorPanel inherits Rectangle {
                             image-fit: contain;
                         }
                         Rectangle {
-                            x: (drag.preview-x) * 1px * preview-box.scale;
-                            y: (drag.preview-y) * 1px * preview-box.scale;
-                            width: root.current.w * 1px * preview-box.scale;
-                            height: root.current.h * 1px * preview-box.scale;
+                            x: drag.preview-x * 1px * preview-box.scale;
+                            y: drag.preview-y * 1px * preview-box.scale;
+                            width: drag.preview-width * 1px * preview-box.scale;
+                            height: drag.preview-height * 1px * preview-box.scale;
                             border-width: 2px;
                             border-color: root.accent;
+                            Rectangle {
+                                width: drag.handle-size;
+                                height: self.width;
+                                x: parent.width - self.width;
+                                y: parent.height - self.height;
+                                background: root.accent;
+                            }
                         }
                         drag := TouchArea {
                             x: root.current.x * 1px * preview-box.scale;
@@ -1466,21 +1473,36 @@ export component StageEditorPanel inherits Rectangle {
                             height: root.current.h * 1px * preview-box.scale;
                             property <string> source;
                             property <string> source-layout;
+                            property <bool> resizing;
+                            property <length> handle-size: min(10px, min(self.width, self.height) * 0.45);
+                            property <bool> over-handle: self.mouse-x >= self.width - self.handle-size && self.mouse-y >= self.height - self.handle-size;
                             property <bool> same-box: self.source == root.current.id && self.source-layout == root.layout-id;
                             property <length> dx: self.mouse-x - self.pressed-x;
                             property <length> dy: self.mouse-y - self.pressed-y;
                             property <bool> moved-far: abs(self.dx) > 3px || abs(self.dy) > 3px;
-                            property <int> drop-x: clamp(root.current.x + round(self.dx / max(0.001px, preview-box.scale * 1px)), -8000, 8000);
-                            property <int> drop-y: clamp(root.current.y + round(self.dy / max(0.001px, preview-box.scale * 1px)), -8000, 8000);
-                            property <int> preview-x: self.pressed && self.same-box && self.moved-far ? self.drop-x : root.current.x;
-                            property <int> preview-y: self.pressed && self.same-box && self.moved-far ? self.drop-y : root.current.y;
-                            mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                            property <int> stage-dx: round(self.dx / max(0.001px, preview-box.scale * 1px));
+                            property <int> stage-dy: round(self.dy / max(0.001px, preview-box.scale * 1px));
+                            property <int> drop-x: clamp(root.current.x + self.stage-dx, -8000, 8000);
+                            property <int> drop-y: clamp(root.current.y + self.stage-dy, -8000, 8000);
+                            property <int> drop-width: clamp(root.current.w + self.stage-dx, 1, 8000);
+                            property <int> drop-height: clamp(root.current.h + self.stage-dy, 1, 8000);
+                            property <bool> preview-drag: self.pressed && self.same-box && self.moved-far;
+                            property <int> preview-x: self.preview-drag && !self.resizing ? self.drop-x : root.current.x;
+                            property <int> preview-y: self.preview-drag && !self.resizing ? self.drop-y : root.current.y;
+                            property <int> preview-width: self.preview-drag && self.resizing ? self.drop-width : root.current.w;
+                            property <int> preview-height: self.preview-drag && self.resizing ? self.drop-height : root.current.h;
+                            mouse-cursor: (self.pressed ? self.resizing : self.over-handle) ? MouseCursor.se-resize : self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
                             pointer-event(event) => {
                                 if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                     self.source = root.current.id;
                                     self.source-layout = root.layout-id;
+                                    self.resizing = self.over-handle;
                                 } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left && self.same-box && self.moved-far) {
-                                    root.position-item(self.source, self.drop-x, self.drop-y);
+                                    if (self.resizing) {
+                                        root.edit-geometry(self.source, self.drop-width, self.drop-height, true);
+                                    } else {
+                                        root.edit-geometry(self.source, self.drop-x, self.drop-y, false);
+                                    }
                                 }
                             }
                         }
