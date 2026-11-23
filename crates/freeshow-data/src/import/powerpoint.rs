@@ -640,6 +640,7 @@ fn find_background(
     let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
     let mut gradient_angle = 90.0;
     let mut gradient_scaled = false;
+    let mut gradient_tile = [0.0; 4];
     let mut gradient_path = None;
     let mut gradient_insets = [0.0; 4];
     let mut gs_pos = None;
@@ -695,6 +696,11 @@ fn find_background(
                                 Some("1" | "true")
                             );
                         }
+                        (Some("gradFill"), "tileRect") => {
+                            gradient_tile = theme::gradient_insets(|key| {
+                                attribute(&element, key).and_then(|value| theme::percentage(&value))
+                            });
+                        }
                         (Some("gradFill"), "path") => {
                             gradient_path =
                                 Some(attribute(&element, "path").unwrap_or_else(|| "rect".into()));
@@ -736,6 +742,7 @@ fn find_background(
         GradientFill {
             linear_angle: gradient_path.is_none().then_some(gradient_angle),
             linear_scaled: gradient_scaled,
+            tile_insets: gradient_tile,
             focus: gradient_path
                 .as_deref()
                 .and_then(|path| theme::GradientFocus::from_path(path, gradient_insets)),
@@ -1237,6 +1244,7 @@ mod tests {
                         <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                     </a:gsLst>
                     <a:lin ang="2700000" scaled="true"/>
+                    <a:tileRect l="25%" t="10000"/>
                 </a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Scaled angle</a:t></a:r></a:p></p:cSld></p:sld>"#,
             ),
             (
@@ -1285,6 +1293,7 @@ mod tests {
                                     <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                                 </a:gsLst>
                                 <a:lin ang="2730000" scaled="1"/>
+                                <a:tileRect l="-10000" r="60%"/>
                             </a:gradFill>
                         </a:bgFillStyleLst>
                     </a:fmtScheme>
@@ -1301,7 +1310,10 @@ mod tests {
                 .unwrap()
                 .contains("--pptx-linear-scaled")
         );
-        for (slide, angle) in [("s6", "135"), ("s7", "135.5")] {
+        for (slide, angle, tile) in [
+            ("s6", "135", "0.25 0.1 0 0"),
+            ("s7", "135.5", "-0.1 0 0.6 0"),
+        ] {
             let style = show.show["slides"][slide]["items"][0]["style"]
                 .as_str()
                 .unwrap();
@@ -1309,6 +1321,10 @@ mod tests {
                 style.contains(&format!(
                     "linear-gradient({angle}deg, #FF0000 0%, #0000FF 100%);--pptx-linear-scaled:1;"
                 )),
+                "{style}"
+            );
+            assert!(
+                style.contains(&format!("--pptx-gradient-tile:{tile};")),
                 "{style}"
             );
         }

@@ -51,6 +51,7 @@ pub struct BoxStyle {
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_linear_scaled: bool,
+    pptx_gradient_tile: Option<[f32; 4]>,
     pptx_radial_focus: Option<[f32; 2]>,
     pptx_rectangular_focus: Option<[f32; 4]>,
 }
@@ -181,6 +182,7 @@ impl Default for BoxStyle {
             rotation_deg: 0.0,
             gradient: None,
             pptx_linear_scaled: false,
+            pptx_gradient_tile: None,
             pptx_radial_focus: None,
             pptx_rectangular_focus: None,
         }
@@ -392,6 +394,9 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 }
             }
             "--pptx-linear-scaled" => style.pptx_linear_scaled = value == "1",
+            "--pptx-gradient-tile" => {
+                style.pptx_gradient_tile = parse_rect_insets(value);
+            }
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
             "--shape-fill-polygon" => {
                 style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
@@ -3460,19 +3465,43 @@ fn fill_item_background(
         && !gradient.stops.is_empty()
     {
         let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
-        let cx = x as f32 + w as f32 / 2.0;
-        let cy = y as f32 + h as f32 / 2.0;
-        let radius_to_corner = (w as f32).hypot(h as f32) / 2.0;
+        let (box_w, box_h) = (w as f32, h as f32);
+        let tile = style
+            .pptx_gradient_tile
+            .and_then(|[left, top, right, bottom]| {
+                let geometry = [
+                    box_w * left,
+                    box_h * top,
+                    box_w * (1.0 - left - right),
+                    box_h * (1.0 - top - bottom),
+                ];
+                (geometry.iter().all(|value| value.is_finite())
+                    && geometry[2] >= f32::MIN_POSITIVE
+                    && geometry[3] >= f32::MIN_POSITIVE)
+                    .then_some(geometry)
+            });
+        let [_, _, fill_w, fill_h] = tile.unwrap_or([0.0, 0.0, box_w, box_h]);
+        let tile_coordinates = tile.map(|[left, top, _, _]| {
+            let columns = (x0..x1)
+                .map(|px| mirrored_tile_coordinate(px as f32 - x as f32 + 0.5 - left, fill_w))
+                .collect::<Vec<_>>();
+            let rows = (y0..y1)
+                .map(|py| mirrored_tile_coordinate(py as f32 - y as f32 + 0.5 - top, fill_h))
+                .collect::<Vec<_>>();
+            (columns, rows)
+        });
+        let (cx, cy) = (fill_w / 2.0, fill_h / 2.0);
+        let radius_to_corner = fill_w.hypot(fill_h) / 2.0;
         let linear = gradient.linear_angle_deg.map(|angle| {
             // Screen y grows downward. CSS 0deg points up.
             let (mut dx, cos) = angle.to_radians().sin_cos();
             let mut dy = -cos;
             if style.pptx_linear_scaled {
                 // PowerPoint scales the gradient as if stretching a square fill.
-                dx /= w as f32;
-                dy /= h as f32;
+                dx /= fill_w;
+                dy /= fill_h;
             }
-            let length = (w as f32 * dx.abs() + h as f32 * dy.abs()).max(1.0);
+            let length = fill_w * dx.abs() + fill_h * dy.abs();
             (dx / length, dy / length)
         });
         let focus = style
@@ -3481,13 +3510,7 @@ fn fill_item_background(
         let rectangular_focus = style
             .pptx_rectangular_focus
             .map(|[left, top, right, bottom]| {
-                [
-                    left * w as f32,
-                    top * h as f32,
-                    right * w as f32,
-                    bottom * h as f32,
-                ]
-                .map(|margin| {
+                [left * fill_w, top * fill_h, right * fill_w, bottom * fill_h].map(|margin| {
                     if margin > 0.0 {
                         margin.recip()
                     } else {
@@ -3496,19 +3519,22 @@ fn fill_item_background(
                 })
             });
         let mut draw_stop = |px, py| {
-            let offset_x = px as f32 + 0.5 - cx;
-            let offset_y = py as f32 + 0.5 - cy;
+            let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
+                (columns[(px - x0) as usize], rows[(py - y0) as usize])
+            } else {
+                (px as f32 - x as f32 + 0.5, py as f32 - y as f32 + 0.5)
+            };
+            let offset_x = local_x - cx;
+            let offset_y = local_y - cy;
             let position = match linear {
                 Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
                 None => {
                     if let Some([left, top, right, bottom]) = rectangular_focus {
                         // Each stop lies on the rectangle interpolated between the focus and the box.
-                        let local_x = (px - x) as f32 + 0.5;
-                        let local_y = (py - y) as f32 + 0.5;
                         1.0 - (local_x * left)
                             .min(local_y * top)
-                            .min((w as f32 - local_x) * right)
-                            .min((h as f32 - local_y) * bottom)
+                            .min((fill_w - local_x) * right)
+                            .min((fill_h - local_y) * bottom)
                             .min(1.0)
                     } else if let Some((fx, fy, remaining)) = focus {
                         // Intersect the ray from the focus through this pixel with the outer circle.
@@ -3645,15 +3671,24 @@ fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
     (components.next().is_none() && x * x + y * y < 1.0).then_some([x, y])
 }
 
-fn parse_rectangular_focus(value: &str) -> Option<[f32; 4]> {
+fn mirrored_tile_coordinate(offset: f32, size: f32) -> f32 {
+    // Office mirrors alternate tiles on both axes.
+    let phase = (f64::from(offset) / f64::from(size)).rem_euclid(2.0);
+    (phase.min(2.0 - phase) * f64::from(size)) as f32
+}
+
+fn parse_rect_insets(value: &str) -> Option<[f32; 4]> {
     let mut components = value.split_whitespace();
     let mut edges = [0.0; 4];
     for edge in &mut edges {
         *edge = components.next()?.parse::<f32>().ok()?;
     }
-    let [left, top, right, bottom] = edges;
-    (components.next().is_none()
-        && edges.iter().all(|&edge| (0.0..=1.0).contains(&edge))
+    (components.next().is_none() && edges.iter().all(|edge| edge.is_finite())).then_some(edges)
+}
+
+fn parse_rectangular_focus(value: &str) -> Option<[f32; 4]> {
+    let edges @ [left, top, right, bottom] = parse_rect_insets(value)?;
+    (edges.iter().all(|&edge| (0.0..=1.0).contains(&edge))
         && left + right <= 1.0
         && top + bottom <= 1.0)
         .then_some(edges)
@@ -4097,6 +4132,35 @@ mod tests {
         assert!(ordinary.pixel(0, 539).b < 100);
         assert!(scaled.pixel(0, 0).r > 250);
         assert!(scaled.pixel(959, 539).b > 250);
+    }
+
+    #[test]
+    fn powerpoint_gradient_tiles_mirror_on_both_axes() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:linear-gradient(135deg, #FF0000 0%, #0000FF 100%);--pptx-gradient-tile:0.5 0.5 0 0;",
+        ));
+        assert_eq!(frame.pixel(100, 340), frame.pixel(859, 340));
+        assert_eq!(frame.pixel(530, 59), frame.pixel(530, 480));
+        assert!(frame.pixel(479, 269).r > 250);
+        assert!(frame.pixel(0, 0).b > 250);
+        assert!(frame.pixel(959, 539).b > 250);
+
+        let outset = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:linear-gradient(90deg, #FF0000 0%, #0000FF 100%);--pptx-gradient-tile:-0.25 0 0.75 0;",
+        ));
+        assert!((126..=129).contains(&outset.pixel(0, 270).b));
+        assert!(outset.pixel(239, 270).b > 250);
+        assert!(outset.pixel(719, 270).r > 250);
+    }
+
+    #[test]
+    fn powerpoint_rectangular_focus_repeats_inside_each_tile() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%);--pptx-rectangular-focus:0.5 0.5 0.5 0.5;--pptx-gradient-tile:0.5 0 0 0;",
+        ));
+        assert!(frame.pixel(239, 269).r > 250);
+        assert!(frame.pixel(719, 269).r > 250);
+        assert!(frame.pixel(479, 269).b > 250);
     }
 
     #[test]

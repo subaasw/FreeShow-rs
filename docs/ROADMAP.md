@@ -149,6 +149,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint circular gradients with an off-center point focus.
 - [x] PowerPoint rectangular gradients with a focus inside the slide.
 - [x] PowerPoint clockwise linear gradient angles and aspect-ratio scaling.
+- [x] PowerPoint gradient tile rectangles with mirrored repeats and signed insets.
 - [ ] PowerPoint custom gradient geometry and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
