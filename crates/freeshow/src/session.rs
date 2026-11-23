@@ -6627,7 +6627,7 @@ impl Session {
             other => (other, 0),
         };
         let id = (1..)
-            .map(|n| format!("{kind}{n}"))
+            .map(|_| freeshow_data::new_id())
             .find(|id| self.stage.items.iter().all(|item| &item.id != id))?;
         let kind = match kind_name {
             "notes" => freeshow_data::StageItemKind::Notes,

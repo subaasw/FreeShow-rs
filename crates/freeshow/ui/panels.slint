@@ -985,9 +985,11 @@ export component StageEditorPanel inherits Rectangle {
     callback select-layout(string);
     callback create-layout();
     callback add(string);
+    callback move-item(string, bool);
     callback remove(string);
     callback close();
-    property <StageRowData> current: root.rows[min(root.selected, root.rows.length - 1)];
+    property <int> current-index: min(root.selected, root.rows.length - 1);
+    property <StageRowData> current: root.rows[root.current-index];
     property <bool> pie-chart: current.chart-kind == "pie" || current.chart-kind == "doughnut" || current.chart-kind == "donut";
     property <string> add-kind: "slide";
     // Typing in a text item saves after a short pause, not on every key.
@@ -1370,6 +1372,20 @@ export component StageEditorPanel inherits Rectangle {
                         }
                     }
                     Row {
+                        HorizontalLayout {
+                            colspan: 3;
+                            spacing: 6px;
+                            Button {
+                                text: "Move backward";
+                                enabled: root.current-index > 0;
+                                clicked => { if (text-save.running) { text-save.save(); } root.move-item(root.current.id, false); }
+                            }
+                            Button {
+                                text: "Move forward";
+                                enabled: root.current-index < root.rows.length - 1;
+                                clicked => { if (text-save.running) { text-save.save(); } root.move-item(root.current.id, true); }
+                            }
+                        }
                         BoxButton {
                             col: 3;
                             label: "Remove item";

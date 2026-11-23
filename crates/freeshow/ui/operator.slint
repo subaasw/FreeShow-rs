@@ -144,6 +144,7 @@ export component ControlWindow inherits Window {
     callback stage-layout-select(string);
     callback stage-layout-create();
     callback stage-add(string);
+    callback stage-move(string, bool);
     callback stage-remove(string);
     callback save-shortcuts(string);
     callback save-layouts(string);
@@ -1171,6 +1172,7 @@ export component ControlWindow inherits Window {
             select-layout(id) => { root.stage-layout-select(id); }
             create-layout => { root.stage-layout-create(); }
             add(kind) => { root.stage-add(kind); }
+            move-item(id, forward) => { root.stage-move(id, forward); }
             remove(id) => { root.stage-remove(id); }
             close => { root.show-stage-editor = false; window-keys.focus(); }
         }
