@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use roxmltree::{Document, Node};
 
-use super::{Archive, invalid, read_xml, relationships};
+use super::{Archive, invalid, read_xml, relationships, text::TextBody};
 use crate::DataError;
 
 #[derive(Clone)]
@@ -550,6 +550,8 @@ type ColorMap = HashMap<String, String>;
 #[derive(Default)]
 struct Theme {
     colors: HashMap<String, ResolvedColor>,
+    major_font: Option<String>,
+    minor_font: Option<String>,
     fills: Vec<Option<StyleFill>>,
     backgrounds: Vec<Option<StyleFill>>,
 }
@@ -578,6 +580,16 @@ impl Theme {
         if let Some(format) = child(elements, "fmtScheme") {
             theme.fills = style_fills(format, "fillStyleLst");
             theme.backgrounds = style_fills(format, "bgFillStyleLst");
+        }
+        if let Some(fonts) = child(elements, "fontScheme") {
+            let latin = |label| {
+                child(fonts, label)
+                    .and_then(|font| child(font, "latin"))
+                    .and_then(|latin| latin.attribute("typeface"))
+                    .map(str::to_owned)
+            };
+            theme.major_font = latin("majorFont");
+            theme.minor_font = latin("minorFont");
         }
         Ok(theme)
     }
@@ -608,18 +620,37 @@ fn style_fills(format: Node<'_, '_>, name: &str) -> Vec<Option<StyleFill>> {
         .collect()
 }
 
-fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
+pub(super) fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
     node.children().find(|node| node.has_tag_name(name))
 }
 
 #[derive(Clone, Default)]
-struct Context {
+pub(super) struct Context {
     theme: Option<Arc<Theme>>,
     master: ColorMap,
     colors: ColorMap,
 }
 
 impl Context {
+    pub(super) fn text_color(&self, node: Node<'_, '_>) -> Option<String> {
+        Color::in_node(node)?.hex_in(|slot| self.color(slot))
+    }
+
+    pub(super) fn font_family<'a>(&'a self, typeface: &'a str) -> Option<&'a str> {
+        let typeface = match typeface {
+            "+mj-lt" => self.theme.as_ref()?.major_font.as_deref()?,
+            "+mn-lt" => self.theme.as_ref()?.minor_font.as_deref()?,
+            other if !other.starts_with('+') => other,
+            _ => return None,
+        }
+        .trim();
+        (!typeface.is_empty()
+            && !typeface
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, ';' | ',')))
+        .then_some(typeface)
+    }
+
     fn color(&self, slot: &str) -> Option<ResolvedColor> {
         let key = self.colors.get(slot).map_or_else(
             || match slot {
@@ -667,6 +698,12 @@ pub(super) struct ThemeReader {
     xml_bytes: usize,
 }
 
+#[derive(Default)]
+pub(super) struct ObjectStyle {
+    pub fill: Option<String>,
+    pub text: Option<TextBody>,
+}
+
 impl ThemeReader {
     pub(super) fn resolve(
         &mut self,
@@ -701,12 +738,13 @@ impl ThemeReader {
         Ok(fill.resolve(|slot| context.color(slot), false))
     }
 
-    pub(super) fn object_fills(
+    pub(super) fn object_styles(
         &mut self,
         archive: &mut Archive<'_>,
         slide: &str,
         xml: &str,
-    ) -> Result<HashMap<u64, String>, DataError> {
+        px_per_point: f64,
+    ) -> Result<HashMap<u64, ObjectStyle>, DataError> {
         if !xml.contains("spPr") {
             return Ok(HashMap::new());
         }
@@ -737,10 +775,6 @@ impl ThemeReader {
                 )
             });
             let fill = match direct {
-                Some(fill) if fill.has_tag_name("noFill") => {
-                    styles.insert(shape.range().start as u64, String::new());
-                    continue;
-                }
                 Some(fill) if fill.has_tag_name("solidFill") => Color::in_node(fill)
                     .and_then(|color| color.hex_in(scheme))
                     .map(ResolvedFill::Color),
@@ -753,12 +787,15 @@ impl ThemeReader {
                     .and_then(|index| index.parse().ok())
                     .and_then(|index| context.style(index, placeholder.as_ref(), ellipse)),
             };
-            if let Some(fill) = fill {
-                let style = match fill {
-                    ResolvedFill::Color(fill) => format!("background:{fill};"),
-                    ResolvedFill::Gradient { style, .. } => style,
-                };
-                styles.insert(shape.range().start as u64, style);
+            let fill = match fill {
+                Some(ResolvedFill::Color(fill)) => Some(format!("background:{fill};")),
+                Some(ResolvedFill::Gradient { style, .. }) => Some(style),
+                None if direct.is_some() => Some(String::new()),
+                None => None,
+            };
+            let text = TextBody::read(shape, &context, px_per_point);
+            if fill.is_some() || text.is_some() {
+                styles.insert(shape.range().start as u64, ObjectStyle { fill, text });
             }
         }
         Ok(styles)

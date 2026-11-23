@@ -15,8 +15,9 @@ use super::{Section, attribute, file_stem_str, local_name, show_file};
 
 use crate::{DataError, ShowFile};
 
+mod text;
 mod theme;
-use theme::{Color, GradientFill, ResolvedFill, ThemeReader};
+use theme::{Color, GradientFill, ObjectStyle, ResolvedFill, ThemeReader};
 
 const XML_LIMIT: u64 = 8 * 1024 * 1024;
 const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
@@ -89,8 +90,8 @@ pub(super) fn import(
         if slide_xml_bytes > 64 * 1024 * 1024 {
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
-        let object_fills = themes.object_fills(&mut archive, part, &xml)?;
-        let mut content = slide_content(&xml, &size, object_fills)?;
+        let object_styles = themes.object_styles(&mut archive, part, &xml, size.px_y(12_700.0))?;
+        let mut content = slide_content(&xml, &size, object_styles)?;
         let lines = std::mem::take(&mut content.lines);
         let disabled = content.hidden;
         let found = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
@@ -376,7 +377,7 @@ struct SlideObject {
     flip_y: bool,
     group_matrix: Option<[f64; 4]>,
     lines: Vec<String>,
-    fill_style: Option<String>,
+    style: ObjectStyle,
     ellipse: bool,
     radius: f64,
     crop: [f64; 4],
@@ -513,7 +514,7 @@ impl SlideObject {
             style.push_str(&format!("--pptx-group-matrix:{a} {b} {c} {d};"));
         }
         if !matches!(self.kind, ObjectKind::Picture) {
-            if let Some(fill) = &self.fill_style {
+            if let Some(fill) = &self.style.fill {
                 style.push_str(fill);
             }
             if self.flip_x {
@@ -549,13 +550,16 @@ impl SlideObject {
             })),
             ObjectKind::Text => {
                 style.push_str("text-align:center;font-size:60px;");
-                let lines = self
-                    .lines
-                    .iter()
-                    .map(|line| json!({ "align": "", "text": [{ "value": line, "style": "" }] }))
-                    .collect::<Vec<_>>();
+                let (align, lines) = if let Some(text) = self.style.text {
+                    (text.align, text.lines)
+                } else {
+                    (String::new(), self.lines.iter().map(|line| {
+                        json!({ "align": "", "text": [{ "value": line, "style": "" }] })
+                    }).collect())
+                };
                 Some(json!({
                     "style": style,
+                    "align": align,
                     "lines": lines
                 }))
             }
@@ -566,7 +570,7 @@ impl SlideObject {
 fn slide_content(
     xml: &str,
     size: &SlideSize,
-    mut fills: HashMap<u64, String>,
+    mut styles: HashMap<u64, ObjectStyle>,
 ) -> Result<SlideContent, DataError> {
     let (lines, hidden) = slide_text(xml)?;
     let mut reader = Reader::from_str(xml);
@@ -616,7 +620,7 @@ fn slide_content(
                             flip_y: false,
                             group_matrix: None,
                             lines: Vec::new(),
-                            fill_style: fills.remove(&start),
+                            style: styles.remove(&start).unwrap_or_default(),
                             ellipse: false,
                             radius: 0.0,
                             crop: [0.0; 4],
@@ -677,14 +681,14 @@ fn slide_content(
                             }
                         }
                         (Some("solidFill"), "srgbClr")
-                            if object.fill_style.is_none()
+                            if object.style.fill.is_none()
                                 && stack.len() >= 2
                                 && stack[stack.len() - 2] == "spPr" =>
                         {
                             if let Some(val) = attribute(&element, "val")
                                 && val.len() == 6
                             {
-                                object.fill_style = Some(format!("background:#{val};"));
+                                object.style.fill = Some(format!("background:#{val};"));
                             }
                         }
                         (Some("blipFill"), "blip") => {
@@ -742,10 +746,11 @@ fn slide_content(
                     && stack.last().map(String::as_str) == Some(name.as_str())
                     && let Some(mut object) = current.take()
                 {
-                    if matches!(object.kind, ObjectKind::Shape) && !object.lines.is_empty() {
+                    let has_text = object.style.text.is_some() || !object.lines.is_empty();
+                    if matches!(object.kind, ObjectKind::Shape) && has_text {
                         object.kind = ObjectKind::Text;
                     }
-                    if object.width > 0.0 || object.height > 0.0 || !object.lines.is_empty() {
+                    if object.width > 0.0 || object.height > 0.0 || has_text {
                         if let Some(&group) = groups.last() {
                             object.apply_group(group);
                         }
@@ -1793,8 +1798,21 @@ mod tests {
                             <a:gs pos="0"><a:schemeClr val="accent1"/></a:gs>
                             <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
                         </a:gsLst><a:lin ang="2700000" scaled="1"/></a:gradFill>
-                    </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef></p:style>
-                    <p:txBody><a:p><a:r><a:t>Caption</a:t></a:r></a:p></p:txBody></p:sp>
+                    </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef>
+                        <a:fontRef idx="major"><a:schemeClr val="accent1"/></a:fontRef>
+                    </p:style>
+                    <p:txBody><a:bodyPr anchor="b"/><a:lstStyle>
+                        <a:lvl1pPr algn="r"><a:defRPr sz="2400" b="1"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
+                    </a:lstStyle>
+                    <a:p><a:pPr><a:defRPr i="true"/></a:pPr>
+                        <a:r><a:t xml:space="preserve">Caption </a:t></a:r>
+                        <a:r><a:rPr b="0" sz="1800" u="sng" strike="sngStrike" spc="50">
+                            <a:latin typeface="+mj-lt"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+                            <a:highlight><a:srgbClr val="FFFF00"/></a:highlight>
+                        </a:rPr><a:t>accent</a:t></a:r>
+                        <a:br/><a:fld id="field"><a:t>Cached field</a:t></a:fld>
+                    </a:p><a:p/><a:p><a:pPr algn="ctr"/><a:r><a:t>Final</a:t></a:r></a:p>
+                    </p:txBody></p:sp>
                     <p:sp><p:spPr>
                         <a:xfrm><a:ext cx="4572000" cy="1371600"/></a:xfrm>
                         <a:prstGeom prst="ellipse"/>
@@ -1811,6 +1829,8 @@ mod tests {
             ("ppt/slideMasters/_rels/master.xml.rels", br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme.xml"/></Relationships>"#),
             ("ppt/theme/theme.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
                 <a:clrScheme><a:accent1><a:srgbClr val="00AA00"/></a:accent1></a:clrScheme>
+                <a:fontScheme><a:majorFont><a:latin typeface="Georgia"/></a:majorFont>
+                    <a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
                 <a:fmtScheme><a:fillStyleLst><a:gradFill rotWithShape="0"><a:gsLst>
                     <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
                     <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
@@ -1829,7 +1849,27 @@ mod tests {
         assert!(direct.contains("--pptx-gradient-fixed:1;"));
         assert!(direct.contains("transform:rotate(45deg);"));
         assert!(direct.contains("--pptx-fill-flip-x:1;"));
-        assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Caption");
+        assert_eq!(items[0]["align"], "align-items:flex-end;");
+        assert_eq!(items[0]["lines"][0]["align"], "right");
+        assert_eq!(
+            items[0]["lines"][0]["text"][0],
+            json!({
+                "value": "Caption ",
+                "style": "font-family:Arial;font-size:48px;color:#00AA00;font-weight:bold;font-style:italic;"
+            })
+        );
+        assert_eq!(
+            items[0]["lines"][0]["text"][1],
+            json!({
+                "value": "accent",
+                "style": "font-family:Georgia;font-size:36px;color:#FF0000;background-color:#FFFF00;font-weight:normal;font-style:italic;text-decoration:underline line-through;letter-spacing:1px;"
+            })
+        );
+        assert_eq!(items[0]["lines"][1]["align"], "right");
+        assert_eq!(items[0]["lines"][1]["text"][0]["value"], "Cached field");
+        assert_eq!(items[0]["lines"][2]["text"][0]["value"], " ");
+        assert_eq!(items[0]["lines"][3]["align"], "center");
+        assert_eq!(items[0]["lines"][3]["text"][0]["value"], "Final");
         let themed = items[1]["style"].as_str().unwrap();
         assert!(themed.contains("border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)"), "{themed}");
         assert!(themed.contains("--pptx-shape-ellipse:1;"));
