@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use freeshow_data::{
     AUDIO_DIR, BibleFile, Catalog, DrawStroke, EffectSpec, FreeShowPreferences, Library, MEDIA_DIR,
-    MediaEntry, MixStep, OutlinedBook, PlayerVideo, ProjectsFile, ShowFile, SlideBackdrop,
-    SlideJump, StageLayout, TimedCueTarget, TimelineCue, TimerStep, VerseHit, default_stage,
-    new_id, parse_timeline_text, timeline_cues_from_show, timeline_for_show, timeline_text_from,
+    MediaEntry, MediaEntryKind, MixStep, OutlinedBook, PlayerVideo, ProjectsFile, ShowFile,
+    SlideBackdrop, SlideJump, StageLayout, TimedCueTarget, TimelineCue, TimerStep, VerseHit,
+    default_stage, new_id, parse_timeline_text, timeline_cues_from_show, timeline_for_show,
+    timeline_text_from,
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 
@@ -4395,15 +4396,17 @@ impl Session {
         if !edit(show, &slide_id, item) {
             return false;
         }
-        let Some(path) = show.path.clone() else {
-            self.commit_edit(snap);
-            return true;
-        };
-        let ok = show.save(&path).is_ok();
-        if ok {
-            self.commit_edit(snap);
+        if let Some(path) = &show.path
+            && let Err(error) = show.save(path)
+        {
+            if let Some(snap) = snap {
+                show.show = snap.show;
+            }
+            tracing::error!(%error, "could not save the item edit");
+            return false;
         }
-        ok
+        self.commit_edit(snap);
+        true
     }
 
     pub fn select_item(&mut self, index: usize) -> bool {
@@ -4436,19 +4439,53 @@ impl Session {
     }
 
     pub fn add_item_box(&mut self) -> bool {
-        let added =
-            self.edit_current_item(|show, slide_id, _| show.add_item_box(slide_id).is_some());
-        if added
-            && let Some(show) = self.current_show()
-            && let Some(id) = self.slide_index.and_then(|index| {
-                show.ordered_slides()
-                    .get(index)
-                    .map(|slide| slide.id.clone())
-            })
-        {
-            self.item_index = show.item_count(&id).saturating_sub(1);
+        self.append_item_box(ShowFile::add_item_box)
+    }
+
+    pub fn slide_pictures(&self) -> impl Iterator<Item = &MediaEntry> {
+        self.media
+            .iter()
+            .filter(|entry| entry.kind == MediaEntryKind::Image && entry.exists)
+    }
+
+    pub fn add_picture_box(&mut self, index: usize) -> Result<(), String> {
+        let picture = self
+            .slide_pictures()
+            .nth(index)
+            .filter(|picture| picture.path.is_file())
+            .ok_or_else(|| "The selected picture is no longer available".to_string())?;
+        let relative = self
+            .root
+            .as_ref()
+            .and_then(|root| picture.path.strip_prefix(root).ok());
+        let src = relative
+            .unwrap_or(&picture.path)
+            .to_str()
+            .ok_or_else(|| "The picture path contains unsupported characters".to_string())?;
+        let src = if relative.is_some() && std::path::MAIN_SEPARATOR != '/' {
+            src.replace(std::path::MAIN_SEPARATOR, "/")
+        } else {
+            src.to_string()
+        };
+        if !self.append_item_box(|show, slide| show.add_picture_box(slide, &src)) {
+            return Err("Could not save the picture box".to_string());
         }
-        added
+        Ok(())
+    }
+
+    fn append_item_box(
+        &mut self,
+        append: impl FnOnce(&mut ShowFile, &str) -> Option<usize>,
+    ) -> bool {
+        let mut index = None;
+        let saved = self.edit_current_item(|show, slide, _| {
+            index = append(show, slide);
+            index.is_some()
+        });
+        if saved && let Some(index) = index {
+            self.item_index = index;
+        }
+        saved
     }
 
     pub fn remove_item_box(&mut self) -> bool {
