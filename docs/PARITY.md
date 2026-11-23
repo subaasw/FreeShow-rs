@@ -111,7 +111,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
 | Create show/slide and save lyrics plus group | done | 1.5 | Untitled `.show` and empty slides |
-| Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space |
+| Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space and editable stacking order |
 | Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
 | Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
 | Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, underline, strikethrough, color, align, X/Y/W/H, solid and gradient fills, per-corner radii in pixels or percentages, text and box shadows, line height, letter spacing, picture fit, flips, and crop edges, item and backdrop filters, and slide transitions. The slide editor can insert Media library pictures as editable boxes |

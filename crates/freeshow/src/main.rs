@@ -552,7 +552,9 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         ui.set_lyrics(lyrics.into());
     }
     ui.set_group(session.group().into());
-    ui.set_item_label(session.item_label().into());
+    let (item_index, item_count) = session.item_position();
+    ui.set_item_index(item_index as i32);
+    ui.set_item_count(item_count as i32);
     ui.set_picture_choices(strings(
         &session
             .slide_pictures()
@@ -3348,6 +3350,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 refresh(&ui, &session);
                 publish(&edit_slot, edit_frame(&session));
             }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_move_item(move |forward| {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            let mut session = session.borrow_mut();
+            let lyrics = ui.get_lyrics();
+            if session.lyrics() != lyrics.as_str() && !session.save_lyrics(lyrics.as_str()) {
+                session.notice = "Could not save the slide text".into();
+                ui.set_notice(session.notice.clone().into());
+                return;
+            }
+            session.notice = if session.move_item_box(forward) {
+                String::new()
+            } else {
+                "Could not move the slide box".into()
+            };
+            refresh(&ui, &session);
+            publish(&edit_slot, edit_frame(&session));
         });
     }
     {

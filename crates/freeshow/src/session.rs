@@ -4319,9 +4319,9 @@ impl Session {
         }
     }
 
-    pub fn item_label(&self) -> String {
+    pub fn item_position(&self) -> (usize, usize) {
         let Some(show) = self.current_show() else {
-            return "Box 1 of 1".to_string();
+            return (0, 0);
         };
         let count = self
             .slide_index
@@ -4331,9 +4331,13 @@ impl Session {
                     .map(|slide| slide.id.clone())
             })
             .map(|id| show.item_count(&id))
-            .unwrap_or(0)
-            .max(1);
-        format!("Box {} of {count}", self.current_item(show) + 1)
+            .unwrap_or(0);
+        (self.item_index.min(count.saturating_sub(1)), count)
+    }
+
+    pub fn item_label(&self) -> String {
+        let (index, count) = self.item_position();
+        format!("Box {} of {}", index + 1, count.max(1))
     }
 
     pub fn item_typography(&self) -> freeshow_data::ItemTypography {
@@ -4439,7 +4443,7 @@ impl Session {
     }
 
     pub fn add_item_box(&mut self) -> bool {
-        self.append_item_box(ShowFile::add_item_box)
+        self.edit_and_select_item(|show, slide, _| show.add_item_box(slide))
     }
 
     pub fn slide_pictures(&self) -> impl Iterator<Item = &MediaEntry> {
@@ -4467,23 +4471,27 @@ impl Session {
         } else {
             src.to_string()
         };
-        if !self.append_item_box(|show, slide| show.add_picture_box(slide, &src)) {
+        if !self.edit_and_select_item(|show, slide, _| show.add_picture_box(slide, &src)) {
             return Err("Could not save the picture box".to_string());
         }
         Ok(())
     }
 
-    fn append_item_box(
+    pub fn move_item_box(&mut self, forward: bool) -> bool {
+        self.edit_and_select_item(|show, slide, index| show.move_item_box(slide, index, forward))
+    }
+
+    fn edit_and_select_item(
         &mut self,
-        append: impl FnOnce(&mut ShowFile, &str) -> Option<usize>,
+        edit: impl FnOnce(&mut ShowFile, &str, usize) -> Option<usize>,
     ) -> bool {
-        let mut index = None;
-        let saved = self.edit_current_item(|show, slide, _| {
-            index = append(show, slide);
-            index.is_some()
+        let mut next = None;
+        let saved = self.edit_current_item(|show, slide, index| {
+            next = edit(show, slide, index);
+            next.is_some()
         });
-        if saved && let Some(index) = index {
-            self.item_index = index;
+        if saved && let Some(next) = next {
+            self.item_index = next;
         }
         saved
     }
@@ -6204,6 +6212,7 @@ struct EditSnapshot {
     show: serde_json::Value,
     show_index: usize,
     slide_index: Option<usize>,
+    item_index: usize,
 }
 
 impl Session {
@@ -6216,6 +6225,7 @@ impl Session {
             show: show.show.clone(),
             show_index,
             slide_index: self.slide_index,
+            item_index: self.item_index,
         })
     }
 
@@ -6255,6 +6265,7 @@ impl Session {
         self.note_live_edit(&snap.show_id);
         self.show_index = Some(index);
         self.slide_index = snap.slide_index;
+        self.item_index = snap.item_index;
         if let Some(path) = self.shows[index].path.clone() {
             let _ = self.shows[index].save(&path);
         }

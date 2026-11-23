@@ -299,6 +299,20 @@ impl ShowFile {
         Some(items.len() - 1)
     }
 
+    pub fn move_item_box(&mut self, slide_id: &str, index: usize, forward: bool) -> Option<usize> {
+        let items = self.items_mut(slide_id)?;
+        let next = if forward {
+            index.checked_add(1)?
+        } else {
+            index.checked_sub(1)?
+        };
+        if index >= items.len() || next >= items.len() {
+            return None;
+        }
+        items.swap(index, next);
+        Some(next)
+    }
+
     pub fn remove_item_box(&mut self, slide_id: &str, index: usize) -> bool {
         let Some(items) = self.items_mut(slide_id) else {
             return false;
