@@ -51,6 +51,7 @@ pub struct BoxStyle {
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_linear_scaled: bool,
+    pptx_gradient_gamma: bool,
     pptx_gradient_tile: Option<[f32; 4]>,
     pptx_radial_focus: Option<[f32; 2]>,
     pptx_rectangular_focus: Option<[f32; 4]>,
@@ -182,6 +183,7 @@ impl Default for BoxStyle {
             rotation_deg: 0.0,
             gradient: None,
             pptx_linear_scaled: false,
+            pptx_gradient_gamma: false,
             pptx_gradient_tile: None,
             pptx_radial_focus: None,
             pptx_rectangular_focus: None,
@@ -394,6 +396,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 }
             }
             "--pptx-linear-scaled" => style.pptx_linear_scaled = value == "1",
+            "--pptx-gradient-gamma" => style.pptx_gradient_gamma = value == "1",
             "--pptx-gradient-tile" => {
                 style.pptx_gradient_tile = parse_rect_insets(value);
             }
@@ -3554,7 +3557,7 @@ fn fill_item_background(
                 frame_h,
                 px,
                 py,
-                interpolate_stops(&gradient.stops, position),
+                interpolate_stops(&gradient.stops, position, style.pptx_gradient_gamma),
             );
         };
         if style.fill_polygon.is_empty() {
@@ -3773,7 +3776,7 @@ fn split_gradient_args(value: &str) -> Vec<String> {
     parts
 }
 
-fn interpolate_stops(stops: &[(f32, Rgba)], t: f32) -> Rgba {
+fn interpolate_stops(stops: &[(f32, Rgba)], t: f32, pptx_gamma: bool) -> Rgba {
     if t <= stops[0].0 {
         return stops[0].1;
     }
@@ -3786,10 +3789,40 @@ fn interpolate_stops(stops: &[(f32, Rgba)], t: f32) -> Rgba {
         if t >= t0 && t <= t1 {
             let span = (t1 - t0).max(f32::EPSILON);
             let f = ((t - t0) / span).clamp(0.0, 1.0);
-            return lerp_rgba(c0, c1, f);
+            return if pptx_gamma {
+                lerp_powerpoint_gamma(c0, c1, f)
+            } else {
+                lerp_rgba(c0, c1, f)
+            };
         }
     }
     stops[stops.len() - 1].1
+}
+
+fn lerp_powerpoint_gamma(from: Rgba, to: Rgba, t: f32) -> Rgba {
+    // Precompute Office's per-channel curve to avoid exponentiation per output pixel.
+    const STEPS: usize = 4096;
+    static CURVE: std::sync::OnceLock<[f32; STEPS + 1]> = std::sync::OnceLock::new();
+    let curve =
+        CURVE.get_or_init(|| std::array::from_fn(|i| (i as f32 / STEPS as f32).powf(1.875)));
+    let index = (t * STEPS as f32).round() as usize;
+    let mix = |a: u8, b: u8, weight: f32| {
+        (f32::from(a) * (1.0 - weight) + f32::from(b) * weight).round() as u8
+    };
+    let channel = |a, b| {
+        let weight = if b > a {
+            1.0 - curve[STEPS - index]
+        } else {
+            curve[index]
+        };
+        mix(a, b, weight)
+    };
+    Rgba {
+        r: channel(from.r, to.r),
+        g: channel(from.g, to.g),
+        b: channel(from.b, to.b),
+        a: mix(from.a, to.a, t),
+    }
 }
 
 fn lerp_rgba(from: Rgba, to: Rgba, t: f32) -> Rgba {
@@ -4111,6 +4144,33 @@ mod tests {
             right.b > 200 && right.r < 40,
             "right should be blue, got {right:?}"
         );
+    }
+
+    #[test]
+    fn powerpoint_gamma_brightens_channels_and_keeps_alpha_linear() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;background:linear-gradient(90deg, #FF0000 0%, #0000FF 100%);--pptx-gradient-gamma:1;",
+        ));
+        let middle = frame.pixel(479, 269);
+        assert!((184..=187).contains(&middle.r), "{middle:?}");
+        assert!((184..=187).contains(&middle.b), "{middle:?}");
+        let first = parse_color("#00000000").unwrap();
+        let mid = parse_color("#FFFF00").unwrap();
+        let stops = [(0.0, first), (0.25, mid), (1.0, first)];
+        let before = interpolate_stops(&stops, 0.125, true);
+        assert_eq!(before, interpolate_stops(&stops, 0.625, true));
+        assert_eq!(before.a, 128);
+        assert_eq!(before.r, 185);
+        assert_eq!(interpolate_stops(&stops, 0.25, true), mid);
+    }
+
+    #[test]
+    fn narrow_gradient_stops_keep_a_blend_between_them() {
+        let gradient =
+            parse_gradient("linear-gradient(90deg, #FF0000 50.125%, #0000FF 50.375%)").unwrap();
+        let sample = interpolate_stops(&gradient.stops, 0.5025, false);
+        assert!((127..=128).contains(&sample.r), "{sample:?}");
+        assert!((127..=128).contains(&sample.b), "{sample:?}");
     }
 
     #[test]
