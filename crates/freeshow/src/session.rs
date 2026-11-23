@@ -333,7 +333,7 @@ pub struct Session {
     timed_seconds: Option<f64>,
     pending_cue_completion: Option<PendingCueCompletion>,
     pub stage: StageLayout,
-    stage_layout_id: Option<String>,
+    pub(crate) stage_layout_id: Option<String>,
     pub stage_media: std::cell::RefCell<crate::stage::StageMedia>,
     pub timer_left: u64,
     pub timer_deadline: Option<Instant>,
@@ -3030,19 +3030,33 @@ impl Session {
             .current_show()
             .and_then(|show| self.slide_index.map(|index| show.stage_layouts_at(index)))
             .unwrap_or_default();
-        let Some(root) = self.root.clone() else {
-            return;
-        };
-        let library = Library::open(&root);
         for (output, layout_id) in steps {
-            if !library.assign_stage_layout(output.as_deref(), &layout_id) {
-                continue;
-            }
-            if let Some(layout) = library.stage_layout(&layout_id) {
-                self.stage = layout;
-                self.stage_layout_id = Some(layout_id);
-            }
+            let _ = self.select_stage_layout(output.as_deref(), &layout_id);
         }
+    }
+
+    pub fn select_primary_stage_layout(&mut self, id: &str) -> Result<(), String> {
+        let output = self
+            .preferences
+            .outputs
+            .iter()
+            .find(|output| output.stage)
+            .map(|output| output.id.clone());
+        self.select_stage_layout(output.as_deref(), id)
+    }
+
+    fn select_stage_layout(&mut self, output: Option<&str>, id: &str) -> Result<(), String> {
+        let root = self.root.as_deref().ok_or("open a library first")?;
+        let library = Library::open(root);
+        let layout = library
+            .stage_layout(id)
+            .ok_or_else(|| format!("no stage layout {id:?}"))?;
+        if !library.assign_stage_layout(output, id) {
+            return Err("could not save the stage layout selection".into());
+        }
+        self.stage = layout;
+        self.stage_layout_id = Some(id.into());
+        Ok(())
     }
 
     /// Starts or steps the audio playlist named by this slide.
