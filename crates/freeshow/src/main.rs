@@ -1092,17 +1092,29 @@ fn hardware() -> &'static HardwareBroadcast {
     })
 }
 
-fn open_network_receive(session: &session::Session) -> Option<freeshow_ndi::NetworkReceiver> {
-    let (kind, name) = session.network_receive()?;
-    let receiver = match kind {
+struct NetworkInput {
+    receiver: freeshow_ndi::NetworkReceiver,
+    label: String,
+    on_air: bool,
+}
+
+fn open_network_receive(
+    source: &freeshow_ndi::NetworkSource,
+    session: &Session,
+) -> Option<NetworkInput> {
+    let receiver = match source.kind {
         freeshow_ndi::SourceKind::Ndi => freeshow_ndi::NetworkReceiver::open_ndi(
-            &name,
+            &source.name,
             session.output_width,
             session.output_height,
         ),
-        freeshow_ndi::SourceKind::Omt => freeshow_ndi::NetworkReceiver::open_omt(&name),
+        freeshow_ndi::SourceKind::Omt => freeshow_ndi::NetworkReceiver::open_omt(&source.name),
     };
-    receiver.is_live().then_some(receiver)
+    receiver.is_live().then(|| NetworkInput {
+        receiver,
+        label: source.label(),
+        on_air: false,
+    })
 }
 
 fn fade_into(
@@ -1921,7 +1933,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = LAN.set(LanBroadcast::open(&session));
     let _ = HARDWARE.set(HardwareBroadcast::open(&session));
-    let network_in = open_network_receive(&session);
+    let configured_input = session
+        .network_receive()
+        .map(|(kind, name)| freeshow_ndi::NetworkSource { kind, name });
+    let network_in = configured_input
+        .as_ref()
+        .and_then(|source| open_network_receive(source, &session));
     session.network_background = network_in.is_some();
     let _ = WEBRTC.set(WebrtcBroadcast::open(&session));
     session.audio_device_map = settings.audio_devices.clone();
@@ -2090,10 +2107,104 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audio_out: Rc<RefCell<Option<AudioOutput>>> = Rc::new(RefCell::new(None));
     let video_player: Rc<RefCell<Option<VideoPlayer>>> = Rc::new(RefCell::new(None));
     let video_timer = Rc::new(slint::Timer::default());
-    let network_timer = Rc::new(slint::Timer::default());
-    if let Some(receiver) = network_in {
-        let mut receiver = Some(receiver);
-        let timer = Rc::downgrade(&network_timer);
+    let network_timer = slint::Timer::default();
+    {
+        let source_list = Rc::new(RefCell::new(
+            configured_input.clone().into_iter().collect::<Vec<_>>(),
+        ));
+        control.set_network_sources(strings(
+            &source_list
+                .borrow()
+                .iter()
+                .map(|source| source.label())
+                .collect::<Vec<_>>(),
+        ));
+        let (found_tx, found_rx) = std::sync::mpsc::channel();
+        let ui = control.as_weak();
+        control.on_find_network_sources(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            if ui.get_network_searching() {
+                return;
+            }
+            ui.set_network_searching(true);
+            let found = found_tx.clone();
+            let configured = configured_input.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("freeshow-network-discovery".into())
+                .spawn(move || {
+                    let mut sources = freeshow_ndi::network_sources();
+                    if let Some(configured) = configured
+                        && !sources.contains(&configured)
+                    {
+                        sources.insert(0, configured);
+                    }
+                    let _ = found.send(sources);
+                })
+            {
+                tracing::warn!(%error, "could not start network discovery");
+                ui.set_network_searching(false);
+                ui.set_network_status("Could not start discovery".into());
+            }
+        });
+
+        let input = Rc::new(RefCell::new(network_in));
+        if let Some(current) = input.borrow().as_ref() {
+            control.set_network_status(format!("Waiting for {}", current.label).into());
+        }
+        let start = {
+            let session = Rc::clone(&session);
+            let input = Rc::clone(&input);
+            let video_timer = Rc::clone(&video_timer);
+            let video_player = Rc::clone(&video_player);
+            let ui = control.as_weak();
+            Rc::new(move |source: freeshow_ndi::NetworkSource| {
+                let Some(ui) = ui.upgrade() else { return };
+                let mut current = session.borrow_mut();
+                if current.preferences.out_locked() {
+                    ui.set_network_status("Output is locked".into());
+                    return;
+                }
+                let Some(new_input) = open_network_receive(&source, &current) else {
+                    ui.set_network_status(format!("Could not open {}", source.label()).into());
+                    return;
+                };
+                if current.begin_network_background() {
+                    stop_video(&video_timer, &video_player);
+                    ui.set_network_status(format!("Waiting for {}", new_input.label).into());
+                    *input.borrow_mut() = Some(new_input);
+                    refresh(&ui, &current);
+                }
+            })
+        };
+        {
+            let sources = Rc::clone(&source_list);
+            let start = Rc::clone(&start);
+            control.on_use_network_source(move |index| {
+                if let Some(source) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| sources.borrow().get(index).cloned())
+                {
+                    start(source);
+                }
+            });
+        }
+        {
+            let ui = control.as_weak();
+            control.on_use_omt_address(move |address| {
+                let address = address.trim();
+                if !address.starts_with("omt://") {
+                    if let Some(ui) = ui.upgrade() {
+                        ui.set_network_status("Enter an omt://host:port address".into());
+                    }
+                    return;
+                }
+                start(freeshow_ndi::NetworkSource {
+                    kind: freeshow_ndi::SourceKind::Omt,
+                    name: address.into(),
+                });
+            });
+        }
+        let ui = control.as_weak();
         let session = Rc::clone(&session);
         let output_fade = Rc::clone(&output_fade);
         let stage_fade = Rc::clone(&stage_fade);
@@ -2106,20 +2217,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(33),
             move || {
+                let Some(ui) = ui.upgrade() else { return };
+                if let Ok(sources) = found_rx.try_recv() {
+                    ui.set_network_sources(strings(
+                        &sources
+                            .iter()
+                            .map(|source| source.label())
+                            .collect::<Vec<_>>(),
+                    ));
+                    *source_list.borrow_mut() = sources;
+                    ui.set_network_searching(false);
+                    ui.set_network_scanned(true);
+                }
+                let mut input = input.borrow_mut();
+                if input.is_none() {
+                    return;
+                }
                 let mut current = session.borrow_mut();
                 if !current.network_background {
-                    receiver.take();
-                    if let Some(timer) = timer.upgrade() {
-                        timer.stop();
-                    }
+                    input.take();
+                    ui.set_network_status("Network input stopped".into());
                     return;
                 }
                 if output_fade.running() || stage_fade.running() {
                     return;
                 }
-                let Some((width, height, rgba)) =
-                    receiver.as_ref().and_then(|input| input.next_frame())
-                else {
+                let Some(input) = input.as_mut() else { return };
+                let Some((width, height, rgba)) = input.receiver.next_frame() else {
                     return;
                 };
                 if current.update_network_background(freeshow_output::Raster {
@@ -2127,6 +2251,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     height,
                     rgba,
                 }) {
+                    if !input.on_air {
+                        ui.set_network_status(format!("Live · {}", input.label).into());
+                        input.on_air = true;
+                    }
                     let audience = audience_frame(&current);
                     let stage = stage_frame(&current);
                     *last_output.borrow_mut() = audience.clone();

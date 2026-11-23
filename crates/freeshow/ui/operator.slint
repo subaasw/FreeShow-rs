@@ -47,6 +47,14 @@ export component ControlWindow inherits Window {
     in-out property <string> panel-title: "Shows";
     in property <string> data-path: "Data folder not set";
     in-out property <[DrawerRowData]> drawer-rows;
+    in property <[string]> network-sources;
+    in property <bool> network-searching;
+    in property <bool> network-scanned;
+    in property <string> network-status;
+    property <string> omt-address;
+    callback find-network-sources();
+    callback use-network-source(int);
+    callback use-omt-address(string);
     in-out property <[SlideRowData]> slide-cards;
     in-out property <int> slides-columns: 1;
     in-out property <bool> full-colors: false;
@@ -1044,6 +1052,56 @@ export component ControlWindow inherits Window {
                     text-color: root.text-color;
                     accent-text: root.accent-text;
                     clicked => { root.library-action("save-rss", root.form-a); }
+                }
+            }
+        }
+        if !root.focus-mode && root.active-tab == "media": Rectangle {
+            background: root.primary-darker;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    Button {
+                        text: root.network-searching ? "Finding sources…" : "Find network sources";
+                        enabled: !root.network-searching;
+                        clicked => { root.find-network-sources(); }
+                    }
+                    if root.network-sources.length > 0: HorizontalLayout {
+                        spacing: 6px;
+                        source := ComboBox {
+                            model: root.network-sources;
+                            accessible-label: "Network video source";
+                        }
+                        Button {
+                            text: "Use source";
+                            enabled: source.current-index >= 0 && source.current-index < root.network-sources.length;
+                            clicked => { root.use-network-source(source.current-index); }
+                        }
+                    }
+                    if root.network-scanned && !root.network-searching && root.network-sources.length == 0: Text {
+                        text: "No sources found";
+                        color: root.text-color;
+                        vertical-alignment: center;
+                    }
+                    LineEdit {
+                        text <=> root.omt-address;
+                        placeholder-text: "omt://host:port";
+                        accessible-label: "Direct OMT address";
+                        horizontal-stretch: 1;
+                        accepted(value) => { root.use-omt-address(value); }
+                    }
+                    Button {
+                        text: "Use OMT address";
+                        enabled: root.omt-address != "";
+                        clicked => { root.use-omt-address(root.omt-address); }
+                    }
+                }
+                if root.network-status != "": Text {
+                    text: root.network-status;
+                    color: root.text-color;
+                    font-size: 12px * OperatorStyle.font-scale;
+                    overflow: elide;
                 }
             }
         }
