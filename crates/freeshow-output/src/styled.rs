@@ -48,6 +48,7 @@ pub struct BoxStyle {
     /// CSS `backdrop-filter` from the item style, or empty.
     pub backdrop: String,
     rotation_deg: f32,
+    pptx_group_matrix: Option<[f32; 4]>,
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_linear_scaled: bool,
@@ -185,6 +186,7 @@ impl Default for BoxStyle {
             box_shadows: Vec::new(),
             backdrop: String::new(),
             rotation_deg: 0.0,
+            pptx_group_matrix: None,
             gradient: None,
             pptx_linear_scaled: false,
             pptx_gradient_gamma: false,
@@ -407,8 +409,9 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "--pptx-gradient-gamma" => style.pptx_gradient_gamma = value == "1",
             "--pptx-fill-flip-x" => style.pptx_fill_flip_x = value == "1",
             "--pptx-fill-flip-y" => style.pptx_fill_flip_y = value == "1",
+            "--pptx-group-matrix" => style.pptx_group_matrix = parse_four_numbers(value),
             "--pptx-gradient-tile" => {
-                style.pptx_gradient_tile = parse_rect_insets(value);
+                style.pptx_gradient_tile = parse_four_numbers(value);
             }
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
             "--pptx-radial-ellipse" => style.pptx_radial_ellipse = parse_radial_ellipse(value),
@@ -1183,7 +1186,8 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     let h = scale(style.height, slide.output_height, slide.source_height).max(1);
     let bounds = text::Clip { x, y, w, h };
     let opacity = item.opacity.clamp(0.0, 1.0);
-    if style.rotation_deg != 0.0 && draw_rotated_item(pixels, slide, item, &style, &bounds, opacity)
+    if (style.rotation_deg != 0.0 || style.pptx_group_matrix.is_some())
+        && draw_transformed_item(pixels, slide, item, &style, &bounds, opacity)
     {
         return;
     }
@@ -1196,7 +1200,7 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     draw_item_content(pixels, slide, item, &style, bounds, opacity, item.blend);
 }
 
-fn draw_rotated_item(
+fn draw_transformed_item(
     pixels: &mut [u8],
     slide: &StyledSlide,
     item: &StyledItem,
@@ -1220,10 +1224,24 @@ fn draw_rotated_item(
         return false;
     }
     let (sin, cos) = style.rotation_deg.to_radians().sin_cos();
+    let [a, b, c, d] = style.pptx_group_matrix.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+    let (a, b, c, d) = (
+        a * cos + c * sin,
+        (b * cos + d * sin) / ratio,
+        (c * cos - a * sin) * ratio,
+        d * cos - b * sin,
+    );
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant == 0.0 {
+        return false;
+    }
     let (half_w, half_h) = (w as f32 / 2.0, h as f32 / 2.0);
     let (cx, cy) = (x as f32 + half_w, y as f32 + half_h);
-    let extent_x = cos.abs() * half_w + sin.abs() * ratio * half_h;
-    let extent_y = cos.abs() * half_h + sin.abs() / ratio * half_w;
+    let extent_x = a.abs() * half_w + c.abs() * half_h;
+    let extent_y = b.abs() * half_w + d.abs() * half_h;
+    if !extent_x.is_finite() || !extent_y.is_finite() {
+        return false;
+    }
     let x0 = (cx - extent_x).floor().max(0.0) as i32;
     let y0 = (cy - extent_y).floor().max(0.0) as i32;
     let x1 = (cx + extent_x).ceil().min(slide.output_width as f32) as i32;
@@ -1232,12 +1250,31 @@ fn draw_rotated_item(
     if x0 >= x1 || y0 >= y1 || (opacity == 0.0 && !backdrop) {
         return true;
     }
-    let (sin_x, sin_y) = (sin * ratio, sin / ratio);
+    // Rasterize enlarged group children at their destination density so text and edges stay sharp.
+    let raster_scale = if style.pptx_group_matrix.is_some() {
+        let density_limit = (pixels.len() as f32 / (w as f32 * h as f32))
+            .sqrt()
+            .max(1.0);
+        a.hypot(b).max(c.hypot(d)).clamp(1.0, density_limit)
+    } else {
+        1.0
+    };
+    let (raster_w, raster_h) = (
+        (w as f32 * raster_scale).round() as i32,
+        (h as f32 * raster_scale).round() as i32,
+    );
+    let (raster_x, raster_y) = (raster_w as f32 / w as f32, raster_h as f32 / h as f32);
+    let (inv_a, inv_b, inv_c, inv_d) = (
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+    );
     let sample = |px: i32, py: i32| {
         let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
         (
-            (half_w + dx * cos + dy * sin_x).floor() as i32,
-            (half_h - dx * sin_y + dy * cos).floor() as i32,
+            ((half_w + dx * inv_a + dy * inv_c) * raster_x).floor() as i32,
+            ((half_h + dx * inv_b + dy * inv_d) * raster_y).floor() as i32,
         )
     };
     // Only rasterize the part of the item sampled by the visible output, with room for its blur.
@@ -1248,15 +1285,18 @@ fn draw_rotated_item(
         sample(x0, y1 - 1),
         sample(x1 - 1, y1 - 1),
     ];
-    let [sx0, sy0, sx1, sy1] = corners.iter().fold([w, h, 0, 0], |edges, &(sx, sy)| {
-        [
-            edges[0].min(sx.saturating_sub(pad)),
-            edges[1].min(sy.saturating_sub(pad)),
-            edges[2].max(sx.saturating_add(pad + 1)),
-            edges[3].max(sy.saturating_add(pad + 1)),
-        ]
-    });
-    let (sx0, sy0, sx1, sy1) = (sx0.max(0), sy0.max(0), sx1.min(w), sy1.min(h));
+    let [sx0, sy0, sx1, sy1] =
+        corners
+            .iter()
+            .fold([raster_w, raster_h, 0, 0], |edges, &(sx, sy)| {
+                [
+                    edges[0].min(sx.saturating_sub(pad)),
+                    edges[1].min(sy.saturating_sub(pad)),
+                    edges[2].max(sx.saturating_add(pad + 1)),
+                    edges[3].max(sy.saturating_add(pad + 1)),
+                ]
+            });
+    let (sx0, sy0, sx1, sy1) = (sx0.max(0), sy0.max(0), sx1.min(raster_w), sy1.min(raster_h));
     if sx0 >= sx1 || sy0 >= sy1 {
         return true;
     }
@@ -1264,7 +1304,7 @@ fn draw_rotated_item(
     let layer_len = (width as usize)
         .saturating_mul(height as usize)
         .saturating_mul(4);
-    // shortcut: extreme scale ratios use the direct path until rotated layers can be tiled.
+    // shortcut: extreme scale ratios use the direct path until transformed layers can be tiled.
     if layer_len > pixels.len().saturating_mul(4) {
         return false;
     }
@@ -1278,7 +1318,16 @@ fn draw_rotated_item(
         let radius = item_radius(style, slide, w, h);
         apply_backdrop(pixels, slide, &viewport, &style.backdrop, |px, py| {
             let (sx, sy) = sample(px, py);
-            in_item_shape(sx, sy, 0, 0, w, h, radius, style.elliptical_background)
+            in_item_shape(
+                (sx as f32 / raster_x).floor() as i32,
+                (sy as f32 / raster_y).floor() as i32,
+                0,
+                0,
+                w,
+                h,
+                radius,
+                style.elliptical_background,
+            )
         });
         if opacity == 0.0 {
             return true;
@@ -1287,8 +1336,8 @@ fn draw_rotated_item(
     let local = StyledSlide {
         output_width: width,
         output_height: height,
-        source_width: width as f32 / scale_x,
-        source_height: height as f32 / scale_y,
+        source_width: width as f32 / (scale_x * raster_x),
+        source_height: height as f32 / (scale_y * raster_y),
         background: Rgba::TRANSPARENT,
         items: Vec::new(),
     };
@@ -1301,8 +1350,8 @@ fn draw_rotated_item(
         text::Clip {
             x: -sx0,
             y: -sy0,
-            w,
-            h,
+            w: raster_w,
+            h: raster_h,
         },
         1.0,
         Blend::Normal,
@@ -3714,7 +3763,7 @@ fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
 }
 
 fn parse_radial_ellipse(value: &str) -> Option<[f32; 4]> {
-    let ellipse @ [cx, cy, rx, ry] = parse_rect_insets(value)?;
+    let ellipse @ [cx, cy, rx, ry] = parse_four_numbers(value)?;
     (rx >= 0.0
         && ry >= 0.0
         && cx.abs() + rx <= 1.0 + f32::EPSILON
@@ -3767,7 +3816,7 @@ fn mirrored_tile_coordinate(offset: f32, size: f32) -> f32 {
     (phase.min(2.0 - phase) * f64::from(size)) as f32
 }
 
-fn parse_rect_insets(value: &str) -> Option<[f32; 4]> {
+fn parse_four_numbers(value: &str) -> Option<[f32; 4]> {
     let mut components = value.split_whitespace();
     let mut edges = [0.0; 4];
     for edge in &mut edges {
@@ -3777,7 +3826,7 @@ fn parse_rect_insets(value: &str) -> Option<[f32; 4]> {
 }
 
 fn parse_rectangular_focus(value: &str) -> Option<[f32; 4]> {
-    let edges @ [left, top, right, bottom] = parse_rect_insets(value)?;
+    let edges @ [left, top, right, bottom] = parse_four_numbers(value)?;
     (edges.iter().all(|&edge| (0.0..=1.0).contains(&edge))
         && left + right <= 1.0
         && top + bottom <= 1.0)
@@ -5344,6 +5393,17 @@ mod tests {
         assert_eq!(frame.pixel(1, 0), colors[5]);
         assert_eq!(frame.pixel(0, 1), colors[1]);
         assert_eq!(frame.pixel(1, 1), colors[4]);
+    }
+
+    #[test]
+    fn powerpoint_group_matrix_scales_and_reflects_the_child_fill() {
+        let frame = render_styled(&style_slide(
+            "left:60px;top:80px;width:80px;height:40px;background:linear-gradient(90deg, #f00 0%, #00f 100%);--pptx-group-matrix:0 -2 1 0;",
+        ));
+        assert!(frame.pixel(50, 20).b > 200);
+        assert!(frame.pixel(50, 80).r > 200);
+        assert_eq!(frame.pixel(30, 50), Rgba::BLACK);
+        assert_eq!(frame.pixel(50, 95), Rgba::BLACK);
     }
 
     #[test]
