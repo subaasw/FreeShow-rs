@@ -106,6 +106,7 @@ export struct StageRowData {
     font-px: int,
     color: string,
     title: string,
+    label: string,
     align: string,
     offset: int,
     line-count: int,
@@ -1119,6 +1120,19 @@ export component StageEditorPanel inherits Rectangle {
             GridLayout {
                     spacing: 8px;
                     Row {
+                        FieldLabel { text: "Box label"; text-color: root.text-color; }
+                        ValueEdit {
+                            colspan: 3;
+                            property <string> item-source: root.current.id;
+                            property <string> layout-source: root.layout-id;
+                            changed item-source => { self.text = self.shown; }
+                            changed layout-source => { self.text = self.shown; }
+                            shown: root.current.label;
+                            placeholder-text: "Default name";
+                            accepted(value) => { root.set(root.current.id, "label", value); }
+                        }
+                    }
+                    Row {
                         Switch {
                             colspan: 4;
                             text: "Show on stage";
@@ -1156,13 +1170,16 @@ export component StageEditorPanel inherits Rectangle {
                             selected(value) => { root.set(root.current.id, "align", value); }
                         }
                     }
-                    if root.current.kind == "slide": Row {
-                        FieldLabel { text: "Shows"; text-color: root.text-color; }
-                        ValueCombo {
-                            model: ["Current slide", "Next slide", "Slide after next"];
-                            value: self.model[clamp(root.current.offset, 0, 2)];
-                            selected(value) => { root.set(root.current.id, "offset", self.current-index); }
+                    if root.current.kind == "slide" || root.current.kind == "notes": Row {
+                        FieldLabel { text: "Slide offset (0 = current)"; text-color: root.text-color; }
+                        ValueSpin {
+                            minimum: -99;
+                            maximum: 99;
+                            shown: root.current.offset;
+                            edited(value) => { root.set(root.current.id, "offset", value); }
                         }
+                    }
+                    if root.current.kind == "slide": Row {
                         FieldLabel { text: "Max lines (0 for all)"; text-color: root.text-color; }
                         ValueSpin {
                             minimum: 0;
