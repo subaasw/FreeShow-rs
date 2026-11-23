@@ -5752,7 +5752,7 @@ pub fn default_shortcuts() -> Vec<(&'static str, &'static str)> {
         ("previous", "Left"),
         ("go", "Space"),
         ("kiosk", "F11"),
-        ("guide", "F1"),
+        ("guide", "Ctrl+F1"),
         ("always_on_top", "Ctrl+Shift+A"),
         ("clear", "Escape"),
     ]

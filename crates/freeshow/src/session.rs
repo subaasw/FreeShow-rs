@@ -6038,7 +6038,7 @@ impl Session {
 
     pub fn guide_text(&self) -> String {
         let mut text = String::from(
-            "Welcome to FreeShow\n1. Pick a show from the drawer or your project.\n2. Click a slide to put it on the output. Arrow keys and Page Up/Down step through.\n3. Open Output for the audience and Stage for the foldback. Esc or Clear all blanks the screen.\nF1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
+            "Welcome to FreeShow\n1. Pick a show from the drawer or your project.\n2. Click a slide to put it on the output. Arrow keys and Page Up/Down step through.\n3. Open Output for the audience and Stage for the foldback. Esc or Clear all blanks the screen; F1 to F4 clear the background, slide, overlays and audio.\nCtrl+F1 opens this guide again. Focus mode (Ctrl+Shift+F) hides the drawer.",
         );
         if let Some(alert) = self.alert_banner() {
             text = format!("{alert}\n\n{text}");
@@ -6114,15 +6114,29 @@ impl Session {
             .map(|(action, _)| action)
             .or_else(|| match chord.as_str() {
                 // Presentation clickers send page keys.
-                "PageDown" => Some("next".to_string()),
+                "PageDown" | "F5" => Some("next".to_string()),
                 "PageUp" => Some("previous".to_string()),
+                // FreeShow's fixed clear keys.
+                "." => Some("clear".to_string()),
+                "F1" => Some("clear_background".to_string()),
+                "F2" => Some("clear_slide".to_string()),
+                "F3" => Some("clear_overlays".to_string()),
+                "F4" => Some("clear_audio".to_string()),
                 _ => None,
             });
         let Some(action) = action else {
             return false;
         };
-        if action == "clear" {
-            self.ui_commands.push(freeshow_remote::Command::Clear);
+        let clear = match action.as_str() {
+            "clear" => Some(freeshow_remote::Command::Clear),
+            "clear_background" => Some(freeshow_remote::Command::ClearBackground),
+            "clear_slide" => Some(freeshow_remote::Command::ClearSlide),
+            "clear_overlays" => Some(freeshow_remote::Command::ClearOverlays),
+            "clear_audio" => Some(freeshow_remote::Command::StopAudio),
+            _ => None,
+        };
+        if let Some(command) = clear {
+            self.ui_commands.push(command);
             return true;
         }
         let live = match action.as_str() {
@@ -7304,6 +7318,23 @@ mod tests {
         assert!(session.perform_shortcut(" "));
         assert!(!session.blanked);
         assert!(session.refresh_output);
+        // FreeShow's fixed keys clear one layer each, and F5 moves on.
+        for key in ["F1", "F2", "F3", "F4", "."] {
+            assert!(session.perform_shortcut(key), "{key}");
+        }
+        assert_eq!(
+            std::mem::take(&mut session.ui_commands),
+            vec![
+                freeshow_remote::Command::ClearBackground,
+                freeshow_remote::Command::ClearSlide,
+                freeshow_remote::Command::ClearOverlays,
+                freeshow_remote::Command::StopAudio,
+                freeshow_remote::Command::Clear,
+            ]
+        );
+        let before = session.slide_index;
+        assert!(session.perform_shortcut("F5"));
+        assert_ne!(session.slide_index, before);
         let _ = std::fs::remove_dir_all(&root);
     }
 
