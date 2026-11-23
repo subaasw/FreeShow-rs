@@ -2315,12 +2315,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
-            control.on_stage_position(move |id, left, top| {
-                let saved = session.borrow_mut().position_stage_item(&id, left, top);
+            control.on_stage_geometry(move |id, first, second, resize| {
+                let saved = session
+                    .borrow_mut()
+                    .set_stage_box_geometry(&id, first, second, resize);
                 done(if saved {
-                    Ok(format!("Moved {}", session.borrow().stage_item_name(&id)))
+                    let action = if resize { "Resized" } else { "Moved" };
+                    Ok(format!(
+                        "{action} {}",
+                        session.borrow().stage_item_name(&id)
+                    ))
                 } else {
-                    Err("could not save stage box position".into())
+                    Err("could not save stage box geometry".into())
                 });
             });
         }
