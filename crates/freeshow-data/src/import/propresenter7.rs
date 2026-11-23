@@ -43,7 +43,7 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
             && !cue
                 .actions
                 .iter()
-                .any(|action| clear_target(action).is_some())
+                .any(|action| immediate_clear_target(action).is_some())
         {
             continue;
         }
@@ -324,7 +324,7 @@ fn add_slide(
     if cue
         .actions
         .iter()
-        .any(|action| clear_target(action) == Some(wire::ClearTarget::Audio))
+        .any(|action| immediate_clear_target(action) == Some(wire::ClearTarget::Audio))
     {
         clear.push("clear_audio");
     }
@@ -378,7 +378,7 @@ fn unsupported_actions(cue: &wire::Cue) -> Vec<&'static str> {
     for action in &cue.actions {
         if action_carries_slide(action).is_some()
             || action_carries_media(action).is_some()
-            || clear_target(action).is_some()
+            || immediate_clear_target(action).is_some()
         {
             continue;
         }
@@ -415,9 +415,13 @@ fn layout_timeline(
     let mut current = 0usize;
     let mut actions = Vec::new();
     for (index, cue) in cues.iter().enumerate() {
-        if !cue.trigger_time.is_finite() || cue.trigger_time < 0.0 {
+        let delay = cue.action.as_ref().map_or(0.0, |action| action.delay);
+        if !(cue.trigger_time >= 0.0 && delay >= 0.0) {
             continue;
         }
+        let Some(time) = timeline_millis(cue.trigger_time + delay) else {
+            continue;
+        };
         let (kind, data) = if let Some(action) = &cue.action {
             if let Some(target) = clear_target(action) {
                 let kind = match target {
@@ -427,7 +431,6 @@ fn layout_timeline(
                 };
                 (kind, json!({}))
             } else if action.enabled
-                && action.delay == 0.0
                 && let Some((picture, path, foreground)) = picture_media(action)
             {
                 let id = insert_media(media, picture, path, foreground);
@@ -458,7 +461,7 @@ fn layout_timeline(
         };
         actions.push(json!({
             "id": format!("t{}", index + 1),
-            "time": (cue.trigger_time * 1000.0).round() as u64,
+            "time": time,
             "name": cue.name,
             "type": kind,
             "data": data
@@ -467,18 +470,23 @@ fn layout_timeline(
     let soundtrack = timeline.audio_action.as_ref().and_then(|action| {
         action_carries_media(action)?;
         let audio = action.media.as_ref()?;
-        if !action.enabled || action.delay != 0.0 || audio.video.is_some() {
+        if !action.enabled || audio.video.is_some() {
             return None;
         }
+        let delay = timeline_millis(action.delay)?;
         let path = media_source(audio)?;
-        Some(insert_media(media, audio, path, false))
+        Some((insert_media(media, audio, path, false), delay))
     });
     if actions.is_empty() && soundtrack.is_none() {
         return None;
     }
+    actions.sort_by_key(|action| action["time"].as_u64());
     let mut value = json!({"actions": actions});
-    if let Some(id) = soundtrack {
+    if let Some((id, delay)) = soundtrack {
         value["soundtrack"] = json!(id);
+        if delay > 0 {
+            value["soundtrackDelayMs"] = json!(delay);
+        }
     }
     if timeline.r#loop {
         value["loop"] = json!(true);
@@ -489,8 +497,19 @@ fn layout_timeline(
     Some(value)
 }
 
+fn timeline_millis(seconds: f64) -> Option<u64> {
+    let millis = (seconds * 1000.0).round();
+    (seconds >= 0.0 && millis < u64::MAX as f64).then_some(millis as u64)
+}
+
+fn immediate_clear_target(action: &wire::Action) -> Option<wire::ClearTarget> {
+    (action.delay == 0.0)
+        .then(|| clear_target(action))
+        .flatten()
+}
+
 fn clear_target(action: &wire::Action) -> Option<wire::ClearTarget> {
-    if action.kind() != wire::ActionType::Clear || !action.enabled || action.delay != 0.0 {
+    if action.kind() != wire::ActionType::Clear || !action.enabled {
         return None;
     }
     let clear = action
@@ -510,7 +529,7 @@ enum CuePicture<'a> {
 
 fn cue_picture(cue: &wire::Cue) -> Option<CuePicture<'_>> {
     cue.actions.iter().rev().find_map(|action| {
-        if clear_target(action) == Some(wire::ClearTarget::Background) {
+        if immediate_clear_target(action) == Some(wire::ClearTarget::Background) {
             return Some(CuePicture::Clear);
         }
         let (media, path, foreground) = picture_media(action)?;
@@ -1267,6 +1286,7 @@ mod tests {
         presentation.timeline = Some(wire::Timeline {
             duration: 5.0,
             audio_action: Some(wire::Action {
+                delay: 0.625,
                 enabled: true,
                 kind: wire::ActionType::Media as i32,
                 media: Some(wire::MediaAction {
@@ -1304,6 +1324,7 @@ mod tests {
         let (timeline, _) = crate::timeline_for_show(show).unwrap();
         assert_eq!(timeline["actions"], json!([]));
         assert_eq!(timeline["duration"], 5.0);
+        assert_eq!(timeline["soundtrackDelayMs"], 625);
         let soundtrack = timeline["soundtrack"].as_str().unwrap();
         let path = std::path::Path::new(show["media"][soundtrack]["path"].as_str().unwrap());
         assert!(path.starts_with(root.canonicalize().unwrap()));
@@ -1357,10 +1378,11 @@ mod tests {
                 ..Default::default()
             }),
         });
-        let timed_clear = |time, target, destination| wire::TimelineCue {
+        let timed_clear = |time, delay, target, destination| wire::TimelineCue {
             trigger_time: time,
             name: "Recorded clear".into(),
             action: Some(wire::Action {
+                delay,
                 enabled: true,
                 kind: wire::ActionType::Clear as i32,
                 clear: Some(wire::ClearAction {
@@ -1372,9 +1394,10 @@ mod tests {
             ..Default::default()
         };
         let timed_video = wire::TimelineCue {
-            trigger_time: 1.75,
+            trigger_time: 1.5,
             name: "Motion".into(),
             action: Some(wire::Action {
+                delay: 0.25,
                 enabled: true,
                 kind: wire::ActionType::BackgroundMedia as i32,
                 media: Some(wire::MediaAction {
@@ -1393,12 +1416,15 @@ mod tests {
             ..Default::default()
         };
         let mut timed_foreground = timed_video.clone();
-        timed_foreground.trigger_time = 2.25;
+        timed_foreground.trigger_time = 2.0;
         timed_foreground.name = "Foreground".into();
         let foreground_action = timed_foreground.action.as_mut().unwrap();
         foreground_action.kind = wire::ActionType::Media as i32;
         foreground_action.media.as_mut().unwrap().layer = 1;
-        presentation.cues[0].actions.push(foreground_action.clone());
+        presentation.cues[0].actions.push(wire::Action {
+            delay: 0.0,
+            ..foreground_action.clone()
+        });
         presentation.timeline = Some(wire::Timeline {
             cues_v2: vec![
                 wire::TimelineCue {
@@ -1407,11 +1433,13 @@ mod tests {
                     name: "Verse".into(),
                     ..Default::default()
                 },
+                timed_clear(1.6, 0.4, wire::ClearTarget::Background, 0),
                 timed_video,
-                timed_clear(2.0, wire::ClearTarget::Background, 0),
                 timed_foreground,
-                timed_clear(2.5, wire::ClearTarget::Audio, 0),
-                timed_clear(2.75, wire::ClearTarget::Audio, 1),
+                timed_clear(2.5, 0.0, wire::ClearTarget::Audio, 0),
+                timed_clear(2.75, 0.0, wire::ClearTarget::Audio, 1),
+                timed_clear(2.9, -0.1, wire::ClearTarget::Audio, 0),
+                timed_clear(3.0, f64::INFINITY, wire::ClearTarget::Audio, 0),
             ],
             duration: 12.0,
             r#loop: true,
