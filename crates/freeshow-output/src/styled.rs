@@ -49,6 +49,7 @@ pub struct BoxStyle {
     pub backdrop: String,
     rotation_deg: f32,
     pptx_group_matrix: Option<[f32; 4]>,
+    pptx_text_insets: [f32; 4],
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_linear_scaled: bool,
@@ -188,6 +189,7 @@ impl Default for BoxStyle {
             backdrop: String::new(),
             rotation_deg: 0.0,
             pptx_group_matrix: None,
+            pptx_text_insets: [0.0; 4],
             gradient: None,
             pptx_linear_scaled: false,
             pptx_gradient_fixed: false,
@@ -413,6 +415,11 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "--pptx-fill-flip-x" => style.pptx_fill_flip_x = value == "1",
             "--pptx-fill-flip-y" => style.pptx_fill_flip_y = value == "1",
             "--pptx-group-matrix" => style.pptx_group_matrix = parse_four_numbers(value),
+            "--pptx-text-insets" => {
+                if let Some(insets) = parse_four_numbers(value) {
+                    style.pptx_text_insets = insets;
+                }
+            }
             "--pptx-gradient-tile" => {
                 style.pptx_gradient_tile = parse_four_numbers(value);
             }
@@ -1480,10 +1487,28 @@ fn draw_item_content(
             item.crop,
         );
     }
-    let clip = text::Clip { x, y, w, h };
+    let clip = bounds;
+    let [left, top, right, bottom] = style.pptx_text_insets;
+    let horizontal = |edge| scale(edge, slide.output_width, slide.source_width).clamp(-w, w);
+    let vertical = |edge| scale(edge, slide.output_height, slide.source_height).clamp(-h, h);
+    let (left, top, right, bottom) = (
+        horizontal(left),
+        vertical(top),
+        horizontal(right),
+        vertical(bottom),
+    );
+    let text_x = x.saturating_add(left);
+    let text_y = y.saturating_add(top);
+    let text_w = w.saturating_sub(left).saturating_sub(right);
+    let text_h = h.saturating_sub(top).saturating_sub(bottom);
     let gap = scale(item.line_gap, slide.output_height, slide.source_height).max(0);
-    let visual = wrap_lines(&item.lines, &item.style, slide, w);
-    let mut cursor_y = y + vertical_offset(item, &visual, style, slide, h, gap);
+    let visual = if text_w > 0 && text_h > 0 {
+        wrap_lines(&item.lines, &item.style, slide, text_w)
+    } else {
+        Vec::new()
+    };
+    let mut cursor_y =
+        text_y.saturating_add(vertical_offset(item, &visual, style, slide, text_h, gap));
     for (index, line) in visual.iter().enumerate() {
         let mut line_style = style.clone();
         if let Some(align) = align_in(&line.align) {
@@ -1528,9 +1553,9 @@ fn draw_item_content(
                 pixels,
                 slide.output_width,
                 slide.output_height,
-                x,
+                text_x,
                 cursor_y,
-                w,
+                text_w,
                 bar_h,
                 Radii::uniform(radius),
                 color,
@@ -1570,14 +1595,14 @@ fn draw_item_content(
             && spaces > 0
             && visual.get(index + 1).is_some_and(|next| !next.line_bar);
         let justify_extra = if justify {
-            (w - text_width).max(0) as f32 / spaces as f32
+            (text_w - text_width).max(0) as f32 / spaces as f32
         } else {
             0.0
         };
         let mut cursor_x = match line_style.align {
-            Align::Left | Align::Justify => x as f32,
-            Align::Center => x as f32 + (w - text_width) as f32 / 2.0,
-            Align::Right => (x + w - text_width) as f32,
+            Align::Left | Align::Justify => text_x as f32,
+            Align::Center => text_x as f32 + (text_w - text_width) as f32 / 2.0,
+            Align::Right => text_x as f32 + (text_w - text_width) as f32,
         };
         let origin = cursor_x;
         let spacer = runs.iter().find(|(run, _)| run.place_on.is_none());
@@ -1751,7 +1776,7 @@ fn draw_item_content(
         if line.line_bar && later_bar {
             cursor_y += gap;
         }
-        if cursor_y >= y + h {
+        if cursor_y >= text_y.saturating_add(text_h).min(y.saturating_add(h)) {
             break;
         }
     }
@@ -4909,6 +4934,27 @@ mod tests {
             bottom.pixel(4, 70).r > 200,
             "flex-end keeps the bar at the bottom"
         );
+    }
+
+    #[test]
+    fn powerpoint_text_insets_reflow_and_anchor_inside_the_shape() {
+        let mut slide = shadow_slide("font-size:20px;color:#fff;");
+        let item = &mut slide.items[0];
+        item.lines[0].runs[0].text = "ONE TWO THREE".into();
+        item.lines[0].align = "right".into();
+        item.align = "align-items:flex-end;".into();
+        item.style
+            .push_str("background:#00f;--pptx-text-insets:32 7 36 9;");
+        let mut reference = slide.clone();
+        let mut text = reference.items[0].clone();
+        text.style = "left:32px;top:7px;width:92px;height:64px;".into();
+        reference.items[0].lines.clear();
+        reference.items.push(text);
+
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixels, render_styled(&reference).pixels);
+        assert_eq!(frame.pixel(159, 79).b, 255);
+        assert!((25..50).any(|y| (32..124).any(|x| frame.pixel(x, y).r > 200)));
     }
 
     #[test]

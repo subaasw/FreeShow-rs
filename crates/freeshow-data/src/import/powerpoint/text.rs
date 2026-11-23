@@ -3,17 +3,22 @@
 use roxmltree::Node;
 use serde_json::{Value, json};
 
-use super::theme::{Context, child};
+use super::{
+    SlideSize,
+    theme::{Context, child},
+};
 
 pub(super) struct TextBody {
     pub align: String,
+    pub insets: [f64; 4],
     pub lines: Vec<Value>,
 }
 
 impl TextBody {
-    pub(super) fn read(shape: Node<'_, '_>, context: &Context, px_per_point: f64) -> Option<Self> {
+    pub(super) fn read(shape: Node<'_, '_>, context: &Context, size: &SlideSize) -> Option<Self> {
         let body = child(shape, "txBody")?;
-        let anchor = child(body, "bodyPr").and_then(|body| body.attribute("anchor"));
+        let properties = child(body, "bodyPr");
+        let anchor = properties.and_then(|body| body.attribute("anchor"));
         let align = match anchor {
             Some("b") => "align-items:flex-end;",
             Some("ctr") => "align-items:center;",
@@ -21,6 +26,7 @@ impl TextBody {
         };
         let font_ref = child(shape, "style").and_then(|style| child(style, "fontRef"));
         let list = child(body, "lstStyle");
+        let px_per_point = size.px_y(12_700.0);
         let mut lines = Vec::new();
         let mut has_text = false;
         for paragraph in body.children().filter(|node| node.has_tag_name("p")) {
@@ -65,9 +71,23 @@ impl TextBody {
             }
             lines.push(line(alignment, runs, style(child(paragraph, "endParaRPr"))));
         }
-        has_text.then(|| Self {
-            align: align.into(),
-            lines,
+        has_text.then(|| {
+            let inset = |key, default| {
+                properties
+                    .and_then(|node| node.attribute(key))
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .map_or(default, f64::from)
+            };
+            Self {
+                align: align.into(),
+                insets: [
+                    size.px_x(inset("lIns", 91_440.0)),
+                    size.px_y(inset("tIns", 45_720.0)),
+                    size.px_x(inset("rIns", 91_440.0)),
+                    size.px_y(inset("bIns", 45_720.0)),
+                ],
+                lines,
+            }
         })
     }
 }

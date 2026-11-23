@@ -157,6 +157,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Nested PowerPoint group transforms, including child offsets, nonuniform scaling, rotation, and flips.
 - [x] PowerPoint gradients that stay aligned to the slide while their shapes rotate.
 - [x] PowerPoint positioned text with mixed run styles, theme fonts and colors, paragraph alignment, and explicit line breaks.
+- [x] PowerPoint text-box insets for wrapping and alignment inside positioned shapes.
 - [ ] PowerPoint custom gradient geometry and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
