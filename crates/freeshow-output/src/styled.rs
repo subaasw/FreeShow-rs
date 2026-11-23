@@ -53,6 +53,8 @@ pub struct BoxStyle {
     pptx_linear_scaled: bool,
     pptx_gradient_gamma: bool,
     pptx_gradient_tile: Option<[f32; 4]>,
+    pptx_fill_flip_x: bool,
+    pptx_fill_flip_y: bool,
     pptx_radial_focus: Option<[f32; 2]>,
     pptx_radial_ellipse: Option<[f32; 4]>,
     pptx_shape_ellipse: bool,
@@ -187,6 +189,8 @@ impl Default for BoxStyle {
             pptx_linear_scaled: false,
             pptx_gradient_gamma: false,
             pptx_gradient_tile: None,
+            pptx_fill_flip_x: false,
+            pptx_fill_flip_y: false,
             pptx_radial_focus: None,
             pptx_radial_ellipse: None,
             pptx_shape_ellipse: false,
@@ -401,6 +405,8 @@ pub fn parse_style(css: &str) -> BoxStyle {
             }
             "--pptx-linear-scaled" => style.pptx_linear_scaled = value == "1",
             "--pptx-gradient-gamma" => style.pptx_gradient_gamma = value == "1",
+            "--pptx-fill-flip-x" => style.pptx_fill_flip_x = value == "1",
+            "--pptx-fill-flip-y" => style.pptx_fill_flip_y = value == "1",
             "--pptx-gradient-tile" => {
                 style.pptx_gradient_tile = parse_rect_insets(value);
             }
@@ -3490,12 +3496,28 @@ fn fill_item_background(
                     .then_some(geometry)
             });
         let [_, _, fill_w, fill_h] = tile.unwrap_or([0.0, 0.0, box_w, box_h]);
+        let local_x = |px: i32| {
+            let offset = px as f32 - x as f32 + 0.5;
+            if style.pptx_fill_flip_x {
+                box_w - offset
+            } else {
+                offset
+            }
+        };
+        let local_y = |py: i32| {
+            let offset = py as f32 - y as f32 + 0.5;
+            if style.pptx_fill_flip_y {
+                box_h - offset
+            } else {
+                offset
+            }
+        };
         let tile_coordinates = tile.map(|[left, top, _, _]| {
             let columns = (x0..x1)
-                .map(|px| mirrored_tile_coordinate(px as f32 - x as f32 + 0.5 - left, fill_w))
+                .map(|px| mirrored_tile_coordinate(local_x(px) - left, fill_w))
                 .collect::<Vec<_>>();
             let rows = (y0..y1)
-                .map(|py| mirrored_tile_coordinate(py as f32 - y as f32 + 0.5 - top, fill_h))
+                .map(|py| mirrored_tile_coordinate(local_y(py) - top, fill_h))
                 .collect::<Vec<_>>();
             (columns, rows)
         });
@@ -3536,7 +3558,7 @@ fn fill_item_background(
             let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
                 (columns[(px - x0) as usize], rows[(py - y0) as usize])
             } else {
-                (px as f32 - x as f32 + 0.5, py as f32 - y as f32 + 0.5)
+                (local_x(px), local_y(py))
             };
             let offset_x = local_x - cx;
             let offset_y = local_y - cy;
@@ -5295,6 +5317,44 @@ mod tests {
             255,
             "the top row moves to the bottom"
         );
+    }
+
+    #[test]
+    fn cropped_picture_flips_before_a_clockwise_rotation() {
+        let mut slide = picture_slide(true, true);
+        let item = &mut slide.items[0];
+        item.style.push_str("transform:rotate(90deg);");
+        item.crop = Crop {
+            left: 33.333,
+            clip: false,
+            ..Crop::default()
+        };
+        let colors = ["#f00", "#00f", "#0f0", "#ff0", "#f0f", "#0ff"]
+            .map(|value| parse_color(value).unwrap());
+        item.image = Some(Raster {
+            width: 3,
+            height: 2,
+            rgba: colors
+                .into_iter()
+                .flat_map(|c| [c.r, c.g, c.b, c.a])
+                .collect(),
+        });
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(0, 0), colors[2]);
+        assert_eq!(frame.pixel(1, 0), colors[5]);
+        assert_eq!(frame.pixel(0, 1), colors[1]);
+        assert_eq!(frame.pixel(1, 1), colors[4]);
+    }
+
+    #[test]
+    fn powerpoint_gradient_flip_applies_before_the_shape_rotation() {
+        let mut slide = picture_slide(false, false);
+        let item = &mut slide.items[0];
+        item.image = None;
+        item.style.push_str("background:linear-gradient(90deg, #f00 0%, #00f 100%);--pptx-fill-flip-x:1;transform:rotate(90deg);");
+        let frame = render_styled(&slide);
+        assert!(frame.pixel(0, 0).b > frame.pixel(0, 0).r);
+        assert!(frame.pixel(0, 1).r > frame.pixel(0, 1).b);
     }
 
     #[test]

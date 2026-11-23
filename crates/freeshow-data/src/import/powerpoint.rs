@@ -371,6 +371,9 @@ struct SlideObject {
     y: f64,
     width: f64,
     height: f64,
+    rotation: f64,
+    flip_x: bool,
+    flip_y: bool,
     lines: Vec<String>,
     fill_style: Option<String>,
     ellipse: bool,
@@ -413,10 +416,19 @@ impl SlideObject {
         } else if self.radius > 0.0 {
             style.push_str(&format!("border-radius:{}px;", self.radius.round()));
         }
-        if !matches!(self.kind, ObjectKind::Picture)
-            && let Some(fill) = &self.fill_style
-        {
-            style.push_str(fill);
+        if self.rotation != 0.0 {
+            style.push_str(&format!("transform:rotate({}deg);", self.rotation));
+        }
+        if !matches!(self.kind, ObjectKind::Picture) {
+            if let Some(fill) = &self.fill_style {
+                style.push_str(fill);
+            }
+            if self.flip_x {
+                style.push_str("--pptx-fill-flip-x:1;");
+            }
+            if self.flip_y {
+                style.push_str("--pptx-fill-flip-y:1;");
+            }
         }
         match self.kind {
             ObjectKind::Picture => {
@@ -425,6 +437,8 @@ impl SlideObject {
                     "type": "media",
                     "style": style,
                     "fit": if self.tile { "tile" } else { "fill" },
+                    "flipped": self.flip_x,
+                    "flippedY": self.flip_y,
                     "src": src,
                     "cropping": {
                         "type": "ppt",
@@ -491,6 +505,9 @@ fn slide_content(
                             y: 0.0,
                             width: 0.0,
                             height: 0.0,
+                            rotation: 0.0,
+                            flip_x: false,
+                            flip_y: false,
                             lines: Vec::new(),
                             fill_style: fills.remove(&start),
                             ellipse: false,
@@ -512,6 +529,18 @@ fn slide_content(
                 }
                 if let Some(object) = current.as_mut() {
                     match (stack.last().map(String::as_str), name.as_str()) {
+                        (Some("spPr"), "xfrm") => {
+                            object.rotation =
+                                (number(&element, "rot").unwrap_or(0.0) / 60_000.0) % 360.0;
+                            object.flip_x = matches!(
+                                attribute(&element, "flipH").as_deref(),
+                                Some("1" | "true")
+                            );
+                            object.flip_y = matches!(
+                                attribute(&element, "flipV").as_deref(),
+                                Some("1" | "true")
+                            );
+                        }
                         (Some("xfrm"), "off") => {
                             object.x = size.px_x(number(&element, "x").unwrap_or(0.0));
                             object.y = size.px_y(number(&element, "y").unwrap_or(0.0));
@@ -1540,7 +1569,7 @@ mod tests {
                 "ppt/slides/slide1.xml",
                 br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
                     <p:sp><p:spPr>
-                        <a:xfrm><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
+                        <a:xfrm rot="2700000" flipH="1"><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
                         <a:prstGeom prst="rect"/>
                         <a:gradFill><a:gsLst>
                             <a:gs pos="0"><a:schemeClr val="accent1"/></a:gs>
@@ -1579,6 +1608,8 @@ mod tests {
             "{direct}"
         );
         assert!(direct.contains("--pptx-linear-scaled:1;"));
+        assert!(direct.contains("transform:rotate(45deg);"));
+        assert!(direct.contains("--pptx-fill-flip-x:1;"));
         assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Caption");
         let themed = items[1]["style"].as_str().unwrap();
         assert!(themed.contains("border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)"), "{themed}");
@@ -1604,7 +1635,7 @@ mod tests {
                 br#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
                     <p:sp>
                         <p:spPr>
-                            <a:xfrm><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
+                            <a:xfrm rot="-1350000"><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
                             <a:prstGeom prst="roundRect"/>
                             <a:solidFill><a:srgbClr val="00AA00"/></a:solidFill>
                         </p:spPr>
@@ -1612,10 +1643,10 @@ mod tests {
                     </p:sp>
                     <p:pic>
                         <p:spPr>
-                            <a:xfrm><a:off x="0" y="3429000"/><a:ext cx="3048000" cy="1714500"/></a:xfrm>
+                            <a:xfrm rot="5400000" flipH="true" flipV="1"><a:off x="0" y="3429000"/><a:ext cx="3048000" cy="1714500"/></a:xfrm>
                             <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
                         </p:spPr>
-                        <p:blipFill><a:blip r:embed="img"/></p:blipFill>
+                        <p:blipFill><a:blip r:embed="img"/><a:srcRect l="12500"/></p:blipFill>
                     </p:pic>
                     <p:graphicFrame>
                         <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"/></a:graphic>
@@ -1642,6 +1673,12 @@ mod tests {
             items[0]["style"]
                 .as_str()
                 .unwrap()
+                .contains("transform:rotate(-22.5deg);")
+        );
+        assert!(
+            items[0]["style"]
+                .as_str()
+                .unwrap()
                 .contains("border-radius:")
         );
         assert!(
@@ -1653,6 +1690,15 @@ mod tests {
         assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Hello");
         assert_eq!(items[1]["type"], "media");
         assert!(items[1]["style"].as_str().unwrap().contains("left:0px"));
+        assert!(
+            items[1]["style"]
+                .as_str()
+                .unwrap()
+                .contains("transform:rotate(90deg);")
+        );
+        assert_eq!(items[1]["flipped"], true);
+        assert_eq!(items[1]["flippedY"], true);
+        assert_eq!(items[1]["cropping"]["left"], 12.5);
         assert!(!items[1]["style"].as_str().unwrap().contains("background:"));
         assert!(
             Path::new(items[1]["src"].as_str().unwrap()).starts_with(path.canonicalize().unwrap())
