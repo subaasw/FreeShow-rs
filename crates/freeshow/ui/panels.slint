@@ -988,6 +988,7 @@ export component StageEditorPanel inherits Rectangle {
     callback create-layout(bool);
     callback add(string);
     callback move-item(string, bool);
+    callback position-item(string, int, int);
     callback remove(string);
     callback close();
     property <int> current-index: min(root.selected, root.rows.length - 1);
@@ -1443,6 +1444,7 @@ export component StageEditorPanel inherits Rectangle {
                         x: (parent.width - self.width) / 2;
                         y: 0;
                         background: black;
+                        clip: true;
                         Image {
                             width: 100%;
                             height: 100%;
@@ -1450,12 +1452,37 @@ export component StageEditorPanel inherits Rectangle {
                             image-fit: contain;
                         }
                         Rectangle {
-                            x: root.current.x * 1px * preview-box.scale;
-                            y: root.current.y * 1px * preview-box.scale;
+                            x: (drag.preview-x) * 1px * preview-box.scale;
+                            y: (drag.preview-y) * 1px * preview-box.scale;
                             width: root.current.w * 1px * preview-box.scale;
                             height: root.current.h * 1px * preview-box.scale;
                             border-width: 2px;
                             border-color: root.accent;
+                        }
+                        drag := TouchArea {
+                            x: root.current.x * 1px * preview-box.scale;
+                            y: root.current.y * 1px * preview-box.scale;
+                            width: root.current.w * 1px * preview-box.scale;
+                            height: root.current.h * 1px * preview-box.scale;
+                            property <string> source;
+                            property <string> source-layout;
+                            property <bool> same-box: self.source == root.current.id && self.source-layout == root.layout-id;
+                            property <length> dx: self.mouse-x - self.pressed-x;
+                            property <length> dy: self.mouse-y - self.pressed-y;
+                            property <bool> moved-far: abs(self.dx) > 3px || abs(self.dy) > 3px;
+                            property <int> drop-x: clamp(root.current.x + round(self.dx / max(0.001px, preview-box.scale * 1px)), -8000, 8000);
+                            property <int> drop-y: clamp(root.current.y + round(self.dy / max(0.001px, preview-box.scale * 1px)), -8000, 8000);
+                            property <int> preview-x: self.pressed && self.same-box && self.moved-far ? self.drop-x : root.current.x;
+                            property <int> preview-y: self.pressed && self.same-box && self.moved-far ? self.drop-y : root.current.y;
+                            mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                    self.source = root.current.id;
+                                    self.source-layout = root.layout-id;
+                                } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left && self.same-box && self.moved-far) {
+                                    root.position-item(self.source, self.drop-x, self.drop-y);
+                                }
+                            }
                         }
                     }
                 }

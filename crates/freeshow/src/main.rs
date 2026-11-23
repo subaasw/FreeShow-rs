@@ -2315,6 +2315,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
+            control.on_stage_position(move |id, left, top| {
+                let saved = session.borrow_mut().position_stage_item(&id, left, top);
+                done(if saved {
+                    Ok(format!("Moved {}", session.borrow().stage_item_name(&id)))
+                } else {
+                    Err("could not save stage box position".into())
+                });
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
             let ui = control.as_weak();
             control.on_stage_layout_select(move |id| {
                 let result = session.borrow_mut().select_primary_stage_layout(&id);
