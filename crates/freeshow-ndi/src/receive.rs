@@ -15,6 +15,16 @@ pub struct NetworkSource {
     pub kind: SourceKind,
 }
 
+impl NetworkSource {
+    pub fn label(&self) -> String {
+        let protocol = match self.kind {
+            SourceKind::Ndi => "NDI",
+            SourceKind::Omt => "OMT",
+        };
+        format!("{protocol} · {}", self.name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Ndi,
@@ -65,6 +75,12 @@ pub fn omt_sources() -> Vec<NetworkSource> {
             }
         }
     }
+    sources
+}
+
+pub fn network_sources() -> Vec<NetworkSource> {
+    let mut sources = ndi_sources();
+    sources.extend(omt_sources());
     sources
 }
 
@@ -151,6 +167,11 @@ impl NetworkReceiver {
     }
 
     pub fn open_omt(name: &str) -> Self {
+        if name.starts_with("omt://")
+            && !OmtAddress::from_url(name).is_ok_and(|address| address.port != 0)
+        {
+            return Self::default();
+        }
         let latest = Arc::new(Mutex::new(None));
         let slot = Arc::downgrade(&latest);
         let name = name.to_string();

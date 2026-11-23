@@ -1434,6 +1434,23 @@ impl Session {
         self.network_background = false;
     }
 
+    pub fn begin_network_background(&mut self) -> bool {
+        if self.preferences.out_locked() {
+            return false;
+        }
+        if self.imported_foreground_active {
+            self.slide_hidden = false;
+        }
+        self.reset_background_look();
+        self.underlay_from = None;
+        self.network_background = true;
+        self.blanked = false;
+        self.video_time = 0.0;
+        self.video_duration = 0.0;
+        self.discard_queued_video();
+        true
+    }
+
     pub fn update_network_background(&mut self, raster: Raster) -> bool {
         if !self.network_background || self.blanked {
             return false;
@@ -6770,9 +6787,7 @@ impl Session {
     }
 
     pub fn network_sources(&self) -> Vec<freeshow_ndi::NetworkSource> {
-        let mut sources = freeshow_ndi::ndi_sources();
-        sources.extend(freeshow_ndi::omt_sources());
-        sources
+        freeshow_ndi::network_sources()
     }
 }
 
