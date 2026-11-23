@@ -159,7 +159,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Load and paint stage layouts | done | 2 | Includes next-slide, notes, clock, timer |
 | Stage cameras, web, and chart boxes | done | 1.5 |  |
 | Stage as a second NDI/WebRTC picture | done | 1 |  |
-| Every Electron stage-item editor pane | partial | 0.5 | Stage editor lists items by name, edits position, size, font size, color and align, plus each type's own options (current/next/after-next slide and max lines, clock seconds and date format, which timer to follow, free text), shows a live layout preview with the picked item outlined, and saves `Config/stage.json` (FreeShow `slideOffset`, `clock`, `timer`) without dropping other layouts, unknown fields or styled text runs; media, slide-tracker and variable item options are not cloned |
+| Every Electron stage-item editor pane | partial | 0.5 | Stage editor lists items by name, edits position, size, font size, color and align, plus each type's own options (slide offset, line limit, text box, box order and background, clock seconds and date format, which timer to follow, free text), shows a live layout preview with the picked item outlined, and saves `Config/stage.json` (FreeShow `slideOffset`, `clock`, `timer`) without dropping other layouts, unknown fields or styled text runs; media path and fit, tracker appearance, and variable selection are editable |
 
 ### Show importers
 
