@@ -8444,6 +8444,23 @@ Second line"
         session
             .inspector_set("background-color", "#00000080")
             .unwrap();
+        let box_shadow = "0 4px 12px rgba(0, 0, 0, 0.5), inset 1px 2px #ffffff";
+        session.inspector_set("box-shadow", box_shadow).unwrap();
+        for invalid in [
+            "0 0 #fff, broken",
+            "0 0 -5px #fff",
+            "0 0 unknown",
+            "0 0 #fff;top:0",
+            "1e20 0",
+        ] {
+            assert!(
+                session.inspector_set("box-shadow", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(session.inspector_form().item_box.box_shadow, box_shadow);
+        session.inspector_set("box-shadow", "").unwrap();
+        assert!(session.inspector_form().item_box.box_shadow.is_empty());
         session.inspector_set("blur", "3").unwrap();
         session.inspector_set("grayscale", "100").unwrap();
         session.inspector_set("opacity", "60").unwrap();

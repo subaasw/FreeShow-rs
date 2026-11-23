@@ -2717,6 +2717,24 @@ fn parse_border_radius(value: &str) -> Option<[CornerRadius; 4]> {
 
 /// Comma-separated `box-shadow` layers. Commas inside `rgb(...)` stay with their color.
 fn parse_box_shadows(value: &str) -> Vec<BoxShadow> {
+    box_shadow_layers(value)
+        .into_iter()
+        .filter_map(|layer| parse_box_shadow(layer, false))
+        .collect()
+}
+
+/// Validates every layer before an Inspector edit is written into item CSS.
+pub fn valid_box_shadow(value: &str) -> bool {
+    let value = value.trim();
+    !value.contains(';')
+        && (value.is_empty()
+            || value.eq_ignore_ascii_case("none")
+            || box_shadow_layers(value)
+                .into_iter()
+                .all(|layer| parse_box_shadow(layer, true).is_some()))
+}
+
+fn box_shadow_layers(value: &str) -> Vec<&str> {
     let mut layers = Vec::new();
     let mut depth = 0_i32;
     let mut start = 0;
@@ -2732,10 +2750,10 @@ fn parse_box_shadows(value: &str) -> Vec<BoxShadow> {
         }
     }
     layers.push(&value[start..]);
-    layers.into_iter().filter_map(parse_box_shadow).collect()
+    layers
 }
 
-fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+fn parse_box_shadow(value: &str, strict: bool) -> Option<BoxShadow> {
     let mut rest = value.trim();
     if rest.is_empty() || rest.eq_ignore_ascii_case("none") {
         return None;
@@ -2761,15 +2779,24 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         lengths.push(px(token).unwrap_or(0.0));
         rest = &trimmed[token.len()..];
     }
-    if lengths.len() < 2 {
+    let blur = lengths.get(2).copied().unwrap_or(0.0);
+    if lengths.len() < 2
+        || (strict
+            && (blur < 0.0
+                || lengths
+                    .iter()
+                    .any(|length| !(-8000.0..=8000.0).contains(length))))
+    {
         return None;
     }
+    let color =
+        parse_color(rest).or_else(|| (!strict || rest.trim().is_empty()).then_some(Rgba::BLACK))?;
     Some(BoxShadow {
         x: lengths[0],
         y: lengths[1],
-        blur: lengths.get(2).copied().unwrap_or(0.0),
+        blur,
         spread: lengths.get(3).copied().unwrap_or(0.0),
-        color: parse_color(rest).unwrap_or(Rgba::BLACK),
+        color,
         inset,
     })
 }
@@ -2973,6 +3000,9 @@ fn paint_box_shadow(
     ellipse: bool,
     shadow: BoxShadow,
 ) {
+    if shadow.color.a == 0 {
+        return;
+    }
     let ox = scale(shadow.x, slide.output_width, slide.source_width);
     let oy = scale(shadow.y, slide.output_height, slide.source_height);
     let blur = scale(shadow.blur, slide.output_height, slide.source_height).clamp(0, 16);
@@ -4256,7 +4286,7 @@ mod tests {
     #[test]
     fn box_shadow_and_rounded_corners_and_backdrop_filters_are_painted() {
         let shadow = render_styled(&style_slide(
-            "left:200px;top:200px;width:200px;height:200px;background:#ffffff;box-shadow: 200px 0px 0px 0 #ff0000;",
+            "left:200px;top:200px;width:200px;height:200px;background:#ffffff;box-shadow: 200px 0px 0px 0 #ff0000, 0 0 5px #0000;",
         ));
         // The white box is around x=100,y=100 at 960x540. A 200px source shadow is 100 output pixels to the right.
         let x = 100 + 100 + 20;
