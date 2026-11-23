@@ -373,28 +373,8 @@ pub(crate) fn write_stage_layout_at(
     layout: &StageLayout,
 ) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let fresh: Value = serde_json::from_str(&serialize_stage(layout))
-        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
-    let fresh = fresh.get("default").cloned().unwrap_or_default();
-    let mut root = match fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(value @ Value::Object(_)) => value,
-            _ => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!(
-                        "{} is not a stage layout file; not replacing it",
-                        path.display()
-                    ),
-                ));
-            }
-        },
-        Err(err) if err.kind() == ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
-        Err(err) => return Err(err),
-    };
+    let fresh = serialized_layout(layout)?;
+    let mut root = read_stage_object(path)?;
     let target = if let Some(id) = id {
         root.get_mut(id)
             .filter(|target| target.get("items").is_some_and(Value::is_object))
@@ -421,9 +401,52 @@ pub(crate) fn write_stage_layout_at(
         entry
     };
     merge_layout(target, &fresh);
+    write_stage_object(path, &root)
+}
+
+pub(crate) fn create_stage_layout(path: &Path, layout: &StageLayout) -> std::io::Result<String> {
+    let mut root = read_stage_object(path)?;
+    if root.get("items").is_some_and(Value::is_object) {
+        root = serde_json::json!({ "default": root });
+    } else if root.as_object().is_some_and(serde_json::Map::is_empty) {
+        root["default"] = serialized_layout(&default_stage())?;
+    }
+    let mut id = crate::new_id();
+    while root.get(&id).is_some() {
+        id = crate::new_id();
+    }
+    root[&id] = serialized_layout(layout)?;
+    write_stage_object(path, &root)?;
+    Ok(id)
+}
+
+fn serialized_layout(layout: &StageLayout) -> std::io::Result<Value> {
+    let mut fresh: Value =
+        serde_json::from_str(&serialize_stage(layout)).map_err(std::io::Error::other)?;
+    Ok(fresh["default"].take())
+}
+
+fn read_stage_object(path: &Path) -> std::io::Result<Value> {
+    use std::io::{Error, ErrorKind};
+    match fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(value @ Value::Object(_)) => Ok(value),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{} is not a stage layout file", path.display()),
+            )),
+        },
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(err) => Err(err),
+    }
+}
+
+fn write_stage_object(path: &Path, root: &Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let staging = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(&root)
-        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+    let text = serde_json::to_string_pretty(root).map_err(std::io::Error::other)?;
     fs::write(&staging, text)?;
     fs::rename(&staging, path).inspect_err(|_| {
         let _ = fs::remove_file(&staging);

@@ -3045,6 +3045,24 @@ impl Session {
         self.select_stage_layout(output.as_deref(), id)
     }
 
+    pub fn create_stage_layout(&mut self) -> Result<String, String> {
+        let root = self.root.as_deref().ok_or("open a library first")?;
+        let layout = StageLayout {
+            name: "New layout".into(),
+            background: default_stage().background,
+            items: Vec::new(),
+        };
+        let id = Library::open(root)
+            .create_stage_layout(&layout)
+            .map_err(|err| format!("could not create stage layout: {err}"))?;
+        if self.select_primary_stage_layout(&id).is_ok() {
+            return Ok(format!("Created {}", layout.name));
+        }
+        self.stage = layout;
+        self.stage_layout_id = Some(id);
+        Ok("Created layout. Could not save its selection".into())
+    }
+
     fn select_stage_layout(&mut self, output: Option<&str>, id: &str) -> Result<(), String> {
         let root = self.root.as_deref().ok_or("open a library first")?;
         let library = Library::open(root);
