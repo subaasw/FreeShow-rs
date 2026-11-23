@@ -473,6 +473,7 @@ fn merge_layout(target: &mut Value, fresh: &Value) {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let original_order = item_order(target, &existing);
     let mut items = serde_json::Map::new();
     let mut order = Vec::new();
     if let Some(fresh_items) = fresh.get("items").and_then(Value::as_object) {
@@ -506,11 +507,19 @@ fn merge_layout(target: &mut Value, fresh: &Value) {
             order.push(Value::String(id.to_string()));
         }
     }
-    // Items hidden with `enabled: false` are skipped on load; keep them on save.
+    // Retain saved items outside the editor's order, and keep hidden boxes in their old slots.
+    for (index, id) in original_order.iter().enumerate() {
+        if existing
+            .get(id)
+            .is_some_and(|item| item["enabled"].as_bool() == Some(false))
+            && !items.contains_key(id)
+        {
+            order.insert(index.min(order.len()), Value::String(id.clone()));
+        }
+    }
     for (id, item) in existing {
-        if item.get("enabled").and_then(Value::as_bool) == Some(false) && !items.contains_key(&id) {
-            order.push(Value::String(id.clone()));
-            items.insert(id, item);
+        if item["enabled"].as_bool() == Some(false) || !original_order.contains(&id) {
+            items.entry(id).or_insert(item);
         }
     }
     target["itemOrder"] = Value::Array(order);
@@ -783,17 +792,7 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
         .unwrap_or("#12121c")
         .to_string();
     let items_value = layout.get("items").and_then(Value::as_object).ok_or(())?;
-    let order = layout
-        .get("itemOrder")
-        .and_then(Value::as_array)
-        .map(|order| {
-            order
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| items_value.keys().cloned().collect());
+    let order = item_order(layout, items_value);
     let mut items = Vec::new();
     for id in order {
         let Some(item_value) = items_value.get(&id) else {
@@ -935,6 +934,20 @@ fn layout_from(layout: &Value) -> Result<StageLayout, ()> {
         background,
         items,
     })
+}
+
+fn item_order(layout: &Value, items: &serde_json::Map<String, Value>) -> Vec<String> {
+    layout
+        .get("itemOrder")
+        .and_then(Value::as_array)
+        .map(|order| {
+            order
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_else(|| items.keys().cloned().collect())
 }
 
 fn web_url(item: &Value) -> Option<String> {

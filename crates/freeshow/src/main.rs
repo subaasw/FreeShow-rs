@@ -2387,6 +2387,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
+            let ui = control.as_weak();
+            control.on_stage_move(move |id, forward| {
+                let result = session.borrow_mut().move_stage_item(&id, forward);
+                if let (Ok(index), Some(ui)) = (&result, ui.upgrade()) {
+                    ui.set_stage_selected(*index as i32);
+                }
+                done(result.map(|_| format!("Moved {}", session.borrow().stage_item_name(&id))));
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
             control.on_stage_remove(move |id| {
                 let name = session.borrow().stage_item_name(&id);
                 let removed = session.borrow_mut().remove_stage_item(&id);

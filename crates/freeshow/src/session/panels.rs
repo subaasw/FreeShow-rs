@@ -1616,6 +1616,25 @@ impl Session {
         }
     }
 
+    pub fn move_stage_item(&mut self, id: &str, forward: bool) -> Result<usize, String> {
+        let index = self
+            .stage
+            .items
+            .iter()
+            .position(|item| item.id == id)
+            .ok_or_else(|| format!("no stage item {id:?}"))?;
+        let next = index
+            .checked_add_signed(if forward { 1 } else { -1 })
+            .filter(|next| *next < self.stage.items.len())
+            .ok_or("stage item is already at the edge of the stack")?;
+        self.stage.items.swap(index, next);
+        if self.save_stage_layout() {
+            return Ok(next);
+        }
+        self.stage.items.swap(index, next);
+        Err("could not save stage.json".into())
+    }
+
     pub fn remove_stage_item(&mut self, id: &str) -> bool {
         let Some(index) = self.stage.items.iter().position(|item| item.id == id) else {
             return false;
@@ -1906,6 +1925,67 @@ mod tests {
         assert!(saved.contains("400px"), "{saved}");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
+    }
+
+    #[test]
+    fn reordering_overlapping_stage_items_preserves_hidden_and_unordered_items() {
+        let (dir, _) = library("stage-order");
+        for (name, pixel) in [
+            ("red.png", [200, 0, 0, 255]),
+            ("blue.png", [0, 0, 200, 255]),
+        ] {
+            let image = freeshow_output::Frame {
+                width: 16,
+                height: 9,
+                pixels: pixel.repeat(16 * 9),
+            };
+            std::fs::write(dir.path().join(name), image.encode_png().unwrap()).unwrap();
+        }
+        let path = freeshow_data::Library::open(dir.path()).stage_path();
+        let style = "left:0px;top:0px;width:160px;height:90px;";
+        let hidden = serde_json::json!({"type":"clock","enabled":false,"custom":true});
+        let unlisted = serde_json::json!({"type":"media","src":"other.png"});
+        std::fs::write(
+            &path,
+            serde_json::json!({"stage":{
+                "items":{
+                    "red":{"type":"media","style":style,"src":"red.png"},
+                    "blue":{"type":"media","style":style,"src":"blue.png"},
+                    "clock1":hidden,
+                    "unlisted":unlisted,
+                },
+                "itemOrder":["red","clock1","blue"]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        let pixel = |session: &Session| crate::live::stage_frame(session).pixel(10, 10);
+        assert_eq!(
+            pixel(&session),
+            freeshow_output::parse_color("#0000c8").unwrap()
+        );
+        assert!(session.move_stage_item("red", false).is_err());
+        assert_eq!(session.move_stage_item("red", true).unwrap(), 1);
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(
+            pixel(&session),
+            freeshow_output::parse_color("#c80000").unwrap()
+        );
+
+        let id = session.add_stage_item("clock", "left:500px;").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["stage"]["itemOrder"],
+            serde_json::json!(["blue", "clock1", "red", id])
+        );
+        assert_eq!(saved["stage"]["items"]["clock1"], hidden);
+        assert_eq!(saved["stage"]["items"]["unlisted"], unlisted);
+        std::fs::write(&path, "{bad json").unwrap();
+        assert!(session.move_stage_item("red", false).is_err());
+        assert_eq!(session.stage.items[1].id, "red");
     }
 
     #[test]
