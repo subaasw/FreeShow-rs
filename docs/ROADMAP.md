@@ -159,6 +159,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint positioned text with mixed run styles, theme fonts and colors, paragraph alignment, and explicit line breaks.
 - [x] PowerPoint text-box insets for wrapping and alignment inside positioned shapes.
 - [x] PowerPoint line spacing and paragraph spacing before and after, including wrapped text and hard breaks.
+- [x] PowerPoint paragraph margins and first-line or hanging indents, including wrapped continuations.
 - [ ] PowerPoint custom gradient geometry and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with

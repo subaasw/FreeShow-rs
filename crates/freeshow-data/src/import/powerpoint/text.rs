@@ -55,6 +55,14 @@ impl TextBody {
                     .flatten()
                     .find_map(|node| spacing(child(node, key)?, px_per_point))
             });
+            let [left, right, indent] = ["marL", "marR", "indent"].map(|key| {
+                let emu = properties
+                    .into_iter()
+                    .flatten()
+                    .find_map(|node| node.attribute(key)?.parse::<i32>().ok())
+                    .unwrap_or(0);
+                size.px_x(f64::from(emu)).round() as i32
+            });
             let first = lines.len();
             let style = |run| run_style(run, defaults, font_ref, context, px_per_point);
             let mut runs = Vec::new();
@@ -84,6 +92,10 @@ impl TextBody {
                 let after = after.as_deref().filter(|_| index == last);
                 if height.is_some() || before.is_some() || after.is_some() {
                     line["pptxSpacing"] = json!([height, before, after]);
+                }
+                let first_indent = if index == first { indent } else { 0 };
+                if [left, right, first_indent] != [0; 3] {
+                    line["pptxMargins"] = json!([left, right, first_indent]);
                 }
             }
         }
