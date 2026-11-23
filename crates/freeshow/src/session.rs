@@ -154,6 +154,30 @@ struct TimelineSoundtrack {
     owned: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+enum VideoEnd {
+    #[default]
+    Hold,
+    Clear {
+        fade: bool,
+    },
+    Black {
+        fade: bool,
+    },
+}
+
+impl VideoEnd {
+    fn from_media(media: &serde_json::Value) -> Self {
+        match media["endBehavior"].as_str() {
+            Some("clear") => Self::Clear { fade: false },
+            Some("fade_clear") => Self::Clear { fade: true },
+            Some("black") => Self::Black { fade: false },
+            Some("fade_black") => Self::Black { fade: true },
+            _ => Self::Hold,
+        }
+    }
+}
+
 pub struct Session {
     pub root: Option<PathBuf>,
     pub icecast: Option<(freeshow_core::IcecastDestination, bool)>,
@@ -247,6 +271,8 @@ pub struct Session {
     pub background_transition: bool,
     /// Path of the picture currently behind the slide, when one is showing.
     background_path: Option<PathBuf>,
+    video_end: VideoEnd,
+    video_end_fade: Option<bool>,
     imported_foreground_active: bool,
     pub volume: f32,
     /// The main channel is muted. Playback stays silent until a slide unmutes it.
@@ -476,6 +502,8 @@ impl Session {
             style_template: None,
             background_transition: false,
             background_path: None,
+            video_end: VideoEnd::Hold,
+            video_end_fade: None,
             imported_foreground_active: false,
             volume: 1.0,
             audio_muted: false,
@@ -662,6 +690,8 @@ impl Session {
             style_template: None,
             background_transition: false,
             background_path: None,
+            video_end: VideoEnd::Hold,
+            video_end_fade: None,
             imported_foreground_active: false,
             volume,
             audio_muted,
@@ -2080,6 +2110,7 @@ impl Session {
         let shown = match media_kind(&path) {
             MediaKind::Image => self.show_background_still(&path, hide_slide, retrigger),
             MediaKind::Video if path.is_file() => {
+                let end = VideoEnd::from_media(media);
                 let loops = media["loop"] != false;
                 let muted = media["muted"] != false;
                 let ended = self
@@ -2096,6 +2127,7 @@ impl Session {
                 } else {
                     self.slide_hidden = hide_slide;
                 }
+                self.video_end = end;
                 true
             }
             _ => false,
@@ -2427,6 +2459,8 @@ impl Session {
 
     fn remember_background(&mut self, path: &Path) {
         self.imported_foreground_active = false;
+        self.video_end = VideoEnd::Hold;
+        self.video_end_fade = None;
         let Some(root) = self.root.clone() else {
             self.reset_background_look();
             return;
@@ -2519,7 +2553,15 @@ impl Session {
         let flags = self.current_show().and_then(|show| {
             show.backdrop_media_flags_at(self.slide_index?, &path.to_string_lossy())
         });
+        let end = self
+            .current_show()
+            .and_then(|show| {
+                show.backdrop_media_entry_at(self.slide_index?, &path.to_string_lossy())
+            })
+            .map(VideoEnd::from_media)
+            .unwrap_or_default();
         if self.background_path.as_deref() == Some(path) {
+            self.video_end = end;
             if !self.timeline_playing {
                 self.background_transition = false;
             }
@@ -2549,6 +2591,7 @@ impl Session {
             flags.map(|(loops, muted, _)| (loops, muted)),
             foreground,
         );
+        self.video_end = end;
     }
 
     fn queue_background_video(
@@ -2616,6 +2659,8 @@ impl Session {
 
     fn reset_background_look(&mut self) {
         self.imported_foreground_active = false;
+        self.video_end = VideoEnd::Hold;
+        self.video_end_fade = None;
         self.background_fit = Fit::Contain;
         self.background_flip_x = false;
         self.background_flip_y = false;
@@ -3572,6 +3617,14 @@ impl Session {
 
     /// Goes to the next slide when the file that just ended belongs to this slide.
     pub fn finish_media(&mut self, path: &str, audio: bool) -> bool {
+        if !audio
+            && matches!(
+                self.pending_play,
+                Some(PendingPlay::Video(_) | PendingPlay::Camera(_))
+            )
+        {
+            return false;
+        }
         let key = (path.to_string(), audio);
         if self.media_finished.as_ref() == Some(&key) {
             return false;
@@ -3580,6 +3633,7 @@ impl Session {
         if audio && self.timeline_owns_audio(Path::new(path)) {
             return false;
         }
+        let ended_video = !audio && self.finish_background_video(Path::new(path));
         if !self.resume_after_effect(path, audio) {
             self.advance_playlist(path, audio);
         }
@@ -3603,12 +3657,36 @@ impl Session {
             })
             .unwrap_or(false);
         if !waits {
-            return false;
+            self.refresh_output |= ended_video;
+            return ended_video;
         }
         let advanced = self.advance_show();
         self.media_finished = Some(key);
-        self.refresh_output = advanced;
-        advanced
+        self.refresh_output |= advanced || ended_video;
+        advanced || ended_video
+    }
+
+    fn finish_background_video(&mut self, path: &Path) -> bool {
+        if self.background_path.as_deref() != Some(path) {
+            return false;
+        }
+        let (fade, black) = match self.video_end {
+            VideoEnd::Hold => return false,
+            VideoEnd::Clear { fade } => (fade, false),
+            VideoEnd::Black { fade } => (fade, true),
+        };
+        self.reset_background_look();
+        self.replace_underlay(black.then(|| Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+        }));
+        if black {
+            self.background_fit = Fit::Fill;
+        }
+        self.background_transition = true;
+        self.video_end_fade = Some(fade);
+        true
     }
 
     pub fn set_channel_volume(&mut self, id: &str, gain: f32) {
@@ -5203,6 +5281,17 @@ impl Session {
     pub fn output_motion(&mut self) -> (freeshow_data::TextTransition, bool) {
         let background = self.background_transition;
         self.background_transition = false;
+        if let Some(fade) = self.video_end_fade.take() {
+            let mut motion = self.library_motion(true);
+            if fade && motion.duration_ms > 0 {
+                motion.kind = "fade".into();
+            } else if fade {
+                motion = freeshow_data::TextTransition::default();
+            } else {
+                motion.kind = "none".into();
+            }
+            return (motion, true);
+        }
         if self.blanked {
             return (
                 freeshow_data::TextTransition {
@@ -7963,6 +8052,73 @@ Second line"
         assert!(!session.slide_hidden);
         assert!(session.underlay.is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imported_timeline_video_end_actions_keep_the_slide_and_audio() {
+        let video = std::env::temp_dir().join(format!("{}.mp4", new_id()));
+        std::fs::write(
+            &video,
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4"),
+        )
+        .unwrap();
+        for (behavior, motion, black) in [
+            ("clear", "none", false),
+            ("black", "none", true),
+            ("fade_clear", "fade", false),
+            ("fade_black", "fade", true),
+            ("hold", "", false),
+        ] {
+            let mut show = ShowFile::blank("ending", "Ending");
+            show.show["origin"] = serde_json::json!("propresenter");
+            show.show["media"]["clip"] =
+                serde_json::json!({"path": video, "loop": false, "endBehavior": behavior});
+            show.show["layouts"]["main"]["timeline"]["actions"] = serde_json::json!([
+                {"time": 0, "type": "background", "data": {"id": "clip"}}
+            ]);
+            let mut session = Session::empty();
+            session.shows = vec![show];
+            assert!(session.present_show_id("ending"));
+            assert!(session.start_timeline());
+            assert!(session.tick_timeline(session.timeline_started.unwrap()));
+            let video_path = video.to_string_lossy();
+            assert!(
+                !session.finish_media(&video_path, false),
+                "ignore an old completion while a video is queued"
+            );
+            assert!(matches!(
+                session.take_plays(),
+                [Some(PendingPlay::Video(_)), None]
+            ));
+            session.replace_underlay(Some(Raster {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 0, 0, 255],
+            }));
+            session.playing_audio = Some(PathBuf::from("score.wav"));
+            assert_eq!(session.finish_media(&video_path, false), behavior != "hold");
+            assert!(!session.finish_media(&video_path, false));
+            if behavior == "hold" {
+                assert_eq!(session.underlay.unwrap().rgba, [255, 0, 0, 255]);
+                continue;
+            }
+            assert_eq!(session.slide_index, Some(0));
+            assert!(!session.slide_hidden);
+            assert_eq!(
+                session.playing_audio.as_deref(),
+                Some(Path::new("score.wav"))
+            );
+            assert!(session.background_path.is_none());
+            assert!(session.refresh_output);
+            let (transition, media) = session.output_motion();
+            assert!(media);
+            assert_eq!(transition.kind, motion);
+            assert_eq!(
+                session.underlay.as_ref().map(|image| image.rgba.as_slice()),
+                black.then_some([0, 0, 0, 255].as_slice())
+            );
+        }
+        std::fs::remove_file(video).unwrap();
     }
 
     #[test]
