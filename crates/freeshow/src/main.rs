@@ -699,6 +699,9 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
     ui.set_autosave_choices(strings(&session::AUTOSAVE_CHOICES.map(str::to_string)));
     let inspector = session.inspector_form();
+    let has_picture = inspector.item_box.crop.is_some();
+    let [crop_left, crop_right, crop_top, crop_bottom] =
+        inspector.item_box.crop.unwrap_or_default();
     ui.set_inspector_data(InspectorData {
         has_item: inspector.has_item,
         family: inspector.typography.family.into(),
@@ -717,6 +720,11 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         radius: inspector.item_box.radius.into(),
         box_shadow: inspector.item_box.box_shadow.into(),
         backdrop_filter: inspector.item_box.backdrop_filter.into(),
+        has_picture,
+        crop_left: crop_left.into(),
+        crop_right: crop_right.into(),
+        crop_top: crop_top.into(),
+        crop_bottom: crop_bottom.into(),
         line_height: inspector.typography.line_height_pct,
         letter_spacing: inspector.typography.letter_spacing,
         outline_width: inspector.typography.outline_width,

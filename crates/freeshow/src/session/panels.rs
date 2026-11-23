@@ -1317,6 +1317,19 @@ impl Session {
                     show.set_item_box_css(slide, item, "box-shadow", &value)
                 })
             }
+            "crop-left" | "crop-right" | "crop-top" | "crop-bottom" => {
+                let percent = value
+                    .strip_suffix('%')
+                    .unwrap_or(&value)
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| (0.0..=99.0).contains(number))
+                    .ok_or("a crop edge must be between 0 and 99 percent")?;
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_crop_edge(slide, item, key.trim_start_matches("crop-"), percent)
+                })
+            }
             "backdrop-filter" => {
                 if !freeshow_output::valid_backdrop_filter(&value) {
                     return Err(format!("invalid backdrop filter {value:?}"));
@@ -1886,6 +1899,40 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn inspector_edits_picture_crop_edges_without_changing_the_saved_mode() {
+        let (dir, mut session) = library("inspector-crop");
+        assert!(session.create_show());
+        assert!(session.inspector_form().item_box.crop.is_none());
+        assert!(session.inspector_set("crop-left", "25").is_err());
+        assert!(session.edit_current_item(|show, slide, index| {
+            let item = &mut show.show["slides"][slide]["items"][index];
+            item["src"] = serde_json::json!("Media/picture.png");
+            item["cropping"] =
+                serde_json::json!({"type":"ppt","left":10,"top":"4.5","extension":true});
+            true
+        }));
+        assert_eq!(
+            session.inspector_form().item_box.crop.unwrap(),
+            ["10", "0", "4.5", "0"]
+        );
+        session.inspector_set("crop-left", "32.5%").unwrap();
+        session.inspector_set("crop-bottom", "9").unwrap();
+        for invalid in ["-1", "100", "NaN", "30%%"] {
+            assert!(session.inspector_set("crop-right", invalid).is_err());
+        }
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.select_drawer(0);
+        assert!(session.pick_first_slide());
+        assert_eq!(
+            session.inspector_form().item_box.crop.unwrap(),
+            ["32.5", "0", "4.5", "9"]
+        );
+        let crop = &session.current_show().unwrap().show["slides"]["s1"]["items"][0]["cropping"];
+        assert_eq!(crop["type"], "ppt");
+        assert_eq!(crop["extension"], true);
     }
 
     #[test]

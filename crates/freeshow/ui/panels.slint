@@ -74,6 +74,11 @@ export struct InspectorData {
     radius: string,
     box-shadow: string,
     backdrop-filter: string,
+    has-picture: bool,
+    crop-left: string,
+    crop-right: string,
+    crop-top: string,
+    crop-bottom: string,
     line-height: int,
     letter-spacing: int,
     outline-width: int,
@@ -849,6 +854,24 @@ export component InspectorPanel inherits VerticalLayout {
         ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.w; edited(value) => { root.set("width", value); } }
         FieldLabel { text: "Height"; text-color: root.text-color; min-width: 32px; }
         ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.h; edited(value) => { root.set("height", value); } }
+    }
+    if root.data.has-item && root.data.has-picture: VerticalLayout {
+        spacing: 4px;
+        FieldLabel { text: "Picture crop (%)"; text-color: root.text-color; }
+        HorizontalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Left"; text-color: root.text-color; min-width: 48px; }
+            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-left; accepted(value) => { root.set("crop-left", value); } }
+            FieldLabel { text: "Right"; text-color: root.text-color; min-width: 48px; }
+            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-right; accepted(value) => { root.set("crop-right", value); } }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Top"; text-color: root.text-color; min-width: 48px; }
+            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-top; accepted(value) => { root.set("crop-top", value); } }
+            FieldLabel { text: "Bottom"; text-color: root.text-color; min-width: 48px; }
+            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-bottom; accepted(value) => { root.set("crop-bottom", value); } }
+        }
     }
     HorizontalLayout {
         spacing: 6px;
