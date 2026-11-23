@@ -634,6 +634,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         output_name: settings.output_name.into(),
         output_always_on_top: settings.output_always_on_top,
         output_kiosk: settings.output_kiosk,
+        output_resolution: settings.output_resolution.into(),
         text_transition: settings.text_transition.into(),
         text_duration: settings.text_duration,
         media_transition: settings.media_transition.into(),

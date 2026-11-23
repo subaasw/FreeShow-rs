@@ -31,6 +31,7 @@ export struct SettingsData {
     output-name: string,
     output-always-on-top: bool,
     output-kiosk: bool,
+    output-resolution: string,
     text-transition: string,
     text-duration: int,
     media-transition: string,
@@ -493,6 +494,16 @@ export component SettingsPanel inherits Rectangle {
                         }
                     }
                     Row {
+                        SettingLabel { text: "Resolution"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 2;
+                            // Slides are 16:9, so these sizes keep that shape.
+                            model: ["1920x1080", "1280x720", "2560x1440", "3840x2160"];
+                            value: root.data.output-resolution;
+                            selected(value) => { root.apply("outputResolution", value); }
+                        }
+                    }
+                    Row {
                         SettingLabel { text: "Window"; text-color: root.text-color; }
                         Switch {
                             text: "Always on top";
@@ -509,7 +520,7 @@ export component SettingsPanel inherits Rectangle {
                         Rectangle {}
                         Text {
                             colspan: 2;
-                            text: "The output window plays the output picked here, with its style and window options. Screen in the header moves it to another monitor. Stage displays are set up in Stage edit.";
+                            text: "The output window plays the output picked here, with its style and window options. Screen in the header moves it to another monitor. A new resolution applies the next time FreeShow starts. Stage displays are set up in Stage edit.";
                             color: root.text-color;
                             opacity: 0.6;
                             font-size: 12px;
