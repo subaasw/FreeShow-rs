@@ -150,6 +150,7 @@ pub(super) enum GradientFocus {
     RadialPoint([f64; 2]),
     RadialEllipse([f64; 4]),
     Rectangle([f64; 4]),
+    Shape([f64; 4]),
 }
 
 impl GradientFocus {
@@ -168,10 +169,8 @@ impl GradientFocus {
                 let (rx, ry) = (1.0 - left - right, 1.0 - top - bottom);
                 Some(Self::RadialEllipse([x, y, rx.max(0.0), ry.max(0.0)]))
             }
-            // The anchor shape for a slide background is a rectangle.
-            "rect" | "shape" if edges.iter().all(|edge| *edge >= 0.0) => {
-                Some(Self::Rectangle(edges))
-            }
+            "rect" if edges.iter().all(|edge| *edge >= 0.0) => Some(Self::Rectangle(edges)),
+            "shape" if edges.iter().all(|edge| *edge >= 0.0) => Some(Self::Shape(edges)),
             // shortcut: extended radial focuses and non-nested paths use the centered fill until their geometry is supported.
             _ => None,
         }
@@ -230,7 +229,11 @@ impl GradientFill {
         })
     }
 
-    fn resolve(&self, scheme: impl Fn(&str) -> Option<ResolvedColor>) -> Option<ResolvedFill> {
+    fn resolve(
+        &self,
+        scheme: impl Fn(&str) -> Option<ResolvedColor>,
+        ellipse_shape: bool,
+    ) -> Option<ResolvedFill> {
         let mut resolved = Vec::new();
         for (pos, color) in &self.stops {
             resolved.push((*pos, color.hex_in(&scheme)?));
@@ -269,9 +272,18 @@ impl GradientFill {
             Some(GradientFocus::RadialEllipse([x, y, rx, ry])) => {
                 style.push_str(&format!("--pptx-radial-ellipse:{x} {y} {rx} {ry};"))
             }
-            Some(GradientFocus::Rectangle([l, t, r, b])) => style.push_str(&format!(
-                "--pptx-rectangular-focus:{l:.5} {t:.5} {r:.5} {b:.5};"
-            )),
+            Some(GradientFocus::Shape([l, t, r, b])) if ellipse_shape => {
+                let (x, y) = (l - r, t - b);
+                let (rx, ry) = ((1.0 - l - r).max(0.0), (1.0 - t - b).max(0.0));
+                style.push_str(&format!(
+                    "--pptx-radial-ellipse:{x} {y} {rx} {ry};--pptx-shape-ellipse:1;"
+                ));
+            }
+            Some(GradientFocus::Rectangle([l, t, r, b]) | GradientFocus::Shape([l, t, r, b])) => {
+                style.push_str(&format!(
+                    "--pptx-rectangular-focus:{l:.5} {t:.5} {r:.5} {b:.5};"
+                ))
+            }
             None => {}
         }
         if gamma {
@@ -602,6 +614,47 @@ struct Context {
     colors: ColorMap,
 }
 
+impl Context {
+    fn color(&self, slot: &str) -> Option<ResolvedColor> {
+        let key = self.colors.get(slot).map_or_else(
+            || match slot {
+                "bg1" => "lt1",
+                "bg2" => "lt2",
+                "tx1" => "dk1",
+                "tx2" => "dk2",
+                slot => slot,
+            },
+            String::as_str,
+        );
+        self.theme.as_ref()?.colors.get(key).copied()
+    }
+
+    fn color_with_placeholder(
+        &self,
+        slot: &str,
+        placeholder: Option<&Color>,
+    ) -> Option<ResolvedColor> {
+        if slot == "phClr" {
+            placeholder.and_then(|color| color.resolve(|slot| self.color(slot)))
+        } else {
+            self.color(slot)
+        }
+    }
+
+    fn style(
+        &self,
+        index: u32,
+        placeholder: Option<&Color>,
+        ellipse: bool,
+    ) -> Option<ResolvedFill> {
+        let color = |slot: &str| self.color_with_placeholder(slot, placeholder);
+        match self.theme.as_ref()?.style(index)? {
+            StyleFill::Solid(fill) => fill.hex_in(color).map(ResolvedFill::Color),
+            StyleFill::Gradient(fill) => fill.resolve(color, ellipse),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ThemeReader {
     themes: HashMap<String, Arc<Theme>>,
@@ -622,35 +675,12 @@ impl ThemeReader {
             return Ok(None);
         }
         let context = self.context(archive, slide, Some(xml), 0)?;
-        let Some(theme) = &context.theme else {
+        if context.theme.is_none() {
             return Ok(None);
-        };
-        let resolve = |slot: &str| {
-            let key = context.colors.get(slot).map_or_else(
-                || match slot {
-                    "bg1" => "lt1",
-                    "bg2" => "lt2",
-                    "tx1" => "dk1",
-                    "tx2" => "dk2",
-                    slot => slot,
-                },
-                String::as_str,
-            );
-            theme.colors.get(key).copied()
-        };
-        let scheme = |slot: &str| {
-            if slot == "phClr" {
-                color.and_then(|color| color.resolve(resolve))
-            } else {
-                resolve(slot)
-            }
-        };
+        }
+        let scheme = |slot: &str| context.color_with_placeholder(slot, color);
         Ok(match style {
-            Some(index) => match theme.style(index) {
-                Some(StyleFill::Solid(fill)) => fill.hex_in(scheme).map(ResolvedFill::Color),
-                Some(StyleFill::Gradient(fill)) => fill.resolve(scheme),
-                None => None,
-            },
+            Some(index) => context.style(index, color, false),
             None => color.and_then(|color| color.hex_in(scheme).map(ResolvedFill::Color)),
         })
     }
@@ -663,23 +693,70 @@ impl ThemeReader {
         fill: &GradientFill,
     ) -> Result<Option<ResolvedFill>, DataError> {
         let context = self.context(archive, slide, Some(xml), 0)?;
-        let Some(theme) = &context.theme else {
-            return Ok(fill.resolve(|_| None));
+        Ok(fill.resolve(|slot| context.color(slot), false))
+    }
+
+    pub(super) fn object_fills(
+        &mut self,
+        archive: &mut Archive<'_>,
+        slide: &str,
+        xml: &str,
+    ) -> Result<HashMap<u64, String>, DataError> {
+        if !xml.contains("spPr") {
+            return Ok(HashMap::new());
+        }
+        let Ok(document) = Document::parse(xml) else {
+            // Keep the streaming importer for older fragments with unbound prefixes.
+            return Ok(HashMap::new());
         };
-        let resolve = |slot: &str| {
-            let key = context.colors.get(slot).map_or_else(
-                || match slot {
-                    "bg1" => "lt1",
-                    "bg2" => "lt2",
-                    "tx1" => "dk1",
-                    "tx2" => "dk2",
-                    slot => slot,
-                },
-                String::as_str,
-            );
-            theme.colors.get(key).copied()
-        };
-        Ok(fill.resolve(resolve))
+        let context = self.context(archive, slide, Some(xml), 0)?;
+        let mut styles = HashMap::new();
+        for shape in document.descendants().filter(|node| {
+            (node.has_tag_name("sp") || node.has_tag_name("cxnSp"))
+                && node.parent_element().is_some_and(|parent| {
+                    parent.has_tag_name("spTree") || parent.has_tag_name("grpSp")
+                })
+        }) {
+            let Some(properties) = child(shape, "spPr") else {
+                continue;
+            };
+            let ellipse = child(properties, "prstGeom").and_then(|geom| geom.attribute("prst"))
+                == Some("ellipse");
+            let reference = child(shape, "style").and_then(|style| child(style, "fillRef"));
+            let placeholder = reference.and_then(Color::in_node);
+            let scheme = |slot: &str| context.color_with_placeholder(slot, placeholder.as_ref());
+            let direct = properties.children().filter(Node::is_element).find(|node| {
+                matches!(
+                    node.tag_name().name(),
+                    "noFill" | "solidFill" | "gradFill" | "blipFill" | "pattFill" | "grpFill"
+                )
+            });
+            let fill = match direct {
+                Some(fill) if fill.has_tag_name("noFill") => {
+                    styles.insert(shape.range().start as u64, String::new());
+                    continue;
+                }
+                Some(fill) if fill.has_tag_name("solidFill") => Color::in_node(fill)
+                    .and_then(|color| color.hex_in(scheme))
+                    .map(ResolvedFill::Color),
+                Some(fill) if fill.has_tag_name("gradFill") => {
+                    GradientFill::from_node(fill).and_then(|fill| fill.resolve(scheme, ellipse))
+                }
+                Some(_) => None,
+                None => reference
+                    .and_then(|reference| reference.attribute("idx"))
+                    .and_then(|index| index.parse().ok())
+                    .and_then(|index| context.style(index, placeholder.as_ref(), ellipse)),
+            };
+            if let Some(fill) = fill {
+                let style = match fill {
+                    ResolvedFill::Color(fill) => format!("background:{fill};"),
+                    ResolvedFill::Gradient { style, .. } => style,
+                };
+                styles.insert(shape.range().start as u64, style);
+            }
+        }
+        Ok(styles)
     }
 
     fn load_xml(

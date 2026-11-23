@@ -89,7 +89,8 @@ pub(super) fn import(
         if slide_xml_bytes > 64 * 1024 * 1024 {
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
-        let mut content = slide_content(&xml, &size)?;
+        let object_fills = themes.object_fills(&mut archive, part, &xml)?;
+        let mut content = slide_content(&xml, &size, object_fills)?;
         let lines = std::mem::take(&mut content.lines);
         let disabled = content.hidden;
         let found = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
@@ -371,7 +372,7 @@ struct SlideObject {
     width: f64,
     height: f64,
     lines: Vec<String>,
-    fill: Option<String>,
+    fill_style: Option<String>,
     ellipse: bool,
     radius: f64,
     crop: [f64; 4],
@@ -412,6 +413,11 @@ impl SlideObject {
         } else if self.radius > 0.0 {
             style.push_str(&format!("border-radius:{}px;", self.radius.round()));
         }
+        if !matches!(self.kind, ObjectKind::Picture)
+            && let Some(fill) = &self.fill_style
+        {
+            style.push_str(fill);
+        }
         match self.kind {
             ObjectKind::Picture => {
                 let src = self.src?;
@@ -429,20 +435,12 @@ impl SlideObject {
                     }
                 }))
             }
-            ObjectKind::Shape => {
-                if let Some(fill) = &self.fill {
-                    style.push_str(&format!("background:{fill};"));
-                }
-                Some(json!({
-                    "type": "shape",
-                    "style": style,
-                    "lines": []
-                }))
-            }
+            ObjectKind::Shape => Some(json!({
+                "type": "shape",
+                "style": style,
+                "lines": []
+            })),
             ObjectKind::Text => {
-                if let Some(fill) = &self.fill {
-                    style.push_str(&format!("background:{fill};"));
-                }
                 style.push_str("text-align:center;font-size:60px;");
                 let lines = self
                     .lines
@@ -458,7 +456,11 @@ impl SlideObject {
     }
 }
 
-fn slide_content(xml: &str, size: &SlideSize) -> Result<SlideContent, DataError> {
+fn slide_content(
+    xml: &str,
+    size: &SlideSize,
+    mut fills: HashMap<u64, String>,
+) -> Result<SlideContent, DataError> {
     let (lines, hidden) = slide_text(xml)?;
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
@@ -472,6 +474,7 @@ fn slide_content(xml: &str, size: &SlideSize) -> Result<SlideContent, DataError>
     let mut paragraph = false;
     let mut picture_ids = Vec::new();
     loop {
+        let start = reader.buffer_position();
         match reader.read_event().map_err(invalid)? {
             Event::Start(element) => {
                 let name = local_name(element.name().as_ref());
@@ -489,7 +492,7 @@ fn slide_content(xml: &str, size: &SlideSize) -> Result<SlideContent, DataError>
                             width: 0.0,
                             height: 0.0,
                             lines: Vec::new(),
-                            fill: None,
+                            fill_style: fills.remove(&start),
                             ellipse: false,
                             radius: 0.0,
                             crop: [0.0; 4],
@@ -531,11 +534,15 @@ fn slide_content(xml: &str, size: &SlideSize) -> Result<SlideContent, DataError>
                                 }
                             }
                         }
-                        (Some("solidFill"), "srgbClr") => {
+                        (Some("solidFill"), "srgbClr")
+                            if object.fill_style.is_none()
+                                && stack.len() >= 2
+                                && stack[stack.len() - 2] == "spPr" =>
+                        {
                             if let Some(val) = attribute(&element, "val")
                                 && val.len() == 6
                             {
-                                object.fill = Some(format!("#{val}"));
+                                object.fill_style = Some(format!("background:#{val};"));
                             }
                         }
                         (Some("blipFill"), "blip") => {
@@ -1527,6 +1534,59 @@ mod tests {
     }
 
     #[test]
+    fn positioned_shapes_keep_direct_and_theme_gradients() {
+        let files = archive(&[
+            (
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                    <p:sp><p:spPr>
+                        <a:xfrm><a:off x="914400" y="685800"/><a:ext cx="4572000" cy="1371600"/></a:xfrm>
+                        <a:prstGeom prst="rect"/>
+                        <a:gradFill><a:gsLst>
+                            <a:gs pos="0"><a:schemeClr val="accent1"/></a:gs>
+                            <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                        </a:gsLst><a:lin ang="2700000" scaled="1"/></a:gradFill>
+                    </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef></p:style>
+                    <p:txBody><a:p><a:r><a:t>Caption</a:t></a:r></a:p></p:txBody></p:sp>
+                    <p:sp><p:spPr>
+                        <a:xfrm><a:ext cx="4572000" cy="1371600"/></a:xfrm>
+                        <a:prstGeom prst="ellipse"/>
+                    </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef></p:style></p:sp>
+                    <p:sp><p:spPr><a:xfrm><a:ext cx="4572000" cy="1371600"/></a:xfrm><a:noFill/></p:spPr>
+                    <p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef></p:style>
+                    <p:txBody><a:p><a:r><a:rPr><a:solidFill><a:srgbClr val="F0F0F0"/></a:solidFill></a:rPr><a:t>Transparent</a:t></a:r></a:p></p:txBody></p:sp>
+                </p:spTree></p:cSld></p:sld>"#,
+            ),
+            ("ppt/slides/_rels/slide1.xml.rels", br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/layout.xml"/></Relationships>"#),
+            ("ppt/slideLayouts/layout.xml", br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#),
+            ("ppt/slideLayouts/_rels/layout.xml.rels", br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/master.xml"/></Relationships>"#),
+            ("ppt/slideMasters/master.xml", br#"<p:sldMaster xmlns:p="p"><p:cSld/></p:sldMaster>"#),
+            ("ppt/slideMasters/_rels/master.xml.rels", br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme.xml"/></Relationships>"#),
+            ("ppt/theme/theme.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
+                <a:clrScheme><a:accent1><a:srgbClr val="00AA00"/></a:accent1></a:clrScheme>
+                <a:fmtScheme><a:fillStyleLst><a:gradFill><a:gsLst>
+                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                </a:gsLst><a:path path="shape"/></a:gradFill></a:fillStyleLst></a:fmtScheme>
+            </a:themeElements></a:theme>"#),
+        ]);
+        let show = import("Shape gradients.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        let direct = items[0]["style"].as_str().unwrap();
+        assert!(
+            direct.contains("background:linear-gradient(135deg, #00AA00 0%, #0000FF 100%)"),
+            "{direct}"
+        );
+        assert!(direct.contains("--pptx-linear-scaled:1;"));
+        assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Caption");
+        let themed = items[1]["style"].as_str().unwrap();
+        assert!(themed.contains("border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)"), "{themed}");
+        assert!(themed.contains("--pptx-shape-ellipse:1;"));
+        assert!(!items[2]["style"].as_str().unwrap().contains("background:"));
+    }
+
+    #[test]
     fn rich_objects_keep_their_bounds_and_tables_warn() {
         let files = archive(&[
             (
@@ -1553,6 +1613,7 @@ mod tests {
                     <p:pic>
                         <p:spPr>
                             <a:xfrm><a:off x="0" y="3429000"/><a:ext cx="3048000" cy="1714500"/></a:xfrm>
+                            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
                         </p:spPr>
                         <p:blipFill><a:blip r:embed="img"/></p:blipFill>
                     </p:pic>
@@ -1592,6 +1653,7 @@ mod tests {
         assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Hello");
         assert_eq!(items[1]["type"], "media");
         assert!(items[1]["style"].as_str().unwrap().contains("left:0px"));
+        assert!(!items[1]["style"].as_str().unwrap().contains("background:"));
         assert!(
             Path::new(items[1]["src"].as_str().unwrap()).starts_with(path.canonicalize().unwrap())
         );
