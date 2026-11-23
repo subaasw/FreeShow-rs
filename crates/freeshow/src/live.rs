@@ -2055,15 +2055,25 @@ mod tests {
         std::fs::create_dir_all(root.join("Shows")).unwrap();
         std::fs::write(
             root.join("settings.json"),
-            r#"{"outputs":{"default":{"enabled":true,"active":true,"name":"Main","style":"default","bounds":{"x":0,"y":0,"width":1280,"height":720}}}}"#,
+            r#"{"outputs":{"default":{"enabled":true,"active":true,"name":"Main","style":"default","bounds":{"x":0,"y":0,"width":1280,"height":960}}}}"#,
         )
         .unwrap();
-        let session = crate::session::Session::open(root.clone());
-        assert_eq!((session.output_width, session.output_height), (1280, 720));
+        let mut session = crate::session::Session::open(root.clone());
+        assert_eq!((session.output_width, session.output_height), (1280, 960));
         let frame = audience_frame(&session);
-        assert_eq!((frame.width, frame.height), (1280, 720));
+        assert_eq!((frame.width, frame.height), (1280, 960));
+        session.stage.items.clear();
+        session
+            .add_stage_item(
+                "text",
+                "left:480px;top:270px;width:480px;height:270px;background:#ff0000;",
+            )
+            .unwrap();
         let stage = stage_frame(&session);
-        assert_eq!((stage.width, stage.height), (1280, 720));
+        assert_eq!((stage.width, stage.height), (1280, 960));
+        assert_eq!(stage.pixel(320, 240), parse_color("#ff0000").unwrap());
+        assert_ne!(stage.pixel(319, 240), stage.pixel(320, 240));
+        assert_ne!(stage.pixel(320, 239), stage.pixel(320, 240));
         let _ = std::fs::remove_dir_all(&root);
     }
 
