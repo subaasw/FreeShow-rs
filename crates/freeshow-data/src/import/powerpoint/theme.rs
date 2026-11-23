@@ -140,6 +140,7 @@ pub(super) struct GradientFill {
     pub linear_angle: Option<f64>,
     pub linear_scaled: bool,
     pub focus: Option<GradientFocus>,
+    pub tile_insets: [f64; 4],
     /// Positions in 0..=1 and DrawingML colors, which may still be scheme slots.
     pub stops: Vec<(f64, Color)>,
 }
@@ -206,10 +207,15 @@ impl GradientFill {
                 }),
             )
         });
+        let tile = child(fill, "tileRect");
         Some(Self {
             linear_angle: path.is_none().then_some(angle),
             linear_scaled,
             focus,
+            tile_insets: gradient_insets(|key| {
+                tile.and_then(|tile| tile.attribute(key))
+                    .and_then(percentage)
+            }),
             stops,
         })
     }
@@ -230,6 +236,12 @@ impl GradientFill {
         };
         if self.linear_angle.is_some() && self.linear_scaled {
             style.push_str("--pptx-linear-scaled:1;");
+        }
+        if self.tile_insets != [0.0; 4] {
+            let [left, top, right, bottom] = self.tile_insets;
+            style.push_str(&format!(
+                "--pptx-gradient-tile:{left} {top} {right} {bottom};"
+            ));
         }
         match self.focus {
             Some(GradientFocus::RadialPoint([x, y])) => {
