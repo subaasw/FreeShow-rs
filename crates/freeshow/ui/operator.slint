@@ -123,6 +123,9 @@ export component ControlWindow inherits Window {
         }
     }
     in property <string> stage-layout-name;
+    in property <string> stage-layout-id;
+    in property <[string]> stage-layout-ids;
+    in property <[string]> stage-layout-names;
     in property <[StageRowData]> stage-rows;
     in property <[string]> stage-add-kinds;
     in property <[string]> stage-add-names;
@@ -137,6 +140,7 @@ export component ControlWindow inherits Window {
     in property <string> stage-status;
     in-out property <int> stage-selected: 0;
     callback stage-set(string, string, string);
+    callback stage-layout-select(string);
     callback stage-add(string);
     callback stage-remove(string);
     callback save-shortcuts(string);
@@ -1139,6 +1143,9 @@ export component ControlWindow inherits Window {
             height: parent.height - 48px - 28px;
             background: root.primary;
             layout-name: root.stage-layout-name;
+            layout-id: root.stage-layout-id;
+            layout-ids: root.stage-layout-ids;
+            layout-names: root.stage-layout-names;
             rows: root.stage-rows;
             add-kinds: root.stage-add-kinds;
             add-names: root.stage-add-names;
@@ -1158,6 +1165,7 @@ export component ControlWindow inherits Window {
             accent-text: root.accent-text;
             close-fill: root.primary-lighter;
             set(id, key, value) => { root.stage-set(id, key, value); }
+            select-layout(id) => { root.stage-layout-select(id); }
             add(kind) => { root.stage-add(kind); }
             remove(id) => { root.stage-remove(id); }
             close => { root.show-stage-editor = false; window-keys.focus(); }

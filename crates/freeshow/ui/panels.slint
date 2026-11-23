@@ -208,7 +208,7 @@ component ValueCombo inherits ComboBox {
     changed value => { self.follow(); }
     changed model => { self.follow(); }
     // Setting the index alone can leave the shown text on the old row, so set both.
-    function follow() {
+    public function follow() {
         self.current-index = ComboIndex.find(self.model, self.value);
         self.current-value = self.current-index >= 0 ? self.model[self.current-index] : self.value;
     }
@@ -956,6 +956,9 @@ export component InspectorPanel inherits VerticalLayout {
 
 export component StageEditorPanel inherits Rectangle {
     in property <string> layout-name;
+    in property <string> layout-id;
+    in property <[string]> layout-ids;
+    in property <[string]> layout-names;
     in property <[StageRowData]> rows;
     in property <[string]> add-kinds;
     // What each add kind is called in the add menu, in the same order.
@@ -978,6 +981,7 @@ export component StageEditorPanel inherits Rectangle {
     in property <color> accent-text;
     in property <color> close-fill;
     callback set(string, string, string);
+    callback select-layout(string);
     callback add(string);
     callback remove(string);
     callback close();
@@ -988,15 +992,22 @@ export component StageEditorPanel inherits Rectangle {
     text-save := Timer {
         property <string> pending;
         property <string> target;
+        property <string> target-layout;
         interval: 600ms;
         running: false;
         triggered => {
+            self.save();
+        }
+        function save() {
             self.running = false;
-            root.set(self.target, "text", self.pending);
+            if self.target-layout == root.layout-id {
+                root.set(self.target, "text", self.pending);
+            }
         }
         function queue(value: string) {
             self.pending = value;
             self.target = root.current.id;
+            self.target-layout = root.layout-id;
             self.running = false;
             self.running = true;
         }
@@ -1009,13 +1020,28 @@ export component StageEditorPanel inherits Rectangle {
             status: root.status;
             text-color: root.text-color;
             close-fill: root.close-fill;
-            close => { root.close(); }
+            close => { if (text-save.running) { text-save.save(); } root.close(); }
         }
         HorizontalLayout {
             spacing: 10px;
             VerticalLayout {
                 width: 240px;
                 spacing: 6px;
+                if root.layout-ids.length > 0: HorizontalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Layout"; text-color: root.text-color; min-width: 0px; }
+                    ValueCombo {
+                        horizontal-stretch: 1;
+                        property <int> layout-index: ComboIndex.find(root.layout-ids, root.layout-id);
+                        model: root.layout-names;
+                        value: self.layout-index >= 0 ? root.layout-names[self.layout-index] : root.layout-name;
+                        selected(value) => {
+                            if (text-save.running) { text-save.save(); }
+                            root.select-layout(root.layout-ids[self.current-index]);
+                            self.follow();
+                        }
+                    }
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     ValueCombo {
@@ -1042,7 +1068,7 @@ export component StageEditorPanel inherits Rectangle {
                             accent: root.accent;
                             text-color: root.text-color;
                             accent-text: root.accent-text;
-                            clicked => { root.selected = index; }
+                            clicked => { if (text-save.running) { text-save.save(); } root.selected = index; }
                         }
                     }
                 }
@@ -1284,7 +1310,9 @@ export component StageEditorPanel inherits Rectangle {
                             FieldLabel { text: "Chart data (one label: value per line)"; text-color: root.text-color; }
                             chart-data := TextEdit {
                                 property <string> item-id: root.current.id;
+                                property <string> source-layout: root.layout-id;
                                 changed item-id => { self.text = root.current.chart-data; }
+                                changed source-layout => { self.text = root.current.chart-data; }
                                 height: 90px;
                                 text: root.current.chart-data;
                             }
@@ -1305,7 +1333,9 @@ export component StageEditorPanel inherits Rectangle {
                         TextEdit {
                             // Picking another text item loads its words even after typing here.
                             property <string> source: root.current.id;
+                            property <string> source-layout: root.layout-id;
                             changed source => { self.text = root.current.text; }
+                            changed source-layout => { self.text = root.current.text; }
                             colspan: 3;
                             height: 90px;
                             text: root.current.text;

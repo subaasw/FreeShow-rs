@@ -760,6 +760,13 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         })
         .collect();
     ui.set_stage_rows(Rc::new(slint::VecModel::from(rows)).into());
+    ui.set_stage_layout_id(
+        session
+            .stage_layout_id
+            .as_deref()
+            .unwrap_or_default()
+            .into(),
+    );
     ui.set_stage_add_kinds(strings(&session::STAGE_ADD_KINDS.map(str::to_string)));
     ui.set_stage_add_names(strings(&session::STAGE_ADD_NAMES.map(str::to_string)));
     if ui.get_show_stage_editor() {
@@ -2284,6 +2291,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let session = Rc::clone(&session);
             let done = Rc::clone(&after_stage_edit);
+            let ui = control.as_weak();
+            control.on_stage_layout_select(move |id| {
+                let result = session.borrow_mut().select_primary_stage_layout(&id);
+                if result.is_ok()
+                    && let Some(ui) = ui.upgrade()
+                {
+                    ui.set_stage_selected(0);
+                }
+                done(result.map(|()| format!("Showing {}", session.borrow().stage.name)));
+            });
+        }
+        {
+            let session = Rc::clone(&session);
+            let done = Rc::clone(&after_stage_edit);
             control.on_stage_set(move |id, key, value| {
                 let result = session.borrow_mut().stage_set(&id, &key, &value);
                 let name = session.borrow().stage_item_name(&id);
@@ -2336,7 +2357,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     names.dedup();
                     names.insert(0, "No camera selected".into());
                     ui.set_stage_camera_names(strings(&names));
-                    refresh_panels(&ui, &session.borrow());
+                    let current = session.borrow();
+                    let layouts = current
+                        .root
+                        .as_deref()
+                        .map(|root| freeshow_data::Library::open(root).stage_layout_choices())
+                        .unwrap_or_default();
+                    let names: Vec<_> = layouts
+                        .iter()
+                        .map(|(id, name)| {
+                            if layouts.iter().filter(|(_, other)| other == name).count() > 1 {
+                                format!("{name} ({id})")
+                            } else {
+                                name.clone()
+                            }
+                        })
+                        .collect();
+                    let ids: Vec<_> = layouts.into_iter().map(|(id, _)| id).collect();
+                    ui.set_stage_layout_ids(strings(&ids));
+                    ui.set_stage_layout_names(strings(&names));
+                    refresh_panels(&ui, &current);
                 }
             });
         }

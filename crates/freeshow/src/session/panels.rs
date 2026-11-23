@@ -1884,6 +1884,57 @@ mod tests {
     }
 
     #[test]
+    fn stage_layout_selection_persists_and_only_changes_the_primary_stage_output() {
+        let (dir, _) = library("stage-picker");
+        let library = freeshow_data::Library::open(dir.path());
+        std::fs::write(
+            library.stage_path(),
+            r#"{"a":{"name":"Clock","items":{"box":{"type":"clock"}}},"b":{"name":"Notes","items":{"box":{"type":"slide_notes"}}},"c":{"name":"Hidden","disabled":true,"items":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            library.stage_layout_choices(),
+            vec![("a".into(), "Clock".into()), ("b".into(), "Notes".into())]
+        );
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(session.stage.name, "Clock");
+        assert!(session.select_stage_layout(Some("audience"), "b").is_err());
+        assert_eq!(session.stage.name, "Clock");
+
+        session.select_primary_stage_layout("b").unwrap();
+        session.stage_set("box", "left", "42").unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert_eq!(session.stage.name, "Notes");
+        assert_eq!(session.stage_rows()[0].left, 42);
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(library.settings_path()).unwrap())
+                .unwrap();
+        assert_eq!(settings["nativeStageLayout"], "b");
+        assert_eq!(settings["unknownKey"]["keep"], 1);
+
+        std::fs::write(library.settings_path(), "{bad json").unwrap();
+        assert!(session.select_primary_stage_layout("a").is_err());
+        assert_eq!(session.stage.name, "Notes");
+        assert_eq!(
+            std::fs::read_to_string(library.settings_path()).unwrap(),
+            "{bad json"
+        );
+
+        std::fs::write(
+            library.settings_path(),
+            r#"{"outputs":{"first":{"stageOutput":"a"},"second":{"stageOutput":"a"}}}"#,
+        )
+        .unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.select_primary_stage_layout("b").unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(library.settings_path()).unwrap())
+                .unwrap();
+        assert_eq!(settings["outputs"]["first"]["stageOutput"], "b");
+        assert_eq!(settings["outputs"]["second"]["stageOutput"], "a");
+    }
+
+    #[test]
     fn a_missing_stage_layout_does_not_redirect_or_apply_edits() {
         let (dir, _) = library("stage-missing");
         let path = freeshow_data::Library::open(dir.path()).stage_path();

@@ -4391,18 +4391,53 @@ impl Library {
         stage_layout::stage_by_id(&text, id)
     }
 
-    /// The layout id stored on the first stage output.
+    /// Enabled saved stage layouts as (id, name).
+    pub fn stage_layout_choices(&self) -> Vec<(String, String)> {
+        let Some(Value::Object(layouts)) = fs::read_to_string(self.stage_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+        else {
+            return Vec::new();
+        };
+        if layouts.get("items").is_some_and(Value::is_object) {
+            return Vec::new();
+        }
+        layouts
+            .into_iter()
+            .filter(|(_, layout)| {
+                layout.get("items").is_some_and(Value::is_object)
+                    && layout["disabled"].as_bool() != Some(true)
+            })
+            .map(|(id, layout)| {
+                let name = layout["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&id);
+                (id.clone(), name.to_owned())
+            })
+            .collect()
+    }
+
+    /// The layout id stored on the first stage output, or for the native stage alone.
     pub fn assigned_stage_id(&self) -> Option<String> {
         let text = fs::read_to_string(self.settings_path()).ok()?;
         let json: Value = serde_json::from_str(&text).ok()?;
-        let outputs = json.get("outputs")?.as_object()?;
-        outputs.values().find_map(|output| {
-            output
-                .get("stageOutput")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-        })
+        json.get("outputs")
+            .and_then(Value::as_object)
+            .and_then(|outputs| {
+                outputs.values().find_map(|output| {
+                    output
+                        .get("stageOutput")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                })
+            })
+            .or_else(|| {
+                json["nativeStageLayout"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+            })
+            .map(str::to_owned)
     }
 
     /// Points stage outputs at this layout. An output id limits the change to that window.
@@ -4411,36 +4446,34 @@ impl Library {
             return false;
         }
         let path = self.settings_path();
-        let mut json = fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let Some(outputs) = json.get_mut("outputs").and_then(Value::as_object_mut) else {
-            return false;
+        let mut json = match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(value @ Value::Object(_)) => value,
+                _ => return false,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(_) => return false,
         };
-        let keys: Vec<String> = outputs
-            .iter()
-            .filter(|(key, output)| {
-                output
-                    .get("stageOutput")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !id.is_empty())
-                    && output_id.is_none_or(|wanted| wanted == key.as_str())
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
-        if keys.is_empty() {
-            return false;
-        }
-        for key in keys {
-            if let Some(output) = outputs.get_mut(&key).and_then(Value::as_object_mut) {
-                output.insert(
-                    "stageOutput".to_string(),
-                    Value::String(layout_id.to_string()),
-                );
+        let mut assigned = false;
+        if let Some(outputs) = json.get_mut("outputs").and_then(Value::as_object_mut) {
+            for (key, output) in outputs {
+                if output_id.is_none_or(|wanted| wanted == key.as_str())
+                    && output["stageOutput"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty())
+                {
+                    output["stageOutput"] = Value::String(layout_id.into());
+                    assigned = true;
+                }
             }
         }
-        fs::write(path, json.to_string()).is_ok()
+        if !assigned {
+            if output_id.is_some() {
+                return false;
+            }
+            json["nativeStageLayout"] = Value::String(layout_id.into());
+        }
+        atomic_write(&path, json.to_string().as_bytes()).is_ok()
     }
 
     pub fn load_events(&self) -> Result<Catalog, DataError> {
