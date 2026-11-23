@@ -1415,6 +1415,19 @@ impl Session {
         }
     }
 
+    pub fn position_stage_item(&mut self, id: &str, left: i32, top: i32) -> bool {
+        let Some(item) = self.stage.items.iter().find(|item| item.id == id) else {
+            return false;
+        };
+        let style = freeshow_data::css_set(
+            &item.style,
+            "left",
+            &format!("{}px", left.clamp(-8000, 8000)),
+        );
+        let style = freeshow_data::css_set(&style, "top", &format!("{}px", top.clamp(-8000, 8000)));
+        self.set_stage_item_style(id, &style)
+    }
+
     fn stage_set_layout(&mut self, key: &str, value: &str) -> Result<(), String> {
         let field = match key {
             "layout-name" if !value.is_empty() => &mut self.stage.name,
@@ -1926,15 +1939,16 @@ mod tests {
         session.stage_set(&id, "left", "400").unwrap();
         session.stage_set(&id, "color", "#ff0000").unwrap();
         assert!(session.stage_set(&id, "color", "not a color!").is_err());
+        assert!(session.position_stage_item(&id, 410, -90));
+        let mut session = Session::open(dir.path().to_path_buf());
         let row = session
             .stage_rows()
             .into_iter()
             .find(|row| row.id == id)
             .unwrap();
-        assert_eq!((row.kind.as_str(), row.left, row.top), ("clock", 400, 20));
+        assert_eq!((row.kind.as_str(), row.left, row.top), ("clock", 410, -90));
+        assert_eq!((row.width, row.height), (300, 100));
         assert_eq!(row.color, "#ff0000");
-        let saved = std::fs::read_to_string(dir.path().join("Config").join("stage.json")).unwrap();
-        assert!(saved.contains("400px"), "{saved}");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
     }
@@ -2183,6 +2197,7 @@ mod tests {
 
         assert!(session.stage_set("text", "text", "After").is_err());
         assert!(session.stage_set("text", "left", "20").is_err());
+        assert!(!session.position_stage_item("text", 20, 30));
         assert!(session.add_stage_item("text", "").is_none());
         assert!(!session.remove_stage_item("text"));
         assert_eq!(session.stage, stage);
