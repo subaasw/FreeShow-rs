@@ -287,6 +287,18 @@ impl ShowFile {
         Some(items.len() - 1)
     }
 
+    pub fn add_picture_box(&mut self, slide_id: &str, src: &str) -> Option<usize> {
+        let items = self.items_mut(slide_id)?;
+        items.push(serde_json::json!({
+            "type": "media",
+            "src": src,
+            "fit": "contain",
+            "style": "left:480px;top:270px;width:960px;height:540px;",
+            "lines": []
+        }));
+        Some(items.len() - 1)
+    }
+
     pub fn remove_item_box(&mut self, slide_id: &str, index: usize) -> bool {
         let Some(items) = self.items_mut(slide_id) else {
             return false;

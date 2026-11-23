@@ -553,6 +553,12 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     }
     ui.set_group(session.group().into());
     ui.set_item_label(session.item_label().into());
+    ui.set_picture_choices(strings(
+        &session
+            .slide_pictures()
+            .map(|entry| entry.label())
+            .collect::<Vec<_>>(),
+    ));
     ui.set_show_name(session.show_name().into());
     ui.set_notice(sentence_case(&session.notice).into());
     ui.set_can_restore(session.can_restore_show());
@@ -3325,6 +3331,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
                 publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_add_picture(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            let mut session = session.borrow_mut();
+            session.notice = session.add_picture_box(index).err().unwrap_or_default();
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session);
+                publish(&edit_slot, edit_frame(&session));
             }
         });
     }

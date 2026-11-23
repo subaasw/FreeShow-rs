@@ -25,6 +25,8 @@ Open a show from the drawer or the project list. Its slides appear as thumbnails
 
 **Edit** switches the show to editing: clicking a slide then only selects it, the preview shows the slide being edited, and **Go** puts it on the output. **New show** opens straight into editing, and **Show text** edits the whole song as plain text.
 
+To place a picture on a slide, choose a still image from the Media library picker in **Edit** and click **Add picture**. The new box opens in the inspector, where you can change its position, size, fit, crop, or flips. Keep the source file in place so the slide can display it.
+
 Drop songs, pictures, video, audio, or Bibles onto the operator window to import them into the open library. When a file cannot be copied, the status bar reports the failure and the rest of the batch continues.
 
 Audience slides and the native stage window render saved FreeShow QR boxes with their configured payload and colors. The code stays square in a rectangular box. A Current Output box previews the active audience picture on the native stage and its browser view, with the saved output name when requested. Stage text boxes honor saved text-box numbers, item order, and stage bindings for multilingual slides.

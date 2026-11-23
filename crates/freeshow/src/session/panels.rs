@@ -1917,6 +1917,54 @@ mod tests {
     }
 
     #[test]
+    fn add_library_picture_selects_the_new_box_and_preserves_lyrics() {
+        let (dir, _) = library("add-library-picture");
+        let media = dir.path().join("Media");
+        std::fs::create_dir(&media).unwrap();
+        let image = freeshow_output::Frame {
+            width: 16,
+            height: 9,
+            pixels: [0, 255, 0, 255].repeat(16 * 9),
+        };
+        std::fs::write(media.join("picture.png"), image.encode_png().unwrap()).unwrap();
+        std::fs::write(media.join("notes.txt"), "").unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Existing lyrics"));
+        assert_eq!(session.slide_pictures().count(), 1);
+        assert!(session.add_picture_box(1).is_err());
+
+        let show_index = session.show_index.unwrap();
+        let path = session.shows[show_index].path.clone();
+        session.shows[show_index].path = Some(media.join("notes.txt").join("blocked.show"));
+        assert!(session.add_picture_box(0).is_err());
+        assert_eq!(session.current_show().unwrap().item_count("s1"), 1);
+        session.shows[show_index].path = path;
+
+        session.add_picture_box(0).unwrap();
+        assert_eq!(session.item_index, 1);
+        assert!(session.lyrics().is_empty());
+        assert_eq!(session.inspector_form().item_box.picture_fit, "contain");
+        assert!(session.undo());
+        assert_eq!(session.current_show().unwrap().item_count("s1"), 1);
+        assert!(session.redo());
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        reopened.select_drawer(0);
+        assert!(reopened.pick_first_slide());
+        assert_eq!(reopened.lyrics(), "Existing lyrics");
+        let show = reopened.current_show().unwrap();
+        assert_eq!(
+            show.show["slides"]["s1"]["items"][1]["src"],
+            "Media/picture.png"
+        );
+        assert_eq!(
+            crate::live::edit_frame(&reopened).pixel(481, 271),
+            freeshow_output::parse_color("#00ff00").unwrap()
+        );
+    }
+
+    #[test]
     fn inspector_picture_fit_and_flips_persist_and_render() {
         let (dir, mut session) = library("inspector-picture");
         assert!(session.create_show());

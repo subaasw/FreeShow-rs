@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Operator, output and stage windows. Compiled by build.rs (slint-build).
 
-import { ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow, HotkeyScope, SlideCard } from "widgets.slint";
 import { ComboIndex, ValueEdit, SettingsPanel, SettingsData, ThemeColorRow, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
 
@@ -167,9 +167,11 @@ export component ControlWindow inherits Window {
     callback save-lyrics(string);
     callback save-group(string);
     in-out property <string> item-label: "Box 1 of 1";
+    in property <[string]> picture-choices;
     callback prev-item();
     callback next-item();
     callback add-item();
+    callback add-picture(int);
     callback remove-item();
     callback go-slide(string);
     callback move-project(int);
@@ -578,6 +580,18 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Next box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.next-item(); } }
                             BoxButton { label: "Add box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-item(); } }
                             BoxButton { label: "Remove"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.remove-item(); } }
+                        }
+                        if root.editing && !root.text-mode && root.inspector-data.has-item && root.picture-choices.length > 0: HorizontalLayout {
+                            spacing: 6px;
+                            picture := ComboBox {
+                                model: root.picture-choices;
+                                accessible-label: "Media library picture";
+                            }
+                            Button {
+                                text: "Add picture";
+                                enabled: picture.current-index >= 0 && picture.current-index < root.picture-choices.length;
+                                clicked => { root.add-picture(picture.current-index); }
+                            }
                         }
                         if root.editing && !root.text-mode: InspectorPanel {
                             data: root.inspector-data;
