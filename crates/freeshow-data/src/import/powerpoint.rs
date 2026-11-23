@@ -15,6 +15,7 @@ use super::{Section, attribute, file_stem_str, local_name, show_file};
 
 use crate::{DataError, ShowFile};
 
+mod numbering;
 mod text;
 mod theme;
 use theme::{Color, GradientFill, ObjectStyle, ResolvedFill, ThemeReader};
@@ -1903,6 +1904,55 @@ mod tests {
         let transparent = items[2]["style"].as_str().unwrap();
         assert!(!transparent.contains("background:"));
         assert!(transparent.contains("--pptx-text-insets:14.4 7.2 14.4 7.2;"));
+    }
+
+    #[test]
+    fn numbered_lists_resume_outer_sequences_and_honor_saved_starts() {
+        let files = archive(&[("ppt/slides/slide1.xml", br#"
+            <p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+                <a:xfrm><a:ext cx="4572000" cy="1371600"/></a:xfrm>
+            </p:spPr><p:txBody><a:bodyPr/><a:lstStyle>
+                <a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="3"/></a:lvl1pPr>
+                <a:lvl2pPr><a:buAutoNum type="alphaLcParenR" startAt="27"/></a:lvl2pPr>
+            </a:lstStyle>
+                <a:p><a:r><a:t>Outer</a:t></a:r><a:br/><a:r><a:t>Continuation</a:t></a:r></a:p>
+                <a:p><a:pPr lvl="1"/><a:r><a:t>Nested one</a:t></a:r></a:p>
+                <a:p><a:pPr lvl="1"/><a:r><a:t>Nested two</a:t></a:r></a:p>
+                <a:p><a:pPr><a:buAutoNum type="arabicPeriod" startAt="3"/></a:pPr><a:r><a:t>Outer again</a:t></a:r></a:p>
+                <a:p><a:pPr lvl="1"/><a:r><a:t>Nested restart</a:t></a:r></a:p>
+                <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:t>Plain after nested</a:t></a:r></a:p>
+                <a:p><a:r><a:t>Outer continues</a:t></a:r></a:p>
+                <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:t>Plain instead of outer</a:t></a:r></a:p>
+                <a:p><a:r><a:t>Outer restarts</a:t></a:r></a:p>
+                <a:p><a:pPr><a:buAutoNum type="romanUcParenBoth" startAt="9"/></a:pPr><a:r><a:t>Roman one</a:t></a:r></a:p>
+                <a:p><a:pPr><a:buAutoNum type="romanUcParenBoth" startAt="9"/></a:pPr><a:r><a:t>Roman two</a:t></a:r></a:p>
+            </p:txBody></p:sp></p:spTree></p:cSld></p:sld>
+        "#)]);
+        let show = import("Numbered lists.pptx", &files, None).unwrap();
+        let lines = show.show["slides"]["s1"]["items"][0]["lines"]
+            .as_array()
+            .unwrap();
+        let markers: Vec<_> = lines
+            .iter()
+            .map(|line| line["pptxBullet"]["value"].as_str())
+            .collect();
+        assert_eq!(
+            markers,
+            [
+                Some("3."),
+                None,
+                Some("aa)"),
+                Some("bb)"),
+                Some("4."),
+                Some("aa)"),
+                None,
+                Some("5."),
+                None,
+                Some("3."),
+                Some("(IX)"),
+                Some("(X)")
+            ]
+        );
     }
 
     #[test]

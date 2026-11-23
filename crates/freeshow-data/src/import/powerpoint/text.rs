@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::{
     SlideSize,
+    numbering::Numbering,
     theme::{Context, child},
 };
 
@@ -29,6 +30,7 @@ impl TextBody {
         let px_per_point = size.px_y(12_700.0);
         let mut lines = Vec::new();
         let mut has_text = false;
+        let mut numbering = Numbering::default();
         for paragraph in body.children().filter(|node| node.has_tag_name("p")) {
             let para = child(paragraph, "pPr");
             let level = para
@@ -36,8 +38,12 @@ impl TextBody {
                 .and_then(|level| level.parse::<usize>().ok())
                 .filter(|level| *level < 9)
                 .unwrap_or(0);
-            let level = list.and_then(|list| child(list, &format!("lvl{}pPr", level + 1)));
-            let properties = [para, level, list.and_then(|list| child(list, "defPPr"))];
+            let level_style = list.and_then(|list| child(list, &format!("lvl{}pPr", level + 1)));
+            let properties = [
+                para,
+                level_style,
+                list.and_then(|list| child(list, "defPPr")),
+            ];
             let alignment = match properties
                 .into_iter()
                 .flatten()
@@ -88,10 +94,19 @@ impl TextBody {
             }
             lines.push(line(alignment, runs, style(child(paragraph, "endParaRPr"))));
             has_text |= paragraph_has_text;
-            if paragraph_has_text
-                && let Some(bullet) = character_bullet(properties, context, px_per_point)
-            {
-                lines[first]["pptxBullet"] = bullet;
+            let marker = bullet_property(properties, &["buNone", "buChar", "buAutoNum", "buBlip"]);
+            let number = numbering.marker(marker, level, paragraph_has_text);
+            if paragraph_has_text {
+                let character = marker
+                    .filter(|node| node.has_tag_name("buChar"))
+                    .and_then(|node| node.attribute("char"));
+                if let Some(value) = number
+                    .as_deref()
+                    .or(character)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    lines[first]["pptxBullet"] = bullet(value, properties, context, px_per_point);
+                }
             }
             let last = lines.len() - 1;
             for (index, line) in lines.iter_mut().enumerate().skip(first) {
@@ -127,25 +142,24 @@ impl TextBody {
     }
 }
 
-fn character_bullet(
+fn bullet_property<'a, 'input>(
+    properties: [Option<Node<'a, 'input>>; 3],
+    names: &[&str],
+) -> Option<Node<'a, 'input>> {
+    properties.into_iter().flatten().find_map(|node| {
+        node.children()
+            .filter(Node::is_element)
+            .find(|child| names.contains(&child.tag_name().name()))
+    })
+}
+
+fn bullet(
+    value: &str,
     properties: [Option<Node<'_, '_>>; 3],
     context: &Context,
     px_per_point: f64,
-) -> Option<Value> {
-    let property = |names: &[&str]| {
-        properties.into_iter().flatten().find_map(|node| {
-            node.children()
-                .filter(Node::is_element)
-                .find(|child| names.contains(&child.tag_name().name()))
-        })
-    };
-    let marker = property(&["buNone", "buChar", "buAutoNum", "buBlip"])?;
-    if !marker.has_tag_name("buChar") {
-        return None;
-    }
-    let value = marker
-        .attribute("char")
-        .filter(|value| !value.trim().is_empty())?;
+) -> Value {
+    let property = |names: &[&str]| bullet_property(properties, names);
     let font = property(&["buFont", "buFontTx"])
         .and_then(|node| node.attribute("typeface"))
         .and_then(|name| context.font_family(name));
@@ -182,7 +196,7 @@ fn character_bullet(
             _ => {}
         }
     }
-    Some(json!({"value": value, "style": style}))
+    json!({"value": value, "style": style})
 }
 
 fn spacing(node: Node<'_, '_>, px_per_point: f64) -> Option<String> {
