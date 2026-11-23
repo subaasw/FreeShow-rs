@@ -374,6 +374,7 @@ struct SlideObject {
     rotation: f64,
     flip_x: bool,
     flip_y: bool,
+    group_matrix: Option<[f64; 4]>,
     lines: Vec<String>,
     fill_style: Option<String>,
     ellipse: bool,
@@ -391,6 +392,80 @@ enum ObjectKind {
     Picture,
 }
 
+#[derive(Clone, Copy)]
+struct GroupTransform {
+    // Columns of the linear transform, followed separately by its translation.
+    matrix: [f64; 4],
+    offset: [f64; 2],
+}
+
+impl GroupTransform {
+    const IDENTITY: Self = Self {
+        matrix: [1.0, 0.0, 0.0, 1.0],
+        offset: [0.0, 0.0],
+    };
+
+    fn vector(self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let [a, b, c, d] = self.matrix;
+        [a * x + c * y, b * x + d * y]
+    }
+
+    fn point(self, xy: [f64; 2]) -> [f64; 2] {
+        let [x, y] = self.vector(xy);
+        [x + self.offset[0], y + self.offset[1]]
+    }
+
+    fn compose(self, child: Self) -> Self {
+        let [a, b, c, d] = child.matrix;
+        let [a, b] = self.vector([a, b]);
+        let [c, d] = self.vector([c, d]);
+        Self {
+            matrix: [a, b, c, d],
+            offset: self.point(child.offset),
+        }
+    }
+}
+
+#[derive(Default)]
+struct GroupBounds {
+    origin: [f64; 2],
+    size: [f64; 2],
+    child_origin: [f64; 2],
+    child_size: [f64; 2],
+    rotation: f64,
+    flips: [bool; 2],
+}
+
+impl GroupBounds {
+    fn transform(&self, slide: &SlideSize) -> GroupTransform {
+        let scale = |axis: usize| {
+            let child = self.child_size[axis];
+            let scale = if child > 0.0 {
+                self.size[axis] / child
+            } else {
+                1.0
+            };
+            if self.flips[axis] { -scale } else { scale }
+        };
+        let (sx, sy) = (scale(0), scale(1));
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        let ratio = slide.px_x(1.0) / slide.px_y(1.0);
+        let mut transform = GroupTransform {
+            matrix: [sx * cos, sx * sin / ratio, -sy * sin * ratio, sy * cos],
+            offset: [0.0, 0.0],
+        };
+        let [child_x, child_y] = transform.vector([
+            self.child_origin[0] + self.child_size[0] / 2.0,
+            self.child_origin[1] + self.child_size[1] / 2.0,
+        ]);
+        transform.offset = [
+            self.origin[0] + self.size[0] / 2.0 - child_x,
+            self.origin[1] + self.size[1] / 2.0 - child_y,
+        ];
+        transform
+    }
+}
+
 impl SlideContent {
     fn resolve_picture(&mut self, rel: &Relationship) {
         for object in &mut self.objects {
@@ -403,6 +478,21 @@ impl SlideContent {
 }
 
 impl SlideObject {
+    fn apply_group(&mut self, group: GroupTransform) {
+        let [half_w, half_h] = [self.width / 2.0, self.height / 2.0];
+        let [x, y] = group.point([self.x + half_w, self.y + half_h]);
+        let [a, b, c, d] = group.matrix;
+        let determinant = a * d - b * c;
+        if ![x, y, determinant].iter().all(|value| value.is_finite()) || determinant == 0.0 {
+            return;
+        }
+        self.x = x - half_w;
+        self.y = y - half_h;
+        if group.matrix != GroupTransform::IDENTITY.matrix {
+            self.group_matrix = Some(group.matrix);
+        }
+    }
+
     fn into_item(self) -> Option<serde_json::Value> {
         let mut style = format!(
             "left:{}px;top:{}px;width:{}px;height:{}px;",
@@ -418,6 +508,9 @@ impl SlideObject {
         }
         if self.rotation != 0.0 {
             style.push_str(&format!("transform:rotate({}deg);", self.rotation));
+        }
+        if let Some([a, b, c, d]) = self.group_matrix {
+            style.push_str(&format!("--pptx-group-matrix:{a} {b} {c} {d};"));
         }
         if !matches!(self.kind, ObjectKind::Picture) {
             if let Some(fill) = &self.fill_style {
@@ -487,6 +580,8 @@ fn slide_content(
     let mut capture = false;
     let mut paragraph = false;
     let mut picture_ids = Vec::new();
+    let mut groups = Vec::new();
+    let mut group_bounds: Option<GroupBounds> = None;
     loop {
         let start = reader.buffer_position();
         match reader.read_event().map_err(invalid)? {
@@ -494,6 +589,17 @@ fn slide_content(
                 let name = local_name(element.name().as_ref());
                 match (stack.last().map(String::as_str), name.as_str()) {
                     (_, "spTree") => in_tree = true,
+                    (Some("spTree" | "grpSp"), "grpSp") if in_tree => {
+                        groups.push(groups.last().copied().unwrap_or(GroupTransform::IDENTITY));
+                    }
+                    (Some("grpSpPr"), "xfrm") if !groups.is_empty() => {
+                        let (rotation, flip_x, flip_y) = object_transform(&element);
+                        group_bounds = Some(GroupBounds {
+                            rotation,
+                            flips: [flip_x, flip_y],
+                            ..GroupBounds::default()
+                        });
+                    }
                     (Some("spTree" | "grpSp"), "sp" | "pic" | "cxnSp") if in_tree => {
                         current = Some(SlideObject {
                             kind: if name == "pic" {
@@ -508,6 +614,7 @@ fn slide_content(
                             rotation: 0.0,
                             flip_x: false,
                             flip_y: false,
+                            group_matrix: None,
                             lines: Vec::new(),
                             fill_style: fills.remove(&start),
                             ellipse: false,
@@ -524,22 +631,28 @@ fn slide_content(
                             "tables and charts are not imported as slide objects".to_string(),
                         );
                     }
-                    (Some("xfrm") | Some("off"), _) => {}
                     _ => {}
+                }
+                if let Some(group) = group_bounds.as_mut() {
+                    let coordinates = |x, y| {
+                        [
+                            size.px_x(number(&element, x).unwrap_or(0.0)),
+                            size.px_y(number(&element, y).unwrap_or(0.0)),
+                        ]
+                    };
+                    match name.as_str() {
+                        "off" => group.origin = coordinates("x", "y"),
+                        "ext" => group.size = coordinates("cx", "cy"),
+                        "chOff" => group.child_origin = coordinates("x", "y"),
+                        "chExt" => group.child_size = coordinates("cx", "cy"),
+                        _ => {}
+                    }
                 }
                 if let Some(object) = current.as_mut() {
                     match (stack.last().map(String::as_str), name.as_str()) {
                         (Some("spPr"), "xfrm") => {
-                            object.rotation =
-                                (number(&element, "rot").unwrap_or(0.0) / 60_000.0) % 360.0;
-                            object.flip_x = matches!(
-                                attribute(&element, "flipH").as_deref(),
-                                Some("1" | "true")
-                            );
-                            object.flip_y = matches!(
-                                attribute(&element, "flipV").as_deref(),
-                                Some("1" | "true")
-                            );
+                            (object.rotation, object.flip_x, object.flip_y) =
+                                object_transform(&element);
                         }
                         (Some("xfrm"), "off") => {
                             object.x = size.px_x(number(&element, "x").unwrap_or(0.0));
@@ -600,6 +713,21 @@ fn slide_content(
             }
             Event::End(element) => {
                 let name = local_name(element.name().as_ref());
+                if name == "xfrm"
+                    && let Some(bounds) = group_bounds.take()
+                    && let Some(group) = groups.last_mut()
+                {
+                    *group = group.compose(bounds.transform(size));
+                }
+                if name == "grpSp"
+                    && stack
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|name| matches!(name.as_str(), "spTree" | "grpSp"))
+                {
+                    groups.pop();
+                }
                 if name == "t" {
                     capture = false;
                 }
@@ -618,6 +746,9 @@ fn slide_content(
                         object.kind = ObjectKind::Text;
                     }
                     if object.width > 0.0 || object.height > 0.0 || !object.lines.is_empty() {
+                        if let Some(&group) = groups.last() {
+                            object.apply_group(group);
+                        }
                         objects.push(object);
                     }
                 }
@@ -643,6 +774,12 @@ fn slide_content(
         warnings,
         picture_ids,
     })
+}
+
+fn object_transform(element: &BytesStart<'_>) -> (f64, bool, bool) {
+    let rotation = (number(element, "rot").unwrap_or(0.0) / 60_000.0) % 360.0;
+    let flipped = |key| matches!(attribute(element, key).as_deref(), Some("1" | "true"));
+    (rotation, flipped("flipH"), flipped("flipV"))
 }
 
 fn find_background(
@@ -1560,6 +1697,79 @@ mod tests {
         assert_eq!(slides["s2"]["items"][0]["fit"], "fill");
         assert_ne!(slides["s3"]["items"][0]["type"], "media");
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn nested_group_transforms_preserve_positions_and_item_order() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:grpSp><p:grpSpPr><a:xfrm rot="5400000" flipH="1">
+                    <a:off x="635000" y="1270000"/><a:ext cx="2540000" cy="1270000"/>
+                    <a:chOff x="63500" y="127000"/><a:chExt cx="1270000" cy="1270000"/>
+                </a:xfrm></p:grpSpPr>
+                <p:sp><p:spPr><a:xfrm rot="2700000">
+                    <a:off x="127000" y="190500"/><a:ext cx="254000" cy="127000"/>
+                </a:xfrm></p:spPr><p:txBody><a:p><a:r><a:t>Outer</a:t></a:r></a:p></p:txBody></p:sp>
+                <p:grpSp><p:grpSpPr><a:xfrm flipV="true">
+                    <a:off x="254000" y="381000"/><a:ext cx="635000" cy="635000"/>
+                    <a:chOff x="0" y="0"/><a:chExt cx="317500" cy="635000"/>
+                </a:xfrm></p:grpSpPr>
+                <p:sp><p:spPr><a:xfrm>
+                    <a:off x="31750" y="95250"/><a:ext cx="127000" cy="127000"/>
+                </a:xfrm></p:spPr><p:txBody><a:p><a:r><a:t>Inner</a:t></a:r></a:p></p:txBody></p:sp>
+                </p:grpSp></p:grpSp>
+                <p:sp><p:spPr><a:xfrm>
+                    <a:off x="63500" y="127000"/><a:ext cx="63500" cy="127000"/>
+                </a:xfrm></p:spPr><p:txBody><a:p><a:r><a:t>Outside</a:t></a:r></a:p></p:txBody></p:sp>
+            </p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Groups.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        for (item, label, bounds, expected) in [
+            (
+                &items[0],
+                "Outer",
+                "left:360px;top:430px;width:40px;height:20px;",
+                [0.0, -2.0, -1.0, 0.0],
+            ),
+            (
+                &items[1],
+                "Inner",
+                "left:275px;top:370px;width:20px;height:20px;",
+                [0.0, -4.0, 1.0, 0.0],
+            ),
+        ] {
+            assert_eq!(item["lines"][0]["text"][0]["value"], label);
+            let style = item["style"].as_str().unwrap();
+            assert!(style.starts_with(bounds), "{style}");
+            let matrix = style
+                .split_once("--pptx-group-matrix:")
+                .unwrap()
+                .1
+                .split_once(';')
+                .unwrap()
+                .0;
+            let values = matrix
+                .split_whitespace()
+                .map(|part| part.parse::<f64>().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 4);
+            for (actual, expected) in values.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-8, "{matrix}");
+            }
+        }
+        assert!(
+            items[0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("transform:rotate(45deg);")
+        );
+        assert_eq!(items[2]["lines"][0]["text"][0]["value"], "Outside");
+        let outside = items[2]["style"].as_str().unwrap();
+        assert!(outside.starts_with("left:10px;top:20px;"));
+        assert!(!outside.contains("--pptx-group-matrix"));
     }
 
     #[test]
