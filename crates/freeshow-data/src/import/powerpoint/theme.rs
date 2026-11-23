@@ -180,8 +180,11 @@ impl GradientFill {
             Some("1" | "true")
         );
         let mut stops = Vec::new();
+        let mut stop_count = None;
         if let Some(list) = child(fill, "gsLst") {
-            for stop in list.children().filter(|node| node.has_tag_name("gs")) {
+            let children = list.children().filter(|node| node.has_tag_name("gs"));
+            stop_count = Some(children.clone().count());
+            for stop in children {
                 let pos = stop
                     .attribute("pos")
                     .and_then(percentage)
@@ -192,7 +195,7 @@ impl GradientFill {
                 }
             }
         }
-        if stops.len() < 2 {
+        if stops.len() < 2 && stop_count != Some(stops.len()) {
             return None;
         }
         stops.sort_by(|left, right| left.0.total_cmp(&right.0));
@@ -225,9 +228,18 @@ impl GradientFill {
         for (pos, color) in &self.stops {
             resolved.push((*pos, color.hex_in(&scheme)?));
         }
+        let gamma = match resolved.as_slice() {
+            [] => return Some(ResolvedFill::Color("#000000".into())),
+            [(_, color)] => return Some(ResolvedFill::Color(color.clone())),
+            [(start, _), (end, _)] => *start == 0.0 && *end == 1.0,
+            [(start, first), (middle, _), (end, last)] => {
+                *start == 0.0 && *end == 1.0 && (0.0 < *middle && *middle < 1.0) && first == last
+            }
+            _ => false,
+        };
         let body = resolved
             .iter()
-            .map(|(pos, color)| format!("{color} {}%", (pos * 100.0).round()))
+            .map(|(pos, color)| format!("{color} {}%", pos * 100.0))
             .collect::<Vec<_>>()
             .join(", ");
         let mut style = match self.linear_angle {
@@ -251,6 +263,9 @@ impl GradientFill {
                 "--pptx-rectangular-focus:{l:.5} {t:.5} {r:.5} {b:.5};"
             )),
             None => {}
+        }
+        if gamma {
+            style.push_str("--pptx-gradient-gamma:1;");
         }
         Some(ResolvedFill::Gradient {
             style,

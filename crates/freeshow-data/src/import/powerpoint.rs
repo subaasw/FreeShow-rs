@@ -638,6 +638,8 @@ fn find_background(
     let mut inset = [0.0; 4];
     let mut tiled = false;
     let mut gradient_stops: Vec<(f64, Color)> = Vec::new();
+    let mut gradient_stop_list = false;
+    let mut gradient_stop_count = 0;
     let mut gradient_angle = 90.0;
     let mut gradient_scaled = false;
     let mut gradient_tile = [0.0; 4];
@@ -683,7 +685,9 @@ fn find_background(
                                 color.add_transform(&name, attribute(&element, "val").as_deref());
                             }
                         }
+                        (Some("gradFill"), "gsLst") => gradient_stop_list = true,
                         (Some("gsLst") | Some("gradFill"), "gs") => {
+                            gradient_stop_count += 1;
                             gs_pos = attribute(&element, "pos")
                                 .and_then(|value| theme::percentage(&value));
                             gs_color = None;
@@ -737,18 +741,20 @@ fn find_background(
             _ => {}
         }
     }
-    let gradient = (gradient_stops.len() >= 2).then(|| {
-        gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
-        GradientFill {
-            linear_angle: gradient_path.is_none().then_some(gradient_angle),
-            linear_scaled: gradient_scaled,
-            tile_insets: gradient_tile,
-            focus: gradient_path
-                .as_deref()
-                .and_then(|path| theme::GradientFocus::from_path(path, gradient_insets)),
-            stops: gradient_stops,
-        }
-    });
+    let gradient = (gradient_stops.len() >= 2
+        || (gradient_stop_list && gradient_stops.len() == gradient_stop_count))
+        .then(|| {
+            gradient_stops.sort_by(|left, right| left.0.total_cmp(&right.0));
+            GradientFill {
+                linear_angle: gradient_path.is_none().then_some(gradient_angle),
+                linear_scaled: gradient_scaled,
+                tile_insets: gradient_tile,
+                focus: gradient_path
+                    .as_deref()
+                    .and_then(|path| theme::GradientFocus::from_path(path, gradient_insets)),
+                stops: gradient_stops,
+            }
+        });
     let fill = if let Some(id) = picture {
         relationships(archive, part)?
             .into_iter()
@@ -1193,6 +1199,40 @@ mod tests {
     }
 
     #[test]
+    fn gradient_stop_precision_and_degenerate_fills_survive_import() {
+        let files = archive(&[
+            (
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst>
+                <a:gs pos="50125"><a:srgbClr val="FF0000"/></a:gs>
+                <a:gs pos="50.375%"><a:srgbClr val="0000FF"/></a:gs>
+                </a:gsLst></a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Band</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide2.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst/></a:gradFill></p:bgPr></p:bg>
+                <a:p><a:r><a:t>Empty</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide3.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst>
+                <a:gs pos="35000"><a:srgbClr val="334455"><a:alpha val="50000"/></a:srgbClr></a:gs>
+                </a:gsLst></a:gradFill></p:bgPr></p:bg><a:p><a:r><a:t>Solid</a:t></a:r></a:p></p:cSld></p:sld>"#,
+            ),
+        ]);
+        let show = import("Stops.pptx", &files, None).unwrap();
+        let slides = &show.show["slides"];
+        let style = slides["s1"]["items"][0]["style"].as_str().unwrap();
+        assert!(
+            style.contains("#FF0000 50.125%, #0000FF 50.375%"),
+            "{style}"
+        );
+        assert!(!style.contains("--pptx-gradient-gamma"));
+        assert_eq!(slides["s2"]["settings"]["color"], "#000000");
+        assert_eq!(slides["s3"]["settings"]["color"], "#33445580");
+    }
+
+    #[test]
     fn gradients_become_full_slide_shape_items() {
         let layout_rel = br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
         let files = archive(&[
@@ -1304,6 +1344,18 @@ mod tests {
         let first = &show.show["slides"]["s1"];
         let second = &show.show["slides"]["s2"];
         let gradient = "linear-gradient(90deg, #FF0000 0%, #0000FF 100%)";
+        assert!(
+            first["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("--pptx-gradient-gamma:1;")
+        );
+        assert!(
+            second["items"][0]["style"]
+                .as_str()
+                .unwrap()
+                .contains("--pptx-gradient-gamma:1;")
+        );
         assert!(
             !first["items"][0]["style"]
                 .as_str()
