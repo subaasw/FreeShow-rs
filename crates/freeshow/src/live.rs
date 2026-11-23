@@ -1532,6 +1532,42 @@ mod tests {
     }
 
     #[test]
+    fn network_background_renders_and_stops_after_clear_or_replacement() {
+        let mut session = Session::empty();
+        let received = Raster {
+            width: 16,
+            height: 9,
+            rgba: [255, 0, 0, 255].repeat(16 * 9),
+        };
+        session.network_background = true;
+        assert!(session.update_network_background(received.clone()));
+        assert_eq!(
+            audience_frame(&session).pixel(80, 45),
+            parse_color("#f00").unwrap()
+        );
+
+        session.apply_remote(freeshow_remote::Command::ClearBackground);
+        assert!(!session.update_network_background(received.clone()));
+        assert_ne!(
+            audience_frame(&session).pixel(80, 45),
+            parse_color("#f00").unwrap()
+        );
+
+        session.network_background = true;
+        assert!(session.update_network_background(received.clone()));
+        session.replace_underlay(Some(Raster {
+            width: 16,
+            height: 9,
+            rgba: [0, 255, 0, 255].repeat(16 * 9),
+        }));
+        assert!(!session.update_network_background(received));
+        assert_eq!(
+            audience_frame(&session).pixel(80, 45),
+            parse_color("#0f0").unwrap()
+        );
+    }
+
+    #[test]
     fn stage_lyrics_can_mirror_the_current_background() {
         use freeshow_data::StageItemKind;
         let mut session = Session::empty();

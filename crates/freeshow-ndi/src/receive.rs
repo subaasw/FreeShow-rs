@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use gstreamer::prelude::*;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-/// An NDI or OMT source that can be received when the runtime plugin is present.
+use gstreamer::prelude::*;
+use openmediatransport::{
+    DecodedVideoFrame, Discovery, FrameType, OmtAddress, OmtError, ReceiverConfig, ReceiverSession,
+};
+
+/// A named NDI or OMT source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkSource {
     pub name: String,
@@ -20,11 +26,6 @@ pub fn ndi_receive_available() -> bool {
     element_available("ndisrc")
 }
 
-/// True when an OMT source element is installed.
-pub fn omt_receive_available() -> bool {
-    element_available("omtsrc") || element_available("omtinput")
-}
-
 pub fn element_available(name: &str) -> bool {
     if gstreamer::init().is_err() {
         return false;
@@ -40,23 +41,10 @@ pub fn ndi_receive_pipeline(name: &str, width: u32, height: u32) -> String {
     )
 }
 
-/// The GStreamer launch line used to receive an OMT source, when that runtime exists.
-pub fn omt_receive_pipeline(name: &str, width: u32, height: u32) -> String {
-    let name = name.replace('\\', "\\\\").replace('"', "\\\"");
-    let element = if element_available("omtsrc") {
-        "omtsrc"
-    } else {
-        "omtinput"
-    };
-    format!(
-        "{element} name=\"{name}\" ! videoconvert ! videoscale ! video/x-raw,format=RGBA,width={width},height={height} ! appsink name=sink max-buffers=1 drop=true sync=false"
-    )
-}
-
 /// Known NDI sources. Empty when the finder plugin is missing.
 pub fn ndi_sources() -> Vec<NetworkSource> {
     let mut sources = sources_from_env("FREESHOW_NDI_SOURCES", SourceKind::Ndi);
-    for source in sources_from_factory("ndisrc") {
+    for source in discover_ndi() {
         if !sources.iter().any(|existing| existing.name == source.name) {
             sources.push(source);
         }
@@ -66,12 +54,15 @@ pub fn ndi_sources() -> Vec<NetworkSource> {
 
 pub fn omt_sources() -> Vec<NetworkSource> {
     let mut sources = sources_from_env("FREESHOW_OMT_SOURCES", SourceKind::Omt);
-    for source in sources_from_factory("omtsrc")
-        .into_iter()
-        .chain(sources_from_factory("omtinput"))
-    {
-        if !sources.iter().any(|existing| existing.name == source.name) {
-            sources.push(source);
+    if let Ok(discovery) = discover_omt() {
+        for address in discovery.sources() {
+            let name = address.instance_name();
+            if !sources.iter().any(|entry| entry.name == name) {
+                sources.push(NetworkSource {
+                    name,
+                    kind: SourceKind::Omt,
+                });
+            }
         }
     }
     sources
@@ -96,16 +87,8 @@ fn sources_from_env(var: &str, kind: SourceKind) -> Vec<NetworkSource> {
         .unwrap_or_default()
 }
 
-fn sources_from_factory(factory: &str) -> Vec<NetworkSource> {
-    let kind = if factory.starts_with("ndi") {
-        SourceKind::Ndi
-    } else {
-        SourceKind::Omt
-    };
-    if !element_available(factory) {
-        return Vec::new();
-    }
-    if gstreamer::init().is_err() {
+fn discover_ndi() -> Vec<NetworkSource> {
+    if !ndi_receive_available() {
         return Vec::new();
     }
     let monitor = gstreamer::DeviceMonitor::new();
@@ -119,16 +102,17 @@ fn sources_from_factory(factory: &str) -> Vec<NetworkSource> {
         }
         let class = device.device_class().to_ascii_lowercase();
         let looks = class.contains("ndi")
-            || class.contains("omt")
             || name.to_ascii_lowercase().contains("ndi")
-            || name.to_ascii_lowercase().contains("omt")
-            || factory_matches(&device, factory);
+            || factory_matches(&device, "ndisrc");
         if looks
             && !sources
                 .iter()
                 .any(|source: &NetworkSource| source.name == name)
         {
-            sources.push(NetworkSource { name, kind });
+            sources.push(NetworkSource {
+                name,
+                kind: SourceKind::Ndi,
+            });
         }
     }
     monitor.stop();
@@ -147,10 +131,15 @@ fn factory_matches(device: &gstreamer::Device, factory: &str) -> bool {
         .is_some_and(|api| api.contains(factory) || factory.contains(&api))
 }
 
-/// Receives one NDI or OMT picture as RGBA frames. Disabled when the plugin is missing.
+type Picture = (u32, u32, Vec<u8>);
+type LatestPicture = Mutex<Option<Picture>>;
+
+/// Receives one NDI or OMT picture as RGBA frames.
+#[derive(Default)]
 pub struct NetworkReceiver {
-    _pipeline: Option<gstreamer::Pipeline>,
+    pipeline: Option<gstreamer::Pipeline>,
     sink: Option<gstreamer_app::AppSink>,
+    omt: Option<Arc<LatestPicture>>,
 }
 
 impl NetworkReceiver {
@@ -161,53 +150,62 @@ impl NetworkReceiver {
         )
     }
 
-    pub fn open_omt(name: &str, width: u32, height: u32) -> Self {
-        Self::open(
-            &omt_receive_pipeline(name, width, height),
-            omt_receive_available(),
-        )
+    pub fn open_omt(name: &str) -> Self {
+        let latest = Arc::new(Mutex::new(None));
+        let slot = Arc::downgrade(&latest);
+        let name = name.to_string();
+        match std::thread::Builder::new()
+            .name("freeshow-omt-input".into())
+            .spawn(move || receive_omt(&name, slot))
+        {
+            Ok(_) => Self {
+                pipeline: None,
+                sink: None,
+                omt: Some(latest),
+            },
+            Err(error) => {
+                tracing::warn!(%error, "could not start OMT input");
+                Self::default()
+            }
+        }
     }
 
     fn open(description: &str, available: bool) -> Self {
         if !available {
-            return Self {
-                _pipeline: None,
-                sink: None,
-            };
+            return Self::default();
         }
         if gstreamer::init().is_err() {
-            return Self {
-                _pipeline: None,
-                sink: None,
-            };
+            return Self::default();
         }
         let Ok(element) = gstreamer::parse::launch(description) else {
-            return Self {
-                _pipeline: None,
-                sink: None,
-            };
+            return Self::default();
         };
         let Ok(pipeline) = element.downcast::<gstreamer::Pipeline>() else {
-            return Self {
-                _pipeline: None,
-                sink: None,
-            };
+            return Self::default();
         };
         let sink = pipeline
             .by_name("sink")
             .and_then(|element| element.downcast::<gstreamer_app::AppSink>().ok());
-        let _ = pipeline.set_state(gstreamer::State::Playing);
+        if let Err(error) = pipeline.set_state(gstreamer::State::Playing) {
+            tracing::warn!(%error, "could not start NDI input");
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            return Self::default();
+        }
         Self {
-            _pipeline: Some(pipeline),
+            pipeline: Some(pipeline),
             sink,
+            omt: None,
         }
     }
 
     pub fn is_live(&self) -> bool {
-        self.sink.is_some()
+        self.sink.is_some() || self.omt.is_some()
     }
 
-    pub fn next_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
+    pub fn next_frame(&self) -> Option<Picture> {
+        if let Some(latest) = &self.omt {
+            return latest.lock().ok()?.take();
+        }
         let sample = self
             .sink
             .as_ref()?
@@ -222,6 +220,94 @@ impl NetworkReceiver {
     }
 }
 
+impl Drop for NetworkReceiver {
+    fn drop(&mut self) {
+        if let Some(pipeline) = &self.pipeline {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+        }
+    }
+}
+
+fn discover_omt() -> Result<Discovery, OmtError> {
+    let mut discovery = Discovery::new()?;
+    discovery.refresh()?;
+    Ok(discovery)
+}
+
+fn omt_address<'a>(name: &str, sources: &'a [OmtAddress]) -> Option<&'a OmtAddress> {
+    if let Some(exact) = sources
+        .iter()
+        .find(|address| address.instance_name() == name)
+    {
+        return Some(exact);
+    }
+    let mut matching = sources.iter().filter(|address| address.name == name);
+    let single = matching.next()?;
+    matching.next().is_none().then_some(single)
+}
+
+fn connect_omt(name: &str) -> Result<ReceiverSession, OmtError> {
+    let config = ReceiverConfig {
+        frame_types: FrameType::VIDEO,
+        connect_timeout: Duration::from_secs(1),
+        ..Default::default()
+    };
+    if name.starts_with("omt://") {
+        return ReceiverSession::connect(name, config);
+    }
+    let discovery = discover_omt()?;
+    let address = omt_address(name, discovery.sources()).ok_or_else(|| {
+        OmtError::InvalidArgument(format!("OMT source {name:?} is missing or ambiguous"))
+    })?;
+    ReceiverSession::connect_from_address(address, config)
+}
+
+fn receive_omt(name: &str, slot: Weak<LatestPicture>) {
+    while slot.strong_count() > 0 {
+        let receiver = match connect_omt(name) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                tracing::debug!(%error, "waiting for OMT input {name}");
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        while slot.strong_count() > 0 {
+            if let Some(frame) = receiver.recv_video_timeout(Duration::from_millis(200)) {
+                if let Some(picture) = omt_picture(&frame)
+                    && let Some(slot) = slot.upgrade()
+                    && let Ok(mut latest) = slot.lock()
+                {
+                    *latest = Some(picture);
+                }
+            } else if !name.starts_with("omt://")
+                && receiver.state() == openmediatransport::SessionState::Reconnecting
+            {
+                // A discovered sender may come back on a different port.
+                break;
+            }
+        }
+    }
+}
+
+fn omt_picture(frame: &DecodedVideoFrame) -> Option<Picture> {
+    let row = (frame.width as usize).checked_mul(4)?;
+    let stride = frame.stride as usize;
+    let height = frame.height as usize;
+    if row == 0 || height == 0 || stride < row || frame.pixels.len() < stride.checked_mul(height)? {
+        return None;
+    }
+    let mut rgba = vec![0; row * height];
+    for (from, to) in frame
+        .pixels
+        .chunks_exact(stride)
+        .zip(rgba.chunks_exact_mut(row))
+    {
+        openmediatransport::bgra_to_rgba_into(&from[..row], to);
+    }
+    Some((frame.width, frame.height, rgba))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,9 +318,6 @@ mod tests {
         assert!(ndi.contains("ndisrc"));
         assert!(ndi.contains("ndi-name=\"Sanctuary\""));
         assert!(ndi.contains("width=1920"));
-        let omt = omt_receive_pipeline("Lobby", 1280, 720);
-        assert!(omt.contains("Lobby"));
-        assert!(omt.contains("width=1280"));
     }
 
     #[test]
@@ -244,10 +327,9 @@ mod tests {
         assert_eq!(listed[0].name, "Cam 1");
         if !ndi_receive_available() {
             // DeviceMonitor has nothing to find; the explicit list still works.
-            assert!(sources_from_factory("ndisrc").is_empty());
+            assert!(discover_ndi().is_empty());
         }
         let _ = ndi_sources();
-        let _ = omt_sources();
     }
 
     #[test]
@@ -258,9 +340,48 @@ mod tests {
         let receiver = NetworkReceiver::open_ndi("None", 64, 48);
         assert!(!receiver.is_live());
         assert!(receiver.next_frame().is_none());
-        if !omt_receive_available() {
-            let omt = NetworkReceiver::open_omt("None", 64, 48);
-            assert!(!omt.is_live());
+    }
+
+    #[test]
+    fn omt_short_names_must_be_unambiguous() {
+        let sources = [
+            OmtAddress::from_full_name("Desk (Lobby)", 6400),
+            OmtAddress::from_full_name("Booth (Lobby)", 6401),
+            OmtAddress::from_full_name("Booth (Stage)", 6402),
+        ];
+        assert!(omt_address("Lobby", &sources).is_none());
+        assert_eq!(omt_address("Desk (Lobby)", &sources).unwrap().port, 6400);
+        assert_eq!(omt_address("Stage", &sources).unwrap().port, 6402);
+    }
+
+    #[test]
+    fn native_omt_receives_rgba_from_a_loopback_sender() {
+        use openmediatransport::{Codec, MediaFrame, Sender};
+        let mut sender = Sender::create("FreeShow input test", FrameType::VIDEO).unwrap();
+        let receiver = NetworkReceiver::open_omt(&format!("omt://127.0.0.1:{}", sender.port()));
+        assert!(receiver.is_live());
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            sender.poll_accept().unwrap();
+            sender.poll_peer_metadata().unwrap();
+            sender
+                .send_video(MediaFrame {
+                    frame_type: FrameType::VIDEO,
+                    codec: Codec::Bgra.as_i32(),
+                    width: 64,
+                    height: 48,
+                    stride: 64 * 4,
+                    data: [30, 20, 220, 255].repeat(64 * 48),
+                    ..Default::default()
+                })
+                .unwrap();
+            if let Some((width, height, rgba)) = receiver.next_frame() {
+                assert_eq!((width, height, rgba.len()), (64, 48, 64 * 48 * 4));
+                assert!(rgba[0] > 180 && rgba[2] < 70, "expected red RGBA");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
+        panic!("no OMT frame reached the receiver");
     }
 }

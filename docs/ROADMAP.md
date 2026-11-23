@@ -78,7 +78,8 @@ the show or reveals lyrics until the password is accepted.
 - [x] Separate audience and stage pictures over NDI and WebRTC/WHIP.
 - [x] Route each WebRTC/WHIP output's stereo mix into its Opus track.
 - [x] Send audience and stage video and routed stereo over OMT from the Rust app.
-- [ ] Verify OMT against third-party receivers, add NDI groups, and support
+- [x] Receive configured OMT video backgrounds with the Rust SDK.
+- [ ] Verify OMT with third-party implementations, add NDI groups, and support
       multiple independent audience pictures.
 - [x] Keep the main volume and mute controls working for paths through Main.
 - [x] Remote channel list, per-channel volume, and independent mute.
