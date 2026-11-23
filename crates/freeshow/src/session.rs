@@ -6600,6 +6600,7 @@ impl Session {
             "qr" => freeshow_data::StageItemKind::QrCode,
             "output" => freeshow_data::StageItemKind::CurrentOutput,
             "camera" => freeshow_data::StageItemKind::Camera,
+            "chart" => freeshow_data::StageItemKind::Chart,
             _ => freeshow_data::StageItemKind::Slide,
         };
         self.stage.items.push(freeshow_data::StageItemSpec {
@@ -6630,7 +6631,8 @@ impl Session {
             flip_y: false,
             qr: (kind == freeshow_data::StageItemKind::QrCode).then(freeshow_data::QrItem::default),
             url: None,
-            chart: None,
+            chart: (kind == freeshow_data::StageItemKind::Chart)
+                .then(freeshow_data::ChartItem::default),
             clock: freeshow_data::StageClockOptions::default(),
             tracker: freeshow_data::StageTrackerOptions::default(),
         });

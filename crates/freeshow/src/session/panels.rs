@@ -10,13 +10,13 @@ use super::Session;
 /// FreeShow's autosave choices (Settings → General).
 pub const AUTOSAVE_CHOICES: [&str; 6] = ["never", "2min", "5min", "10min", "15min", "30min"];
 /// Stage item kinds the editor can add without extra data.
-pub const STAGE_ADD_KINDS: [&str; 12] = [
+pub const STAGE_ADD_KINDS: [&str; 13] = [
     "slide", "next", "notes", "clock", "timer", "text", "media", "tracker", "variable", "qr",
-    "output", "camera",
+    "output", "camera", "chart",
 ];
 
 /// How the stage editor's add menu names each of [`STAGE_ADD_KINDS`].
-pub const STAGE_ADD_NAMES: [&str; 12] = [
+pub const STAGE_ADD_NAMES: [&str; 13] = [
     "Current slide",
     "Next slide",
     "Slide notes",
@@ -29,6 +29,7 @@ pub const STAGE_ADD_NAMES: [&str; 12] = [
     "QR code",
     "Output picture",
     "Camera",
+    "Chart",
 ];
 
 /// Library `settings.json` values shown in Settings.
@@ -223,6 +224,9 @@ pub struct StageRow {
     pub device_name: String,
     pub flip_x: bool,
     pub flip_y: bool,
+    pub chart_kind: String,
+    pub chart_data: String,
+    pub chart_hole_size: i32,
     /// A text item's words, one line per line.
     pub text: String,
     pub seconds: bool,
@@ -1305,6 +1309,18 @@ impl Session {
                     device_name: item.device_name.clone().unwrap_or_default(),
                     flip_x: item.flip_x,
                     flip_y: item.flip_y,
+                    chart_kind: item
+                        .chart
+                        .as_ref()
+                        .map_or_else(|| "bar".into(), |chart| chart.kind.to_ascii_lowercase()),
+                    chart_data: item
+                        .chart
+                        .as_ref()
+                        .map_or_else(String::new, |chart| chart.data.clone()),
+                    chart_hole_size: item
+                        .chart
+                        .as_ref()
+                        .map_or(0, |chart| i32::from(chart.hole_size)),
                     text: item.lines.join("\n"),
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
@@ -1337,6 +1353,9 @@ impl Session {
                 | "camera-device"
                 | "flip-x"
                 | "flip-y"
+                | "chart-kind"
+                | "chart-data"
+                | "chart-hole-size"
                 | "text"
                 | "seconds"
                 | "date-format"
@@ -1459,6 +1478,19 @@ impl Session {
             }
             "flip-y" if item.kind == freeshow_data::StageItemKind::Camera => {
                 item.flip_y = parse_bool(value)?;
+            }
+            "chart-kind" if item.kind == freeshow_data::StageItemKind::Chart => {
+                if !matches!(value, "bar" | "line" | "pie") {
+                    return Err(format!("unknown chart type {value:?}"));
+                }
+                item.chart.get_or_insert_with(Default::default).kind = value.into();
+            }
+            "chart-data" if item.kind == freeshow_data::StageItemKind::Chart => {
+                item.chart.get_or_insert_with(Default::default).data = value.into();
+            }
+            "chart-hole-size" if item.kind == freeshow_data::StageItemKind::Chart => {
+                let size = parse_int(value, 0, 90)? as u8;
+                item.chart.get_or_insert_with(Default::default).hole_size = size;
             }
             "qr-text" | "qr-color" | "qr-background"
                 if item.kind == freeshow_data::StageItemKind::QrCode =>
@@ -1937,6 +1969,54 @@ mod tests {
         assert_eq!(item["device"], serde_json::json!({"extension": 1}));
         assert_eq!(item["flipped"], false);
         assert_eq!(item["flippedY"], true);
+    }
+
+    #[test]
+    fn stage_chart_edits_reopen_and_render() {
+        let (dir, mut session) = library("stage-chart");
+        let id = session
+            .add_stage_item("chart", "left:0px;top:0px;width:400px;height:240px;")
+            .unwrap();
+        let values = r##"[["A",10,"#c01054"],["B",20,"#365686"]]"##;
+        session.stage_set(&id, "chart-kind", "pie").unwrap();
+        session.stage_set(&id, "chart-data", values).unwrap();
+        session.stage_set(&id, "chart-hole-size", "40").unwrap();
+        assert!(session.stage_set(&id, "chart-hole-size", "91").is_err());
+        assert!(session.stage_set(&id, "chart-kind", "unknown").is_err());
+
+        let path = freeshow_data::Library::open(dir.path()).stage_path();
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let layout = saved.as_object().unwrap().keys().next().unwrap().clone();
+        saved[&layout]["items"][&id]["chart"]["extension"] = serde_json::json!(true);
+        std::fs::write(&path, saved.to_string()).unwrap();
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        let row = reopened
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(
+            (row.kind.as_str(), row.chart_kind.as_str()),
+            ("chart", "pie")
+        );
+        assert_eq!(row.chart_data, values);
+        assert_eq!(row.chart_hole_size, 40);
+        let frame = crate::live::stage_frame(&reopened);
+        assert!(
+            frame
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == [192, 16, 84, 255])
+        );
+
+        reopened.stage_set(&id, "chart-data", "A: 5\nB: 6").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let chart = &saved[&layout]["items"][&id]["chart"];
+        assert_eq!(chart["data"], "A: 5\nB: 6");
+        assert_eq!(chart["extension"], true);
     }
 
     #[test]

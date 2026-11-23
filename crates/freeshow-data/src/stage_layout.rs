@@ -117,6 +117,16 @@ pub struct ChartItem {
     pub hole_size: u8,
 }
 
+impl Default for ChartItem {
+    fn default() -> Self {
+        Self {
+            kind: "bar".into(),
+            data: String::new(),
+            hole_size: 0,
+        }
+    }
+}
+
 impl ChartItem {
     pub fn parse(item: &Value) -> Option<Self> {
         let data = item.get("chart")?;
@@ -470,7 +480,14 @@ fn merge_item_options(
             item.insert(key.into(), value.clone());
         }
     }
-    for group in ["clock", "tracker", "qr_code", "currentOutput", "device"] {
+    for group in [
+        "clock",
+        "tracker",
+        "qr_code",
+        "currentOutput",
+        "device",
+        "chart",
+    ] {
         let Some(Value::Object(fresh)) = modeled.get(group) else {
             continue;
         };
@@ -597,6 +614,16 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
                     "text": qr.text,
                     "color": qr.color,
                     "background": qr.background,
+                }),
+            );
+        }
+        if let Some(chart) = &item.chart {
+            object.insert(
+                "chart".into(),
+                serde_json::json!({
+                    "type": chart.kind,
+                    "data": chart.data,
+                    "holeSize": chart.hole_size,
                 }),
             );
         }

@@ -119,6 +119,9 @@ export struct StageRowData {
     device-name: string,
     flip-x: bool,
     flip-y: bool,
+    chart-kind: string,
+    chart-data: string,
+    chart-hole-size: int,
     text: string,
     seconds: bool,
     date-format: string,
@@ -978,6 +981,7 @@ export component StageEditorPanel inherits Rectangle {
     callback remove(string);
     callback close();
     property <StageRowData> current: root.rows[min(root.selected, root.rows.length - 1)];
+    property <bool> pie-chart: current.chart-kind == "pie" || current.chart-kind == "doughnut" || current.chart-kind == "donut";
     property <string> add-kind: "slide";
     // Typing in a text item saves after a short pause, not on every key.
     text-save := Timer {
@@ -1237,6 +1241,45 @@ export component StageEditorPanel inherits Rectangle {
                             text: "Show output name";
                             checked: root.current.show-output-label;
                             toggled => { root.set(root.current.id, "show-output-label", Fmt.flag(self.checked)); }
+                        }
+                    }
+                    if root.current.kind == "chart": Row {
+                        FieldLabel { text: "Chart type"; text-color: root.text-color; }
+                        ValueCombo {
+                            model: ["Bar", "Line", "Pie"];
+                            value: root.current.chart-kind == "line" ? "Line" : root.pie-chart ? "Pie" : "Bar";
+                            selected(value) => { root.set(root.current.id, "chart-kind", self.current-index == 1 ? "line" : self.current-index == 2 ? "pie" : "bar"); }
+                        }
+                        FieldLabel { text: "Pie hole (%)"; text-color: root.text-color; }
+                        ValueSpin {
+                            enabled: root.pie-chart;
+                            minimum: 0;
+                            maximum: 90;
+                            shown: min(root.current.chart-hole-size, 90);
+                            edited(value) => { root.set(root.current.id, "chart-hole-size", value); }
+                        }
+                    }
+                    if root.current.kind == "chart": Row {
+                        VerticalLayout {
+                            colspan: 4;
+                            spacing: 4px;
+                            FieldLabel { text: "Chart data (one label: value per line)"; text-color: root.text-color; }
+                            chart-data := TextEdit {
+                                property <string> item-id: root.current.id;
+                                changed item-id => { self.text = root.current.chart-data; }
+                                height: 90px;
+                                text: root.current.chart-data;
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                BoxButton {
+                                    label: "Apply chart data";
+                                    accent: root.accent;
+                                    text-color: root.text-color;
+                                    accent-text: root.accent-text;
+                                    clicked => { root.set(root.current.id, "chart-data", chart-data.text); }
+                                }
+                            }
                         }
                     }
                     if root.current.kind == "text": Row {
