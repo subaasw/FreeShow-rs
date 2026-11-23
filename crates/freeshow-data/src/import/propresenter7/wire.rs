@@ -459,7 +459,10 @@ pub(super) struct MediaAction {
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub(super) struct Audio {}
+pub(super) struct Audio {
+    #[prost(int32, tag = "1")]
+    pub playback: i32,
+}
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct Media {
