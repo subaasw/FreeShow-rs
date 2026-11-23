@@ -20,6 +20,9 @@ pub struct ItemBox {
     pub radius: String,
     /// Crop edges in left, right, top, bottom order for a picture source.
     pub crop: Option<[String; 4]>,
+    pub picture_fit: String,
+    pub picture_flip_x: bool,
+    pub picture_flip_y: bool,
     /// `top`, `center` or `bottom`, from the box `align-items`.
     pub valign: String,
     /// Clockwise turn in whole degrees, from the box `transform: rotate()`.
@@ -517,6 +520,12 @@ impl ShowFile {
                         .unwrap_or_else(|| "0".into())
                 })
             }),
+            picture_fit: item
+                .and_then(|item| item["fit"].as_str())
+                .unwrap_or("contain")
+                .into(),
+            picture_flip_x: item.is_some_and(|item| item["flipped"].as_bool() == Some(true)),
+            picture_flip_y: item.is_some_and(|item| item["flippedY"].as_bool() == Some(true)),
             // FreeShow keeps vertical alignment in the item's `align` CSS, not its `style`.
             valign: match self
                 .item(slide_id, index)
@@ -553,13 +562,11 @@ impl ShowFile {
         edge: &str,
         percent: f64,
     ) -> bool {
-        if !matches!(edge, "left" | "right" | "top" | "bottom")
-            || !(0.0..=99.0).contains(&percent)
-            || !self.item(slide_id, index).is_some_and(has_picture_source)
+        if !matches!(edge, "left" | "right" | "top" | "bottom") || !(0.0..=99.0).contains(&percent)
         {
             return false;
         }
-        let Some(item) = self.item_mut(slide_id, index) else {
+        let Some(item) = self.picture_item_mut(slide_id, index) else {
             return false;
         };
         let crop = item
@@ -569,6 +576,32 @@ impl ShowFile {
             *crop = serde_json::json!({});
         }
         crop[edge] = Value::from(percent);
+        true
+    }
+
+    pub fn set_item_picture_fit(&mut self, slide_id: &str, index: usize, fit: &str) -> bool {
+        if !matches!(fit, "contain" | "cover" | "fill" | "tile") {
+            return false;
+        }
+        let Some(item) = self.picture_item_mut(slide_id, index) else {
+            return false;
+        };
+        item.insert("fit".into(), Value::String(fit.into()));
+        true
+    }
+
+    pub fn set_item_picture_flip(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        vertical: bool,
+        flipped: bool,
+    ) -> bool {
+        let Some(item) = self.picture_item_mut(slide_id, index) else {
+            return false;
+        };
+        let key = if vertical { "flippedY" } else { "flipped" };
+        item.insert(key.into(), Value::Bool(flipped));
         true
     }
 
@@ -763,6 +796,17 @@ impl ShowFile {
 
     fn item(&self, slide_id: &str, index: usize) -> Option<&Value> {
         self.items(slide_id)?.get(index)
+    }
+
+    fn picture_item_mut(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+    ) -> Option<&mut serde_json::Map<String, Value>> {
+        if !self.item(slide_id, index).is_some_and(has_picture_source) {
+            return None;
+        }
+        self.item_mut(slide_id, index)
     }
 
     fn item_mut(

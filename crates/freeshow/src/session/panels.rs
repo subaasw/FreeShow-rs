@@ -1317,6 +1317,21 @@ impl Session {
                     show.set_item_box_css(slide, item, "box-shadow", &value)
                 })
             }
+            "picture-fit" => {
+                if !matches!(value.as_str(), "contain" | "cover" | "fill" | "tile") {
+                    return Err(format!("unknown picture fit {value:?}"));
+                }
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_picture_fit(slide, item, &value)
+                })
+            }
+            "picture-flip-x" | "picture-flip-y" => {
+                let flipped = parse_bool(&value)?;
+                let vertical = key == "picture-flip-y";
+                self.edit_current_item(|show, slide, item| {
+                    show.set_item_picture_flip(slide, item, vertical, flipped)
+                })
+            }
             "crop-left" | "crop-right" | "crop-top" | "crop-bottom" => {
                 let percent = value
                     .strip_suffix('%')
@@ -1899,6 +1914,43 @@ mod tests {
             vec!["Lobby".to_string()]
         );
         assert!(session.apply_setting("outputDelete", "").is_err());
+    }
+
+    #[test]
+    fn inspector_picture_fit_and_flips_persist_and_render() {
+        let (dir, mut session) = library("inspector-picture");
+        assert!(session.create_show());
+        assert!(session.inspector_set("picture-fit", "fill").is_err());
+        let image = freeshow_output::Frame {
+            width: 2,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255, 0, 255, 0, 255],
+        };
+        std::fs::write(dir.path().join("picture.png"), image.encode_png().unwrap()).unwrap();
+        assert!(session.edit_current_item(|show, slide, index| {
+            let item = &mut show.show["slides"][slide]["items"][index];
+            item["src"] = serde_json::json!("picture.png");
+            item["style"] = serde_json::json!("left:20px;top:20px;width:40px;height:20px;");
+            true
+        }));
+        let green = freeshow_output::parse_color("#00ff00").unwrap();
+        assert_eq!(session.inspector_form().item_box.picture_fit, "contain");
+        assert_ne!(crate::live::edit_frame(&session).pixel(20, 20), green);
+        assert!(session.inspector_set("picture-fit", "unknown").is_err());
+        session.inspector_set("picture-fit", "fill").unwrap();
+        session.inspector_set("picture-flip-x", "true").unwrap();
+        session.inspector_set("picture-flip-y", "true").unwrap();
+
+        let mut session = Session::open(dir.path().to_path_buf());
+        session.select_drawer(0);
+        assert!(session.pick_first_slide());
+        let item = session.inspector_form().item_box;
+        assert_eq!(item.picture_fit, "fill");
+        assert!(item.picture_flip_x && item.picture_flip_y);
+        assert_eq!(crate::live::edit_frame(&session).pixel(20, 20), green);
+        session.inspector_set("picture-flip-y", "false").unwrap();
+        assert!(session.inspector_form().item_box.picture_flip_x);
+        assert_eq!(crate::live::edit_frame(&session).pixel(20, 20).b, 255);
     }
 
     #[test]
