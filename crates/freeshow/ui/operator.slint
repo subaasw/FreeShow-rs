@@ -166,12 +166,14 @@ export component ControlWindow inherits Window {
     callback choose-slide(int);
     callback save-lyrics(string);
     callback save-group(string);
-    in-out property <string> item-label: "Box 1 of 1";
+    in property <int> item-index;
+    in property <int> item-count;
     in property <[string]> picture-choices;
     callback prev-item();
     callback next-item();
     callback add-item();
     callback add-picture(int);
+    callback move-item(bool);
     callback remove-item();
     callback go-slide(string);
     callback move-project(int);
@@ -571,7 +573,7 @@ export component ControlWindow inherits Window {
                         if root.editing && !root.text-mode: HorizontalLayout {
                             spacing: 6px;
                             Text {
-                                text: root.item-label;
+                                text: "Box \{root.item-index + 1} of \{max(1, root.item-count)}";
                                 color: root.text-color;
                                 font-size: 12px * OperatorStyle.font-scale;
                                 vertical-alignment: center;
@@ -580,6 +582,19 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Next box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.next-item(); } }
                             BoxButton { label: "Add box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-item(); } }
                             BoxButton { label: "Remove"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.remove-item(); } }
+                        }
+                        if root.editing && !root.text-mode && root.item-count > 1: HorizontalLayout {
+                            spacing: 6px;
+                            Button {
+                                text: "Move backward";
+                                enabled: root.item-index > 0;
+                                clicked => { root.move-item(false); }
+                            }
+                            Button {
+                                text: "Move forward";
+                                enabled: root.item-index < root.item-count - 1;
+                                clicked => { root.move-item(true); }
+                            }
                         }
                         if root.editing && !root.text-mode && root.inspector-data.has-item && root.picture-choices.length > 0: HorizontalLayout {
                             spacing: 6px;

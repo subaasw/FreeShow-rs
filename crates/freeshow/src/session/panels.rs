@@ -1917,6 +1917,55 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_box_updates_preview_and_program_and_keeps_it_selected() {
+        let (dir, mut session) = library("move-slide-box");
+        assert!(session.create_show());
+        assert!(!session.move_item_box(false));
+        assert!(!session.move_item_box(true));
+        assert!(session.save_lyrics("First"));
+        assert!(session.add_item_box());
+        assert!(session.save_lyrics("Second"));
+        assert!(session.edit_current_item(|show, slide, _| {
+            let items = &mut show.show["slides"][slide]["items"];
+            items[0]["style"] =
+                serde_json::json!("left:20px;top:20px;width:200px;height:200px;background:#f00;");
+            items[1]["style"] =
+                serde_json::json!("left:20px;top:20px;width:200px;height:200px;background:#0f0;");
+            true
+        }));
+        let red = freeshow_output::parse_color("#f00").unwrap();
+        let green = freeshow_output::parse_color("#0f0").unwrap();
+        session.go_live();
+        assert_eq!(crate::live::audience_frame(&session).pixel(21, 21), green);
+        assert_eq!(session.item_position(), (1, 2));
+        assert!(!session.move_item_box(true));
+
+        assert!(session.move_item_box(false));
+        assert!(session.live_edited);
+        assert_eq!(session.item_position(), (0, 2));
+        assert_eq!(session.lyrics(), "Second");
+        assert!(!session.move_item_box(false));
+        assert_eq!(crate::live::edit_frame(&session).pixel(21, 21), red);
+        assert_eq!(crate::live::audience_frame(&session).pixel(21, 21), red);
+        assert!(session.move_item_box(true));
+        assert_eq!(session.item_position(), (1, 2));
+        assert_eq!(crate::live::edit_frame(&session).pixel(21, 21), green);
+        assert!(session.undo());
+        assert_eq!(session.item_position(), (0, 2));
+        assert_eq!(session.lyrics(), "Second");
+        assert!(session.redo());
+        assert_eq!(session.item_position(), (1, 2));
+        assert_eq!(session.lyrics(), "Second");
+        assert!(session.move_item_box(false));
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        reopened.select_drawer(0);
+        assert!(reopened.pick_first_slide());
+        assert_eq!(reopened.lyrics(), "Second");
+        assert_eq!(crate::live::edit_frame(&reopened).pixel(21, 21), red);
+    }
+
+    #[test]
     fn add_library_picture_selects_the_new_box_and_preserves_lyrics() {
         let (dir, _) = library("add-library-picture");
         let media = dir.path().join("Media");
