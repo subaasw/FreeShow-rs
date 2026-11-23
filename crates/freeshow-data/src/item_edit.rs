@@ -17,7 +17,7 @@ pub struct ItemBox {
     pub background: String,
     pub box_shadow: String,
     pub backdrop_filter: String,
-    pub radius: i32,
+    pub radius: String,
     /// `top`, `center` or `bottom`, from the box `align-items`.
     pub valign: String,
     /// Clockwise turn in whole degrees, from the box `transform: rotate()`.
@@ -493,7 +493,7 @@ impl ShowFile {
                 .or_else(|| css_value(style, "background-color"))
                 .or(background)
                 .unwrap_or_default(),
-            radius: css_px(style, "border-radius").unwrap_or(0),
+            radius: css_value(style, "border-radius").unwrap_or_default(),
             box_shadow: css_value(style, "box-shadow").unwrap_or_default(),
             backdrop_filter: css_value(style, "backdrop-filter").unwrap_or_default(),
             // FreeShow keeps vertical alignment in the item's `align` CSS, not its `style`.

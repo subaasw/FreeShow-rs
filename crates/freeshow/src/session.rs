@@ -8533,7 +8533,7 @@ Second line"
         assert_eq!(form.typography.family, "Georgia");
         assert_eq!(form.typography.color, "#ff0000");
         assert_eq!((form.item_box.left, form.item_box.width), (300, 900));
-        assert_eq!(form.item_box.radius, 24);
+        assert_eq!(form.item_box.radius, "24px");
         assert_eq!(form.item_box.background, "#00000080");
         assert!(session.select_item(0));
         assert_eq!(session.lyrics(), "Hello");

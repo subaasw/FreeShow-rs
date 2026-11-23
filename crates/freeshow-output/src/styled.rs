@@ -2699,6 +2699,18 @@ fn parse_shadow(value: &str) -> Option<TextShadow> {
     })
 }
 
+/// Validates one to four pixel or percentage corner radii for the slide inspector.
+pub fn valid_box_radius(value: &str) -> bool {
+    let tokens = value.split_whitespace();
+    (1..=4).contains(&tokens.clone().count())
+        && tokens.map(CornerRadius::parse).all(|radius| match radius {
+            Some(CornerRadius::Px(amount) | CornerRadius::Percent(amount)) => {
+                (0.0..=2000.0).contains(&amount)
+            }
+            _ => false,
+        })
+}
+
 /// CSS `border-radius` shorthand (1–4 values; the elliptical `/` part is ignored).
 fn parse_border_radius(value: &str) -> Option<[CornerRadius; 4]> {
     let horizontal = value.split('/').next().unwrap_or(value);
