@@ -116,6 +116,9 @@ export struct StageRowData {
     qr-background: string,
     output-source: string,
     show-output-label: bool,
+    device-name: string,
+    flip-x: bool,
+    flip-y: bool,
     text: string,
     seconds: bool,
     date-format: string,
@@ -962,6 +965,7 @@ export component StageEditorPanel inherits Rectangle {
     in property <[string]> variable-names;
     in property <[string]> output-ids;
     in property <[string]> output-names;
+    in property <[string]> camera-names;
     in property <image> preview;
     in property <string> status;
     in-out property <int> selected: 0;
@@ -1151,12 +1155,35 @@ export component StageEditorPanel inherits Rectangle {
                             accepted(value) => { root.set(root.current.id, "src", value); }
                         }
                     }
-                    if root.current.kind == "media": Row {
+                    if root.current.kind == "camera": Row {
+                        FieldLabel { text: "Camera"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 3;
+                            model: root.camera-names;
+                            value: root.current.device-name == "" ? "No camera selected" : root.current.device-name;
+                            selected(value) => { root.set(root.current.id, "camera-device", self.current-index == 0 ? "" : value); }
+                        }
+                    }
+                    if root.current.kind == "camera" || root.current.kind == "media": Row {
                         FieldLabel { text: "Fit"; text-color: root.text-color; }
                         ValueCombo {
                             model: ["contain", "cover", "fill"];
                             value: root.current.fit;
                             selected(value) => { root.set(root.current.id, "fit", value); }
+                        }
+                    }
+                    if root.current.kind == "camera": Row {
+                        Switch {
+                            colspan: 2;
+                            text: "Flip horizontally";
+                            checked: root.current.flip-x;
+                            toggled => { root.set(root.current.id, "flip-x", Fmt.flag(self.checked)); }
+                        }
+                        Switch {
+                            colspan: 2;
+                            text: "Flip vertically";
+                            checked: root.current.flip-y;
+                            toggled => { root.set(root.current.id, "flip-y", Fmt.flag(self.checked)); }
                         }
                     }
                     if root.current.kind == "tracker": Row {

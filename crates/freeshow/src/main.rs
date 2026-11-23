@@ -741,6 +741,9 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
             qr_background: row.qr_background.into(),
             output_source: row.output_source.into(),
             show_output_label: row.show_output_label,
+            device_name: row.device_name.into(),
+            flip_x: row.flip_x,
+            flip_y: row.flip_y,
             text: row.text.into(),
             seconds: row.seconds,
             date_format: row.date_format.into(),
@@ -2324,6 +2327,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui = control.as_weak();
             control.on_stage_editor_opened(move || {
                 if let Some(ui) = ui.upgrade() {
+                    let mut names = freeshow_media::cameras();
+                    names.sort();
+                    names.dedup();
+                    names.insert(0, "No camera selected".into());
+                    ui.set_stage_camera_names(strings(&names));
                     refresh_panels(&ui, &session.borrow());
                 }
             });

@@ -470,7 +470,7 @@ fn merge_item_options(
             item.insert(key.into(), value.clone());
         }
     }
-    for group in ["clock", "tracker", "qr_code", "currentOutput"] {
+    for group in ["clock", "tracker", "qr_code", "currentOutput", "device"] {
         let Some(Value::Object(fresh)) = modeled.get(group) else {
             continue;
         };
@@ -490,6 +490,13 @@ fn merge_item_options(
             }
             if group == "currentOutput" && !fresh.contains_key("source") {
                 target.remove("source");
+            }
+            if group == "device" {
+                for key in ["name", "type"] {
+                    if !fresh.contains_key(key) {
+                        target.remove(key);
+                    }
+                }
             }
         }
     }
@@ -514,7 +521,7 @@ fn merge_item_options(
         }
         target["id"] = id.clone();
     }
-    for key in ["src", "fit"] {
+    for key in ["src", "fit", "flipped", "flippedY"] {
         if let Some(value) = modeled.get(key) {
             item.insert(key.into(), value.clone());
         }
@@ -570,6 +577,18 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
                 output["source"] = Value::String(source.clone());
             }
             object.insert("currentOutput".into(), output);
+        }
+        if item.kind == StageItemKind::Camera {
+            let mut device = serde_json::Map::new();
+            if let Some(name) = &item.device_name {
+                device.insert("name".into(), Value::String(name.clone()));
+            }
+            if let Some(kind) = &item.device_type {
+                device.insert("type".into(), Value::String(kind.clone()));
+            }
+            object.insert("device".into(), Value::Object(device));
+            object.insert("flipped".into(), Value::Bool(item.flip_x));
+            object.insert("flippedY".into(), Value::Bool(item.flip_y));
         }
         if let Some(qr) = &item.qr {
             object.insert(

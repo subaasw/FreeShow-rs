@@ -6599,6 +6599,7 @@ impl Session {
             "variable" => freeshow_data::StageItemKind::Variable,
             "qr" => freeshow_data::StageItemKind::QrCode,
             "output" => freeshow_data::StageItemKind::CurrentOutput,
+            "camera" => freeshow_data::StageItemKind::Camera,
             _ => freeshow_data::StageItemKind::Slide,
         };
         self.stage.items.push(freeshow_data::StageItemSpec {
