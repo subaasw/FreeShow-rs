@@ -55,6 +55,7 @@ pub struct BoxStyle {
     pptx_gradient_tile: Option<[f32; 4]>,
     pptx_radial_focus: Option<[f32; 2]>,
     pptx_radial_ellipse: Option<[f32; 4]>,
+    pptx_shape_ellipse: bool,
     pptx_rectangular_focus: Option<[f32; 4]>,
 }
 
@@ -188,6 +189,7 @@ impl Default for BoxStyle {
             pptx_gradient_tile: None,
             pptx_radial_focus: None,
             pptx_radial_ellipse: None,
+            pptx_shape_ellipse: false,
             pptx_rectangular_focus: None,
         }
     }
@@ -404,6 +406,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
             }
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
             "--pptx-radial-ellipse" => style.pptx_radial_ellipse = parse_radial_ellipse(value),
+            "--pptx-shape-ellipse" => style.pptx_shape_ellipse = value == "1",
             "--shape-fill-polygon" => {
                 style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
             }
@@ -3498,6 +3501,11 @@ fn fill_item_background(
         });
         let (cx, cy) = (fill_w / 2.0, fill_h / 2.0);
         let radius_to_corner = fill_w.hypot(fill_h) / 2.0;
+        let ellipse_radius = if style.pptx_shape_ellipse {
+            (cx, cy)
+        } else {
+            (radius_to_corner, radius_to_corner)
+        };
         let linear = gradient.linear_angle_deg.map(|angle| {
             // Screen y grows downward. CSS 0deg points up.
             let (mut dx, cos) = angle.to_radians().sin_cos();
@@ -3551,8 +3559,8 @@ fn fill_item_background(
                         ((dot * dot + distance_squared * remaining).sqrt() + dot) / remaining
                     } else if let Some(ellipse) = style.pptx_radial_ellipse {
                         radial_ellipse_position(
-                            offset_x / radius_to_corner,
-                            offset_y / radius_to_corner,
+                            offset_x / ellipse_radius.0,
+                            offset_y / ellipse_radius.1,
                             ellipse,
                         )
                     } else {
@@ -4304,6 +4312,16 @@ mod tests {
         assert!(focus.r > 245 && focus.b < 10, "{focus:?}");
         assert!((165..=175).contains(&center.r), "{center:?}");
         assert!(corner.r < 10 && corner.b > 245, "{corner:?}");
+    }
+
+    #[test]
+    fn powerpoint_ellipse_shape_gradient_reaches_the_shape_edge() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:1920px;height:1080px;border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%);--pptx-radial-ellipse:0 0 0 0;--pptx-shape-ellipse:1;",
+        ));
+        assert!(frame.pixel(480, 270).r > 250);
+        assert!(frame.pixel(480, 5).b > 245);
+        assert_eq!(frame.pixel(100, 0).b, 0);
     }
 
     #[test]

@@ -152,6 +152,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint gradient tile rectangles with mirrored repeats and signed insets.
 - [x] PowerPoint fractional gradient stops, explicit empty and single-stop fills, and gamma for eligible two- and three-stop gradients.
 - [x] PowerPoint shape-path slide backgrounds, default center focuses, and radial ellipse focuses.
+- [x] Direct and theme gradient fills for positioned PowerPoint shapes and text boxes.
 - [ ] PowerPoint custom gradient geometry and backgrounds from other import formats.
 
 Acceptance: importing a ProPresenter bundle produces shows that present with
