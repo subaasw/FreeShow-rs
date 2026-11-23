@@ -376,6 +376,12 @@ mod tests {
     }
 
     #[test]
+    fn invalid_direct_omt_address_does_not_start_a_receiver() {
+        assert!(!NetworkReceiver::open_omt("omt://localhost").is_live());
+        assert!(!NetworkReceiver::open_omt("omt://localhost:abc").is_live());
+    }
+
+    #[test]
     fn native_omt_receives_rgba_from_a_loopback_sender() {
         use openmediatransport::{Codec, MediaFrame, Sender};
         let mut sender = Sender::create("FreeShow input test", FrameType::VIDEO).unwrap();

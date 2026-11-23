@@ -1539,7 +1539,11 @@ mod tests {
             height: 9,
             rgba: [255, 0, 0, 255].repeat(16 * 9),
         };
-        session.network_background = true;
+        session.preferences.out_locked = Some(true);
+        assert!(!session.begin_network_background());
+        assert!(!session.update_network_background(received.clone()));
+        session.preferences.out_locked = Some(false);
+        assert!(session.begin_network_background());
         assert!(session.update_network_background(received.clone()));
         assert_eq!(
             audience_frame(&session).pixel(80, 45),
@@ -1553,7 +1557,7 @@ mod tests {
             parse_color("#f00").unwrap()
         );
 
-        session.network_background = true;
+        assert!(session.begin_network_background());
         assert!(session.update_network_background(received.clone()));
         session.replace_underlay(Some(Raster {
             width: 16,

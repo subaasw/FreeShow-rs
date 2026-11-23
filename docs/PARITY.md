@@ -185,7 +185,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | MIDI and OSC input | done | 0.6 |  |
 | Timecode (MTC/LTC) | done | 0.4 |  |
 | NDI send, including stage and groups | done | 0.8 | One sender per (group, stage); source name `{name} [{group}]` |
-| NDI/OMT receive | done | 0.6 | Configured feeds display as live video backgrounds. NDI uses the GStreamer plugin. OMT uses the Rust SDK for direct URLs and source discovery |
+| NDI/OMT receive | done | 0.6 | The Media drawer discovers and starts live video backgrounds. Startup configuration remains available. NDI uses the GStreamer plugin. OMT uses the Rust SDK for direct URLs and discovery |
 | OMT broadcast | partial | 0.3 | Built-in Rust VMX1 video and routed stereo for audience and stage outputs. Loopback tested. Third-party receiver interoperability remains unverified |
 | WebRTC/WHIP send | done | 0.5 | H.264 video and stereo Opus from each saved `network_sub_<output-id>` route |
 | Auto-started RTMP | done | 0.5 | From `rtmpData` destinations or `special.autoRtmp`, plus `FREESHOW_RTMP` |
