@@ -452,6 +452,11 @@ fn merge_item_options(
     item: &mut serde_json::Map<String, Value>,
     modeled: &serde_json::Map<String, Value>,
 ) {
+    for key in ["includeMedia", "itemNumber", "invertItems"] {
+        if let Some(value) = modeled.get(key) {
+            item.insert(key.into(), value.clone());
+        }
+    }
     for group in ["clock", "tracker"] {
         let Some(Value::Object(fresh)) = modeled.get(group) else {
             continue;
@@ -565,6 +570,14 @@ pub fn serialize_stage(layout: &StageLayout) -> String {
         }
         if let Some(count) = item.line_count {
             object.insert("lineCount".into(), Value::from(count as u64));
+        }
+        if item.kind == StageItemKind::Slide {
+            object.insert("includeMedia".into(), Value::Bool(item.include_media));
+            object.insert(
+                "itemNumber".into(),
+                Value::from(item.text_box.map_or(0, |index| index.saturating_add(1)) as u64),
+            );
+            object.insert("invertItems".into(), Value::Bool(item.invert_items));
         }
         if !item.label.is_empty() {
             object.insert("label".into(), Value::String(item.label.clone()));

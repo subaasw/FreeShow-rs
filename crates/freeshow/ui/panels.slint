@@ -108,6 +108,9 @@ export struct StageRowData {
     align: string,
     offset: int,
     line-count: int,
+    include-media: bool,
+    text-box: int,
+    invert-items: bool,
     text: string,
     seconds: bool,
     date-format: string,
@@ -1070,7 +1073,7 @@ export component StageEditorPanel inherits Rectangle {
                             value: self.model[clamp(root.current.offset, 0, 2)];
                             selected(value) => { root.set(root.current.id, "offset", self.current-index); }
                         }
-                        FieldLabel { text: "Max lines"; text-color: root.text-color; }
+                        FieldLabel { text: "Max lines (0 for all)"; text-color: root.text-color; }
                         ValueSpin {
                             minimum: 0;
                             maximum: 99;
@@ -1079,13 +1082,25 @@ export component StageEditorPanel inherits Rectangle {
                         }
                     }
                     if root.current.kind == "slide": Row {
-                        Rectangle { }
-                        Text {
-                            colspan: 3;
-                            text: "Max lines 0 shows the whole slide.";
-                            color: root.text-color;
-                            opacity: 0.6;
-                            font-size: 12px * OperatorStyle.font-scale;
+                        FieldLabel { text: "Text box (0 for all)"; text-color: root.text-color; }
+                        ValueSpin {
+                            minimum: 0;
+                            maximum: 99;
+                            shown: root.current.text-box;
+                            edited(value) => { root.set(root.current.id, "text-box", value); }
+                        }
+                        Switch {
+                            text: "Reverse box order";
+                            checked: root.current.invert-items;
+                            toggled => { root.set(root.current.id, "invert-items", self.checked ? "true" : "false"); }
+                        }
+                    }
+                    if root.current.kind == "slide": Row {
+                        Switch {
+                            colspan: 2;
+                            text: "Include slide background";
+                            checked: root.current.include-media;
+                            toggled => { root.set(root.current.id, "include-media", self.checked ? "true" : "false"); }
                         }
                     }
                     if root.current.kind == "clock": Row {

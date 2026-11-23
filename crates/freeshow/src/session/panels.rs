@@ -208,6 +208,9 @@ pub struct StageRow {
     pub offset: i32,
     /// Lines shown at most; 0 shows the whole slide.
     pub line_count: i32,
+    pub include_media: bool,
+    pub text_box: i32,
+    pub invert_items: bool,
     /// A text item's words, one line per line.
     pub text: String,
     pub seconds: bool,
@@ -1265,6 +1268,11 @@ impl Session {
                     },
                     offset: item.offset.clamp(-99, 99) as i32,
                     line_count: item.line_count.unwrap_or(0).min(99) as i32,
+                    include_media: item.include_media,
+                    text_box: item
+                        .text_box
+                        .map_or(0, |index| index.saturating_add(1).min(99) as i32),
+                    invert_items: item.invert_items,
                     text: item.lines.join("\n"),
                     seconds: item.clock.seconds,
                     date_format: item.clock.date_format.clone(),
@@ -1286,6 +1294,9 @@ impl Session {
             "align"
                 | "offset"
                 | "line-count"
+                | "include-media"
+                | "text-box"
+                | "invert-items"
                 | "text"
                 | "seconds"
                 | "date-format"
@@ -1381,6 +1392,12 @@ impl Session {
                 let count = parse_int(value, 0, 99)?;
                 item.line_count = (count > 0).then_some(count as usize);
             }
+            "include-media" => item.include_media = parse_bool(value)?,
+            "text-box" => {
+                let number = parse_int(value, 0, 99)? as usize;
+                item.text_box = number.checked_sub(1);
+            }
+            "invert-items" => item.invert_items = parse_bool(value)?,
             "text" => {
                 item.lines = value
                     .lines()
@@ -1724,6 +1741,31 @@ mod tests {
         assert!(saved.contains("400px"), "{saved}");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
+    }
+
+    #[test]
+    fn stage_slide_options_reopen_with_the_saved_values() {
+        let (dir, mut session) = library("stage-slide-options");
+        let id = session.add_stage_item("slide", "left:10px;").unwrap();
+        session.stage_set(&id, "include-media", "true").unwrap();
+        session.stage_set(&id, "text-box", "2").unwrap();
+        session.stage_set(&id, "invert-items", "true").unwrap();
+
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        let row = reopened
+            .stage_rows()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert!(row.include_media && row.invert_items);
+        assert_eq!(row.text_box, 2);
+        reopened.stage_set(&id, "include-media", "false").unwrap();
+        reopened.stage_set(&id, "text-box", "0").unwrap();
+        reopened.stage_set(&id, "invert-items", "false").unwrap();
+        let saved = freeshow_data::Library::open(dir.path()).load_stage_layout();
+        let item = saved.items.iter().find(|item| item.id == id).unwrap();
+        assert!(!item.include_media && !item.invert_items);
+        assert_eq!(item.text_box, None);
     }
 
     #[test]
