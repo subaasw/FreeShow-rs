@@ -324,6 +324,13 @@ fn add_slide(
     if cue
         .actions
         .iter()
+        .any(|action| immediate_clear_target(action) == Some(wire::ClearTarget::All))
+    {
+        clear.push("clear_all");
+    }
+    if cue
+        .actions
+        .iter()
         .any(|action| immediate_clear_target(action) == Some(wire::ClearTarget::Audio))
     {
         clear.push("clear_audio");
@@ -336,7 +343,8 @@ fn add_slide(
         clear.push("clear_slide");
     }
     match cue_picture(cue) {
-        Some(CuePicture::Clear) => clear.push("clear_background"),
+        Some(CuePicture::Clear) if !clear.contains(&"clear_all") => clear.push("clear_background"),
+        Some(CuePicture::Clear) => {}
         Some(CuePicture::Media(media_action, path, foreground)) => {
             node["background"] = json!(insert_media(media, media_action, path, foreground));
         }
@@ -435,7 +443,7 @@ fn layout_timeline(
                     wire::ClearTarget::Audio => "clear_audio",
                     wire::ClearTarget::Background => "clear_background",
                     wire::ClearTarget::Slide => "clear_slide",
-                    _ => continue,
+                    wire::ClearTarget::All => "clear_all",
                 };
                 (kind, json!({}))
             } else if action.enabled
@@ -524,12 +532,7 @@ fn clear_target(action: &wire::Action) -> Option<wire::ClearTarget> {
         .clear
         .as_ref()
         .filter(|clear| clear.destination == 0)?;
-    match wire::ClearTarget::try_from(clear.target).ok()? {
-        target @ (wire::ClearTarget::Audio
-        | wire::ClearTarget::Background
-        | wire::ClearTarget::Slide) => Some(target),
-        wire::ClearTarget::All => None,
-    }
+    wire::ClearTarget::try_from(clear.target).ok()
 }
 
 enum CuePicture<'a> {
@@ -538,6 +541,13 @@ enum CuePicture<'a> {
 }
 
 fn cue_picture(cue: &wire::Cue) -> Option<CuePicture<'_>> {
+    if cue
+        .actions
+        .iter()
+        .any(|action| immediate_clear_target(action) == Some(wire::ClearTarget::All))
+    {
+        return Some(CuePicture::Clear);
+    }
     cue.actions.iter().rev().find_map(|action| {
         if immediate_clear_target(action) == Some(wire::ClearTarget::Background) {
             return Some(CuePicture::Clear);
@@ -968,8 +978,12 @@ mod tests {
         let actions = &mut presentation.cues[2].actions;
         let clear_after_media = actions.remove(1);
         actions.push(clear_after_media);
+        presentation.cues[1].actions = vec![clear(wire::ClearTarget::All as i32)];
         let show = crate::import::import_show("Clears.pro", &presentation.encode_to_vec()).unwrap();
         assert_eq!(show.backdrop_at(0), crate::SlideBackdrop::Clear);
+        assert!(show.clears_all_at(2));
+        assert!(show.clears_audio_at(2));
+        assert!(show.clears_slide_at(2));
         assert!(show.show["media"].as_object().unwrap().is_empty());
     }
 
@@ -1453,6 +1467,7 @@ mod tests {
                 timed_foreground,
                 timed_clear(2.5, 0.0, wire::ClearTarget::Audio, 0),
                 timed_clear(2.5, 0.125, wire::ClearTarget::Slide, 0),
+                timed_clear(2.6, 0.1, wire::ClearTarget::All, 0),
                 timed_clear(2.75, 0.0, wire::ClearTarget::Audio, 1),
                 timed_clear(2.9, -0.1, wire::ClearTarget::Audio, 0),
                 timed_clear(3.0, f64::INFINITY, wire::ClearTarget::Audio, 0),
@@ -1500,7 +1515,7 @@ mod tests {
         assert_eq!(timeline["actions"][0]["type"], "slide");
         assert_eq!(timeline["actions"][0]["data"]["id"], "s1");
         let cues = crate::timeline_cues_from_show(&show.show);
-        assert_eq!(cues.len(), 6);
+        assert_eq!(cues.len(), 7);
         assert_eq!(cues[0].time_ms, 1500);
         assert_eq!(cues[0].slide_index, Some(1));
         assert_eq!(cues[1].time_ms, 1750);
@@ -1532,10 +1547,12 @@ mod tests {
         assert_eq!(cues[4].kind, "clear_audio");
         assert_eq!(cues[5].time_ms, 2625);
         assert_eq!(cues[5].kind, "clear_slide");
+        assert_eq!(cues[6].time_ms, 2700);
+        assert_eq!(cues[6].kind, "clear_all");
         assert_eq!(
             crate::timeline_text_from(&cues),
             format!(
-                "1.500 slide:s1\n1.750 background:{background}\n2.000 clear_background\n2.250 foreground:{foreground}\n2.500 clear_audio\n2.625 clear_slide"
+                "1.500 slide:s1\n1.750 background:{background}\n2.000 clear_background\n2.250 foreground:{foreground}\n2.500 clear_audio\n2.625 clear_slide\n2.700 clear_all"
             )
         );
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();

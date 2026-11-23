@@ -1023,6 +1023,7 @@ fn fade_into(
     motion: freeshow_data::TextTransition,
 ) {
     if motion.kind == "none" {
+        timer.stop();
         let frame = to;
         submit_network(picture, &frame);
         for slot in &slots {
@@ -2474,8 +2475,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut current = session.borrow_mut();
                 match index {
                     0 => {
-                        current.blanked = true;
-                        current.clear_output();
+                        if !current.clear_all_layers() {
+                            return;
+                        }
+                        let _ = current.take_plays();
                         stop_video(&video_timer, &video_player);
                         *audio_out.borrow_mut() = None;
                         let blank = audience_frame(&current);
@@ -3625,9 +3628,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if fades {
             remote_next_slide.stop();
         }
-        if clear {
-            stop_video(&remote_video_timer, &remote_video);
-            *remote_audio.borrow_mut() = None;
+        if clear && remote_session.borrow().blanked {
             remote_next_slide.stop();
             // A fade still running would paint the old slide back over the blank.
             remote_output_fade.stop();

@@ -1403,6 +1403,31 @@ impl Session {
         self.audio_duration = 0.0;
     }
 
+    pub fn clear_all_layers(&mut self) -> bool {
+        if self.preferences.out_locked() {
+            return false;
+        }
+        self.clear_output();
+        self.blanked = true;
+        self.slide_hidden = true;
+        self.background_transition = false;
+        self.timed_seconds = None;
+        self.pending_actions = None;
+        self.active_overlays.clear();
+        self.restore_locked_overlays();
+        self.clear_effects();
+        self.playlist_id = None;
+        self.playlist_songs.clear();
+        self.effect_playing = None;
+        self.effect_return = None;
+        if self.metronome_on {
+            self.toggle_metronome();
+        }
+        self.pending_play = Some(PendingPlay::StopVideo);
+        self.pending_also = Some(PendingPlay::StopAudio);
+        true
+    }
+
     fn output_id(&self) -> String {
         self.audience().0
     }
@@ -2003,10 +2028,7 @@ impl Session {
                 true
             }
             "clear_slide" => self.clear_slide_layer(),
-            "clear" => {
-                self.clear_output();
-                true
-            }
+            "clear" | "clear_all" => self.clear_all_layers(),
             _ => false,
         }
     }
@@ -2340,7 +2362,9 @@ impl Session {
                 self.set_still_underlay(path.clone(), self.load_still(&path));
                 self.blanked = false;
                 self.background_transition = true;
-                self.pending_play = None;
+                if !matches!(self.pending_play, Some(PendingPlay::StopVideo)) {
+                    self.pending_play = None;
+                }
                 self.note_media_layer(&path, MediaKind::Image);
                 true
             }
@@ -2351,12 +2375,9 @@ impl Session {
             MediaKind::Audio => {
                 if self.audio_paused && self.playing_audio.as_ref() == Some(&path) {
                     self.audio_paused = false;
-                    self.pending_play = Some(PendingPlay::ResumeAudio);
+                    self.keep_video_then(PendingPlay::ResumeAudio);
                 } else {
-                    self.media_finished = None;
-                    self.playing_audio = Some(path.clone());
-                    self.audio_paused = false;
-                    self.pending_play = Some(PendingPlay::Audio(path));
+                    self.queue_audio(path);
                 }
                 true
             }
@@ -2817,6 +2838,15 @@ impl Session {
 
     fn apply_slide_actions_now(&mut self, continuation: bool) {
         if self.tab == "scripture" {
+            return;
+        }
+        if self.current_show().is_some_and(|show| {
+            show.show["origin"] == "propresenter"
+                && self
+                    .slide_index
+                    .is_some_and(|index| show.clears_all_at(index))
+        }) {
+            self.clear_all_layers();
             return;
         }
         if !continuation {
@@ -3316,7 +3346,10 @@ impl Session {
 
     /// Keeps a slide video queued and stores the audio command beside it.
     fn keep_video_then(&mut self, play: PendingPlay) {
-        if matches!(self.pending_play, Some(PendingPlay::Video(_))) {
+        if matches!(
+            self.pending_play,
+            Some(PendingPlay::Video(_) | PendingPlay::StopVideo)
+        ) {
             self.pending_also = Some(play);
         } else {
             self.pending_play = Some(play);
@@ -4452,13 +4485,7 @@ impl Session {
                 let _ = self.open_project_item(index, slide);
             }
             freeshow_remote::Command::Clear => {
-                if self.preferences.out_locked() {
-                    return;
-                }
-                self.blanked = true;
-                self.active_overlays.clear();
-                self.restore_locked_overlays();
-                self.clear_output();
+                self.clear_all_layers();
             }
             freeshow_remote::Command::ClearSlide => {
                 self.clear_slide_layer();
@@ -4511,9 +4538,7 @@ impl Session {
                 }
             }
             freeshow_remote::Command::StopAudio => {
-                self.playing_audio = None;
-                self.audio_paused = false;
-                self.pending_play = Some(PendingPlay::StopAudio);
+                self.stop_audio();
             }
             freeshow_remote::Command::SeekAudio { millis } => {
                 if self.playing_audio.is_some() {
@@ -5141,6 +5166,15 @@ impl Session {
     pub fn output_motion(&mut self) -> (freeshow_data::TextTransition, bool) {
         let background = self.background_transition;
         self.background_transition = false;
+        if self.blanked {
+            return (
+                freeshow_data::TextTransition {
+                    kind: "none".into(),
+                    ..Default::default()
+                },
+                false,
+            );
+        }
         if background {
             let from_slide = if self.tab == "shows" {
                 self.current_show().and_then(|show| {
@@ -7622,7 +7656,8 @@ Second line"
             {"time": 1000, "name": "Background off", "type": "clear_background"},
             {"time": 1500, "name": "Audio off", "type": "clear_audio"},
             {"time": 1750, "name": "Slide off", "type": "clear_slide"},
-            {"time": 1900, "name": "Background off again", "type": "clear_background"}
+            {"time": 1900, "name": "Background off again", "type": "clear_background"},
+            {"time": 2000, "name": "All off", "type": "clear_all"}
         ]});
         let mut session = Session::empty();
         session.shows = vec![show];
@@ -7697,7 +7732,32 @@ Second line"
         assert!(session.tick_timeline(start + Duration::from_millis(1900)));
         assert!(session.underlay.is_none());
         assert!(session.slide_hidden);
+        session.active_effects.push("sparkles".into());
+        session.playlist_id = Some("music".into());
+        session.toggle_metronome();
+        assert!(session.tick_timeline(start + Duration::from_millis(2000)));
+        assert!(session.blanked);
+        assert!(session.slide_hidden);
+        assert!(session.active_overlays.is_empty());
+        assert!(session.active_effects.is_empty());
+        assert!(session.playlist_id.is_none());
+        assert!(!session.metronome_on);
+        assert!(session.playing_audio.is_none());
+        assert_eq!(session.output_motion().0.kind, "none");
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::StopVideo), Some(PendingPlay::StopAudio)]
+        ));
         assert!(!session.timeline_playing);
+
+        session.shows[0].show["layouts"]["main"]["slides"][0]["actions"]["slideActions"] =
+            serde_json::json!([{"triggers": ["clear_all"]}]);
+        session.select_slide(0);
+        assert!(session.blanked);
+        assert!(session.play_path(audio.clone()));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::StopVideo), Some(PendingPlay::Audio(path))] if path == audio)
+        );
     }
 
     #[test]

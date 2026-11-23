@@ -2833,6 +2833,12 @@ impl ShowFile {
         action_trigger(node, "clear_slide") || action_trigger(node, "clear_all")
     }
 
+    /// This slide explicitly requests a full output clear.
+    pub fn clears_all_at(&self, index: usize) -> bool {
+        self.layout_node_at(index)
+            .is_some_and(|node| action_trigger(&node, "clear_all"))
+    }
+
     /// This slide removes the overlays already on screen.
     pub fn clears_overlays_at(&self, index: usize) -> bool {
         let steps = self.layout_steps();
@@ -6266,7 +6272,7 @@ pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
             .and_then(Value::as_str)
             .or_else(|| action.pointer("/data/path").and_then(Value::as_str))
             .or_else(|| match kind.as_str() {
-                "slide" | "clear_background" | "clear_audio" | "clear_slide" => None,
+                "slide" | "clear_background" | "clear_audio" | "clear_slide" | "clear_all" => None,
                 _ => action["name"].as_str(),
             })
             .map(str::to_string)
