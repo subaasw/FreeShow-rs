@@ -146,6 +146,7 @@ export component ControlWindow inherits Window {
     callback stage-add(string);
     callback stage-move(string, bool);
     callback stage-geometry(string, int, int, bool);
+    callback stage-box-at(float, float) -> int;
     callback stage-remove(string);
     callback save-shortcuts(string);
     callback save-layouts(string);
@@ -1175,6 +1176,7 @@ export component ControlWindow inherits Window {
             add(kind) => { root.stage-add(kind); }
             move-item(id, forward) => { root.stage-move(id, forward); }
             edit-geometry(id, first, second, resize) => { root.stage-geometry(id, first, second, resize); }
+            box-at(x, y) => { return root.stage-box-at(x, y); }
             remove(id) => { root.stage-remove(id); }
             close => { root.show-stage-editor = false; window-keys.focus(); }
         }
