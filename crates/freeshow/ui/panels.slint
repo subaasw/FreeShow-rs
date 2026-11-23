@@ -1439,9 +1439,12 @@ export component StageEditorPanel inherits Rectangle {
                     vertical-stretch: 1;
                     min-height: 120px;
                     preview-box := Rectangle {
-                        property <float> scale: min(parent.width / 1920px, parent.height / 1080px);
-                        width: 1920px * self.scale;
-                        height: 1080px * self.scale;
+                        property <float> aspect: root.preview.width > 0 && root.preview.height > 0
+                            ? root.preview.width / root.preview.height : 1920.0 / 1080.0;
+                        property <length> unit-x: self.width / 1920;
+                        property <length> unit-y: self.height / 1080;
+                        width: min(parent.width, parent.height * self.aspect);
+                        height: self.width / self.aspect;
                         x: (parent.width - self.width) / 2;
                         y: 0;
                         background: black;
@@ -1453,10 +1456,10 @@ export component StageEditorPanel inherits Rectangle {
                             image-fit: contain;
                         }
                         Rectangle {
-                            x: drag.preview-x * 1px * preview-box.scale;
-                            y: drag.preview-y * 1px * preview-box.scale;
-                            width: drag.preview-width * 1px * preview-box.scale;
-                            height: drag.preview-height * 1px * preview-box.scale;
+                            x: drag.preview-x * preview-box.unit-x;
+                            y: drag.preview-y * preview-box.unit-y;
+                            width: drag.preview-width * preview-box.unit-x;
+                            height: drag.preview-height * preview-box.unit-y;
                             border-width: 2px;
                             border-color: root.accent;
                             Rectangle {
@@ -1470,11 +1473,10 @@ export component StageEditorPanel inherits Rectangle {
                         drag := TouchArea {
                             width: parent.width;
                             height: parent.height;
-                            property <length> unit: max(0.001px, preview-box.scale * 1px);
-                            property <length> box-x: root.current.x * self.unit;
-                            property <length> box-y: root.current.y * self.unit;
-                            property <length> box-width: root.current.w * self.unit;
-                            property <length> box-height: root.current.h * self.unit;
+                            property <length> box-x: root.current.x * preview-box.unit-x;
+                            property <length> box-y: root.current.y * preview-box.unit-y;
+                            property <length> box-width: root.current.w * preview-box.unit-x;
+                            property <length> box-height: root.current.h * preview-box.unit-y;
                             property <length> right: self.box-x + self.box-width;
                             property <length> bottom: self.box-y + self.box-height;
                             property <string> source;
@@ -1487,8 +1489,8 @@ export component StageEditorPanel inherits Rectangle {
                             property <length> dx: self.mouse-x - self.pressed-x;
                             property <length> dy: self.mouse-y - self.pressed-y;
                             property <bool> moved-far: abs(self.dx) > 3px || abs(self.dy) > 3px;
-                            property <int> stage-dx: round(self.dx / self.unit);
-                            property <int> stage-dy: round(self.dy / self.unit);
+                            property <int> stage-dx: round(self.dx / max(0.001px, preview-box.unit-x));
+                            property <int> stage-dy: round(self.dy / max(0.001px, preview-box.unit-y));
                             property <int> drop-x: clamp(root.current.x + self.stage-dx, -8000, 8000);
                             property <int> drop-y: clamp(root.current.y + self.stage-dy, -8000, 8000);
                             property <int> drop-width: clamp(root.current.w + self.stage-dx, 1, 8000);
@@ -1504,7 +1506,10 @@ export component StageEditorPanel inherits Rectangle {
                                     self.source = "";
                                     self.resizing = self.over-handle;
                                     if (!self.resizing) {
-                                        self.select-hit(root.box-at(self.mouse-x / self.unit, self.mouse-y / self.unit));
+                                        self.select-hit(root.box-at(
+                                            self.mouse-x / max(0.001px, preview-box.unit-x),
+                                            self.mouse-y / max(0.001px, preview-box.unit-y)
+                                        ));
                                     }
                                     if (self.over-box) {
                                         self.source = root.current.id;
