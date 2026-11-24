@@ -28,7 +28,8 @@ pub struct BoxStyle {
     pub color: Rgba,
     pub background: Option<Rgba>,
     pub elliptical_background: bool,
-    fill_polygon: Vec<[f32; 2]>,
+    fill_paths: Vec<FillPath>,
+    fill_even_odd: bool,
     pub font_px: f32,
     pub align: Align,
     pub font_family: String,
@@ -174,7 +175,8 @@ impl Default for BoxStyle {
             color: Rgba::WHITE,
             background: None,
             elliptical_background: false,
-            fill_polygon: Vec::new(),
+            fill_paths: Vec::new(),
+            fill_even_odd: false,
             font_px: 100.0,
             align: Align::Center,
             font_family: String::new(),
@@ -439,7 +441,14 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "--pptx-shape-ellipse" => style.pptx_shape_ellipse = value == "1",
             "--pptx-polygon-focus" => style.pptx_polygon_focus = parse_pair(value),
             "--shape-fill-polygon" => {
-                style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
+                style.fill_paths = parse_fill_polygon(value)
+                    .map(|contour| vec![vec![contour]])
+                    .unwrap_or_default();
+                style.fill_even_odd = true;
+            }
+            "--pptx-fill-paths" => {
+                style.fill_paths = parse_fill_paths(value).unwrap_or_default();
+                style.fill_even_odd = false;
             }
             "--pptx-rectangular-focus" => {
                 style.pptx_rectangular_focus = parse_rectangular_focus(value)
@@ -3298,19 +3307,14 @@ fn item_backdrop_mask(
     let ellipse = style.elliptical_background;
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
     let stride = (x1 - x0) as usize;
-    let polygon = (!style.fill_polygon.is_empty()).then(|| {
+    let polygon = (!style.fill_paths.is_empty()).then(|| {
         let mut mask = vec![false; stride * (y1 - y0) as usize];
-        for_polygon_span(
-            slide,
-            text::Clip { x, y, w, h },
-            &style.fill_polygon,
-            |py, start, end| {
-                if start < end {
-                    let row = (py - y0) as usize * stride;
-                    mask[row + (start - x0) as usize..row + (end - x0) as usize].fill(true);
-                }
-            },
-        );
+        for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
+            if start < end {
+                let row = (py - y0) as usize * stride;
+                mask[row + (start - x0) as usize..row + (end - x0) as usize].fill(true);
+            }
+        });
         mask
     });
     move |px, py| {
@@ -4022,8 +4026,13 @@ fn fill_item_background(
             if tile.is_some() || gradient_space.is_some() {
                 return None;
             }
-            let points: Vec<_> = style
-                .fill_polygon
+            let [path] = style.fill_paths.as_slice() else {
+                return None;
+            };
+            let [contour] = path.as_slice() else {
+                return None;
+            };
+            let points: Vec<_> = contour
                 .iter()
                 .map(|&[x, y]| {
                     [
@@ -4102,7 +4111,7 @@ fn fill_item_background(
                 interpolate_stops(&gradient.stops, position, style.pptx_gradient_gamma),
             );
         };
-        if style.fill_polygon.is_empty() {
+        if style.fill_paths.is_empty() {
             for py in y0..y1 {
                 for px in x0..x1 {
                     if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
@@ -4111,40 +4120,30 @@ fn fill_item_background(
                 }
             }
         } else {
-            for_polygon_span(
-                slide,
-                text::Clip { x, y, w, h },
-                &style.fill_polygon,
-                |py, start, end| {
-                    for px in start..end {
-                        draw_stop(px, py);
-                    }
-                },
-            );
+            for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
+                for px in start..end {
+                    draw_stop(px, py);
+                }
+            });
         }
         return;
     }
     let Some(background) = style.background else {
         return;
     };
-    if !style.fill_polygon.is_empty() {
-        for_polygon_span(
-            slide,
-            text::Clip { x, y, w, h },
-            &style.fill_polygon,
-            |py, start, end| {
-                fill_rect(
-                    pixels,
-                    frame_w,
-                    frame_h,
-                    start,
-                    py,
-                    end.saturating_sub(start),
-                    1,
-                    background,
-                );
-            },
-        );
+    if !style.fill_paths.is_empty() {
+        for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
+            fill_rect(
+                pixels,
+                frame_w,
+                frame_h,
+                start,
+                py,
+                end.saturating_sub(start),
+                1,
+                background,
+            );
+        });
     } else if style.elliptical_background {
         let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
         for py in y0..y1 {
@@ -4203,16 +4202,48 @@ fn parse_fill_polygon(value: &str) -> Option<Vec<[f32; 2]>> {
     (vertices.len() >= 3).then_some(vertices)
 }
 
-fn for_polygon_span(
+type FillPath = Vec<Vec<[f32; 2]>>;
+
+fn parse_fill_paths(value: &str) -> Option<Vec<FillPath>> {
+    let mut vertices = 0;
+    value
+        .split('|')
+        .map(|path| {
+            path.split('/')
+                .map(|contour| {
+                    let contour = parse_fill_polygon(contour)?;
+                    vertices += contour.len();
+                    (vertices <= 1024).then_some(contour)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn for_shape_span(
     slide: &StyledSlide,
     bounds: text::Clip,
-    vertices: &[[f32; 2]],
+    style: &BoxStyle,
     mut draw_span: impl FnMut(i32, i32, i32),
 ) {
-    let text::Clip { x, y, w, h } = bounds;
+    for path in &style.fill_paths {
+        for_path_span(slide, &bounds, path, style.fill_even_odd, &mut draw_span);
+    }
+}
+
+fn for_path_span(
+    slide: &StyledSlide,
+    bounds: &text::Clip,
+    path: &FillPath,
+    even_odd: bool,
+    mut draw_span: impl FnMut(i32, i32, i32),
+) {
+    let text::Clip { x, y, w, h } = *bounds;
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
-    let mut crossings = Vec::with_capacity(vertices.len());
-    let edges = vertices.iter().zip(vertices.iter().cycle().skip(1));
+    let mut crossings = Vec::with_capacity(path.iter().map(Vec::len).sum());
+    let edges = path
+        .iter()
+        .flat_map(|vertices| vertices.iter().zip(vertices.iter().cycle().skip(1)));
     let edge_to_pixel = |edge: f32| (x as f32 + edge * w as f32 - 0.5).ceil() as i32;
     for py in y0..y1 {
         let scan_y = (py as f32 + 0.5 - y as f32) / h as f32;
@@ -4221,14 +4252,24 @@ fn for_polygon_span(
             // Treat each edge's vertical extent as half-open to count shared crossings once.
             if (ay > scan_y) != (by > scan_y) {
                 let t = (scan_y - ay) / (by - ay);
-                crossings.push(ax + (bx - ax) * t);
+                let direction = if by > ay { 1 } else { -1 };
+                crossings.push((ax + (bx - ax) * t, direction));
             }
         }
-        crossings.sort_unstable_by(f32::total_cmp);
-        for &[left, right] in crossings.as_chunks::<2>().0 {
-            let start = edge_to_pixel(left).max(x0);
-            let end = edge_to_pixel(right).min(x1);
-            draw_span(py, start, end);
+        crossings.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let mut winding = 0;
+        for (&(left, direction), &(right, _)) in crossings.iter().zip(crossings.iter().skip(1)) {
+            winding += direction;
+            let covered = if even_odd {
+                winding % 2 != 0
+            } else {
+                winding != 0
+            };
+            if covered {
+                let start = edge_to_pixel(left).max(x0);
+                let end = edge_to_pixel(right).min(x1);
+                draw_span(py, start, end);
+            }
         }
     }
 }
@@ -4893,6 +4934,36 @@ mod tests {
         ));
         assert_eq!(frame.pixel(337, 320), parse_color("#FF0000").unwrap());
         assert!(frame.pixel(959, 539).b > 250);
+    }
+
+    #[test]
+    fn powerpoint_compound_paths_respect_winding_and_paint_separate_paths_in_order() {
+        let render = |paths: &str, fill: &str| {
+            let mut slide = style_slide(&format!(
+                "left:0px;top:0px;width:100px;height:100px;background:{fill};--pptx-fill-paths:{paths};"
+            ));
+            slide.output_width = 100;
+            slide.output_height = 100;
+            slide.source_width = 100.0;
+            slide.source_height = 100.0;
+            render_styled(&slide)
+        };
+        let outer = "0.1 0.1,0.9 0.1,0.9 0.9,0.1 0.9";
+        let hole = "0.3 0.3,0.3 0.7,0.7 0.7,0.7 0.3";
+        let strip = "0.45 0.2,0.55 0.2,0.55 0.8,0.45 0.8";
+        let paths = format!("{outer}/{hole}|{strip}");
+        let frame = render(&paths, "#ff000080");
+        assert_eq!(frame.pixel(5, 5), Rgba::BLACK);
+        assert_eq!(frame.pixel(35, 50), Rgba::BLACK);
+        assert_eq!(frame.pixel(50, 50).r, 128);
+        assert_eq!(frame.pixel(50, 25).r, 191);
+
+        let same_winding = "0.3 0.3,0.7 0.3,0.7 0.7,0.3 0.7";
+        let filled = render(&format!("{outer}/{same_winding}"), "#ff000080");
+        assert_eq!(filled.pixel(35, 50).r, 128);
+        let gradient = render(&paths, "linear-gradient(90deg,#f00 0%,#00f 100%)");
+        assert_eq!(gradient.pixel(35, 50), Rgba::BLACK);
+        assert!(gradient.pixel(50, 50).b > 120);
     }
 
     #[test]

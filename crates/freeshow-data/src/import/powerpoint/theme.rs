@@ -718,17 +718,38 @@ pub(super) struct ThemeReader {
 pub(super) struct ObjectStyle {
     pub fill: Option<String>,
     pub text: Option<TextBody>,
-    pub polygon: Vec<[f64; 2]>,
+    pub paths: Vec<CustomPath>,
 }
 
-fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
+type CustomPath = Vec<Vec<[f64; 2]>>;
+
+fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     let geometry = child(properties, "custGeom")?;
-    let paths = child(geometry, "pathLst")?;
-    let mut paths = paths.children().filter(Node::is_element);
-    let path = paths.next().filter(|node| node.has_tag_name("path"))?;
-    if paths.next().is_some() || !matches!(path.attribute("fill"), None | Some("norm")) {
-        return None;
+    let mut paths = Vec::new();
+    let mut vertices = 0;
+    for path in child(geometry, "pathLst")?
+        .children()
+        .filter(Node::is_element)
+    {
+        match path.attribute("fill") {
+            Some("none") => continue,
+            None | Some("norm") if path.has_tag_name("path") => {}
+            _ => return None,
+        }
+        let contours = custom_path(path)?;
+        if contours.is_empty() {
+            continue;
+        }
+        vertices += contours.iter().map(Vec::len).sum::<usize>();
+        if vertices > 1024 {
+            return None;
+        }
+        paths.push(contours);
     }
+    Some(paths)
+}
+
+fn custom_path(path: Node<'_, '_>) -> Option<CustomPath> {
     let dimension = |key| {
         path.attribute(key)?
             .parse::<i64>()
@@ -737,8 +758,6 @@ fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
             .map(|n| n as f64)
     };
     let (width, height) = (dimension("w")?, dimension("h")?);
-    let mut commands = path.children().filter(Node::is_element);
-    let first = commands.next().filter(|node| node.has_tag_name("moveTo"))?;
     let point = |node: Node<'_, '_>| {
         if !node.has_tag_name("pt") {
             return None;
@@ -749,20 +768,35 @@ fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
         };
         Some([coordinate("x", width)?, coordinate("y", height)?])
     };
-    let start = point(child(first, "pt")?)?;
     let mut polygon = Vec::new();
-    push_path_vertex(&mut polygon, start)?;
-    while let Some(command) = commands.next() {
+    let mut contours = Vec::new();
+    let mut vertices = 0;
+    for command in path.children().filter(Node::is_element) {
         let mut points = command.children().filter(Node::is_element);
         match command.tag_name().name() {
+            "moveTo" => {
+                polygon.clear();
+                push_path_vertex(&mut polygon, point(points.next()?)?)?;
+            }
             "close" => {
-                if same_path_point(*polygon.last()?, start) {
+                if same_path_point(*polygon.last()?, polygon[0]) {
                     polygon.pop();
                 }
-                return ((3..=128).contains(&polygon.len()) && commands.next().is_none())
-                    .then_some(polygon);
+                if polygon.len() > 128 {
+                    return None;
+                }
+                if polygon.len() >= 3 {
+                    vertices += polygon.len();
+                    if vertices > 1024 {
+                        return None;
+                    }
+                    contours.push(std::mem::take(&mut polygon));
+                }
+                polygon.clear();
             }
-            "lnTo" => push_path_vertex(&mut polygon, point(points.next()?)?)?,
+            "lnTo" if !polygon.is_empty() => {
+                push_path_vertex(&mut polygon, point(points.next()?)?)?;
+            }
             "arcTo" => flatten_arc_path(&mut polygon, command, [width, height])?,
             "quadBezTo" | "cubicBezTo" => {
                 let first = point(points.next()?)?;
@@ -786,7 +820,7 @@ fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
             return None;
         }
     }
-    None
+    Some(contours)
 }
 
 fn push_path_vertex(vertices: &mut Vec<[f64; 2]>, point: [f64; 2]) -> Option<()> {
@@ -921,7 +955,8 @@ fn a_closed_bezier_outline_does_not_count_the_repeated_starting_point() {
         <close/>
     </path></pathLst></custGeom></spPr>"#;
     let document = Document::parse(xml).unwrap();
-    let vertices = custom_polygon(document.root_element()).unwrap();
+    let paths = custom_paths(document.root_element()).unwrap();
+    let vertices = &paths[0][0];
     assert_eq!(vertices.len(), 128);
     assert_eq!(vertices[0], [0.5, 0.0]);
     assert_ne!(vertices.first(), vertices.last());
@@ -938,7 +973,8 @@ fn full_turn_arcs_close_without_a_repeated_vertex() {
             </path></pathLst></custGeom></spPr>"#
         );
         let document = Document::parse(&xml).unwrap();
-        let vertices = custom_polygon(document.root_element()).unwrap();
+        let paths = custom_paths(document.root_element()).unwrap();
+        let vertices = &paths[0][0];
         assert!((60..=128).contains(&vertices.len()));
         assert_eq!(vertices[0], [1.0, 0.5]);
         assert_ne!(vertices.first(), vertices.last());
@@ -954,7 +990,8 @@ fn full_turn_arcs_close_without_a_repeated_vertex() {
         <close/>
     </path></pathLst></custGeom></spPr>"#;
     let document = Document::parse(xml).unwrap();
-    let vertices = custom_polygon(document.root_element()).unwrap();
+    let paths = custom_paths(document.root_element()).unwrap();
+    let vertices = &paths[0][0];
     assert_eq!(vertices.len() % 4, 0);
     assert!(!same_path_point(vertices[0], *vertices.last().unwrap()));
 }
@@ -1018,8 +1055,11 @@ impl ThemeReader {
             let Some(properties) = child(shape, "spPr") else {
                 continue;
             };
-            let polygon = custom_polygon(properties).unwrap_or_default();
-            let geometry = if !polygon.is_empty() {
+            let paths = custom_paths(properties);
+            let geometry = if paths
+                .as_ref()
+                .is_some_and(|paths| paths.len() == 1 && paths[0].len() == 1)
+            {
                 GradientShape::Polygon
             } else if child(properties, "prstGeom").and_then(|geom| geom.attribute("prst"))
                 == Some("ellipse")
@@ -1051,6 +1091,7 @@ impl ThemeReader {
                     .and_then(|index| context.style(index, placeholder.as_ref(), geometry)),
             };
             let fill = match fill {
+                _ if paths.as_ref().is_some_and(Vec::is_empty) => Some(String::new()),
                 Some(ResolvedFill::Color(fill)) => Some(format!("background:{fill};")),
                 Some(ResolvedFill::Gradient { style, .. }) => Some(style),
                 None if direct.is_some() => Some(String::new()),
@@ -1063,7 +1104,7 @@ impl ThemeReader {
                     ObjectStyle {
                         fill,
                         text,
-                        polygon,
+                        paths: paths.unwrap_or_default(),
                     },
                 );
             }

@@ -829,19 +829,30 @@ impl SlideObject {
             style.push_str(&format!("--pptx-group-matrix:{a} {b} {c} {d};"));
         }
         if !matches!(self.kind, ObjectKind::Picture) {
-            if !self.style.polygon.is_empty() {
-                let polygon = self
+            if !self.style.paths.is_empty() {
+                let paths = self
                     .style
-                    .polygon
+                    .paths
                     .iter()
-                    .map(|&[x, y]| {
-                        let x = if self.flip_x { 1.0 - x } else { x };
-                        let y = if self.flip_y { 1.0 - y } else { y };
-                        format!("{x} {y}")
+                    .map(|path| {
+                        path.iter()
+                            .map(|contour| {
+                                contour
+                                    .iter()
+                                    .map(|&[x, y]| {
+                                        let x = if self.flip_x { 1.0 - x } else { x };
+                                        let y = if self.flip_y { 1.0 - y } else { y };
+                                        format!("{x} {y}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("/")
                     })
                     .collect::<Vec<_>>()
-                    .join(",");
-                style.push_str(&format!("--shape-fill-polygon:{polygon};"));
+                    .join("|");
+                style.push_str(&format!("--pptx-fill-paths:{paths};"));
             }
             if let Some(fill) = &self.style.fill {
                 style.push_str(fill);
@@ -2437,7 +2448,7 @@ mod tests {
         let style = show.show["slides"]["s1"]["items"][0]["style"]
             .as_str()
             .unwrap();
-        assert!(style.contains("--shape-fill-polygon:1 0,0 0,1 1;"));
+        assert!(style.contains("--pptx-fill-paths:1 0,0 0,1 1;"));
         assert!(style.contains("--pptx-polygon-focus:0.25 0.25;"));
         assert!(style.contains("--pptx-fill-flip-x:1;"));
     }
@@ -2465,7 +2476,7 @@ mod tests {
             .as_str()
             .unwrap();
         let polygon = style
-            .split_once("--shape-fill-polygon:")
+            .split_once("--pptx-fill-paths:")
             .unwrap()
             .1
             .split(';')
@@ -2519,7 +2530,7 @@ mod tests {
                 .as_str()
                 .unwrap();
             let polygon = style
-                .split_once("--shape-fill-polygon:")
+                .split_once("--pptx-fill-paths:")
                 .unwrap()
                 .1
                 .split(';')
@@ -2533,6 +2544,41 @@ mod tests {
             assert!((x.parse::<f64>().unwrap() - (100.0 + offset) / 200.0).abs() < 1e-9);
             assert!((y.parse::<f64>().unwrap() - (50.0 + sign * offset) / 100.0).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn imports_compound_contours_and_independent_fill_paths() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+                <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                <a:custGeom><a:pathLst>
+                    <a:path w="100" h="100">
+                        <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+                        <a:lnTo><a:pt x="100" y="0"/></a:lnTo>
+                        <a:lnTo><a:pt x="100" y="100"/></a:lnTo>
+                        <a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/>
+                        <a:moveTo><a:pt x="25" y="25"/></a:moveTo>
+                        <a:lnTo><a:pt x="25" y="75"/></a:lnTo>
+                        <a:lnTo><a:pt x="75" y="75"/></a:lnTo>
+                        <a:lnTo><a:pt x="75" y="25"/></a:lnTo><a:close/>
+                    </a:path>
+                    <a:path fill="none"/>
+                    <a:path w="20" h="40">
+                        <a:moveTo><a:pt x="10" y="10"/></a:moveTo>
+                        <a:lnTo><a:pt x="15" y="20"/></a:lnTo>
+                        <a:lnTo><a:pt x="10" y="30"/></a:lnTo><a:close/>
+                    </a:path>
+                </a:pathLst></a:custGeom>
+                <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+            </p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Compound.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(style.contains("--pptx-fill-paths:0 0,1 0,1 1,0 1/0.25 0.25,0.25 0.75,0.75 0.75,0.75 0.25|0.5 0.25,0.75 0.5,0.5 0.75;"));
+        assert!(style.contains("background:#FF0000;"));
     }
 
     #[test]
