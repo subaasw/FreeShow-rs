@@ -584,7 +584,7 @@ struct LineStyle {
     emu: Option<u32>,
     paint: Option<LinePaint>,
     cap: Option<StrokeCap>,
-    dash: Option<Vec<f64>>,
+    dash: Option<DashPattern>,
     ends: [LineEnd; 2],
 }
 
@@ -669,6 +669,18 @@ pub(super) struct StrokeMarker {
     pub length: f64,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct DashPattern {
+    pub lengths: Vec<f64>,
+    preset: bool,
+}
+
+impl DashPattern {
+    pub fn includes_cap(&self, cap: StrokeCap) -> bool {
+        matches!(cap, StrokeCap::Round) || (self.preset && matches!(cap, StrokeCap::Square))
+    }
+}
+
 enum LinePaint {
     Solid(Color),
     Suppressed,
@@ -709,7 +721,16 @@ impl LineStyle {
                 "sysDashDotDot" => Some(vec![3.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
                 _ => None,
             })
-            .or_else(|| child(line, "custDash").map(|dash| custom_dash(dash).unwrap_or_default()));
+            .map(|lengths| DashPattern {
+                lengths,
+                preset: true,
+            })
+            .or_else(|| {
+                child(line, "custDash").map(|dash| DashPattern {
+                    lengths: custom_dash(dash).unwrap_or_default(),
+                    preset: false,
+                })
+            });
         Self {
             emu,
             paint,
@@ -892,7 +913,7 @@ pub(super) struct ConnectorStroke {
     pub color: String,
     pub inverse: bool,
     pub cap: StrokeCap,
-    pub dash: Vec<f64>,
+    pub dash: DashPattern,
     pub markers: [Option<StrokeMarker>; 2],
 }
 

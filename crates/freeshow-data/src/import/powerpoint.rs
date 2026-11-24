@@ -867,17 +867,23 @@ impl SlideObject {
                 }
             }
             self.style.paths = vec![contours];
-            if !stroke.dash.is_empty() {
+            if !stroke.dash.lengths.is_empty() {
                 let [x, y] = point([0.0, 0.0]);
                 let (sx, sy) = (width / stroke.width[0], height / stroke.width[1]);
                 let dash = stroke
                     .dash
+                    .lengths
                     .iter()
                     .map(f64::to_string)
                     .collect::<Vec<_>>()
                     .join(" ");
+                let inset = if stroke.dash.includes_cap(stroke.cap) {
+                    "inset "
+                } else {
+                    ""
+                };
                 dash_style = format!(
-                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {dash};",
+                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {inset}{dash};",
                     stroke.cap.code()
                 );
             }
@@ -2654,7 +2660,7 @@ mod tests {
         assert!(dash(0).ends_with("20 0 4 3"));
         assert!(style(1).starts_with("left:795px;top:295px;width:10px;height:410px;"));
         assert!(style(1).contains("background:#2244D0;"));
-        assert!(dash(1).ends_with("40 1 1 1"));
+        assert!(dash(1).ends_with("40 1 inset 1 1"));
         assert!(style(2).contains("--pptx-fill-flip-y:1;"));
         assert!(style(2).contains("background:#00FF00;"));
         assert!(dash(2).ends_with("0 0.5 1.25 2 0.25 1 0.75 1.5 0.5"));
