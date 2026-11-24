@@ -95,6 +95,7 @@ pub(super) fn import(
         }
     };
     let mut advance_times = Vec::new();
+    let mut transitions = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let xml = read_xml(&mut archive, part)?.ok_or_else(|| invalid("slide part is missing"))?;
         slide_xml_bytes += xml.len();
@@ -170,6 +171,7 @@ pub(super) fn import(
         fills.push(fill);
         hidden.push(disabled);
         advance_times.push(content.advance_ms);
+        transitions.push(slide_visual_transition(&xml));
     }
     let mut files = HashMap::new();
     if let Some(directory) = media {
@@ -183,7 +185,12 @@ pub(super) fn import(
     let mut show = show_file(file_name, &file_stem_str(file_name), sections);
     show.show["origin"] = json!("powerpoint");
     let last_playable = hidden.iter().rposition(|disabled| !disabled);
-    for (index, (fill, notes)) in fills.into_iter().zip(speaker_notes).enumerate() {
+    for (index, ((fill, notes), transition)) in fills
+        .into_iter()
+        .zip(speaker_notes)
+        .zip(transitions)
+        .enumerate()
+    {
         let slide = &mut show.show["slides"][format!("s{}", index + 1)];
         if let Some(notes) = notes {
             slide["notes"] = json!(notes);
@@ -262,6 +269,9 @@ pub(super) fn import(
         if hidden[index] {
             show.show["layouts"]["main"]["slides"][index]["disabled"] = json!(true);
         }
+        if let Some(transition) = transition {
+            show.show["layouts"]["main"]["slides"][index]["transition"] = transition;
+        }
         if use_timings && let Some(millis) = advance_times[index] {
             let step = &mut show.show["layouts"]["main"]["slides"][index];
             step["nextTimer"] = json!(f64::from(millis.max(1)) / 1000.0);
@@ -302,6 +312,63 @@ fn show_timing(archive: &mut Archive<'_>) -> Result<(bool, bool), DataError> {
     let all_slides = child(show, "sldRg").is_none() && child(show, "custShow").is_none();
     let loop_show = all_slides && matches!(show.attribute("loop"), Some("1" | "true"));
     Ok((use_timings, loop_show))
+}
+
+fn slide_visual_transition(xml: &str) -> Option<serde_json::Value> {
+    use theme::child;
+
+    if !xml.contains("transition") {
+        return None;
+    }
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let root = doc.root_element();
+    let read = |transition: roxmltree::Node<'_, '_>| {
+        let effect = transition.children().find(|node| {
+            node.is_element() && !node.has_tag_name("sndAc") && !node.has_tag_name("extLst")
+        })?;
+        let through_black = matches!(effect.attribute("thruBlk"), Some("1" | "true"));
+        let kind = match effect.tag_name().name() {
+            "cut" if !through_black => "none",
+            "fade" if through_black => "fade_through_black",
+            "fade" => "fade",
+            "push" => "push",
+            _ => return None,
+        };
+        let duration = transition
+            .attribute((
+                "http://schemas.microsoft.com/office/powerpoint/2010/main",
+                "dur",
+            ))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| match transition.attribute("spd") {
+                Some("fast") => 500,
+                Some("slow") => 2000,
+                _ => 1000,
+            })
+            .min(10_000);
+        let (kind, duration) = if kind == "none" || duration == 0 {
+            ("none", 0)
+        } else {
+            (kind, duration)
+        };
+        let direction = match effect.attribute("dir") {
+            Some("r") => "right_left",
+            Some("u") => "top_bottom",
+            Some("d") => "bottom_top",
+            _ => "left_right",
+        };
+        Some(json!({"type":kind,"duration":duration,"custom":{"direction":direction}}))
+    };
+    if let Some(transition) = child(root, "transition") {
+        return read(transition);
+    }
+    root.children()
+        .filter(|node| node.has_tag_name("AlternateContent"))
+        .flat_map(|node| {
+            node.children()
+                .filter(|branch| branch.has_tag_name("Choice") || branch.has_tag_name("Fallback"))
+        })
+        .find_map(|branch| read(child(branch, "transition")?))
 }
 
 struct SlideSize {
@@ -1621,6 +1688,43 @@ mod tests {
             assert_eq!(manual.next_timer_at(index), None);
             assert_eq!(manual.timed_cue_target_at(index), None);
         }
+    }
+
+    #[test]
+    fn imports_fade_cut_and_directional_push_transitions() {
+        let files = archive(&[
+            ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:mc="mc" xmlns:modern="http://schemas.microsoft.com/office/powerpoint/2010/main"><p:cSld/>
+                <mc:AlternateContent><mc:Choice Requires="modern"><p:transition modern:dur="825"><p:push dir="u"/></p:transition></mc:Choice>
+                    <mc:Fallback><p:transition spd="slow"><p:push dir="u"/></p:transition></mc:Fallback></mc:AlternateContent></p:sld>"#),
+            ("ppt/slides/slide2.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition spd="fast"><p:fade thruBlk="true"/></p:transition></p:sld>"#),
+            ("ppt/slides/slide3.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:cut/></p:transition></p:sld>"#),
+            ("ppt/slides/slide4.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:fade/></p:transition></p:sld>"#),
+            ("ppt/slides/slide5.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:randomBar/></p:transition></p:sld>"#),
+        ]);
+        let mut show = import("Transitions.pptx", &files, None).unwrap();
+        for (index, (kind, duration, direction)) in [
+            ("push", 825, "top_bottom"),
+            ("fade_through_black", 500, "left_right"),
+            ("none", 0, "left_right"),
+            ("fade", 1000, "left_right"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let transition = show.transition_at(index).unwrap();
+            assert_eq!(
+                (
+                    transition.kind.as_str(),
+                    transition.duration_ms,
+                    transition.direction.as_str()
+                ),
+                (kind, duration, direction)
+            );
+        }
+        assert!(show.transition_at(4).is_none());
+        assert!(show.set_transition_at(0, "push", 600));
+        assert_eq!(show.transition_at(0).unwrap().direction, "top_bottom");
+        assert_eq!(show.transition_at(0).unwrap().duration_ms, 600);
     }
 
     #[test]

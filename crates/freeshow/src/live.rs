@@ -9,9 +9,10 @@ use freeshow_output::render_styled;
 use freeshow_output::{
     Blend, Fit, Frame, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine,
     StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, crossfade,
-    decode_image, ease_progress, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
-    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, parse_color,
-    placed_image, scale_frames, slide_frames, slide_way, spin_frames,
+    decode_image, ease_progress, fade_through_black, filter_blur, filter_brightness,
+    filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity,
+    filter_saturate, filter_sepia, parse_color, placed_image, push_frames, scale_frames,
+    slide_frames, slide_way, spin_frames,
 };
 #[cfg(test)]
 use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
@@ -29,6 +30,8 @@ pub fn motion_frame(
     let t = ease_progress(&motion.easing, t.clamp(0.0, 1.0));
     match motion.kind.as_str() {
         "slide" => slide_frames(from, to, t, slide_way(&motion.direction)),
+        "push" => push_frames(from, to, t, slide_way(&motion.direction)),
+        "fade_through_black" => fade_through_black(from, to, t),
         "scale" => scale_frames(from, to, t),
         "blur" => blur_frames(from, to, t),
         "spin" => spin_frames(from, to, t),
@@ -1463,6 +1466,48 @@ fn lines_slide_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powerpoint_push_fills_the_frame_and_fade_through_black_reaches_black() {
+        let from = Frame {
+            width: 5,
+            height: 3,
+            pixels: [255, 0, 0, 255].repeat(15),
+        };
+        let to = Frame {
+            width: 5,
+            height: 3,
+            pixels: [0, 0, 255, 255].repeat(15),
+        };
+        let push = freeshow_data::TextTransition {
+            kind: "push".into(),
+            direction: "left_right".into(),
+            easing: "linear".into(),
+            ..Default::default()
+        };
+        let middle = motion_frame(&from, &to, &push, 0.5);
+        assert_eq!(
+            (0..5).map(|x| middle.pixel(x, 0).r).collect::<Vec<_>>(),
+            [255, 255, 0, 0, 0]
+        );
+        assert_eq!(
+            (0..5).map(|x| middle.pixel(x, 0).b).collect::<Vec<_>>(),
+            [0, 0, 255, 255, 255]
+        );
+        assert_eq!(motion_frame(&from, &to, &push, 0.0), from);
+        assert_eq!(motion_frame(&from, &to, &push, 1.0), to);
+
+        let black = freeshow_data::TextTransition {
+            kind: "fade_through_black".into(),
+            ..push
+        };
+        assert_eq!(motion_frame(&from, &to, &black, 0.25).pixel(0, 0).r, 128);
+        assert_eq!(
+            motion_frame(&from, &to, &black, 0.5).pixel(0, 0),
+            Rgba::BLACK
+        );
+        assert_eq!(motion_frame(&from, &to, &black, 0.75).pixel(0, 0).b, 128);
+    }
 
     #[test]
     fn overlay_and_template_thumbnails_use_their_background_and_items() {

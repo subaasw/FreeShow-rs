@@ -1043,7 +1043,7 @@ export component InspectorPanel inherits VerticalLayout {
         ValueCombo {
             horizontal-stretch: 1;
             enabled: root.data.has-item;
-            model: ["default", "none", "fade", "blur", "scale", "slide", "spin"];
+            model: ["default", "none", "fade", "blur", "scale", "slide", "spin", "push", "fade_through_black"];
             value: root.data.slide-transition;
             selected(value) => { root.set("slide-transition", value); }
         }

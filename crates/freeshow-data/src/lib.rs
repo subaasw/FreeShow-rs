@@ -1419,6 +1419,10 @@ impl ShowFile {
         };
         if kind.trim().is_empty() {
             node.remove("transition");
+        } else if let Some(transition) = node.get_mut("transition")
+            && transition.get("type").and_then(Value::as_str) == Some(kind.trim())
+        {
+            transition["duration"] = serde_json::json!(duration_ms.min(10_000));
         } else {
             node.insert(
                 "transition".to_string(),
