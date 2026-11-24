@@ -162,6 +162,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint saved normal autofit font scaling and percentage line-spacing reduction.
 - [x] PowerPoint speaker notes in the FreeShow stage view, linked to their source slides.
 - [x] PowerPoint saved automatic advance timings and all-slides loops.
+- [x] PowerPoint named custom shows and saved slide ranges as arrangements, with local automatic loops.
 - [x] PowerPoint cuts, fades, fades through black, and directional pushes with saved transition durations.
 - [x] PowerPoint directional wipes, covers, and uncovers, including corner motion for cover and uncover.
 - [x] PowerPoint line spacing and paragraph spacing before and after, including wrapped text and hard breaks.
