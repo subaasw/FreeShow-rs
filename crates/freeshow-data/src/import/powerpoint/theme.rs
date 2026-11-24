@@ -723,6 +723,76 @@ pub(super) struct ObjectStyle {
 
 type CustomPath = Vec<Vec<[f64; 2]>>;
 
+fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
+    let geometry = child(properties, "prstGeom")?;
+    let adjustment = |name, default| {
+        child(geometry, "avLst")
+            .and_then(|guides| {
+                guides
+                    .children()
+                    .find(|guide| guide.has_tag_name("gd") && guide.attribute("name") == Some(name))
+            })
+            .and_then(|guide| {
+                let mut formula = guide.attribute("fmla")?.split_ascii_whitespace();
+                if formula.next()? != "val" {
+                    return None;
+                }
+                let value = f64::from(formula.next()?.parse::<i32>().ok()?);
+                formula.next().is_none().then_some(value)
+            })
+            .unwrap_or(default)
+    };
+    let name = geometry.attribute("prst")?;
+    let outline = match name {
+        "triangle" => vec![
+            [0.0, 1.0],
+            [
+                adjustment("adj", 50_000.0).clamp(0.0, 100_000.0) / 100_000.0,
+                0.0,
+            ],
+            [1.0, 1.0],
+        ],
+        "rtTriangle" => vec![[0.0, 1.0], [0.0, 0.0], [1.0, 1.0]],
+        "diamond" => vec![[0.0, 0.5], [0.5, 0.0], [1.0, 0.5], [0.5, 1.0]],
+        name => {
+            // Default DrawingML star adjustments and ellipse scale factors from ECMA-376.
+            let (points, inner, horizontal, vertical) = match name {
+                "star4" => (4, 12_500.0, 100_000.0, 100_000.0),
+                "star5" => (5, 19_098.0, 105_146.0, 110_557.0),
+                "star6" => (6, 28_868.0, 115_470.0, 100_000.0),
+                "star7" => (7, 34_601.0, 102_572.0, 105_210.0),
+                "star8" => (8, 37_500.0, 100_000.0, 100_000.0),
+                "star10" => (10, 42_533.0, 105_146.0, 100_000.0),
+                "star12" => (12, 37_500.0, 100_000.0, 100_000.0),
+                "star16" => (16, 37_500.0, 100_000.0, 100_000.0),
+                "star24" => (24, 37_500.0, 100_000.0, 100_000.0),
+                "star32" => (32, 37_500.0, 100_000.0, 100_000.0),
+                _ => return None,
+            };
+            let inner = adjustment("adj", inner).clamp(0.0, 50_000.0) / 50_000.0;
+            // Only presets with a declared scale guide let an adjustment replace it.
+            let radius = |guide, default| {
+                let scale = if default == 100_000.0 {
+                    default
+                } else {
+                    adjustment(guide, default)
+                };
+                (scale / 200_000.0_f64).clamp(0.0, 1.0)
+            };
+            let (rx, ry) = (radius("hf", horizontal), radius("vf", vertical));
+            (0..2 * points)
+                .map(|vertex| {
+                    let angle = f64::from(vertex) * std::f64::consts::PI / f64::from(points);
+                    let (sin, cos) = angle.sin_cos();
+                    let factor = if vertex % 2 == 0 { 1.0 } else { inner };
+                    [0.5 + rx * factor * sin, ry * (1.0 - factor * cos)]
+                })
+                .collect()
+        }
+    };
+    Some(vec![vec![outline]])
+}
+
 fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     let geometry = child(properties, "custGeom")?;
     let mut paths = Vec::new();
@@ -1055,7 +1125,7 @@ impl ThemeReader {
             let Some(properties) = child(shape, "spPr") else {
                 continue;
             };
-            let paths = custom_paths(properties);
+            let paths = custom_paths(properties).or_else(|| preset_paths(properties));
             let geometry = if paths
                 .as_ref()
                 .is_some_and(|paths| paths.len() == 1 && paths[0].len() == 1)

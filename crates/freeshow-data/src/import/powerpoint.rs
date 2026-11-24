@@ -2428,6 +2428,54 @@ mod tests {
     }
 
     #[test]
+    fn imports_preset_shape_adjustments_and_star_gradients() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:sp><p:spPr>
+                    <a:xfrm flipH="1"><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                    <a:prstGeom prst="triangle"><a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst></a:prstGeom>
+                    <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+                </p:spPr></p:sp>
+                <p:sp><p:spPr>
+                    <a:xfrm><a:off x="4000000" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                    <a:prstGeom prst="star5"><a:avLst><a:gd name="adj" fmla="val 48000"/></a:avLst></a:prstGeom>
+                    <a:gradFill><a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst><a:path path="shape"/></a:gradFill>
+                </p:spPr></p:sp>
+            </p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Presets.pptx", &files, None).unwrap();
+        let items = &show.show["slides"]["s1"]["items"];
+        let triangle = items[0]["style"].as_str().unwrap();
+        assert!(
+            triangle.contains("--pptx-fill-paths:1 1,0.75 0,0 1;"),
+            "{triangle}"
+        );
+        let star = items[1]["style"].as_str().unwrap();
+        assert!(star.contains("--pptx-polygon-focus:0.5 0.5;"), "{star}");
+        let path = star
+            .split_once("--pptx-fill-paths:")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        let vertices: Vec<[f64; 2]> = path
+            .split(',')
+            .map(|point| {
+                let (x, y) = point.split_once(' ').unwrap();
+                [x.parse().unwrap(), y.parse().unwrap()]
+            })
+            .collect();
+        assert_eq!(vertices.len(), 10);
+        assert_eq!(vertices[0], [0.5, 0.0]);
+        assert!((vertices[5][1] - 1.0834586).abs() < 1e-6, "{vertices:?}");
+    }
+
+    #[test]
     fn imports_a_custom_polygon_and_its_shape_path_gradient() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",

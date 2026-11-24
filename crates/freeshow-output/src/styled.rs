@@ -454,7 +454,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "--pptx-shape-ellipse" => style.pptx_shape_ellipse = value == "1",
             "--pptx-polygon-focus" => style.pptx_polygon_focus = parse_pair(value),
             "--shape-fill-polygon" => {
-                style.fill_paths = parse_fill_polygon(value)
+                style.fill_paths = parse_fill_polygon(value, 0.0..=1.0)
                     .map(|contour| vec![vec![contour]])
                     .unwrap_or_default();
                 style.fill_even_odd = true;
@@ -4199,15 +4199,15 @@ impl PolygonGradient {
     }
 }
 
-fn parse_fill_polygon(value: &str) -> Option<Vec<[f32; 2]>> {
+fn parse_fill_polygon(value: &str, bounds: std::ops::RangeInclusive<f32>) -> Option<Vec<[f32; 2]>> {
     let mut vertices = Vec::new();
     for pair in value.split(',') {
         let mut coords = pair.split_whitespace();
         let x = coords.next()?.parse::<f32>().ok()?;
         let y = coords.next()?.parse::<f32>().ok()?;
         if coords.next().is_some()
-            || !(0.0..=1.0).contains(&x)
-            || !(0.0..=1.0).contains(&y)
+            || !bounds.contains(&x)
+            || !bounds.contains(&y)
             || vertices.len() == 128
         {
             return None;
@@ -4226,7 +4226,8 @@ fn parse_fill_paths(value: &str) -> Option<Vec<FillPath>> {
         .map(|path| {
             path.split('/')
                 .map(|contour| {
-                    let contour = parse_fill_polygon(contour)?;
+                    // Adjusted PowerPoint presets can extend beyond the item box.
+                    let contour = parse_fill_polygon(contour, -1.0..=2.0)?;
                     vertices += contour.len();
                     (vertices <= 1024).then_some(contour)
                 })
@@ -5005,6 +5006,21 @@ mod tests {
         for (x, y) in [(25, 25), (37, 37), (49, 49), (80, 80)] {
             assert_eq!(flipped.pixel(99 - x, y), frame.pixel(x, y));
         }
+    }
+
+    #[test]
+    fn powerpoint_preset_points_beyond_the_box_keep_the_visible_fill() {
+        let mut slide = style_slide(
+            "left:10px;top:10px;width:80px;height:80px;background:#ff0000;--pptx-fill-paths:0 0,1 0,0.5 1.25;",
+        );
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(50, 88).r, 255);
+        assert_eq!(frame.pixel(20, 88), Rgba::BLACK);
+        assert_eq!(frame.pixel(50, 91), Rgba::BLACK);
     }
 
     #[test]
