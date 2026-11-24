@@ -2006,6 +2006,7 @@ dependencies = [
 name = "freeshow-record"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "freeshow-core",
  "freeshow-media",
  "gstreamer",

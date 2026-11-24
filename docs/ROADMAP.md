@@ -74,7 +74,7 @@ the show or reveals lyrics until the password is accepted.
 - [x] Route video sound through the active audience output's mixer channels.
 - [x] Route individual hardware channels for audio files and video.
 - [x] Feed the existing NDI and RTMP senders from saved stereo network routes.
-- [x] Icecast stereo audio on the saved mixer node with operator and slide controls.
+- [x] Icecast stereo audio on the saved mixer node with operator and slide controls. Plain HTTP works on builds without libshout.
 - [x] Separate audience and stage pictures over NDI and WebRTC/WHIP.
 - [x] Route each WebRTC/WHIP output's stereo mix into its Opus track.
 - [x] Send audience and stage video and routed stereo over OMT from the Rust app.

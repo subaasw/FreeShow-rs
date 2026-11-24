@@ -23,7 +23,7 @@ SYSTEM = ("/usr/lib/", "/System/Library/")
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png osxaudio applemedia curl
-autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc shout2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
+autodetect rtmp videoparsersbad flv x264 videotestsrc audiotestsrc rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 
 
 def run(*args, **kwargs):
@@ -234,7 +234,8 @@ def main():
     bundle = Bundle(app, args.binary)
     bundle.add(args.binary, bundle.contents / "MacOS/freeshow")
     plugins = Path(output("pkg-config", "--variable=pluginsdir", "gstreamer-1.0"))
-    for plugin in PLUGINS + (["ndi"] if (plugins / "libgstndi.dylib").is_file() else []):
+    optional = [name for name in ("ndi", "shout2") if (plugins / f"libgst{name}.dylib").is_file()]
+    for plugin in PLUGINS + optional:
         source = plugins / f"libgst{plugin}.dylib"
         if not source.is_file():
             raise RuntimeError(f"required GStreamer plugin is missing: {source}")

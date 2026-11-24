@@ -189,7 +189,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | OMT broadcast | partial | 0.3 | Built-in Rust VMX1 video and routed stereo for audience and stage outputs. Loopback tested. Third-party receiver interoperability remains unverified |
 | WebRTC/WHIP send | done | 0.5 | H.264 video and stereo Opus from each saved `network_sub_<output-id>` route |
 | Auto-started RTMP | done | 0.5 | From `rtmpData` destinations or `special.autoRtmp`, plus `FREESHOW_RTMP` |
-| File recording and Icecast | done | 0.4 |  |
+| File recording and Icecast | done | 0.4 | Icecast streams stereo Ogg Opus over HTTP with a built-in Rust sender on builds without libshout. TLS uses the optional GStreamer `shout2send` plugin |
 | Virtual camera | done | 0.4 | Linux `v4l2sink`; soft-fail without a loopback device |
 | Spout/Syphon | done | 0.3 | Platform-gated; no-ops on Linux |
 | Blackmagic Decklink | done | 0.4 | GStreamer decklink sink, no vendor SDK; soft-fail without a card |
