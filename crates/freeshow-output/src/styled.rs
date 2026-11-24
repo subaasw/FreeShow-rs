@@ -45,8 +45,8 @@ pub struct BoxStyle {
     pub stroke_color: Option<Rgba>,
     pub shadow: Option<TextShadow>,
     /// CSS `border-radius` corners: top-left, top-right, bottom-right, bottom-left.
-    /// A single `50%` still uses `elliptical_background`.
     pub radii: [CornerRadius; 4],
+    vertical_radii: [CornerRadius; 4],
     /// CSS `box-shadow` layers in source order (the first one paints on top).
     pub box_shadows: Vec<BoxShadow>,
     /// CSS `backdrop-filter` from the item style, or empty.
@@ -86,7 +86,7 @@ pub struct TextShadow {
     pub color: Rgba,
 }
 
-/// One `border-radius` corner, in slide pixels or a percent of the shorter side.
+/// One axis of a `border-radius` corner, in slide pixels or percent of that side.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CornerRadius {
     #[default]
@@ -98,51 +98,63 @@ pub enum CornerRadius {
 impl CornerRadius {
     fn parse(token: &str) -> Option<Self> {
         let token = token.trim();
-        if let Some(percent) = token.strip_suffix('%') {
-            return percent.trim().parse().ok().map(Self::Percent);
-        }
-        px(token).map(Self::Px)
+        let (amount, unit): (f32, fn(f32) -> Self) = if let Some(percent) = token.strip_suffix('%')
+        {
+            (percent.parse().ok()?, Self::Percent)
+        } else {
+            (px(token)?, Self::Px)
+        };
+        (amount.is_finite() && amount >= 0.0).then(|| unit(amount))
     }
 
-    /// Output pixels for a box of `w`×`h` output pixels.
-    fn resolve(self, slide: &StyledSlide, w: i32, h: i32) -> i32 {
+    fn resolve(self, side: i32, output: u32, source: f32) -> f32 {
         match self {
-            Self::Zero => 0,
-            Self::Px(value) => scale(value, slide.output_height, slide.source_height).max(0),
-            Self::Percent(percent) => (w.min(h) as f32 * percent / 100.0).round().max(0.0) as i32,
+            Self::Zero => 0.0,
+            Self::Px(value) if source > 0.0 => value * (output as f32 / source),
+            Self::Px(value) => value,
+            Self::Percent(percent) => side as f32 * (percent / 100.0),
         }
+        .min(i32::MAX as f32)
     }
 }
 
 /// Resolved per-corner radii in output pixels: top-left, top-right, bottom-right, bottom-left.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct Radii([i32; 4]);
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Radii([[f32; 2]; 4]);
 
 impl Radii {
     fn uniform(radius: i32) -> Self {
-        Self([radius.max(0); 4])
+        Self([[radius.max(0) as f32; 2]; 4])
     }
 
     fn grow(self, by: i32) -> Self {
-        Self(
-            self.0
-                .map(|radius| if radius > 0 { (radius + by).max(0) } else { 0 }),
-        )
+        Self(self.0.map(|[x, y]| {
+            if x > 0.0 && y > 0.0 {
+                [(x + by as f32).max(0.0), (y + by as f32).max(0.0)]
+            } else {
+                [0.0; 2]
+            }
+        }))
     }
 
     /// CSS scales every corner down when adjacent radii overflow a side.
     fn fit(self, w: i32, h: i32) -> Self {
         let [tl, tr, br, bl] = self.0;
-        let sides = [(tl + tr, w), (tr + br, h), (br + bl, w), (bl + tl, h)];
+        let sides = [
+            (tl[0] + tr[0], w),
+            (tr[1] + br[1], h),
+            (br[0] + bl[0], w),
+            (bl[1] + tl[1], h),
+        ];
         let factor = sides
             .iter()
-            .filter(|(sum, _)| *sum > 0)
-            .map(|(sum, side)| (*side).max(0) as f32 / *sum as f32)
+            .filter(|(sum, _)| *sum > 0.0)
+            .map(|(sum, side)| (*side).max(0) as f32 / *sum)
             .fold(1.0_f32, f32::min);
         if factor >= 1.0 {
             self
         } else {
-            Self(self.0.map(|radius| (radius as f32 * factor).floor() as i32))
+            Self(self.0.map(|corner| corner.map(|radius| radius * factor)))
         }
     }
 }
@@ -192,6 +204,7 @@ impl Default for BoxStyle {
             stroke_color: None,
             shadow: None,
             radii: [CornerRadius::Zero; 4],
+            vertical_radii: [CornerRadius::Zero; 4],
             box_shadows: Vec::new(),
             backdrop: String::new(),
             rotation_deg: 0.0,
@@ -454,10 +467,11 @@ pub fn parse_style(css: &str) -> BoxStyle {
                 style.pptx_rectangular_focus = parse_rectangular_focus(value)
             }
             "border-radius" => {
-                if value.trim() == "50%" {
-                    style.elliptical_background = true;
-                } else if let Some(radii) = parse_border_radius(value) {
-                    style.radii = radii;
+                if let Some([horizontal, vertical]) = parse_border_radius(value) {
+                    style.radii = horizontal;
+                    style.vertical_radii = vertical;
+                    style.elliptical_background =
+                        horizontal == [CornerRadius::Percent(50.0); 4] && vertical == horizontal;
                 }
             }
             "box-shadow" => style.box_shadows = parse_box_shadows(value),
@@ -1579,17 +1593,7 @@ fn draw_item_content(
         .rev()
         .filter(|shadow| !shadow.inset)
     {
-        paint_box_shadow(
-            pixels,
-            slide,
-            x,
-            y,
-            w,
-            h,
-            radius,
-            style.elliptical_background,
-            shadow,
-        );
+        paint_box_shadow(pixels, slide, x, y, w, h, radius, shadow);
     }
     let grayscale = item.grayscale.clamp(0.0, 1.0);
     let invert = item.invert.clamp(0.0, 1.0);
@@ -1981,17 +1985,7 @@ fn draw_item_content(
         }
     }
     for &shadow in style.box_shadows.iter().rev().filter(|shadow| shadow.inset) {
-        paint_inset_shadow(
-            pixels,
-            slide,
-            x,
-            y,
-            w,
-            h,
-            radius,
-            style.elliptical_background,
-            shadow,
-        );
+        paint_inset_shadow(pixels, slide, x, y, w, h, radius, shadow);
     }
 }
 
@@ -3152,32 +3146,36 @@ fn parse_shadow(value: &str) -> Option<TextShadow> {
     })
 }
 
-/// Validates one to four pixel or percentage corner radii for the slide inspector.
+/// Validates pixel or percentage corner radii for the slide inspector.
 pub fn valid_box_radius(value: &str) -> bool {
-    let tokens = value.split_whitespace();
-    (1..=4).contains(&tokens.clone().count())
-        && tokens.map(CornerRadius::parse).all(|radius| match radius {
-            Some(CornerRadius::Px(amount) | CornerRadius::Percent(amount)) => {
-                (0.0..=2000.0).contains(&amount)
-            }
-            _ => false,
+    parse_border_radius(value).is_some_and(|axes| {
+        axes.into_iter().flatten().all(|radius| match radius {
+            CornerRadius::Px(amount) | CornerRadius::Percent(amount) => amount <= 2000.0,
+            CornerRadius::Zero => true,
         })
+    })
 }
 
-/// CSS `border-radius` shorthand (1–4 values; the elliptical `/` part is ignored).
-fn parse_border_radius(value: &str) -> Option<[CornerRadius; 4]> {
-    let horizontal = value.split('/').next().unwrap_or(value);
-    let values = horizontal
-        .split_whitespace()
-        .map(CornerRadius::parse)
-        .collect::<Option<Vec<_>>>()?;
-    Some(match values.as_slice() {
-        [all] => [*all; 4],
-        [a, b] => [*a, *b, *a, *b],
-        [a, b, c] => [*a, *b, *c, *b],
-        [a, b, c, d, ..] => [*a, *b, *c, *d],
-        [] => return None,
-    })
+fn parse_border_radius(value: &str) -> Option<[[CornerRadius; 4]; 2]> {
+    let expand = |axis: &str| {
+        let values = axis
+            .split_whitespace()
+            .take(5)
+            .map(CornerRadius::parse)
+            .collect::<Option<Vec<_>>>()?;
+        Some(match values.as_slice() {
+            [all] => [*all; 4],
+            [a, b] => [*a, *b, *a, *b],
+            [a, b, c] => [*a, *b, *c, *b],
+            [a, b, c, d] => [*a, *b, *c, *d],
+            _ => return None,
+        })
+    };
+    if let Some((horizontal, vertical)) = value.split_once('/') {
+        Some([expand(horizontal)?, expand(vertical)?])
+    } else {
+        Some([expand(value)?; 2])
+    }
 }
 
 /// Comma-separated `box-shadow` layers. Commas inside `rgb(...)` stay with their color.
@@ -3266,35 +3264,21 @@ fn parse_box_shadow(value: &str, strict: bool) -> Option<BoxShadow> {
     })
 }
 
-fn in_item_shape(
-    px: i32,
-    py: i32,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    radius: Radii,
-    ellipse: bool,
-) -> bool {
+fn in_item_shape(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, radius: Radii) -> bool {
     if px < x || py < y || px >= x + w || py >= y + h {
         return false;
-    }
-    if ellipse {
-        let dx = (px - x) as f32 + 0.5;
-        let dy = (py - y) as f32 + 0.5;
-        let nx = 2.0 * dx / w as f32 - 1.0;
-        let ny = 2.0 * dy / h as f32 - 1.0;
-        return nx * nx + ny * ny <= 1.0;
     }
     !outside_round_corner(px - x, py - y, w, h, radius)
 }
 
 fn item_radius(style: &BoxStyle, slide: &StyledSlide, w: i32, h: i32) -> Radii {
-    if style.elliptical_background {
-        Radii::default()
-    } else {
-        Radii(style.radii.map(|corner| corner.resolve(slide, w, h))).fit(w, h)
-    }
+    Radii(std::array::from_fn(|corner| {
+        [
+            style.radii[corner].resolve(w, slide.output_width, slide.source_width),
+            style.vertical_radii[corner].resolve(h, slide.output_height, slide.source_height),
+        ]
+    }))
+    .fit(w, h)
 }
 
 fn item_backdrop_mask(
@@ -3304,7 +3288,6 @@ fn item_backdrop_mask(
 ) -> impl Fn(i32, i32) -> bool + use<> {
     let text::Clip { x, y, w, h } = *bounds;
     let radius = item_radius(style, slide, w, h);
-    let ellipse = style.elliptical_background;
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
     let stride = (x1 - x0) as usize;
     let polygon = (!style.fill_paths.is_empty()).then(|| {
@@ -3323,7 +3306,7 @@ fn item_backdrop_mask(
                 && (y0..y1).contains(&py)
                 && mask[(py - y0) as usize * stride + (px - x0) as usize]
         } else {
-            in_item_shape(px, py, x, y, w, h, radius, ellipse)
+            in_item_shape(px, py, x, y, w, h, radius)
         }
     }
 }
@@ -3530,7 +3513,6 @@ fn paint_box_shadow(
     w: i32,
     h: i32,
     radius: Radii,
-    ellipse: bool,
     shadow: BoxShadow,
 ) {
     if shadow.color.a == 0 {
@@ -3544,6 +3526,7 @@ fn paint_box_shadow(
     let sy = y + oy - spread;
     let sw = (w + spread * 2).max(1);
     let sh = (h + spread * 2).max(1);
+    let radius = radius.grow(spread).fit(sw, sh);
     let faded = |alpha: u8| Rgba {
         r: shadow.color.r,
         g: shadow.color.g,
@@ -3559,8 +3542,7 @@ fn paint_box_shadow(
             sy,
             sw,
             sh,
-            radius.grow(spread),
-            ellipse,
+            radius,
             shadow.color,
         );
         return;
@@ -3581,8 +3563,7 @@ fn paint_box_shadow(
                 sy + dy,
                 sw,
                 sh,
-                radius.grow(spread),
-                ellipse,
+                radius,
                 faded(alpha),
             );
         }
@@ -3598,13 +3579,12 @@ fn stamp_shadow_shape(
     w: i32,
     h: i32,
     radius: Radii,
-    ellipse: bool,
     color: Rgba,
 ) {
     let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
     for py in y0..y1 {
         for px in x0..x1 {
-            if in_item_shape(px, py, x, y, w, h, radius, ellipse) {
+            if in_item_shape(px, py, x, y, w, h, radius) {
                 paint(pixels, frame_w, frame_h, px, py, color);
             }
         }
@@ -3619,7 +3599,6 @@ fn paint_inset_shadow(
     w: i32,
     h: i32,
     radius: Radii,
-    ellipse: bool,
     shadow: BoxShadow,
 ) {
     let ox = scale(shadow.x, slide.output_width, slide.source_width);
@@ -3630,15 +3609,14 @@ fn paint_inset_shadow(
     let inner_y = y + oy + spread;
     let inner_w = (w - spread * 2).max(1);
     let inner_h = (h - spread * 2).max(1);
-    let inner_r = radius.grow(-spread);
+    let inner_r = radius.grow(-spread).fit(inner_w, inner_h);
     let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
     for py in y0..y1 {
         for px in x0..x1 {
-            if !in_item_shape(px, py, x, y, w, h, radius, ellipse) {
+            if !in_item_shape(px, py, x, y, w, h, radius) {
                 continue;
             }
-            let inside =
-                in_item_shape(px, py, inner_x, inner_y, inner_w, inner_h, inner_r, ellipse);
+            let inside = in_item_shape(px, py, inner_x, inner_y, inner_w, inner_h, inner_r);
             if inside && blur <= 0 {
                 continue;
             }
@@ -3909,20 +3887,23 @@ fn fill_round_rect(
 
 fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radii: Radii) -> bool {
     let [tl, tr, br, bl] = radii.0;
-    let (radius, cx, cy) = if tl > 0 && dx < tl && dy < tl {
-        (tl, tl, tl)
-    } else if tr > 0 && dx >= w - tr && dy < tr {
-        (tr, w - tr - 1, tr)
-    } else if br > 0 && dx >= w - br && dy >= h - br {
-        (br, w - br - 1, h - br - 1)
-    } else if bl > 0 && dx < bl && dy >= h - bl {
-        (bl, bl, h - bl - 1)
-    } else {
-        return false;
+    let left = dx as f32 + 0.5;
+    let top = dy as f32 + 0.5;
+    let right = w as f32 - left;
+    let bottom = h as f32 - top;
+    let outside = |x: f32, y: f32, [rx, ry]: [f32; 2]| {
+        if x < rx && y < ry {
+            let nx = 1.0 - x / rx;
+            let ny = 1.0 - y / ry;
+            nx * nx + ny * ny > 1.0
+        } else {
+            false
+        }
     };
-    let ddx = dx - cx;
-    let ddy = dy - cy;
-    ddx * ddx + ddy * ddy > radius * radius
+    outside(left, top, tl)
+        || outside(right, top, tr)
+        || outside(right, bottom, br)
+        || outside(left, bottom, bl)
 }
 
 fn fill_item_background(
@@ -4114,7 +4095,7 @@ fn fill_item_background(
         if style.fill_paths.is_empty() {
             for py in y0..y1 {
                 for px in x0..x1 {
-                    if in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background) {
+                    if in_item_shape(px, py, x, y, w, h, radius) {
                         draw_stop(px, py);
                     }
                 }
@@ -4144,15 +4125,6 @@ fn fill_item_background(
                 background,
             );
         });
-    } else if style.elliptical_background {
-        let (x0, y0, x1, y1) = clipped_rect(frame_w, frame_h, x, y, w, h);
-        for py in y0..y1 {
-            for px in x0..x1 {
-                if in_item_shape(px, py, x, y, w, h, radius, true) {
-                    paint(pixels, frame_w, frame_h, px, py, background);
-                }
-            }
-        }
     } else if radius != Radii::default() {
         fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
     } else {
@@ -5216,6 +5188,7 @@ mod tests {
                 CornerRadius::Px(2.0)
             ]
         );
+        assert_eq!(three.vertical_radii, [CornerRadius::Px(9.0); 4]);
         assert_eq!(
             parse_style("border-radius: 0 0 0 40px;").radii[3],
             CornerRadius::Px(40.0)
@@ -5228,9 +5201,22 @@ mod tests {
         assert!(layers[1].inset);
         assert_eq!(layers[2].x, 5.0);
         assert_eq!(
-            Radii([300, 300, 0, 0]).fit(400, 400),
-            Radii([200, 200, 0, 0])
+            Radii([[300.0, 100.0], [300.0, 50.0], [0.0; 2], [0.0; 2]]).fit(300, 400),
+            Radii([[150.0, 50.0], [150.0, 25.0], [0.0; 2], [0.0; 2]])
         );
+    }
+
+    #[test]
+    fn elliptical_radius_sets_the_fill_and_shadow_mask_on_each_axis() {
+        let frame = render_styled(&style_slide(
+            "left:0px;top:0px;width:400px;height:200px;background:#ffffff;border-radius:40% 0 0 / 90% 0 0;box-shadow:0 220px #ff0000;",
+        ));
+        let red = parse_color("#ff0000").unwrap();
+        assert_ne!(frame.pixel(35, 10), Rgba::WHITE);
+        assert_eq!(frame.pixel(35, 20), Rgba::WHITE);
+        assert_eq!(frame.pixel(199, 0), Rgba::WHITE);
+        assert_ne!(frame.pixel(35, 120), red);
+        assert_eq!(frame.pixel(35, 130), red);
     }
 
     #[test]

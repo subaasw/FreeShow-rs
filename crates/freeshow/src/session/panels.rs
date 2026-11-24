@@ -1183,16 +1183,21 @@ impl Session {
                     return Err(format!("invalid corner radius {value:?}"));
                 }
                 let css = value
-                    .split_whitespace()
-                    .map(|token| {
-                        if token.ends_with("px") || token.ends_with('%') {
-                            token.to_string()
-                        } else {
-                            format!("{token}px")
-                        }
+                    .split('/')
+                    .map(|axis| {
+                        axis.split_whitespace()
+                            .map(|token| {
+                                if token.ends_with("px") || token.ends_with('%') {
+                                    token.to_string()
+                                } else {
+                                    format!("{token}px")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     })
                     .collect::<Vec<_>>()
-                    .join(" ");
+                    .join(" / ");
                 self.edit_current_item(|show, slide, item| {
                     show.set_item_box_css(slide, item, key, &css)
                 })
@@ -2155,7 +2160,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_keeps_percentage_and_per_corner_radii() {
+    fn inspector_keeps_percentage_and_elliptical_corner_radii() {
         let (dir, mut session) = library("inspector-radius");
         assert!(session.create_show());
         assert!(session.save_lyrics("Rounded"));
@@ -2178,14 +2183,15 @@ mod tests {
         );
 
         session
-            .inspector_set("border-radius", "16 20% 8px 4%")
+            .inspector_set("border-radius", "16 20% 8px 4%/30% 12")
             .unwrap();
-        let mixed = "16px 20% 8px 4%";
+        let mixed = "16px 20% 8px 4% / 30% 12px";
         for invalid in [
             "-1px",
             "NaN",
             "1px 2px 3px 4px 5px",
-            "20px / 30px",
+            "20px /",
+            "20px / 30px / 40px",
             "24px;top:0",
         ] {
             assert!(
