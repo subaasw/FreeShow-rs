@@ -19,7 +19,17 @@ struct Format {
     strike: Option<bool>,
     caps: Option<bool>,
     spacing_twips: Option<i32>,
+    baseline: Baseline,
     hidden: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Baseline {
+    #[default]
+    Normal,
+    Raised(i32),
+    Superscript,
+    Subscript,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -172,6 +182,14 @@ impl Document {
         }
         if let Some(twips) = format.spacing_twips {
             let _ = write!(css, "letter-spacing:{}px;", f64::from(twips) / 20.0);
+        }
+        match format.baseline {
+            Baseline::Normal => {}
+            Baseline::Raised(half_points) => {
+                let _ = write!(css, "vertical-align:{}px;", f64::from(half_points) / 2.0);
+            }
+            Baseline::Superscript => css.push_str("vertical-align:super;"),
+            Baseline::Subscript => css.push_str("vertical-align:sub;"),
         }
         css
     }
@@ -387,6 +405,13 @@ impl Reader {
             "v" => format.hidden = number != Some(0),
             "expnd" => format.spacing_twips = number.map(|value| value.clamp(-2000, 2000) * 5),
             "expndtw" => format.spacing_twips = number.map(|value| value.clamp(-10000, 10000)),
+            "up" | "dn" => {
+                let offset = number.unwrap_or(6).clamp(-20000, 20000);
+                format.baseline = Baseline::Raised(if word == "dn" { -offset } else { offset });
+            }
+            "super" => format.baseline = Baseline::Superscript,
+            "sub" => format.baseline = Baseline::Subscript,
+            "nosupersub" => format.baseline = Baseline::Normal,
             "plain" => {
                 *format = Format {
                     font: self.default_font,
@@ -400,6 +425,7 @@ impl Reader {
                     strike: Some(false),
                     caps: Some(false),
                     spacing_twips: Some(0),
+                    baseline: Baseline::Normal,
                     hidden: false,
                 }
             }
@@ -601,6 +627,28 @@ mod tests {
     fn imports_typographic_spacing() {
         let document = decode(r"{\rtf1 A\emspace B\enspace C\qmspace D}");
         assert_eq!(document.plain_text(), "A\u{2003}B\u{2002}C\u{2005}D");
+    }
+
+    #[test]
+    fn baseline_controls_follow_rtf_group_scope() {
+        let document = decode(r"{\rtf1\fs48 H{\sub 2}O{\super 3}{\up8 U\dn D\nosupersub N}!}");
+        assert_eq!(document.plain_text(), "H2O3UDN!");
+        let lines = document.styled_lines("", false, false);
+        let runs = lines[0]["text"].as_array().unwrap();
+        let expected = [
+            ("H", ""),
+            ("2", "vertical-align:sub;"),
+            ("O", ""),
+            ("3", "vertical-align:super;"),
+            ("U", "vertical-align:4px;"),
+            ("D", "vertical-align:-3px;"),
+            ("N!", ""),
+        ];
+        assert_eq!(runs.len(), expected.len());
+        for (run, (text, style)) in runs.iter().zip(expected) {
+            assert_eq!(run["value"], text);
+            assert_eq!(run["style"], format!("font-size:24px;{style}"));
+        }
     }
 
     #[test]
