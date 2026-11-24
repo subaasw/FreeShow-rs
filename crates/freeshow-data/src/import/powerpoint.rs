@@ -2641,6 +2641,63 @@ mod tests {
     }
 
     #[test]
+    fn imports_custom_shape_guides_in_the_effective_path_coordinates() {
+        let xml = |size, radius| {
+            format!(
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+            <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+            <a:custGeom>
+              <a:avLst><a:gd name="adj" fmla="val 30000"/></a:avLst>
+              <a:gdLst>
+                <a:gd name="rx" fmla="{radius}"/>
+                <a:gd name="startX" fmla="+- hc rx 0"/>
+                <a:gd name="ry" fmla="val hd5"/>
+                <a:gd name="sweep" fmla="at2 0 1"/>
+              </a:gdLst>
+              <a:pathLst><a:path {size}>
+                <a:moveTo><a:pt x="startX" y="vc"/></a:moveTo>
+                <a:arcTo wR="rx" hR="ry" stAng="0" swAng="sweep"/>
+                <a:lnTo><a:pt x="hc" y="vc"/></a:lnTo><a:close/>
+              </a:path></a:pathLst>
+            </a:custGeom>
+            <a:gradFill><a:gsLst>
+              <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+              <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+            </a:gsLst><a:path path="shape"/></a:gradFill>
+            </p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#
+            )
+        };
+        let default_size = xml(r#"h="0""#, "*/ ss adj 100000");
+        let explicit_size = xml(r#"w="100" h="100""#, "*/ ss adj 100000");
+        let invalid = xml("", "*/ ss adj 0");
+        let files = archive(&[
+            ("ppt/slides/slide1.xml", default_size.as_bytes()),
+            ("ppt/slides/slide2.xml", explicit_size.as_bytes()),
+            ("ppt/slides/slide3.xml", invalid.as_bytes()),
+        ]);
+        let show = import("Guides.pptx", &files, None).unwrap();
+        for (slide, start) in [("s1", "0.65 0.5"), ("s2", "0.8 0.5")] {
+            let style = show.show["slides"][slide]["items"][0]["style"]
+                .as_str()
+                .unwrap();
+            assert!(style.contains("--pptx-polygon-focus:0.5 0.5;"));
+            let path = style.split_once("--pptx-fill-paths:").unwrap().1;
+            let points: Vec<_> = path.split_once(';').unwrap().0.split(',').collect();
+            assert!(points.len() > 4);
+            assert_eq!(points[0], start);
+            let (x, y) = points[points.len() - 2].split_once(' ').unwrap();
+            assert!((x.parse::<f64>().unwrap() - 0.5).abs() < 1e-12);
+            assert!((y.parse::<f64>().unwrap() - 0.7).abs() < 1e-12);
+            assert_eq!(points.last(), Some(&"0.5 0.5"));
+        }
+        let fallback = show.show["slides"]["s3"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(!fallback.contains("--pptx-fill-paths"));
+        assert!(fallback.contains("gradient("));
+    }
+
+    #[test]
     fn imports_compound_contours_and_independent_fill_paths() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",

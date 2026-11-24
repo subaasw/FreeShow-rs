@@ -165,6 +165,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint rounded and snipped rectangle presets preserve their saved corner dimensions.
 - [x] PowerPoint quadratic and cubic Bézier segments in closed custom outlines follow their saved control points.
 - [x] PowerPoint elliptical arcs in closed custom outlines keep their radii, start angles, and signed sweeps.
+- [x] PowerPoint custom path points and arcs resolve DrawingML guides in their effective coordinate system.
 - [x] PowerPoint compound contours preserve cutouts, and independent normal-fill paths paint in document order.
 - [x] PowerPoint object rotation, picture flips, and gradient fill reflection.
 - [x] Nested PowerPoint group transforms, including child offsets, nonuniform scaling, rotation, and flips.
