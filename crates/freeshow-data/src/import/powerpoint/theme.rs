@@ -570,12 +570,42 @@ struct Theme {
     minor_font: Option<String>,
     fills: Vec<Option<StyleFill>>,
     backgrounds: Vec<Option<StyleFill>>,
+    lines: Vec<LineStyle>,
 }
 
 #[derive(Clone)]
 enum StyleFill {
     Solid(Color),
     Gradient(GradientFill),
+}
+
+#[derive(Default)]
+struct LineStyle {
+    emu: Option<u32>,
+    paint: Option<LinePaint>,
+}
+
+enum LinePaint {
+    Solid(Color),
+    Suppressed,
+}
+
+impl LineStyle {
+    fn read(line: Node<'_, '_>) -> Self {
+        let paint = line
+            .children()
+            .find_map(|fill| match fill.tag_name().name() {
+                "solidFill" => Some(
+                    Color::in_node(fill)
+                        .map(LinePaint::Solid)
+                        .unwrap_or(LinePaint::Suppressed),
+                ),
+                "noFill" | "gradFill" | "pattFill" => Some(LinePaint::Suppressed),
+                _ => None,
+            });
+        let emu = line.attribute("w").and_then(|width| width.parse().ok());
+        Self { emu, paint }
+    }
 }
 
 impl Theme {
@@ -596,6 +626,13 @@ impl Theme {
         if let Some(format) = child(elements, "fmtScheme") {
             theme.fills = style_fills(format, "fillStyleLst");
             theme.backgrounds = style_fills(format, "bgFillStyleLst");
+            if let Some(lines) = child(format, "lnStyleLst") {
+                theme.lines = lines
+                    .children()
+                    .filter(|line| line.has_tag_name("ln"))
+                    .map(LineStyle::read)
+                    .collect();
+            }
         }
         if let Some(fonts) = child(elements, "fontScheme") {
             let latin = |label| {
@@ -720,6 +757,67 @@ pub(super) struct ObjectStyle {
     pub text: Option<TextBody>,
     pub paths: Vec<CustomPath>,
     pub path_shades: Vec<i8>,
+    pub connector: Option<ConnectorStroke>,
+}
+
+pub(super) struct ConnectorStroke {
+    pub width: [f64; 2],
+    pub color: String,
+    pub inverse: bool,
+}
+
+fn connector_direction(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<bool> {
+    match child(properties, "prstGeom").and_then(|geom| geom.attribute("prst")) {
+        Some("line" | "straightConnector1") => Some(false),
+        Some("lineInv") => Some(true),
+        None if shape.has_tag_name("cxnSp") && child(properties, "custGeom").is_none() => {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+fn connector_stroke(
+    shape: Node<'_, '_>,
+    properties: Node<'_, '_>,
+    context: &Context,
+    size: &SlideSize,
+    inverse: bool,
+) -> Option<ConnectorStroke> {
+    let reference = child(shape, "style").and_then(|style| child(style, "lnRef"));
+    let index = reference
+        .and_then(|reference| reference.attribute("idx"))
+        .and_then(|index| index.parse::<usize>().ok());
+    let themed = index.and_then(|index| context.theme.as_ref()?.lines.get(index.checked_sub(1)?));
+    let line = child(properties, "ln");
+    let direct = line.map(LineStyle::read).unwrap_or_default();
+    let placeholder = reference.and_then(Color::in_node);
+    let scheme = |slot: &str| context.color_with_placeholder(slot, placeholder.as_ref());
+    let color = match direct
+        .paint
+        .as_ref()
+        .or_else(|| themed.and_then(|line| line.paint.as_ref()))
+    {
+        Some(LinePaint::Suppressed) => return None,
+        Some(LinePaint::Solid(color)) => color.hex_in(scheme)?,
+        None if index == Some(0) && line.is_none() => return None,
+        None => placeholder
+            .and_then(|color| color.hex_in(|slot| context.color(slot)))
+            .unwrap_or_else(|| "#000000".into()),
+    };
+    // Office's hard-coded line width is 3/4 pt when no drawing or theme width is set.
+    let emu = f64::from(
+        direct
+            .emu
+            .or_else(|| themed.and_then(|line| line.emu))
+            .unwrap_or(9_525),
+    );
+    let width = [size.px_x(emu).max(1.0), size.px_y(emu).max(1.0)];
+    Some(ConnectorStroke {
+        width,
+        color,
+        inverse,
+    })
 }
 
 type CustomPath = Vec<Vec<[f64; 2]>>;
@@ -1878,8 +1976,11 @@ impl ThemeReader {
                     .and_then(|index| index.parse().ok())
                     .and_then(|index| context.style(index, placeholder.as_ref(), geometry)),
             };
+            let direction = connector_direction(shape, properties);
             let fill = match fill {
-                _ if paths.as_ref().is_some_and(|(paths, _)| paths.is_empty()) => {
+                _ if direction.is_some()
+                    || paths.as_ref().is_some_and(|(paths, _)| paths.is_empty()) =>
+                {
                     Some(String::new())
                 }
                 Some(ResolvedFill::Color(fill)) => Some(format!("background:{fill};")),
@@ -1888,6 +1989,8 @@ impl ThemeReader {
                 None => None,
             };
             let text = TextBody::read(shape, &context, size);
+            let connector = direction
+                .and_then(|inverse| connector_stroke(shape, properties, &context, size, inverse));
             if fill.is_some() || text.is_some() {
                 let (paths, path_shades) = paths.unwrap_or_default();
                 styles.insert(
@@ -1897,6 +2000,7 @@ impl ThemeReader {
                         text,
                         paths,
                         path_shades,
+                        connector,
                     },
                 );
             }
