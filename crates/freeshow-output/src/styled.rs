@@ -2,6 +2,8 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::{Rgba, paint, source_over, text};
 
 /// FreeShow lays items out in a 1920×1080 slide. The compositor scales that
@@ -2544,10 +2546,6 @@ fn split_line(
     {
         return vec![line.clone()];
     }
-    let words = line_words(line);
-    if words.is_empty() {
-        return vec![line.clone()];
-    }
     let [left, right, _] = line.pptx_margins;
     let bullet = line.pptx_bullet.as_ref().map(|bullet| {
         bullet_width(
@@ -2572,7 +2570,13 @@ fn split_line(
     }
     let mut rows = vec![Vec::new()];
     let mut width: i32 = 0;
-    for word in words {
+    let text: String = line.runs.iter().map(|run| run.text.as_str()).collect();
+    let spans = line
+        .runs
+        .iter()
+        .map(|run| (run.text.as_str(), run.style.as_str()));
+    let boundaries = unicode_linebreak::linebreaks(&text).map(|(offset, _)| offset);
+    for word in split_pieces(spans, boundaries) {
         let word_width = width_of(&word);
         if width.saturating_add(word_width) > row_limit
             && rows.last().is_some_and(|row| !row.is_empty())
@@ -2621,25 +2625,36 @@ fn split_line(
 
 type TextPiece<'a> = (&'a str, &'a str);
 
-fn line_words(line: &StyledLine) -> Vec<Vec<TextPiece<'_>>> {
-    let mut words = Vec::new();
-    let mut word = Vec::new();
-    for run in &line.runs {
-        for part in run
-            .text
-            .split_inclusive(char::is_whitespace)
-            .filter(|part| !part.is_empty())
-        {
-            word.push((part, run.style.as_str()));
-            if part.ends_with(char::is_whitespace) {
-                words.push(std::mem::take(&mut word));
+fn split_pieces<'a>(
+    spans: impl IntoIterator<Item = TextPiece<'a>>,
+    boundaries: impl IntoIterator<Item = usize>,
+) -> Vec<Vec<TextPiece<'a>>> {
+    let mut chunks = Vec::new();
+    let mut chunk = Vec::new();
+    let mut boundaries = boundaries.into_iter().peekable();
+    let mut offset = 0;
+    for (mut text, style) in spans {
+        let end = offset + text.len();
+        while let Some(boundary) = boundaries.next_if(|&boundary| boundary <= end) {
+            let (head, tail) = text.split_at(boundary - offset);
+            if !head.is_empty() {
+                chunk.push((head, style));
             }
+            if !chunk.is_empty() {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            text = tail;
+            offset = boundary;
         }
+        if !text.is_empty() {
+            chunk.push((text, style));
+        }
+        offset = end;
     }
-    if !word.is_empty() {
-        words.push(word);
+    if !chunk.is_empty() {
+        chunks.push(chunk);
     }
-    words
+    chunks
 }
 
 fn break_word<'a>(
@@ -2647,31 +2662,35 @@ fn break_word<'a>(
     measure: &impl Fn(&str, &str) -> i32,
     [mut max_width, continuation_width]: [i32; 2],
 ) -> Vec<Vec<TextPiece<'a>>> {
-    let mut chunks = Vec::new();
-    let mut chunk = Vec::new();
-    let mut width = 0_i32;
-    for (text, css) in word {
-        let mut start = 0;
-        for (index, ch) in text.char_indices() {
-            let end = index + ch.len_utf8();
-            if (index > start || !chunk.is_empty())
-                && width.saturating_add(measure(&text[start..end], css)) > max_width
-            {
-                if index > start {
-                    chunk.push((&text[start..index], css));
-                }
-                chunks.push(std::mem::take(&mut chunk));
-                width = 0;
-                max_width = continuation_width;
-                start = index;
+    let text: String = word.iter().map(|(text, _)| *text).collect();
+    let mut boundaries = Vec::new();
+    let mut start = 0_usize;
+    let (mut first, mut first_offset) = (0, 0);
+    for (index, cluster) in text.grapheme_indices(true) {
+        let end = index + cluster.len();
+        let mut offset = first_offset;
+        let mut width = 0_i32;
+        for &(part, css) in &word[first..] {
+            let part_end = offset + part.len();
+            let from = start.saturating_sub(offset);
+            let to = end.min(part_end) - offset;
+            width = width.saturating_add(measure(&part[from..to], css));
+            if part_end >= end {
+                break;
+            }
+            offset = part_end;
+        }
+        if index > start && width > max_width {
+            boundaries.push(index);
+            start = index;
+            max_width = continuation_width;
+            while first_offset + word[first].0.len() <= start {
+                first_offset += word[first].0.len();
+                first += 1;
             }
         }
-        let tail = &text[start..];
-        width = width.saturating_add(measure(tail, css));
-        chunk.push((tail, css));
     }
-    chunks.push(chunk);
-    chunks
+    split_pieces(word, boundaries)
 }
 
 fn merge_words(words: Vec<TextPiece<'_>>) -> Vec<TextRun> {
@@ -5604,6 +5623,52 @@ mod tests {
         assert_eq!(rows[0].runs[1].text, "n");
         assert_eq!(rows[1].runs[0].text, "otes");
         assert_eq!(rows[1].runs[0].style, line.runs[1].style);
+    }
+
+    #[test]
+    fn unicode_wrap_keeps_nonbreaking_spaces_and_combining_marks() {
+        let mut slide = shadow_slide("font-size:20px;color:#f00;");
+        let runs = &mut slide.items[0].lines[0].runs;
+        runs[0].text = "Lead 12\u{a0}".into();
+        let mut second = runs[0].clone();
+        second.text = "kg".into();
+        second.style = "font-size:20px;color:#0f0;".into();
+        runs.push(second);
+        let line = &slide.items[0].lines[0];
+        let room = piece_width(&line.runs[0].text, &line.runs[0].style, "", &slide);
+        let rows = wrap_lines(&slide.items[0].lines, "", &slide, room);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].runs[0].text, "Lead ");
+        assert_eq!(rows[1].runs[0].text, "12\u{a0}");
+        assert_eq!(rows[1].runs[1], line.runs[1]);
+
+        let text = "中文，測試";
+        let chunks = split_pieces(
+            [(text, "")],
+            unicode_linebreak::linebreaks(text).map(|(offset, _)| offset),
+        );
+        assert_eq!(
+            chunks,
+            [
+                vec![("中", "")],
+                vec![("文，", "")],
+                vec![("測", "")],
+                vec![("試", "")]
+            ]
+        );
+
+        let chunks = break_word(
+            vec![("a", "base"), ("\u{301}e", "accent")],
+            &|text, _| text.chars().count() as i32,
+            [1, 1],
+        );
+        assert_eq!(
+            chunks,
+            [
+                vec![("a", "base"), ("\u{301}", "accent")],
+                vec![("e", "accent")]
+            ]
+        );
     }
 
     #[test]
