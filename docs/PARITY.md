@@ -114,7 +114,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space and editable stacking order |
 | Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
 | Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
-| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, underline, strikethrough, color, align, X/Y/W/H, solid and gradient fills, per-corner radii in pixels or percentages, text and box shadows, line height, letter spacing, picture fit, flips, and crop edges, item and backdrop filters, and slide transitions. The slide editor can insert Media library pictures as editable boxes |
+| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, underline, strikethrough, color, align, X/Y/W/H, solid and gradient fills, per-corner radii in pixels or percentages with separate horizontal and vertical values, text and box shadows, line height, letter spacing, picture fit, flips, and crop edges, item and backdrop filters, and slide transitions. The slide editor can insert Media library pictures as editable boxes |
 
 ### Audience compositor
 
@@ -126,7 +126,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Live effects library | done | 1 | `effectsLibrary` washes/particles |
 | HTML / web / website boxes | done | 1 | URL preview or stripped HTML snippet |
 | Weather boxes | done | 0.8 | Cached Open-Meteo reports auto-refresh (default 600s) and paint into weather boxes |
-| Item box-shadow, pixel radius, backdrop-filter | done | 1.2 | Stacked inset/outset `box-shadow` layers, 1–4 value `border-radius` in px or %, CSS corner fitting, and `backdrop-filter` (also on rotated items) |
+| Item box-shadow, pixel radius, backdrop-filter | done | 1.2 | Stacked inset/outset `box-shadow` layers, 1–4 values per axis for elliptical `border-radius` in px or %, CSS corner fitting, and `backdrop-filter` (also on rotated items) |
 
 ### Preview matches output
 
@@ -228,7 +228,6 @@ M7 is **not** complete. The lists below are the honest leftovers after the no-cr
 - A bundled local speech-to-text model (Functions → AI already rewrites a slide through Ollama when `FREESHOW_AI` is set).
 - A full visual clone of every Electron inspector control (shadows, line height, letter spacing, filters, transitions) and the media, slide-tracker and variable stage-item panes. Settings now has Theme, Outputs and Styles tabs, and the stage editor has per-type clock, timer, next-slide and text panes.
 - Pixel-perfect Electron window chrome (native windows are used). Output-window always-on-top and kiosk are set per output from Settings → Outputs.
-- Item box-shadow, pixel radius, and backdrop-filter typography extras called out from M3.
 
 ### Credential-gated leftovers
 
