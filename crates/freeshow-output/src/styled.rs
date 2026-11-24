@@ -3931,6 +3931,7 @@ struct LineDash {
     unit: [f64; 2],
     length: f64,
     cap: u8,
+    inset_cap: bool,
     painted: Vec<[f64; 2]>,
     period: f64,
 }
@@ -3952,6 +3953,10 @@ impl LineDash {
         {
             return None;
         }
+        let inset_cap = fields.clone().next() == Some("inset");
+        if inset_cap {
+            fields.next();
+        }
         let mut painted = Vec::new();
         let mut period = 0.0;
         while let Some(dash) = fields.next() {
@@ -3971,6 +3976,7 @@ impl LineDash {
             unit,
             length,
             cap,
+            inset_cap,
             painted,
             period,
         })
@@ -4004,6 +4010,20 @@ impl LineDash {
                             ((offset + start).max(0.0), (offset + end).min(self.length));
                         if start >= end {
                             return false;
+                        }
+                        if self.inset_cap {
+                            if !(start..end).contains(&along) {
+                                return false;
+                            }
+                            if self.cap != 1 {
+                                return true;
+                            }
+                            // A one-width dash is a dot. Shorter dashes use a compressed cap.
+                            let radius = ((end - start) / 2.0).min(0.5);
+                            let cap_distance = (start + radius - along)
+                                .max(along - (end - radius))
+                                .max(0.0);
+                            return (cap_distance / radius).powi(2) + (2.0 * across).powi(2) <= 1.0;
                         }
                         let distance = (start - along).max(along - end).max(0.0);
                         match self.cap {
@@ -5159,6 +5179,23 @@ mod tests {
         assert!(round.contains([0.014, 0.0]));
         assert!(!round.contains([0.014, 0.4]));
         assert!(dash(2).contains([0.014, 0.4]));
+    }
+
+    #[test]
+    fn powerpoint_dashes_count_caps_inside_saved_lengths_when_requested() {
+        let round = LineDash::parse("0 0 10 1 1 0 10 1 inset 1 1").unwrap();
+        assert!(round.contains([0.05, 0.49]));
+        assert!(!round.contains([0.01, 0.49]));
+        assert!(!round.contains([0.125, 0.0]));
+        let short = LineDash::parse("0 0 10 1 1 0 10 1 inset 0.5 1").unwrap();
+        assert!(short.contains([0.025, 0.49]));
+        assert!(!short.contains([0.06, 0.0]));
+
+        let preset_square = LineDash::parse("0 0 10 1 1 0 10 2 inset 1 1").unwrap();
+        assert!(preset_square.contains([0.01, 0.49]));
+        assert!(!preset_square.contains([0.125, 0.0]));
+        let custom_square = LineDash::parse("0 0 10 1 1 0 10 2 1 1").unwrap();
+        assert!(custom_square.contains([0.125, 0.0]));
     }
 
     #[test]
