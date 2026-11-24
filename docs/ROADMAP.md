@@ -160,6 +160,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint shape-path slide backgrounds, default center focuses, and radial ellipse focuses.
 - [x] Direct and theme gradient fills for positioned PowerPoint shapes and text boxes.
 - [x] PowerPoint custom polygons with straight, closed paths retain their outlines. Shape-path gradients with an interior point focus follow convex polygon edges.
+- [x] PowerPoint quadratic and cubic Bézier segments in closed custom outlines follow their saved control points.
 - [x] PowerPoint object rotation, picture flips, and gradient fill reflection.
 - [x] Nested PowerPoint group transforms, including child offsets, nonuniform scaling, rotation, and flips.
 - [x] PowerPoint gradients that stay aligned to the slide while their shapes rotate.
