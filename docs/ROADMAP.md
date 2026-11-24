@@ -134,6 +134,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 global Clear All cues use native output clearing and stop both audio and video.
 - [x] ProPresenter 7 audio actions use native playback as slide cues or timeline events, with standard loop and retrigger settings.
 - [x] ProPresenter 7 videos honor hold, stop on black or clear, and fade to black or clear.
+- [x] ProPresenter 7 slide and timeline videos honor saved in and out points and playback rate, even when cues share a file.
 - [x] ProPresenter 7 timeline looping follows the imported duration and survives edits to the arrangement timeline.
 - [ ] Other ProPresenter 7 graphics, remaining RTF controls, and other timeline tracks and cue actions.
 - [x] Lessons.church OLP/OLF imports with downloaded, cached media.

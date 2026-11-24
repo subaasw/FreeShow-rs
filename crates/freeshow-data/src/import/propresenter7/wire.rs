@@ -468,6 +468,24 @@ pub(super) struct Audio {
 pub(super) struct Media {
     #[prost(message, optional, tag = "2")]
     pub url: Option<Url>,
+    #[prost(message, optional, tag = "6")]
+    pub video: Option<VideoProperties>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct VideoProperties {
+    #[prost(message, optional, tag = "3")]
+    pub transport: Option<Transport>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Transport {
+    #[prost(double, tag = "1")]
+    pub play_rate: f64,
+    #[prost(double, tag = "2")]
+    pub in_point: f64,
+    #[prost(double, tag = "3")]
+    pub out_point: f64,
 }
 
 #[derive(Clone, PartialEq, Message)]

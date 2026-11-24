@@ -629,6 +629,29 @@ fn insert_media(
     if let Some(audio) = &action.audio {
         entry["loop"] = json!(audio.playback == 1);
     }
+    if let Some(transport) = action
+        .element
+        .as_ref()
+        .and_then(|media| media.video.as_ref())
+        .and_then(|video| video.transport.as_ref())
+    {
+        let from = if transport.in_point.is_finite() {
+            transport.in_point.max(0.0)
+        } else {
+            0.0
+        };
+        let to = if transport.out_point.is_finite() && transport.out_point > from {
+            transport.out_point
+        } else {
+            0.0
+        };
+        let rate = if transport.play_rate.is_finite() && transport.play_rate > 0.0 {
+            transport.play_rate
+        } else {
+            1.0
+        };
+        entry["videoTransport"] = json!({"fromTime": from, "toTime": to, "speed": rate});
+    }
     if action.always_retrigger {
         entry["retrigger"] = json!(true);
     }
@@ -1374,6 +1397,7 @@ mod tests {
                         relative: "Cue.wav".into(),
                         ..Default::default()
                     }),
+                    ..Default::default()
                 }),
                 audio: Some(wire::Audio { playback: 1 }),
                 always_retrigger: true,
@@ -1433,6 +1457,7 @@ mod tests {
                             relative: "Backing.wav".into(),
                             absolute: String::new(),
                         }),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
@@ -1543,6 +1568,13 @@ mod tests {
                             relative: "Loop.mp4".into(),
                             ..Default::default()
                         }),
+                        video: Some(wire::VideoProperties {
+                            transport: Some(wire::Transport {
+                                play_rate: 1.5,
+                                in_point: 0.25,
+                                out_point: 2.0,
+                            }),
+                        }),
                     }),
                     video: Some(wire::Video {
                         playback: 1,
@@ -1636,6 +1668,10 @@ mod tests {
         assert_eq!(show.show["media"][background]["loop"], true);
         assert_eq!(show.show["media"][background]["retrigger"], true);
         assert_eq!(show.show["media"][background]["endBehavior"], "fade_clear");
+        assert_eq!(
+            show.show["media"][background]["videoTransport"],
+            json!({"fromTime":0.25,"toTime":2.0,"speed":1.5})
+        );
         assert_eq!(cues[2].time_ms, 2000);
         assert_eq!(cues[2].kind, "clear_background");
         assert_eq!(cues[3].time_ms, 2250);
