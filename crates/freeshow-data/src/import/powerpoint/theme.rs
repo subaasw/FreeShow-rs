@@ -585,6 +585,7 @@ struct LineStyle {
     paint: Option<LinePaint>,
     cap: Option<StrokeCap>,
     dash: Option<Vec<f64>>,
+    ends: [LineEnd; 2],
 }
 
 #[derive(Clone, Copy, Default)]
@@ -603,6 +604,69 @@ impl StrokeCap {
             Self::Square => 2,
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct LineEnd {
+    kind: Option<MarkerKind>,
+    width: Option<usize>,
+    length: Option<usize>,
+}
+
+impl LineEnd {
+    fn read(node: Node<'_, '_>) -> Self {
+        let kind = match node.attribute("type") {
+            Some("none") => Some(MarkerKind::None),
+            Some("triangle") => Some(MarkerKind::Triangle),
+            Some("stealth") => Some(MarkerKind::Stealth),
+            Some("diamond") => Some(MarkerKind::Diamond),
+            Some("oval") => Some(MarkerKind::Oval),
+            Some("arrow") => Some(MarkerKind::Arrow),
+            _ => None,
+        };
+        let size = |key| match node.attribute(key) {
+            Some("sm") => Some(0),
+            Some("med") => Some(1),
+            Some("lg") => Some(2),
+            _ => None,
+        };
+        Self {
+            kind,
+            width: size("w"),
+            length: size("len"),
+        }
+    }
+
+    fn resolve(self, themed: Self) -> Option<StrokeMarker> {
+        let kind = self.kind.or(themed.kind)?;
+        let sizes = match kind {
+            MarkerKind::None => return None,
+            MarkerKind::Arrow => [2.5, 3.5, 5.5],
+            _ => [2.0, 3.0, 5.0],
+        };
+        Some(StrokeMarker {
+            kind,
+            width: sizes[self.width.or(themed.width).unwrap_or(1)],
+            length: sizes[self.length.or(themed.length).unwrap_or(1)],
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MarkerKind {
+    None,
+    Triangle,
+    Stealth,
+    Diamond,
+    Oval,
+    Arrow,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StrokeMarker {
+    pub kind: MarkerKind,
+    pub width: f64,
+    pub length: f64,
 }
 
 enum LinePaint {
@@ -651,6 +715,8 @@ impl LineStyle {
             paint,
             cap,
             dash,
+            ends: ["headEnd", "tailEnd"]
+                .map(|name| child(line, name).map(LineEnd::read).unwrap_or_default()),
         }
     }
 }
@@ -827,6 +893,7 @@ pub(super) struct ConnectorStroke {
     pub inverse: bool,
     pub cap: StrokeCap,
     pub dash: Vec<f64>,
+    pub markers: [Option<StrokeMarker>; 2],
 }
 
 fn connector_direction(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<bool> {
@@ -884,6 +951,9 @@ fn connector_stroke(
             .cap
             .or_else(|| themed.and_then(|line| line.cap))
             .unwrap_or_default(),
+        markers: std::array::from_fn(|i| {
+            direct.ends[i].resolve(themed.map(|line| line.ends[i]).unwrap_or_default())
+        }),
         dash: direct
             .dash
             .or_else(|| themed.and_then(|line| line.dash.clone()))

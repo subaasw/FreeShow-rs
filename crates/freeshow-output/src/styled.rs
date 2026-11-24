@@ -4249,17 +4249,32 @@ fn fill_item_background(
         return;
     };
     if let Some(dash) = &style.pptx_line_dash
-        && !style.fill_paths.is_empty()
+        && let [path] = style.fill_paths.as_slice()
     {
         let normalized = |pixel, origin, extent, flip| {
             let v = (f64::from(pixel) + 0.5 - f64::from(origin)) / f64::from(extent);
             if flip { 1.0 - v } else { v }
         };
+        let mut marker_spans = Vec::new();
+        if let Some(markers) = path.get(1..)
+            && !markers.is_empty()
+        {
+            for_path_span(slide, &bounds, markers, false, |y, left, right| {
+                marker_spans.push((y, left, right));
+            });
+        }
         for_shape_span(slide, bounds, style, |py, start, end| {
             let ly = normalized(py, y, h, style.pptx_fill_flip_y);
+            let first = marker_spans.partition_point(|&(y, _, _)| y < py);
+            let marked = &marker_spans[first..];
             for px in start..end {
                 let lx = normalized(px, x, w, style.pptx_fill_flip_x);
-                if dash.contains([lx, ly]) {
+                if dash.contains([lx, ly])
+                    || marked
+                        .iter()
+                        .take_while(|&&(y, _, _)| y == py)
+                        .any(|&(_, left, right)| (left..right).contains(&px))
+                {
                     paint(pixels, frame_w, frame_h, px, py, background);
                 }
             }
@@ -4430,7 +4445,7 @@ fn for_shape_span(
 fn for_path_span(
     slide: &StyledSlide,
     bounds: &text::Clip,
-    path: &FillPath,
+    path: &[Vec<[f32; 2]>],
     even_odd: bool,
     mut draw_span: impl FnMut(i32, i32, i32),
 ) {
@@ -5144,6 +5159,25 @@ mod tests {
         assert!(round.contains([0.014, 0.0]));
         assert!(!round.contains([0.014, 0.4]));
         assert!(dash(2).contains([0.014, 0.4]));
+    }
+
+    #[test]
+    fn powerpoint_dashes_keep_markers_solid_without_alpha_overlap() {
+        let shaft = "0.1 0.55,0.9 0.55,0.9 0.45,0.1 0.45";
+        let marker = "0.96 0.5,0.65 0.35,0.65 0.65";
+        let mut slide = style_slide(&format!(
+            "left:0px;top:0px;width:100px;height:100px;background:#ff000080;--pptx-fill-paths:{shaft}/{marker};--pptx-line-dash:0.1 0.5 10 10 1 0 8 0 1 1;"
+        ));
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(61, 50), Rgba::BLACK);
+        assert_eq!(frame.pixel(70, 50).r, 128);
+        assert_eq!(frame.pixel(80, 50).r, 128);
+        assert_eq!(frame.pixel(94, 50).r, 128);
+        assert_eq!(frame.pixel(98, 50), Rgba::BLACK);
     }
 
     #[test]
