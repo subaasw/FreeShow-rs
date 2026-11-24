@@ -2492,6 +2492,50 @@ mod tests {
     }
 
     #[test]
+    fn imports_elliptical_arcs_using_path_coordinates_and_signed_sweeps() {
+        let xml = |sweep| {
+            format!(
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+            <a:xfrm><a:off x="0" y="0"/><a:ext cx="5000000" cy="2500000"/></a:xfrm>
+            <a:custGeom><a:pathLst><a:path w="200" h="100">
+                <a:moveTo><a:pt x="180" y="50"/></a:moveTo>
+                <a:arcTo wR="80" hR="30" stAng="0" swAng="{sweep}"/>
+                <a:lnTo><a:pt x="100" y="50"/></a:lnTo><a:close/>
+            </a:path></a:pathLst></a:custGeom>
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+            </p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#
+            )
+        };
+        let clockwise = xml(2_700_000);
+        let counterclockwise = xml(-2_700_000);
+        let files = archive(&[
+            ("ppt/slides/slide1.xml", clockwise.as_bytes()),
+            ("ppt/slides/slide2.xml", counterclockwise.as_bytes()),
+        ]);
+        let show = import("Arcs.pptx", &files, None).unwrap();
+        let offset = 80.0 * 30.0 / 80.0f64.hypot(30.0);
+        for (slide, sign) in [("s1", 1.0), ("s2", -1.0)] {
+            let style = show.show["slides"][slide]["items"][0]["style"]
+                .as_str()
+                .unwrap();
+            let polygon = style
+                .split_once("--shape-fill-polygon:")
+                .unwrap()
+                .1
+                .split(';')
+                .next()
+                .unwrap();
+            let points: Vec<_> = polygon.split(',').collect();
+            assert!(points.len() > 4);
+            assert_eq!(points[0], "0.9 0.5");
+            assert_eq!(points.last(), Some(&"0.5 0.5"));
+            let (x, y) = points[points.len() - 2].split_once(' ').unwrap();
+            assert!((x.parse::<f64>().unwrap() - (100.0 + offset) / 200.0).abs() < 1e-9);
+            assert!((y.parse::<f64>().unwrap() - (50.0 + sign * offset) / 100.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
     fn positioned_text_keeps_raised_and_lowered_baselines() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",
