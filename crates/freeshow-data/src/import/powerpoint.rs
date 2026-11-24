@@ -810,6 +810,7 @@ impl SlideObject {
     }
 
     fn into_item(mut self) -> Option<serde_json::Value> {
+        let mut dash_style = String::new();
         if let Some(stroke) = self.style.connector.take() {
             let [px, py] = stroke.width.map(|width| width / 2.0);
             let (dx, dy) = (self.width / px, self.height / py);
@@ -817,17 +818,62 @@ impl SlideObject {
             if !length.is_finite() || length == 0.0 {
                 return None;
             }
-            let (nx, ny) = (-dy * px / length, dx * py / length);
-            let (pad_x, pad_y) = (px.ceil(), py.ceil());
+            use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
+            use theme::StrokeCap;
+
+            let (ux, uy) = (dx / length, dy / length);
+            let (nx, ny) = (-uy * px, ux * py);
+            let padding = if matches!(stroke.cap, StrokeCap::Square) {
+                1.0 / FRAC_1_SQRT_2
+            } else {
+                1.0
+            };
+            let (pad_x, pad_y) = ((px * padding).ceil(), (py * padding).ceil());
             let width = self.width + 2.0 * pad_x;
             let height = self.height + 2.0 * pad_y;
             let point = |x, y| [(pad_x + x) / width, (pad_y + y) / height];
-            self.style.paths = vec![vec![vec![
-                point(nx, ny),
-                point(self.width + nx, self.height + ny),
-                point(self.width - nx, self.height - ny),
-                point(-nx, -ny),
-            ]]];
+            let outline = if matches!(stroke.cap, StrokeCap::Round) {
+                let angle = uy.atan2(ux);
+                let mut outline = Vec::with_capacity(34);
+                for (x, y, start) in [
+                    (self.width, self.height, angle + FRAC_PI_2),
+                    (0.0, 0.0, angle - FRAC_PI_2),
+                ] {
+                    for step in 0..=16 {
+                        let (sin, cos) = (start - f64::from(step) * PI / 16.0).sin_cos();
+                        outline.push(point(x + px * cos, y + py * sin));
+                    }
+                }
+                outline
+            } else {
+                let (ex, ey) = if matches!(stroke.cap, StrokeCap::Square) {
+                    (ux * px, uy * py)
+                } else {
+                    (0.0, 0.0)
+                };
+                vec![
+                    point(-ex + nx, -ey + ny),
+                    point(self.width + ex + nx, self.height + ey + ny),
+                    point(self.width + ex - nx, self.height + ey - ny),
+                    point(-ex - nx, -ey - ny),
+                ]
+            };
+            self.style.paths = vec![vec![outline]];
+            if !stroke.dash.is_empty() {
+                let [x, y] = point(0.0, 0.0);
+                let (sx, sy) = (width / stroke.width[0], height / stroke.width[1]);
+                let dash = stroke
+                    .dash
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                dash_style = format!(
+                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {} {} {dash};",
+                    length / 2.0,
+                    stroke.cap.code()
+                );
+            }
             self.style.fill = Some(format!("background:{};", stroke.color));
             self.x -= pad_x;
             self.y -= pad_y;
@@ -842,6 +888,7 @@ impl SlideObject {
             self.width.max(1.0).round(),
             self.height.max(1.0).round()
         );
+        style.push_str(&dash_style);
         if self.ellipse {
             style.push_str("border-radius:50%;");
         } else if self.radius > 0.0 {
@@ -2469,7 +2516,7 @@ mod tests {
                 <p:cxnSp><p:spPr>
                     <a:xfrm><a:off x="2000000" y="3000000"/><a:ext cx="4000000" cy="0"/></a:xfrm>
                     <a:prstGeom prst="straightConnector1"/>
-                    <a:ln w="200000"><a:solidFill><a:srgbClr val="E04422"/></a:solidFill></a:ln>
+                    <a:ln w="200000"><a:solidFill><a:srgbClr val="E04422"/></a:solidFill><a:prstDash val="dash"/></a:ln>
                 </p:spPr></p:cxnSp>
                 <p:cxnSp><p:spPr>
                     <a:xfrm><a:off x="8000000" y="3000000"/><a:ext cx="0" cy="4000000"/></a:xfrm>
@@ -2493,7 +2540,7 @@ mod tests {
             ("ppt/theme/theme1.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
                 <a:clrScheme><a:accent1><a:srgbClr val="2244D0"/></a:accent1></a:clrScheme>
                 <a:fmtScheme><a:lnStyleLst>
-                    <a:ln w="100000"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                    <a:ln w="100000" cap="rnd"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="sysDot"/></a:ln>
                 </a:lnStyleLst></a:fmtScheme>
             </a:themeElements></a:theme>"#),
         ]);
@@ -2503,8 +2550,19 @@ mod tests {
         let style = |i: usize| items[i]["style"].as_str().unwrap();
         assert!(style(0).starts_with("left:190px;top:290px;width:420px;height:20px;"));
         assert!(style(0).contains("background:#E04422;"));
+        let dash = |item| {
+            style(item)
+                .split_once("--pptx-line-dash:")
+                .unwrap()
+                .1
+                .split(';')
+                .next()
+                .unwrap()
+        };
+        assert!(dash(0).ends_with("20 0 4 3"));
         assert!(style(1).starts_with("left:795px;top:295px;width:10px;height:410px;"));
         assert!(style(1).contains("background:#2244D0;"));
+        assert!(dash(1).ends_with("40 1 1 1"));
         assert!(style(2).contains("--pptx-fill-flip-y:1;"));
         assert!(style(2).contains("background:#00FF00;"));
         assert!(!style(3).contains("background:"));

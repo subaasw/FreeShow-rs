@@ -583,6 +583,26 @@ enum StyleFill {
 struct LineStyle {
     emu: Option<u32>,
     paint: Option<LinePaint>,
+    cap: Option<StrokeCap>,
+    dash: Option<&'static [u8]>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) enum StrokeCap {
+    #[default]
+    Flat,
+    Round,
+    Square,
+}
+
+impl StrokeCap {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Flat => 0,
+            Self::Round => 1,
+            Self::Square => 2,
+        }
+    }
 }
 
 enum LinePaint {
@@ -604,7 +624,34 @@ impl LineStyle {
                 _ => None,
             });
         let emu = line.attribute("w").and_then(|width| width.parse().ok());
-        Self { emu, paint }
+        let cap = match line.attribute("cap") {
+            Some("flat") => Some(StrokeCap::Flat),
+            Some("rnd") => Some(StrokeCap::Round),
+            Some("sq") => Some(StrokeCap::Square),
+            _ => None,
+        };
+        let dash = child(line, "prstDash")
+            .and_then(|dash| match dash.attribute("val")? {
+                "solid" => Some(&[][..]),
+                "dot" => Some(&[1, 3]),
+                "dash" => Some(&[4, 3]),
+                "dashDot" => Some(&[4, 3, 1, 3]),
+                "lgDash" => Some(&[8, 3]),
+                "lgDashDot" => Some(&[8, 3, 1, 3]),
+                "lgDashDotDot" => Some(&[8, 3, 1, 3, 1, 3]),
+                "sysDot" => Some(&[1, 1]),
+                "sysDash" => Some(&[3, 1]),
+                "sysDashDot" => Some(&[3, 1, 1, 1]),
+                "sysDashDotDot" => Some(&[3, 1, 1, 1, 1, 1]),
+                _ => None,
+            })
+            .or_else(|| child(line, "custDash").map(|_| &[][..]));
+        Self {
+            emu,
+            paint,
+            cap,
+            dash,
+        }
     }
 }
 
@@ -764,6 +811,8 @@ pub(super) struct ConnectorStroke {
     pub width: [f64; 2],
     pub color: String,
     pub inverse: bool,
+    pub cap: StrokeCap,
+    pub dash: &'static [u8],
 }
 
 fn connector_direction(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<bool> {
@@ -817,6 +866,14 @@ fn connector_stroke(
         width,
         color,
         inverse,
+        cap: direct
+            .cap
+            .or_else(|| themed.and_then(|line| line.cap))
+            .unwrap_or_default(),
+        dash: direct
+            .dash
+            .or_else(|| themed.and_then(|line| line.dash))
+            .unwrap_or(&[]),
     })
 }
 

@@ -30,6 +30,7 @@ pub struct BoxStyle {
     pub elliptical_background: bool,
     fill_paths: Vec<FillPath>,
     pptx_path_shades: Vec<i8>,
+    pptx_line_dash: Option<LineDash>,
     fill_even_odd: bool,
     pub font_px: f32,
     pub align: Align,
@@ -190,6 +191,7 @@ impl Default for BoxStyle {
             elliptical_background: false,
             fill_paths: Vec::new(),
             pptx_path_shades: Vec::new(),
+            pptx_line_dash: None,
             fill_even_odd: false,
             font_px: 100.0,
             align: Align::Center,
@@ -461,6 +463,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     .unwrap_or_default();
                 style.fill_even_odd = true;
             }
+            "--pptx-line-dash" => style.pptx_line_dash = LineDash::parse(value),
             "--pptx-path-shades" => {
                 style.pptx_path_shades = value
                     .split_ascii_whitespace()
@@ -3921,6 +3924,86 @@ fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radii: Radii) -> bool 
         || outside(left, bottom, bl)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LineDash {
+    origin: [f32; 2],
+    scale: [f32; 2],
+    unit: [f32; 2],
+    length: f32,
+    cap: u8,
+    painted: Vec<[f32; 2]>,
+    period: f32,
+}
+
+impl LineDash {
+    fn parse(value: &str) -> Option<Self> {
+        let mut fields = value.split_ascii_whitespace();
+        let mut finite = || fields.next()?.parse::<f32>().ok().filter(|n| n.is_finite());
+        let origin = [finite()?, finite()?];
+        let scale = [finite()?, finite()?];
+        let unit = [finite()?, finite()?];
+        let length = finite()?;
+        let cap = fields.next()?.parse().ok()?;
+        if !origin.into_iter().all(|v| (0.0..=1.0).contains(&v))
+            || !scale.into_iter().all(|v| v > 0.0)
+            || !unit.into_iter().all(|v| (-1.0..=1.0).contains(&v))
+            || length <= 0.0
+            || cap > 2
+        {
+            return None;
+        }
+        let mut painted = Vec::new();
+        let mut period = 0.0;
+        while let Some(dash) = fields.next() {
+            let dash = dash.parse::<std::num::NonZeroU8>().ok()?;
+            let gap = fields.next()?.parse::<std::num::NonZeroU8>().ok()?;
+            if painted.len() == 3 {
+                return None;
+            }
+            let end = period + f32::from(dash.get());
+            painted.push([period, end]);
+            period = end + f32::from(gap.get());
+        }
+        (!painted.is_empty()).then_some(Self {
+            origin,
+            scale,
+            unit,
+            length,
+            cap,
+            painted,
+            period,
+        })
+    }
+
+    fn contains(&self, [x, y]: [f32; 2]) -> bool {
+        let (x, y) = (
+            (x - self.origin[0]) * self.scale[0],
+            (y - self.origin[1]) * self.scale[1],
+        );
+        let [ux, uy] = self.unit;
+        let along = x * ux + y * uy;
+        let across = y * ux - x * uy;
+        let clamped = along.clamp(0.0, self.length);
+        let cycle = (clamped / self.period).floor() * self.period;
+        [cycle - self.period, cycle, cycle + self.period]
+            .into_iter()
+            .any(|offset| {
+                self.painted.iter().any(|&[start, end]| {
+                    let (start, end) = ((offset + start).max(0.0), (offset + end).min(self.length));
+                    if start >= end {
+                        return false;
+                    }
+                    let distance = (start - along).max(along - end).max(0.0);
+                    match self.cap {
+                        1 => distance * distance + across * across <= 0.25,
+                        2 => distance <= 0.5,
+                        _ => (start..end).contains(&along),
+                    }
+                })
+            })
+    }
+}
+
 fn fill_item_background(
     pixels: &mut [u8],
     slide: &StyledSlide,
@@ -4153,6 +4236,24 @@ fn fill_item_background(
     let Some(background) = style.background else {
         return;
     };
+    if let Some(dash) = &style.pptx_line_dash
+        && !style.fill_paths.is_empty()
+    {
+        let normalized = |pixel, origin, extent, flip| {
+            let v = (pixel as f32 + 0.5 - origin as f32) / extent as f32;
+            if flip { 1.0 - v } else { v }
+        };
+        for_shape_span(slide, bounds, style, |py, start, end| {
+            let ly = normalized(py, y, h, style.pptx_fill_flip_y);
+            for px in start..end {
+                let lx = normalized(px, x, w, style.pptx_fill_flip_x);
+                if dash.contains([lx, ly]) {
+                    paint(pixels, frame_w, frame_h, px, py, background);
+                }
+            }
+        });
+        return;
+    }
     if !style.fill_paths.is_empty() {
         for (index, path) in style.fill_paths.iter().enumerate() {
             let color = shade_path(background, path_shade(index));
@@ -5017,6 +5118,20 @@ mod tests {
         ));
         assert_eq!(frame.pixel(337, 320), parse_color("#FF0000").unwrap());
         assert!(frame.pixel(959, 539).b > 250);
+    }
+
+    #[test]
+    fn powerpoint_dashes_keep_gaps_and_use_the_cap_shape() {
+        let dash = |cap| LineDash::parse(&format!("0 0 100 1 1 0 100 {cap} 1 1")).unwrap();
+        let flat = dash(0);
+        assert!(flat.contains([0.005, 0.0]));
+        assert!(!flat.contains([0.012, 0.0]));
+        assert!(flat.contains([0.985, 0.0]));
+        assert!(!flat.contains([0.995, 0.0]));
+        let round = dash(1);
+        assert!(round.contains([0.014, 0.0]));
+        assert!(!round.contains([0.014, 0.4]));
+        assert!(dash(2).contains([0.014, 0.4]));
     }
 
     #[test]
