@@ -629,28 +629,20 @@ fn insert_media(
     if let Some(audio) = &action.audio {
         entry["loop"] = json!(audio.playback == 1);
     }
-    if let Some(transport) = action
-        .element
-        .as_ref()
-        .and_then(|media| media.video.as_ref())
-        .and_then(|video| video.transport.as_ref())
-    {
-        let from = if transport.in_point.is_finite() {
-            transport.in_point.max(0.0)
-        } else {
-            0.0
-        };
-        let to = if transport.out_point.is_finite() && transport.out_point > from {
-            transport.out_point
-        } else {
-            0.0
-        };
-        let rate = if transport.play_rate.is_finite() && transport.play_rate > 0.0 {
-            transport.play_rate
-        } else {
-            1.0
-        };
-        entry["videoTransport"] = json!({"fromTime": from, "toTime": to, "speed": rate});
+    if let Some(element) = &action.element {
+        let video = element
+            .video
+            .as_ref()
+            .and_then(|video| video.transport.as_ref());
+        let audio = element
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.transport.as_ref());
+        for (key, transport) in [("videoTransport", video), ("audioTransport", audio)] {
+            if let Some(transport) = transport {
+                entry[key] = import_transport(transport);
+            }
+        }
     }
     if action.always_retrigger {
         entry["retrigger"] = json!(true);
@@ -661,6 +653,25 @@ fn insert_media(
     }
     media.insert(id.clone(), entry);
     id
+}
+
+fn import_transport(transport: &wire::Transport) -> Value {
+    let from = if transport.in_point.is_finite() {
+        transport.in_point.max(0.0)
+    } else {
+        0.0
+    };
+    let to = if transport.out_point.is_finite() && transport.out_point > from {
+        transport.out_point
+    } else {
+        0.0
+    };
+    let rate = if transport.play_rate.is_finite() && transport.play_rate > 0.0 {
+        transport.play_rate
+    } else {
+        1.0
+    };
+    json!({"fromTime": from, "toTime": to, "speed": rate})
 }
 
 fn media_source(media: &wire::MediaAction) -> Option<&str> {
@@ -1397,6 +1408,13 @@ mod tests {
                         relative: "Cue.wav".into(),
                         ..Default::default()
                     }),
+                    audio: Some(wire::AudioProperties {
+                        transport: Some(wire::Transport {
+                            play_rate: 1.5,
+                            in_point: 1.25,
+                            out_point: 3.5,
+                        }),
+                    }),
                     ..Default::default()
                 }),
                 audio: Some(wire::Audio { playback: 1 }),
@@ -1438,6 +1456,9 @@ mod tests {
         assert_eq!(media["path"], "Cue.wav");
         assert_eq!(media["loop"], true);
         assert_eq!(media["retrigger"], true);
+        let transport = json!({"fromTime": 1.25, "toTime": 3.5, "speed": 1.5});
+        assert_eq!(media["audioTransport"], transport);
+        assert_eq!(show.audio_media_at(index)[0]["audioTransport"], transport);
     }
 
     #[test]
@@ -1456,6 +1477,13 @@ mod tests {
                         url: Some(wire::Url {
                             relative: "Backing.wav".into(),
                             absolute: String::new(),
+                        }),
+                        audio: Some(wire::AudioProperties {
+                            transport: Some(wire::Transport {
+                                play_rate: 0.75,
+                                in_point: 0.5,
+                                out_point: 3.25,
+                            }),
                         }),
                         ..Default::default()
                     }),
@@ -1488,6 +1516,10 @@ mod tests {
         assert_eq!(timeline["duration"], 5.0);
         assert_eq!(timeline["soundtrackDelayMs"], 625);
         let soundtrack = timeline["soundtrack"].as_str().unwrap();
+        assert_eq!(
+            show["media"][soundtrack]["audioTransport"],
+            json!({"fromTime": 0.5, "toTime": 3.25, "speed": 0.75})
+        );
         let path = std::path::Path::new(show["media"][soundtrack]["path"].as_str().unwrap());
         assert!(path.starts_with(root.canonicalize().unwrap()));
         assert_eq!(std::fs::read(path).unwrap(), b"backing track");
@@ -1575,6 +1607,7 @@ mod tests {
                                 out_point: 2.0,
                             }),
                         }),
+                        ..Default::default()
                     }),
                     video: Some(wire::Video {
                         playback: 1,

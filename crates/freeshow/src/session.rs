@@ -150,6 +150,7 @@ pub enum DrawerAction {
 
 struct TimelineSoundtrack {
     path: PathBuf,
+    transport: Option<MediaTransport>,
     delay_ms: u64,
     restart: bool,
     owned: bool,
@@ -180,15 +181,14 @@ impl VideoEnd {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-struct VideoTransport {
+struct MediaTransport {
     from: f64,
     to: f64,
     rate: f64,
 }
 
-impl VideoTransport {
-    fn from_media(media: &serde_json::Value) -> Option<Self> {
-        let transport = media.get("videoTransport")?;
+impl MediaTransport {
+    fn from_value(transport: &serde_json::Value) -> Option<Self> {
         Some(Self {
             from: transport["fromTime"].as_f64()?,
             to: transport["toTime"].as_f64()?,
@@ -294,7 +294,7 @@ pub struct Session {
     background_path: Option<PathBuf>,
     video_end: VideoEnd,
     video_end_fade: Option<bool>,
-    video_transport: Option<VideoTransport>,
+    video_transport: Option<MediaTransport>,
     imported_foreground_active: bool,
     pub volume: f32,
     /// The main channel is muted. Playback stays silent until a slide unmutes it.
@@ -306,6 +306,7 @@ pub struct Session {
     pub pending_also: Option<PendingPlay>,
     pub playing_audio: Option<PathBuf>,
     audio_loop_override: Option<bool>,
+    audio_transport: Option<MediaTransport>,
     transition_sound_playing: bool,
     /// The audio playlist started by a slide, when one is running.
     playlist_id: Option<String>,
@@ -544,6 +545,7 @@ impl Session {
             pending_also: None,
             playing_audio: None,
             audio_loop_override: None,
+            audio_transport: None,
             transition_sound_playing: false,
             playlist_id: None,
             playlist_index: 0,
@@ -740,6 +742,7 @@ impl Session {
             pending_also: None,
             playing_audio: None,
             audio_loop_override: None,
+            audio_transport: None,
             transition_sound_playing: false,
             playlist_id: None,
             playlist_index: 0,
@@ -1497,6 +1500,7 @@ impl Session {
         self.replace_underlay(None);
         self.reset_background_look();
         self.playing_audio = None;
+        self.audio_transport = None;
         self.transition_sound_playing = false;
         self.audio_paused = false;
         self.video_time = 0.0;
@@ -1891,14 +1895,20 @@ impl Session {
                     .map(|duration| (duration * 1000.0).round() as u64);
                 let soundtrack = timeline["soundtrack"]
                     .as_str()
-                    .and_then(|id| show.show["media"][id]["path"].as_str())
-                    .map(PathBuf::from)
-                    .filter(|path| media_kind(path) == MediaKind::Audio && path.is_file())
-                    .map(|path| TimelineSoundtrack {
-                        path,
-                        delay_ms: timeline["soundtrackDelayMs"].as_u64().unwrap_or_default(),
-                        restart: true,
-                        owned: false,
+                    .and_then(|id| show.show["media"].get(id))
+                    .and_then(|media| {
+                        let path = PathBuf::from(media["path"].as_str()?);
+                        (media_kind(&path) == MediaKind::Audio && path.is_file()).then(|| {
+                            TimelineSoundtrack {
+                                path,
+                                transport: MediaTransport::from_value(&media["audioTransport"]),
+                                delay_ms: timeline["soundtrackDelayMs"]
+                                    .as_u64()
+                                    .unwrap_or_default(),
+                                restart: true,
+                                owned: false,
+                            }
+                        })
                     });
                 Some((timeline["loop"] == true, end, soundtrack))
             })
@@ -2035,7 +2045,9 @@ impl Session {
             && std::mem::take(&mut track.restart)
         {
             let path = track.path.clone();
+            let transport = track.transport;
             self.queue_audio(path);
+            self.audio_transport = transport;
             if let Some(track) = &mut self.timeline_soundtrack {
                 track.owned = true;
             }
@@ -2097,6 +2109,7 @@ impl Session {
     pub fn timeline_audio_failed(&mut self, path: &Path) {
         if self.timeline_owns_audio(path) {
             self.playing_audio = None;
+            self.audio_transport = None;
             self.audio_paused = false;
             // Let the slides finish even if the audio file could not be opened.
             self.timeline_soundtrack = None;
@@ -2163,7 +2176,8 @@ impl Session {
         };
         let looping = media["loop"].as_bool();
         let retrigger = media["retrigger"] == true;
-        self.queue_cue_audio(path, looping, retrigger)
+        let transport = MediaTransport::from_value(&media["audioTransport"]);
+        self.queue_cue_audio(path, looping, retrigger, transport)
     }
 
     fn run_timeline_picture(&mut self, id: &str, foreground: bool) -> bool {
@@ -2186,7 +2200,7 @@ impl Session {
             MediaKind::Image => self.show_background_still(&path, hide_slide, retrigger),
             MediaKind::Video if path.is_file() => {
                 let end = VideoEnd::from_media(media);
-                let transport = VideoTransport::from_media(media);
+                let transport = MediaTransport::from_value(&media["videoTransport"]);
                 let loops = media["loop"] != false;
                 let muted = media["muted"] != false;
                 let ended = self
@@ -2636,7 +2650,8 @@ impl Session {
         });
         let flags = entry.map(ShowFile::media_entry_flags);
         let end = entry.map(VideoEnd::from_media).unwrap_or_default();
-        let transport = entry.and_then(VideoTransport::from_media);
+        let transport =
+            entry.and_then(|media| MediaTransport::from_value(&media["videoTransport"]));
         let retrigger = entry.is_some_and(|media| media["retrigger"] == true);
         if !retrigger
             && self.background_path.as_deref() == Some(path)
@@ -2681,7 +2696,7 @@ impl Session {
         path: &Path,
         audio_flags: Option<(bool, bool)>,
         foreground: bool,
-        transport: Option<VideoTransport>,
+        transport: Option<MediaTransport>,
     ) {
         self.media_finished = None;
         self.remember_background(path);
@@ -3545,6 +3560,7 @@ impl Session {
         self.playing_audio = None;
         self.transition_sound_playing = false;
         self.audio_loop_override = None;
+        self.audio_transport = None;
         self.audio_paused = false;
         self.keep_video_then(PendingPlay::StopAudio);
     }
@@ -3585,42 +3601,56 @@ impl Session {
                         path,
                         media["loop"].as_bool(),
                         media["retrigger"] == true,
+                        MediaTransport::from_value(&media["audioTransport"]),
                         transition_sound,
                     ))
                 })
             })
         });
-        if let Some((path, looping, retrigger, transition_sound)) = audio
-            && self.queue_cue_audio(path, looping, retrigger)
+        if let Some((path, looping, retrigger, transport, transition_sound)) = audio
+            && self.queue_cue_audio(path, looping, retrigger, transport)
         {
             self.transition_sound_playing = transition_sound;
         }
     }
 
-    fn queue_cue_audio(&mut self, path: PathBuf, looping: Option<bool>, retrigger: bool) -> bool {
+    fn queue_cue_audio(
+        &mut self,
+        path: PathBuf,
+        looping: Option<bool>,
+        retrigger: bool,
+        transport: Option<MediaTransport>,
+    ) -> bool {
         if !retrigger
             && self.playing_audio.as_ref() == Some(&path)
             && !self.audio_paused
             && self.audio_loop_override == looping
+            && self.audio_transport == transport
             && !self.timeline_owns_audio(&path)
         {
             return false;
         }
         self.queue_audio(path);
         self.audio_loop_override = looping;
+        self.audio_transport = transport;
         true
     }
 
     fn queue_audio(&mut self, path: PathBuf) {
+        self.remember_audio_playback(&path);
+        self.keep_video_then(PendingPlay::Audio(path));
+    }
+
+    pub fn remember_audio_playback(&mut self, path: &Path) {
         self.media_finished = None;
         self.audio_loop_override = None;
+        self.audio_transport = None;
         self.transition_sound_playing = false;
         if let Some(track) = &mut self.timeline_soundtrack {
             track.owned = false;
         }
-        self.playing_audio = Some(path.clone());
+        self.playing_audio = Some(path.to_path_buf());
         self.audio_paused = false;
-        self.keep_video_then(PendingPlay::Audio(path));
     }
 
     /// Turns on overlays named by an action. Unknown ids are skipped.
@@ -4188,6 +4218,9 @@ impl Session {
 
     /// Stored start and end for the file that is playing. Zero is the file start or the file end.
     pub fn audio_span(&self) -> (f64, f64) {
+        if let Some(transport) = self.audio_transport {
+            return (transport.from, transport.to);
+        }
         self.playing_audio
             .as_ref()
             .and_then(|path| {
@@ -4200,6 +4233,9 @@ impl Session {
 
     /// Stored playback speed for the file that is playing. Missing values stay at normal speed.
     pub fn audio_tempo(&self) -> f64 {
+        if let Some(transport) = self.audio_transport {
+            return transport.rate;
+        }
         self.playing_audio
             .as_ref()
             .and_then(|path| {
@@ -8378,13 +8414,16 @@ Second line"
         let mut show = ShowFile::blank("audio-cues", "Audio cues");
         show.show["origin"] = serde_json::json!("propresenter");
         show.show["media"] = serde_json::json!({
-            "bed": {"path": song}, "cue": {"path": cue, "loop": true},
+            "bed": {"path": song, "audioTransport": {"fromTime": 0.25, "toTime": 2.25, "speed": 0.75}},
+            "cue": {"path": cue, "loop": true, "audioTransport": {"fromTime": 1.0, "toTime": 2.0, "speed": 1.5}},
+            "alternate": {"path": cue, "loop": true, "audioTransport": {"fromTime": 3.0, "toTime": 4.0, "speed": 2.0}},
             "restart": {"path": cue, "loop": false, "retrigger": true}, "video": {"path": video},
         });
         show.show["layouts"]["main"]["timeline"] = serde_json::json!({"soundtrack": "bed", "actions": [
             {"time": 500, "type": "audio", "data": {"id": "cue"}},
             {"time": 500, "type": "background", "data": {"id": "video"}},
             {"time": 700, "type": "audio", "data": {"id": "cue"}},
+            {"time": 850, "type": "audio", "data": {"id": "alternate"}},
             {"time": 1000, "type": "audio", "data": {"id": "restart"}}
         ]});
         let mut session = Session::empty();
@@ -8397,21 +8436,59 @@ Second line"
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Audio(path)), None] if path == song)
         );
+        assert_eq!(session.audio_span(), (0.25, 2.25));
+        assert_eq!(session.audio_tempo(), 0.75);
         assert!(session.tick_timeline(start + Duration::from_millis(500)));
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Video(path)), Some(PendingPlay::Audio(audio))] if path == video && audio == cue)
         );
         assert!(session.audio_should_loop());
+        assert_eq!(session.audio_span(), (1.0, 2.0));
+        assert_eq!(session.audio_tempo(), 1.5);
         assert!(!session.tick_timeline(start + Duration::from_millis(700)));
         assert!(matches!(session.take_plays(), [None, None]));
+        assert!(session.tick_timeline(start + Duration::from_millis(850)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == cue)
+        );
+        assert!(session.audio_should_loop());
+        assert_eq!(session.audio_span(), (3.0, 4.0));
+        assert_eq!(session.audio_tempo(), 2.0);
         assert!(session.tick_timeline(start + Duration::from_millis(1000)));
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Audio(audio)), None] if audio == cue)
         );
         assert!(!session.audio_should_loop());
+        assert_eq!(session.audio_span(), (0.0, 0.0));
+        assert_eq!(session.audio_tempo(), 1.0);
         assert_eq!(session.playing_audio.as_ref(), Some(&cue));
         assert_eq!(session.slide_index, Some(0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drawer_audio_discards_imported_slide_audio_settings_for_the_same_file() {
+        let mut show = ShowFile::blank("audios", "Audio");
+        show.show["media"]["clip"] = serde_json::json!({
+            "path": "clip.wav", "loop": true,
+            "audioTransport": {"fromTime": 1.0, "toTime": 2.0, "speed": 1.5}
+        });
+        show.show["layouts"]["main"]["slides"][0]["audio"] = serde_json::json!(["clip"]);
+        let mut session = Session::empty();
+        session.shows.push(show);
+        session.show_index = Some(0);
+        session.select_slide(0);
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(path)), None] if path == Path::new("clip.wav"))
+        );
+        assert_eq!(session.audio_span(), (1.0, 2.0));
+        assert_eq!(session.audio_tempo(), 1.5);
+        assert!(session.audio_should_loop());
+
+        session.remember_audio_playback(Path::new("clip.wav"));
+        assert_eq!(session.audio_span(), (0.0, 0.0));
+        assert_eq!(session.audio_tempo(), 1.0);
+        assert!(!session.audio_should_loop());
     }
 
     #[test]

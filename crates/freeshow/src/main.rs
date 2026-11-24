@@ -3230,8 +3230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match action {
                 DrawerAction::PlayAudio(path) => {
                     *audio_out.borrow_mut() = None;
-                    session.borrow_mut().playing_audio = Some(path.clone());
-                    session.borrow_mut().audio_paused = false;
+                    session.borrow_mut().remember_audio_playback(&path);
                     let (routes, looping, from, to, tempo) = {
                         let current = session.borrow();
                         let (from, to) = current.audio_span();
