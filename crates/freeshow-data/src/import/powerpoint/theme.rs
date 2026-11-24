@@ -744,11 +744,7 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     };
     let short_side = || {
         let ext = child(child(properties, "xfrm")?, "ext")?;
-        let dimension = |axis| {
-            let size = ext.attribute(axis)?.parse::<f64>().ok()?;
-            (size.is_finite() && size > 0.0).then_some(size)
-        };
-        let (width, height) = (dimension("cx")?, dimension("cy")?);
+        let (width, height) = (shape_extent(ext, "cx")?, shape_extent(ext, "cy")?);
         let short = width.min(height);
         Some([short / width, short / height])
     };
@@ -1060,10 +1056,105 @@ fn adjusted_block_presets_use_the_short_side_in_both_orientations() {
     assert_eq!((octagon[0], octagon[1]), ([0.0, 0.25], [0.125, 0.0]));
 }
 
+fn shape_extent(ext: Node<'_, '_>, axis: &str) -> Option<f64> {
+    let size = ext.attribute(axis)?.parse::<f64>().ok()?;
+    (size.is_finite() && size > 0.0).then_some(size)
+}
+
+const DRAWINGML_TURN: f64 = 360.0 * 60_000.0;
+
+fn builtin_guide(name: &str, [w, h]: [f64; 2]) -> Option<f64> {
+    let short = w.min(h);
+    let value = match name {
+        "l" | "t" => 0.0,
+        "w" | "r" => w,
+        "h" | "b" => h,
+        "ss" => short,
+        "ls" => w.max(h),
+        "hc" => w / 2.0,
+        "vc" => h / 2.0,
+        "cd2" => DRAWINGML_TURN / 2.0,
+        "cd4" => DRAWINGML_TURN / 4.0,
+        "cd8" => DRAWINGML_TURN / 8.0,
+        "3cd4" => DRAWINGML_TURN * 3.0 / 4.0,
+        "3cd8" => DRAWINGML_TURN * 3.0 / 8.0,
+        "5cd8" => DRAWINGML_TURN * 5.0 / 8.0,
+        "7cd8" => DRAWINGML_TURN * 7.0 / 8.0,
+        _ => {
+            let (base, divisor) = name.split_once('d')?;
+            let extent = match base {
+                "w" => w,
+                "h" => h,
+                "ss" => short,
+                _ => return None,
+            };
+            extent / f64::from(divisor.parse::<std::num::NonZeroU32>().ok()?.get())
+        }
+    };
+    Some(value)
+}
+
+fn guide_value(name: &str, guides: &HashMap<&str, Option<f64>>, size: [f64; 2]) -> Option<f64> {
+    if let Ok(value) = name.parse::<f64>() {
+        return value.is_finite().then_some(value);
+    }
+    match guides.get(name) {
+        Some(value) => *value,
+        None => builtin_guide(name, size),
+    }
+}
+
+fn guide_formula(formula: &str, value: impl Fn(&str) -> Option<f64>) -> Option<f64> {
+    let mut fields = formula.split_ascii_whitespace();
+    let op = fields.next()?;
+    let x = value(fields.next()?)?;
+    let y = fields.next();
+    let z = fields.next();
+    if fields.next().is_some() {
+        return None;
+    }
+    let angle = |units: f64| (units / 60_000.0).to_radians();
+    let result = match (op, y, z) {
+        ("val", None, None) => x,
+        ("abs", None, None) => x.abs(),
+        ("sqrt", None, None) => x.sqrt(),
+        ("?:", Some(y), Some(z)) => value(if x > 0.0 { y } else { z })?,
+        (op, Some(y), None) => {
+            let y = value(y)?;
+            match op {
+                "min" => x.min(y),
+                "max" => x.max(y),
+                "at2" => y.atan2(x).to_degrees() * 60_000.0,
+                "cos" => x * angle(y).cos(),
+                "sin" => x * angle(y).sin(),
+                "tan" => x * angle(y).tan(),
+                _ => return None,
+            }
+        }
+        (op, Some(y), Some(z)) => {
+            let (y, z) = (value(y)?, value(z)?);
+            match op {
+                "*/" => x * y / z,
+                "+-" => x + y - z,
+                "+/" => (x + y) / z,
+                "cat2" => x * z.atan2(y).cos(),
+                "sat2" => x * z.atan2(y).sin(),
+                "mod" => x.hypot(y).hypot(z),
+                "pin" => y.min(z).max(x),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    result.is_finite().then_some(result)
+}
+
 fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     let geometry = child(properties, "custGeom")?;
+    let ext = child(properties, "xfrm").and_then(|xfrm| child(xfrm, "ext"));
     let mut paths = Vec::new();
     let mut vertices = 0;
+    let mut guide_budget = 16_384;
     for path in child(geometry, "pathLst")?
         .children()
         .filter(Node::is_element)
@@ -1073,7 +1164,7 @@ fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             None | Some("norm") if path.has_tag_name("path") => {}
             _ => return None,
         }
-        let contours = custom_path(path)?;
+        let contours = custom_path(path, geometry, ext, &mut guide_budget)?;
         if contours.is_empty() {
             continue;
         }
@@ -1086,21 +1177,42 @@ fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     Some(paths)
 }
 
-fn custom_path(path: Node<'_, '_>) -> Option<CustomPath> {
-    let dimension = |key| {
-        path.attribute(key)?
-            .parse::<i64>()
-            .ok()
-            .filter(|n| *n > 0)
-            .map(|n| n as f64)
+fn custom_path(
+    path: Node<'_, '_>,
+    geometry: Node<'_, '_>,
+    ext: Option<Node<'_, '_>>,
+    guide_budget: &mut usize,
+) -> Option<CustomPath> {
+    let dimension = |key, axis| match path.attribute(key).unwrap_or("0").parse::<i64>().ok()? {
+        0 => shape_extent(ext?, axis),
+        n if n > 0 => Some(n as f64),
+        _ => None,
     };
-    let (width, height) = (dimension("w")?, dimension("h")?);
+    let (width, height) = (dimension("w", "cx")?, dimension("h", "cy")?);
+    let size = [width, height];
+    let mut guides = HashMap::new();
+    for list in ["avLst", "gdLst"]
+        .into_iter()
+        .filter_map(|name| child(geometry, name))
+    {
+        for guide in list.children().filter(|node| node.has_tag_name("gd")) {
+            // shortcut: bound per-shape guide work until evaluations are cached by path size.
+            *guide_budget = guide_budget.checked_sub(1)?;
+            if let Some(name) = guide.attribute("name") {
+                let result = guide.attribute("fmla").and_then(|formula| {
+                    guide_formula(formula, |token| guide_value(token, &guides, size))
+                });
+                guides.insert(name, result);
+            }
+        }
+    }
+    let value = |name: &str| guide_value(name, &guides, size);
     let point = |node: Node<'_, '_>| {
         if !node.has_tag_name("pt") {
             return None;
         }
         let coordinate = |key, extent: f64| {
-            let value = node.attribute(key)?.parse::<f64>().ok()? / extent;
+            let value = value(node.attribute(key)?)? / extent;
             value.is_finite().then_some(value)
         };
         Some([coordinate("x", width)?, coordinate("y", height)?])
@@ -1134,7 +1246,7 @@ fn custom_path(path: Node<'_, '_>) -> Option<CustomPath> {
             "lnTo" if !polygon.is_empty() => {
                 push_path_vertex(&mut polygon, point(points.next()?)?)?;
             }
-            "arcTo" => flatten_arc_path(&mut polygon, command, [width, height])?,
+            "arcTo" => flatten_arc_path(&mut polygon, command, size, value)?,
             "quadBezTo" | "cubicBezTo" => {
                 let first = point(points.next()?)?;
                 let second = point(points.next()?)?;
@@ -1193,30 +1305,33 @@ fn flatten_arc_path(
     vertices: &mut Vec<[f64; 2]>,
     command: Node<'_, '_>,
     [width, height]: [f64; 2],
+    value: impl Fn(&str) -> Option<f64>,
 ) -> Option<()> {
     use std::f64::consts::TAU;
 
-    const TURN: i64 = 360 * 60_000;
-    let number = |key| command.attribute(key)?.parse::<i64>().ok();
-    let (rx, ry) = (number("wR")? as f64, number("hR")? as f64);
-    let start_angle = number("stAng")?.rem_euclid(TURN);
+    let number = |key| value(command.attribute(key)?);
+    let (rx, ry) = (number("wR")?, number("hR")?);
+    let start_angle = number("stAng")?.rem_euclid(DRAWINGML_TURN);
     let sweep = number("swAng")?;
-    if rx <= 0.0 || ry <= 0.0 || !(-TURN..=TURN).contains(&sweep) {
+    if rx < 0.0 || ry < 0.0 || sweep.abs() > DRAWINGML_TURN {
         return None;
     }
-    if sweep == 0 {
+    if (rx == 0.0 && ry == 0.0) || sweep == 0.0 {
         return Some(());
     }
-    let parameter = |angle| {
+    if rx == 0.0 || ry == 0.0 {
+        return None;
+    }
+    let parameter = |angle: f64| {
         // DrawingML measures the ray from the ellipse center in path coordinates.
-        let (sin, cos) = (angle as f64 * TAU / TURN as f64).sin_cos();
+        let (sin, cos) = (angle * TAU / DRAWINGML_TURN).sin_cos();
         (rx * sin).atan2(ry * cos)
     };
     let start = parameter(start_angle);
     let stop = parameter(start_angle + sweep);
-    let span = if sweep.abs() == TURN {
-        TAU.copysign(sweep as f64)
-    } else if sweep > 0 {
+    let span = if sweep.abs() == DRAWINGML_TURN {
+        TAU.copysign(sweep)
+    } else if sweep > 0.0 {
         (stop - start).rem_euclid(TAU)
     } else {
         -(start - stop).rem_euclid(TAU)
