@@ -160,6 +160,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint text-box insets for wrapping and alignment inside positioned shapes.
 - [x] PowerPoint text boxes with wrapping disabled keep their explicit line breaks.
 - [x] PowerPoint saved normal autofit font scaling and percentage line-spacing reduction.
+- [x] PowerPoint speaker notes in the FreeShow stage view, linked to their source slides.
 - [x] PowerPoint line spacing and paragraph spacing before and after, including wrapped text and hard breaks.
 - [x] PowerPoint paragraph margins and first-line or hanging indents, including wrapped continuations.
 - [x] PowerPoint character bullets with inherited font, size, and color and one marker per paragraph.

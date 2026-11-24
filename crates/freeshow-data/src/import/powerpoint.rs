@@ -84,6 +84,8 @@ pub(super) fn import(
     let mut assets = BTreeMap::new();
     let mut image_bytes = 0_u64;
     let mut object_items: Vec<Vec<SlideObject>> = Vec::new();
+    let mut speaker_notes = Vec::new();
+    let mut notes_xml_bytes = 0;
     let mut import_warnings = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let xml = read_xml(&mut archive, part)?.ok_or_else(|| invalid("slide part is missing"))?;
@@ -116,6 +118,21 @@ pub(super) fn import(
         }
         let picture_ids = content.picture_ids.clone();
         let rels = relationships(&mut archive, part)?;
+        let notes = rels
+            .iter()
+            .find(|rel| rel.kind == "notesSlide" && !rel.external);
+        speaker_notes.push(notes.and_then(|rel| {
+            match read_speaker_notes(&mut archive, &rel.target, &mut notes_xml_bytes) {
+                Ok(notes) => Some(notes),
+                Err(error) => {
+                    import_warnings.push(format!(
+                        "Slide {}: Could not import speaker notes: {error}",
+                        index + 1
+                    ));
+                    None
+                }
+            }
+        }));
         for rid in picture_ids {
             if let Some(rel) = rels.iter().find(|rel| rel.id == rid && rel.kind == "image") {
                 if !rel.external && media.is_some() && !assets.contains_key(&rel.target) {
@@ -156,8 +173,11 @@ pub(super) fn import(
     }
     let mut show = show_file(file_name, &file_stem_str(file_name), sections);
     show.show["origin"] = json!("powerpoint");
-    for (index, fill) in fills.into_iter().enumerate() {
+    for (index, (fill, notes)) in fills.into_iter().zip(speaker_notes).enumerate() {
         let slide = &mut show.show["slides"][format!("s{}", index + 1)];
+        if let Some(notes) = notes {
+            slide["notes"] = json!(notes);
+        }
         slide["settings"]["resolution"] = json!({"width": 1920, "height": height});
         if !object_items[index].is_empty() {
             for object in &mut object_items[index] {
@@ -357,6 +377,61 @@ fn slide_text(xml: &str) -> Result<(Vec<String>, bool), DataError> {
         }
     }
     Ok((lines, hidden))
+}
+
+fn read_speaker_notes(
+    archive: &mut Archive<'_>,
+    part: &str,
+    expanded_bytes: &mut usize,
+) -> Result<String, DataError> {
+    use theme::child;
+
+    const NOTES_LIMIT: usize = 64 * 1024 * 1024;
+    if *expanded_bytes >= NOTES_LIMIT {
+        return Err(invalid("expanded notes XML exceeds 64 MiB"));
+    }
+    let xml = read_xml(archive, part)?.ok_or_else(|| invalid("notes part is missing"))?;
+    *expanded_bytes += xml.len();
+    if *expanded_bytes > NOTES_LIMIT {
+        return Err(invalid("expanded notes XML exceeds 64 MiB"));
+    }
+    let document = roxmltree::Document::parse(&xml).map_err(invalid)?;
+    let root = document.root_element();
+    if !root.has_tag_name("notes") {
+        return Err(invalid("expected a notes slide"));
+    }
+    let Some(tree) = child(root, "cSld").and_then(|slide| child(slide, "spTree")) else {
+        return Ok(String::new());
+    };
+    let paragraphs = tree
+        .descendants()
+        .filter(|node| node.has_tag_name("sp"))
+        .filter_map(|shape| {
+            let nonvisual = child(child(shape, "nvSpPr")?, "nvPr")?;
+            let placeholder = child(nonvisual, "ph")?;
+            if placeholder.attribute("type") != Some("body") {
+                return None;
+            }
+            child(shape, "txBody")
+        })
+        .flat_map(|body| body.children().filter(|node| node.has_tag_name("p")))
+        .map(|paragraph| {
+            let mut line = String::new();
+            for el in paragraph.children().filter(roxmltree::Node::is_element) {
+                match el.tag_name().name() {
+                    "br" => line.push('\n'),
+                    "r" | "fld" => {
+                        if let Some(text) = child(el, "t").and_then(|node| node.text()) {
+                            line.push_str(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>();
+    Ok(paragraphs.join("\n"))
 }
 
 struct SlideContent {
@@ -1391,6 +1466,48 @@ mod tests {
         );
         assert_eq!(fs::read_dir(library.media_dir()).unwrap().count(), 1);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn speaker_notes_follow_slide_relationships_into_the_stage_model() {
+        let files = archive(&[
+            ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst>
+                <p:sldId r:id="first"/><p:sldId r:id="second"/><p:sldId r:id="third"/>
+            </p:sldIdLst></p:presentation>"#),
+            ("ppt/_rels/presentation.xml.rels", br#"<Relationships>
+                <Relationship Id="first" Type="o/slide" Target="slides/slide7.xml"/>
+                <Relationship Id="second" Type="o/slide" Target="slides/slide2.xml"/>
+                <Relationship Id="third" Type="o/slide" Target="slides/slide3.xml"/>
+            </Relationships>"#),
+            ("ppt/slides/slide7.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>First slide</a:t></a:r></a:p></p:sld>"#),
+            ("ppt/slides/slide2.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>Second slide</a:t></a:r></a:p></p:sld>"#),
+            ("ppt/slides/slide3.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>Third slide</a:t></a:r></a:p></p:sld>"#),
+            ("ppt/slides/_rels/slide7.xml.rels", br#"<Relationships><Relationship Id="not1" Type="o/notesSlide" Target="../notesSlides/notesSlide99.xml"/></Relationships>"#),
+            ("ppt/slides/_rels/slide2.xml.rels", br#"<Relationships><Relationship Id="not2" Type="o/notesSlide" Target="../notesSlides/missing.xml"/></Relationships>"#),
+            ("ppt/slides/_rels/slide3.xml.rels", br#"<Relationships><Relationship Id="not3" Type="o/notesSlide" TargetMode="External" Target="https://example.invalid/notes.xml"/></Relationships>"#),
+            ("ppt/notesSlides/notesSlide99.xml", br#"<p:notes xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:sp><p:nvSpPr><p:nvPr><p:ph type="sldNum"/></p:nvPr></p:nvSpPr>
+                    <p:txBody><a:p><a:fld><a:t>7</a:t></a:fld></a:p></p:txBody></p:sp>
+                <p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+                    <p:txBody><a:p><a:r><a:t>Read &amp; </a:t></a:r><a:r><a:t>pause</a:t></a:r><a:br/>
+                        <a:r><a:t>Wait</a:t></a:r></a:p><a:p/><a:p><a:r><a:t>Continue.</a:t></a:r></a:p></p:txBody></p:sp>
+            </p:spTree></p:cSld></p:notes>"#),
+        ]);
+        let show = import("Notes.pptx", &files, None).unwrap();
+        let slides = show.ordered_slides();
+        assert_eq!(slides[0].lines, ["First slide"]);
+        assert_eq!(slides[0].notes, "Read & pause\nWait\n\nContinue.");
+        assert_eq!(slides[1].lines, ["Second slide"]);
+        assert!(slides[1].notes.is_empty());
+        assert!(slides[2].notes.is_empty());
+        let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0]
+                .as_str()
+                .unwrap()
+                .starts_with("Slide 2: Could not import speaker notes")
+        );
     }
 
     #[test]
