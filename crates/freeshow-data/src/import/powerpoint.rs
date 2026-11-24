@@ -2437,6 +2437,41 @@ mod tests {
     }
 
     #[test]
+    fn imports_shaded_preset_faces_in_drawing_order() {
+        let mut shapes = String::new();
+        for name in ["cube", "bevel", "foldedCorner", "can"] {
+            shapes.push_str(&format!(
+                r#"<p:sp><p:spPr>
+                    <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                    <a:prstGeom prst="{name}"><a:avLst><a:gd name="adj" fmla="val 40000"/></a:avLst></a:prstGeom>
+                    <a:solidFill><a:srgbClr val="646464"/></a:solidFill>
+                </p:spPr></p:sp>"#
+            ));
+        }
+        let xml = format!(
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>"#
+        );
+        let files = archive(&[("ppt/slides/slide1.xml", xml.as_bytes())]);
+        let show = import("Faces.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        for (item, shades) in items
+            .iter()
+            .zip(["0 -20 20", "0 20 -20 40 -40", "0 -20", "0 40"])
+        {
+            let style = item["style"].as_str().unwrap();
+            assert!(style.contains(&format!("--pptx-path-shades:{shades};")));
+            let paths = style.split_once("--pptx-fill-paths:").unwrap().1;
+            assert_eq!(
+                paths.split(';').next().unwrap().split('|').count(),
+                shades.split(' ').count()
+            );
+        }
+        let cube = items[0]["style"].as_str().unwrap();
+        assert!(cube.contains("--pptx-fill-paths:0 0.4,0.8 0.4,0.8 1,0 1|"));
+    }
+
+    #[test]
     fn imports_rounded_and_snipped_corners_with_shape_gradients() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",
