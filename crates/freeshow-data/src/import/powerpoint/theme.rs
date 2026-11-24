@@ -729,29 +729,126 @@ fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
     if paths.next().is_some() || !matches!(path.attribute("fill"), None | Some("norm")) {
         return None;
     }
-    let dimension = |key| path.attribute(key)?.parse::<u32>().ok().filter(|n| *n > 0);
-    let (width, height) = (f64::from(dimension("w")?), f64::from(dimension("h")?));
+    let dimension = |key| {
+        path.attribute(key)?
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|n| n as f64)
+    };
+    let (width, height) = (dimension("w")?, dimension("h")?);
     let mut commands = path.children().filter(Node::is_element);
     let first = commands.next().filter(|node| node.has_tag_name("moveTo"))?;
-    let point = |command| {
-        let node = child(command, "pt")?;
-        let coordinate = |key, extent| {
+    let point = |node: Node<'_, '_>| {
+        if !node.has_tag_name("pt") {
+            return None;
+        }
+        let coordinate = |key, extent: f64| {
             let value = node.attribute(key)?.parse::<f64>().ok()? / extent;
-            (0.0..=1.0).contains(&value).then_some(value)
+            value.is_finite().then_some(value)
         };
         Some([coordinate("x", width)?, coordinate("y", height)?])
     };
-    let mut polygon = vec![point(first)?];
+    let start = point(child(first, "pt")?)?;
+    let mut polygon = Vec::new();
+    push_path_vertex(&mut polygon, start)?;
     while let Some(command) = commands.next() {
-        if command.has_tag_name("close") {
-            return (polygon.len() >= 3 && commands.next().is_none()).then_some(polygon);
+        let mut points = command.children().filter(Node::is_element);
+        match command.tag_name().name() {
+            "close" => {
+                if polygon.last() == Some(&start) {
+                    polygon.pop();
+                }
+                return ((3..=128).contains(&polygon.len()) && commands.next().is_none())
+                    .then_some(polygon);
+            }
+            "lnTo" => push_path_vertex(&mut polygon, point(points.next()?)?)?,
+            "quadBezTo" | "cubicBezTo" => {
+                let first = point(points.next()?)?;
+                let second = point(points.next()?)?;
+                let current = *polygon.last()?;
+                let curve = if command.has_tag_name("quadBezTo") {
+                    [
+                        current,
+                        lerp_path(current, first, 2.0 / 3.0),
+                        lerp_path(second, first, 2.0 / 3.0),
+                        second,
+                    ]
+                } else {
+                    [current, first, second, point(points.next()?)?]
+                };
+                flatten_cubic_path(&mut polygon, curve, 0)?;
+            }
+            _ => return None,
         }
-        if !command.has_tag_name("lnTo") || polygon.len() == 128 {
+        if points.next().is_some() {
             return None;
         }
-        polygon.push(point(command)?);
     }
     None
+}
+
+fn push_path_vertex(vertices: &mut Vec<[f64; 2]>, point: [f64; 2]) -> Option<()> {
+    if vertices.last() == Some(&point) {
+        return Some(());
+    }
+    // Allow a repeated starting point until close removes it before checking the size.
+    if vertices.len() > 128 || !point.iter().all(|axis| (0.0..=1.0).contains(axis)) {
+        return None;
+    }
+    vertices.push(point);
+    Some(())
+}
+
+fn lerp_path([ax, ay]: [f64; 2], [bx, by]: [f64; 2], t: f64) -> [f64; 2] {
+    [ax + (bx - ax) * t, ay + (by - ay) * t]
+}
+
+fn flatten_cubic_path(
+    vertices: &mut Vec<[f64; 2]>,
+    [a, b, c, d]: [[f64; 2]; 4],
+    depth: u8,
+) -> Option<()> {
+    // Compare against the control points of a straight segment in the same parameter space.
+    // The Bézier stays within the convex hull of the four point-wise differences.
+    let near = |control: [f64; 2], chord: [f64; 2]| {
+        control
+            .into_iter()
+            .zip(chord)
+            .all(|(p, q)| (p - q).abs() <= 1.0 / 2048.0)
+    };
+    if near(b, lerp_path(a, d, 1.0 / 3.0)) && near(c, lerp_path(a, d, 2.0 / 3.0)) {
+        return push_path_vertex(vertices, d);
+    }
+    if depth == 10 {
+        return None;
+    }
+    let ab = lerp_path(a, b, 0.5);
+    let bc = lerp_path(b, c, 0.5);
+    let cd = lerp_path(c, d, 0.5);
+    let abc = lerp_path(ab, bc, 0.5);
+    let bcd = lerp_path(bc, cd, 0.5);
+    let midpoint = lerp_path(abc, bcd, 0.5);
+    flatten_cubic_path(vertices, [a, ab, abc, midpoint], depth + 1)?;
+    flatten_cubic_path(vertices, [midpoint, bcd, cd, d], depth + 1)
+}
+
+#[cfg(test)]
+#[test]
+fn a_closed_bezier_outline_does_not_count_the_repeated_starting_point() {
+    let xml = r#"<spPr><custGeom><pathLst><path w="10000" h="10000">
+        <moveTo><pt x="5000" y="0"/></moveTo>
+        <cubicBezTo><pt x="7761" y="0"/><pt x="10000" y="2239"/><pt x="10000" y="5000"/></cubicBezTo>
+        <cubicBezTo><pt x="10000" y="7761"/><pt x="7761" y="10000"/><pt x="5000" y="10000"/></cubicBezTo>
+        <cubicBezTo><pt x="2239" y="10000"/><pt x="0" y="7761"/><pt x="0" y="5000"/></cubicBezTo>
+        <cubicBezTo><pt x="0" y="2239"/><pt x="2239" y="0"/><pt x="5000" y="0"/></cubicBezTo>
+        <close/>
+    </path></pathLst></custGeom></spPr>"#;
+    let document = Document::parse(xml).unwrap();
+    let vertices = custom_polygon(document.root_element()).unwrap();
+    assert_eq!(vertices.len(), 128);
+    assert_eq!(vertices[0], [0.5, 0.0]);
+    assert_ne!(vertices.first(), vertices.last());
 }
 
 impl ThemeReader {

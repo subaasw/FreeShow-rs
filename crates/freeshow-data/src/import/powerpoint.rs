@@ -2443,6 +2443,55 @@ mod tests {
     }
 
     #[test]
+    fn imports_quadratic_and_cubic_segments_in_a_custom_shape() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+                <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                <a:custGeom><a:pathLst><a:path w="40" h="20">
+                    <a:moveTo><a:pt x="0" y="10"/></a:moveTo>
+                    <a:quadBezTo><a:pt x="20" y="0"/><a:pt x="40" y="10"/></a:quadBezTo>
+                    <a:cubicBezTo><a:pt x="40" y="20"/><a:pt x="0" y="20"/><a:pt x="0" y="10"/></a:cubicBezTo>
+                    <a:close/>
+                </a:path></a:pathLst></a:custGeom>
+                <a:gradFill><a:gsLst>
+                    <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                </a:gsLst><a:path path="shape"/></a:gradFill>
+            </p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Curves.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        let polygon = style
+            .split_once("--shape-fill-polygon:")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        let points: Vec<[f64; 2]> = polygon
+            .split(',')
+            .map(|point| {
+                let (x, y) = point.split_once(' ').unwrap();
+                [x.parse().unwrap(), y.parse().unwrap()]
+            })
+            .collect();
+        assert!((4..=128).contains(&points.len()));
+        assert_eq!(points[0], [0.0, 0.5]);
+        assert!(points.contains(&[1.0, 0.5]));
+        assert!(
+            points
+                .iter()
+                .any(|[x, y]| (*x - 0.5).abs() < 1e-9 && (*y - 0.25).abs() < 1e-9)
+        );
+        assert!(points.contains(&[0.5, 0.875]));
+        assert!(!points[1..].contains(&points[0]));
+        assert!(style.contains("--pptx-polygon-focus:0.5 0.5;"));
+    }
+
+    #[test]
     fn positioned_text_keeps_raised_and_lowered_baselines() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",
