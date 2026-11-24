@@ -3,7 +3,7 @@
 > Living plan for the native Rust rewrite of [FreeShow](https://freeshow.app/).
 > Upstream behavior reference: ChurchApps/FreeShow **1.6.8** (this review used `1.6.8-beta.5`).
 > Working status of individual features lives in [`PARITY.md`](PARITY.md).
-> Milestone history and working method live in [`ROADMAP.md`](ROADMAP.md).
+> The [roadmap](ROADMAP.md) sets release order. The [1.0 implementation plan](IMPLEMENTATION_PLAN.md) details feature delivery and verification.
 
 **Goal:** A native, cross-platform presenter that opens an existing FreeShow library, edits a project, presents songs and scripture, runs a stage layout, plays media, and is controlled from the phone remote — with lower CPU, RAM, and startup cost than the Electron app, and without losing data written by that app.
 
@@ -23,7 +23,7 @@
 
 ---
 
-## 1. Current state (reviewed 2026-11-22)
+## 1. Migration baseline (2026-11-22)
 
 The migration is far past a skeleton. `https://github.com/subaasw/FreeShow-rs` on `main` (`f7d53b3`) is a working native presenter with a 16-crate Cargo workspace, packaging scripts for macOS / Windows / Linux, and a detailed `PARITY.md` against FreeShow 1.6.8.
 
@@ -73,8 +73,7 @@ Library folders use the same names as Electron: `Shows/`, `Config/` (`projects.j
 ### 1.3 Build and quality baseline
 
 - Workspace: Cargo resolver 3, edition 2024, `rust-version = "1.97"`, release uses thin LTO, one codegen unit, and symbol stripping.
-- Tests: about 270 unit/integration tests plus a few ignored smoke tests (RTMP loopback, NDI SDK).
-- Existing CI (`.github/workflows/{release,gate,package-*}.yml`) is packaging-heavy: it compiles and runs tests, then builds and verifies installers. It does **not** run `rustfmt` or `clippy`, and macOS unit tests are not on the default pull-request path (they sit in the three-platform release workflow).
+- The release/manual Gate runs formatting on Linux and Clippy on Linux, Windows, and macOS. Tests run in the installer workflows. The 1.0 plan covers targeted earlier checks and packaged-app verification.
 - `thiserror` is used in `freeshow-data`. Other crates still use ad-hoc error enums (`MediaError`, `SettingsError`). Standardize gradually; do not rewrite every crate at once.
 - `tokio` is used where it belongs (the remote/stage servers). The operator session stays synchronous and timer-driven so it can live on the Slint thread. Do not "tokio-ify" the app shell without a reason.
 
@@ -93,7 +92,18 @@ The operator window is Slint 1.18 (`backend-winit`, `renderer-femtovg-wgpu`). Au
 | egui / iced / Dioxus | Reject as a rewrite. Immediate-mode or Rust-frontend stacks can work, but they would discard a large, already-themed operator window and would not paint lyrics more correctly than the existing compositor. |
 | Pure wgpu / raw winit for the operator too | Too much UI work for menus, drawers, and editors. Slint is the right tool for chrome; wgpu is the right tool for the program output. |
 
-**Rule:** do not churn working UI code to chase a different framework. Extract the inline `slint!` block out of `freeshow/src/main.rs` into `.slint` files when that file is next touched for a real feature, not as a standalone rewrite. `main.rs` (~2.4k lines) and `session.rs` (~6.4k lines) should be split along feature boundaries as those features are worked on.
+The Slint UI is already in `crates/freeshow/ui/operator.slint`, `panels.slint`,
+and `widgets.slint`. Keep these components and split bindings or panels
+incrementally when a feature would benefit from clearer ownership.
+
+### Ownership for 1.0 work
+
+| Boundary | Owner |
+| --- | --- |
+| Interaction and operator state | Slint components handle focus, input, and presentation of state. `freeshow` owns selection, edit history, drafts, cue sequencing, and Slint bindings. |
+| Persistent document changes | `freeshow-data` owns JSON-preserving edits, library writes, compatibility, and portable package import/export. The editor works against the same library representation. |
+| Paint and playback | `freeshow-output` owns deterministic paint and blend functions. `live.rs` resolves document and runtime inputs, and `present.rs` delivers frames. Preview work uses the same paint primitives. Program state changes through cue controls. |
+| Media and transports | Existing media and integration crates own decoding, routing, and transport. Keep I/O and slow preparation out of the operator event loop, with errors and progress surfaced in the app. |
 
 ---
 
@@ -105,7 +115,7 @@ The operator window is Slint 1.18 (`backend-winit`, `renderer-femtovg-wgpu`). Au
 - **Async:** tokio in `freeshow-remote` (and similar servers). GStreamer and cpal stay on their own threads. The Slint event loop is the UI thread.
 - **Formatting:** `rustfmt` (edition 2024). `cargo fmt --all -- --check` in CI.
 - **Lints:** `cargo clippy --workspace --all-targets --locked -- -D warnings` in CI. Do not enable `clippy::pedantic` in one shot; tighten it crate-by-crate where a crate is small and clean (`freeshow-core` is a good first candidate). Paint helpers may allow `clippy::too_many_arguments`.
-- **CI:** a Quality workflow for fmt, clippy, and tests on Linux, Windows, and macOS, separate from the existing installer workflows. Cache cargo registries; do not package in the quality job.
+- **CI:** keep the existing release Gate and installer jobs. Add PR-time checks where they can catch an identified regression before packaging.
 - **Lockfile:** `--locked` in CI. Do not casually bump transitive deps during a feature commit.
 - **Simplicity:** small conventional commits, no dead code, no speculative abstractions. Karpathy-style: the file that parses `.show` files should look like it parses `.show` files.
 
@@ -113,7 +123,7 @@ The operator window is Slint 1.18 (`backend-winit`, `renderer-femtovg-wgpu`). Au
 
 ## 4. Performance targets
 
-These are budgets. `--check-perf` and `scripts/bench-perf.py` measure them on a mid-size Sunday library. The compositor framebuffer is 1920×1080 by default, or the active output's stored bounds. Slide layout stays 1920×1080, so still and video fps are painted at the output size from a 1080p layout (and a generated 1920×1080@30 video underlay). Cold open here is library load plus the first audience and stage frames, not a framed operator window. Compare against the Electron app on the same machine and the same library when you can.
+These are the migration budgets. The [release verification plan](IMPLEMENTATION_PLAN.md#5-performance-and-release-verification) separately defines installed-app measurements. `--check-perf` and `scripts/bench-perf.py` measure them on a mid-size Sunday library. The compositor framebuffer is 1920×1080 by default, or the active output's stored bounds. Slide layout stays 1920×1080, so still and video fps are painted at the output size from a 1080p layout (and a generated 1920×1080@30 video underlay). Cold open here is library load plus the first audience and stage frames, not a framed operator window. Compare against the Electron app on the same machine and the same library when you can.
 
 On the Linux workspace box (22 Nov 2026, Asia/Katmandu), a release `freeshow --check-perf` run at the default 1920×1080 framebuffer reported: cold open ~19 ms, idle RSS ~30 MB, stills ~63 fps, unsynced 1080p video decode+paint ~56 fps, Go/Next ~15 ms, and a 1,000-show scan ~11 ms. All of those were under budget. Remote-button latency and a framed UI cold start were not part of that headless pass.
 
@@ -132,13 +142,13 @@ Work toward these with measurement, not premature micro-optimization. The compos
 
 ---
 
-## 5. Milestones to feature parity
+## 5. Migration work log
 
-Milestones 1–6 in [`ROADMAP.md`](ROADMAP.md) are complete (library settings, remote password, audio routing, stage item types, installers, importer media with listed gaps). The work below starts from that baseline and runs to a Sunday-ready 1.0.
+These checklists record migration work and remaining compatibility items. The [roadmap](ROADMAP.md) gives the current order for 1.0.
 
 Each milestone should leave `cargo test --workspace` green, update `PARITY.md` (and `USAGE.md` when behavior is user-visible) in the same commits as behavior, and be small enough to review.
 
-### M1. Quality gates and a honest build — in progress
+### M1. Build fixes and quality gates
 
 Restore a compile-clean `main`, document the architecture, and put format/lint/test gates on every OS.
 
@@ -148,10 +158,10 @@ Restore a compile-clean `main`, document the architecture, and put format/lint/t
 - [x] Make speaker `mix-matrix` updates compatible with GStreamer 1.26.
 - [x] Write this architecture / migration plan.
 - [x] `rustfmt` the workspace in its own commit so `cargo fmt --check` is meaningful.
-- [x] Quality CI: `fmt`, `clippy`, and `test` on Linux, Windows, and macOS, without building installers.
+- [x] A release/manual Gate for formatting and three-platform Clippy. Three-platform tests run in the package jobs.
 - [x] `rust-toolchain.toml` (stable + rustfmt + clippy) so local and CI toolchains match.
 
-Acceptance: `main` compiles on Linux, Windows, and macOS; `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` run in CI on all three.
+Acceptance: release CI checks formatting, runs locked workspace Clippy, and builds and tests on Linux, Windows, and macOS.
 
 ### M2. Operator, settings, and editing depth
 
@@ -161,7 +171,7 @@ The service path exists; the daily editor still feels thinner than Electron.
 - Theme hover, focus, and border overrides.
 - [x] Drawer media as real files (path, kind, image size, duration from common headers, missing-file badges, still thumbnails and kind icons), including `mediaFolders`.
 - [x] Richer lyric editing: item selection, typography (size, bold, font family), and adding/removing boxes, still writing valid FreeShow JSON.
-- Extract `slint!` from `main.rs` when this work lands, if it reduces file size; not as a standalone chore.
+- [x] Move operator Slint components to `crates/freeshow/ui/`.
 
 Acceptance: a volunteer can open their existing library, recognize the theme and outputs, add a song, edit lyrics in place, and attach a background without dropping fields Electron still reads.
 
@@ -230,8 +240,8 @@ Acceptance: the remaining 1.6.8 presentation path works at the configured output
 
 ---
 
-## 7. Next (immediately after M1)
+## 7. Next implementation slice
 
-1. Finish M1 quality CI and the workspace rustfmt commit.
-2. Start M2 with the unread remainder of `settings.json` and drawer media thumbnails — the highest Sunday-operator impact that is still marked partial.
-3. M3 camera, web, and chart stage boxes are in place; continue with remaining typography and effects called out as partial in `PARITY.md`.
+Start with the integrated operator baseline, preview/program isolation, and
+cross-show undo and recovery. See the [implementation queue](IMPLEMENTATION_PLAN.md#6-first-implementation-queue)
+for dependencies and proof of completion.

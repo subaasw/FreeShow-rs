@@ -108,5 +108,7 @@ a manual run) to save CI minutes. See [`docs/RELEASING.md`](docs/RELEASING.md).
 - [`docs/PACKAGING.md`](docs/PACKAGING.md) — installers, signing, diagnostics
 - [`docs/RELEASING.md`](docs/RELEASING.md) — tag → GitHub release
 - [`docs/PARITY.md`](docs/PARITY.md) — status against FreeShow 1.6.8
-- [`docs/MIGRATION_PLAN.md`](docs/MIGRATION_PLAN.md) — architecture, budgets, milestones
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone history and working method
+- [Roadmap](docs/ROADMAP.md) — release priorities, gates, and migration history
+- [Architecture and migration](docs/MIGRATION_PLAN.md) — crate ownership, compatibility, and performance budgets
+- [1.0 implementation plan](docs/IMPLEMENTATION_PLAN.md) — editor, motion, sharing, media, and release verification
+- [1.0 execution plan](docs/EXECUTION_PLAN.md) — merge order, dependencies, acceptance checks, and release sign-off
