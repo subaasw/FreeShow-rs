@@ -2714,10 +2714,10 @@ mod tests {
                 <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
                 <a:custGeom><a:pathLst>
                     <a:path w="100" h="100">
-                        <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+                        <a:moveTo><a:pt x="-10" y="0"/></a:moveTo>
                         <a:lnTo><a:pt x="100" y="0"/></a:lnTo>
                         <a:lnTo><a:pt x="100" y="100"/></a:lnTo>
-                        <a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/>
+                        <a:lnTo><a:pt x="-10" y="100"/></a:lnTo>
                         <a:moveTo><a:pt x="25" y="25"/></a:moveTo>
                         <a:lnTo><a:pt x="25" y="75"/></a:lnTo>
                         <a:lnTo><a:pt x="75" y="75"/></a:lnTo>
@@ -2727,7 +2727,7 @@ mod tests {
                     <a:path w="20" h="40" fill="darkenLess">
                         <a:moveTo><a:pt x="10" y="10"/></a:moveTo>
                         <a:lnTo><a:pt x="15" y="20"/></a:lnTo>
-                        <a:lnTo><a:pt x="10" y="30"/></a:lnTo><a:close/>
+                        <a:lnTo><a:pt x="10" y="30"/></a:lnTo>
                     </a:path>
                 </a:pathLst></a:custGeom>
                 <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
@@ -2737,7 +2737,7 @@ mod tests {
         let style = show.show["slides"]["s1"]["items"][0]["style"]
             .as_str()
             .unwrap();
-        assert!(style.contains("--pptx-fill-paths:0 0,1 0,1 1,0 1/0.25 0.25,0.25 0.75,0.75 0.75,0.75 0.25|0.5 0.25,0.75 0.5,0.5 0.75;"));
+        assert!(style.contains("--pptx-fill-paths:-0.1 0,1 0,1 1,-0.1 1/0.25 0.25,0.25 0.75,0.75 0.75,0.75 0.25|0.5 0.25,0.75 0.5,0.5 0.75;"));
         assert!(style.contains("background:#FF0000;"));
         assert!(style.contains("--pptx-path-shades:0 -20;"));
     }
