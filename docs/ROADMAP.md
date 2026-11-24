@@ -159,7 +159,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint fractional gradient stops, explicit empty and single-stop fills, and gamma for eligible two- and three-stop gradients.
 - [x] PowerPoint shape-path slide backgrounds, default center focuses, and radial ellipse focuses.
 - [x] Direct and theme gradient fills for positioned PowerPoint shapes and text boxes.
-- [x] PowerPoint custom polygons with straight, closed paths retain their outlines. Shape-path gradients with an interior point focus follow convex polygon edges.
+- [x] PowerPoint custom polygons with straight, closed paths retain their outlines. Point-focus shape-path gradients follow convex outlines and concave outlines when the focus can see the full boundary.
 - [x] PowerPoint quadratic and cubic Bézier segments in closed custom outlines follow their saved control points.
 - [x] PowerPoint elliptical arcs in closed custom outlines keep their radii, start angles, and signed sweeps.
 - [x] PowerPoint compound contours preserve cutouts, and independent normal-fill paths paint in document order.
