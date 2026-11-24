@@ -812,26 +812,20 @@ impl SlideObject {
     fn into_item(mut self) -> Option<serde_json::Value> {
         let mut dash_style = String::new();
         if let Some(stroke) = self.style.connector.take() {
-            let (x, y) = (self.width / stroke.width[0], self.height / stroke.width[1]);
-            let length = x.hypot(y);
-            if !length.is_finite() || length == 0.0 {
-                return None;
-            }
-            let (ux, uy) = (x / length, y / length);
-            let local = |[along, across]: [f64; 2]| {
-                [
-                    stroke.width[0] * (ux * along - uy * across),
-                    stroke.width[1] * (uy * along + ux * across),
-                ]
-            };
+            let size = [self.width / stroke.width[0], self.height / stroke.width[1]];
+            let segments = connector_segments(&stroke.route, size)?;
+            let head = segments.first()?;
+            let tail = segments.last()?;
+            let length = tail.phase + tail.length;
             let trim = stroke.markers.map(|marker| marker.map_or(0.0, marker_trim));
-            let from = trim[0].min(length / 2.0);
-            let to = length - trim[1].min(length / 2.0);
+            let from = trim[0].min(head.length / 2.0);
+            let to = tail.length - trim[1].min(tail.length / 2.0);
+            let local = |[x, y]: [f64; 2]| [x * stroke.width[0], y * stroke.width[1]];
             let bands = stroke.compound.bands();
             let mut contours: Vec<Vec<_>> = bands
                 .iter()
                 .map(|&band| {
-                    connector_shaft(from, to, stroke.cap, band)
+                    connector_shaft(&segments, from, to, stroke.cap, band)
                         .into_iter()
                         .map(local)
                         .collect()
@@ -839,15 +833,15 @@ impl SlideObject {
                 .collect();
             for (index, marker) in stroke.markers.into_iter().enumerate() {
                 if let Some(marker) = marker {
-                    let mut points = marker_outline(marker);
-                    if index == 1 {
-                        // Reflect both coordinates to keep the shaft's winding for a single paint pass.
-                        for [along, across] in &mut points {
-                            *along = length - *along;
-                            *across = -*across;
+                    let at_end = index == 1;
+                    let points = marker_outline(marker).into_iter().map(|[along, across]| {
+                        if at_end {
+                            local(tail.point(tail.length - along, -across))
+                        } else {
+                            local(head.point(along, across))
                         }
-                    }
-                    contours.push(points.into_iter().map(local).collect());
+                    });
+                    contours.push(points.collect());
                 }
             }
 
@@ -872,7 +866,8 @@ impl SlideObject {
             }
             self.style.paths = vec![contours];
             if !stroke.dash.lengths.is_empty() {
-                let [x, y] = point([0.0, 0.0]);
+                let [x, y] = point(local(head.origin));
+                let [ux, uy] = head.unit;
                 let (sx, sy) = (width / stroke.width[0], height / stroke.width[1]);
                 let dash = stroke
                     .dash
@@ -895,8 +890,21 @@ impl SlideObject {
                 } else {
                     String::new()
                 };
+                let turns = if segments.len() > 1 {
+                    let turns = segments
+                        .iter()
+                        .map(|segment| {
+                            let [x, y] = point(local(segment.origin));
+                            let [ux, uy] = segment.unit;
+                            format!("{x}:{y}:{ux}:{uy}:{}", segment.length)
+                        })
+                        .collect::<Vec<_>>();
+                    format!("turns={} ", turns.join(","))
+                } else {
+                    String::new()
+                };
                 dash_style = format!(
-                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {inset}{bands}{dash};",
+                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {inset}{bands}{turns}{dash};",
                     stroke.cap.code()
                 );
             }
@@ -1030,7 +1038,53 @@ fn marker_trim(marker: theme::StrokeMarker) -> f64 {
     }
 }
 
+struct ConnectorSegment {
+    origin: [f64; 2],
+    unit: [f64; 2],
+    length: f64,
+    phase: f64,
+}
+
+impl ConnectorSegment {
+    fn point(&self, along: f64, across: f64) -> [f64; 2] {
+        let [ux, uy] = self.unit;
+        [
+            self.origin[0] + ux * along - uy * across,
+            self.origin[1] + uy * along + ux * across,
+        ]
+    }
+}
+
+fn connector_segments(
+    route: &[[f64; 2]],
+    [width, height]: [f64; 2],
+) -> Option<Vec<ConnectorSegment>> {
+    let mut phase = 0.0;
+    let mut segments = Vec::new();
+    for pair in route.windows(2) {
+        let [[x, y], [next_x, next_y]] = <[[f64; 2]; 2]>::try_from(pair).ok()?;
+        let origin = [x * width, y * height];
+        let delta = [next_x * width - origin[0], next_y * height - origin[1]];
+        let length = delta[0].hypot(delta[1]);
+        if !length.is_finite() {
+            return None;
+        }
+        if length == 0.0 {
+            continue;
+        }
+        segments.push(ConnectorSegment {
+            origin,
+            unit: delta.map(|axis| axis / length),
+            length,
+            phase,
+        });
+        phase += length;
+    }
+    phase.is_finite().then_some(segments)
+}
+
 fn connector_shaft(
+    segments: &[ConnectorSegment],
     from: f64,
     to: f64,
     cap: theme::StrokeCap,
@@ -1041,28 +1095,47 @@ fn connector_shaft(
 
     let radius = (high - low) / 2.0;
     let center = (high + low) / 2.0;
-    if matches!(cap, StrokeCap::Round) {
-        let mut outline = Vec::with_capacity(34);
-        for (end, start) in [(to, FRAC_PI_2), (from, -FRAC_PI_2)] {
+    let head = &segments[0];
+    let tail = &segments[segments.len() - 1];
+    let joint = |pair: &[ConnectorSegment], across| {
+        let (before, next) = (&pair[0], &pair[1]);
+        let [ux, uy] = before.unit;
+        // Parallel sections already share an edge. Perpendicular sections meet at a miter.
+        let perpendicular = (ux * next.unit[0] + uy * next.unit[1]).abs() < 1e-12;
+        let mut point = next.point(0.0, across);
+        if perpendicular {
+            point[0] -= uy * across;
+            point[1] += ux * across;
+        }
+        point
+    };
+    let joints = segments.windows(2);
+    let mut outline = Vec::new();
+    let end = |outline: &mut Vec<_>, segment: &ConnectorSegment, along, start: f64, flipped| {
+        if matches!(cap, StrokeCap::Round) {
             for step in 0..=16 {
                 let (sin, cos) = (start - f64::from(step) * PI / 16.0).sin_cos();
-                outline.push([end + cos * radius, center + sin * radius]);
+                outline.push(segment.point(along + cos * radius, center + sin * radius));
             }
-        }
-        outline
-    } else {
-        let extra = if matches!(cap, StrokeCap::Square) {
-            radius
         } else {
-            0.0
-        };
-        vec![
-            [from - extra, high],
-            [to + extra, high],
-            [to + extra, low],
-            [from - extra, low],
-        ]
-    }
+            let extra = if matches!(cap, StrokeCap::Square) {
+                radius
+            } else {
+                0.0
+            };
+            let (along, edges) = if flipped {
+                (along - extra, [low, high])
+            } else {
+                (along + extra, [high, low])
+            };
+            outline.extend(edges.map(|edge| segment.point(along, edge)));
+        }
+    };
+    outline.extend(joints.clone().map(|pair| joint(pair, high)));
+    end(&mut outline, tail, to, FRAC_PI_2, false);
+    outline.extend(joints.rev().map(|pair| joint(pair, low)));
+    end(&mut outline, head, from, -FRAC_PI_2, true);
+    outline
 }
 
 fn marker_outline(marker: theme::StrokeMarker) -> Vec<[f64; 2]> {
@@ -2620,6 +2693,51 @@ mod tests {
         let outside = items[2]["style"].as_str().unwrap();
         assert!(outside.starts_with("left:10px;top:20px;"));
         assert!(!outside.contains("--pptx-group-matrix"));
+    }
+
+    #[test]
+    fn imports_adjusted_elbow_connectors_with_one_continuous_dash() {
+        let files = archive(&[
+            ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p"><p:sldSz cx="19200000" cy="10800000"/></p:presentation>"#),
+            ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+              <p:cxnSp><p:spPr>
+                <a:xfrm flipH="1"><a:off x="2000000" y="3000000"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                <a:prstGeom prst="bentConnector4"><a:avLst>
+                  <a:gd name="adj1" fmla="val 25000"/><a:gd name="adj2" fmla="val 75000"/>
+                </a:avLst></a:prstGeom>
+                <a:ln w="200000"><a:solidFill><a:srgbClr val="44AAFF"/></a:solidFill>
+                  <a:prstDash val="dash"/><a:tailEnd type="triangle"/>
+                </a:ln>
+              </p:spPr></p:cxnSp>
+            </p:spTree></p:cSld></p:sld>"#),
+        ]);
+        let show = import("Elbows.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(style.contains("background:#44AAFF;"));
+        assert!(style.contains("--pptx-fill-flip-x:1;"));
+        let dash = style.split_once("--pptx-line-dash:").unwrap().1;
+        let turns = dash
+            .split_once("turns=")
+            .unwrap()
+            .1
+            .split(' ')
+            .next()
+            .unwrap();
+        let lengths = turns
+            .split(',')
+            .map(|turn| turn.rsplit_once(':').unwrap().1)
+            .collect::<Vec<_>>();
+        assert_eq!(lengths, ["5", "7.5", "15", "2.5"]);
+        let path = style
+            .split_once("--pptx-fill-paths:")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        assert_eq!(path.split('/').count(), 2);
     }
 
     #[test]

@@ -3925,10 +3925,17 @@ fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radii: Radii) -> bool 
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct LineDash {
+struct DashSegment {
     origin: [f64; 2],
-    scale: [f64; 2],
     unit: [f64; 2],
+    length: f64,
+    phase: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LineDash {
+    segments: Vec<DashSegment>,
+    scale: [f64; 2],
     length: f64,
     cap: u8,
     inset_cap: bool,
@@ -3978,6 +3985,49 @@ impl LineDash {
         } else {
             bands.push([-0.5, 0.5]);
         }
+        let segments = if let Some(encoded) = fields
+            .clone()
+            .next()
+            .and_then(|token| token.strip_prefix("turns="))
+        {
+            fields.next();
+            let mut phase = 0.0;
+            let mut segments = Vec::new();
+            for item in encoded.split(',') {
+                let mut nums = item
+                    .split(':')
+                    .map(|value| value.parse::<f64>().ok().filter(|n| n.is_finite()));
+                let origin = [nums.next()??, nums.next()??];
+                let unit = [nums.next()??, nums.next()??];
+                let length = nums.next()??;
+                if nums.next().is_some()
+                    || length <= 0.0
+                    || segments.len() == 5
+                    || !origin.into_iter().all(|n| (0.0..=1.0).contains(&n))
+                    || !unit.into_iter().all(|n| (-1.0..=1.0).contains(&n))
+                {
+                    return None;
+                }
+                segments.push(DashSegment {
+                    origin,
+                    unit,
+                    length,
+                    phase,
+                });
+                phase += length;
+            }
+            if !phase.is_finite() || (phase - length).abs() > 1e-10 * length {
+                return None;
+            }
+            segments
+        } else {
+            vec![DashSegment {
+                origin,
+                unit,
+                length,
+                phase: 0.0,
+            }]
+        };
         let mut painted = Vec::new();
         let mut period = 0.0;
         while let Some(dash) = fields.next() {
@@ -3992,9 +4042,8 @@ impl LineDash {
             period = next;
         }
         (!painted.is_empty()).then_some(Self {
-            origin,
+            segments,
             scale,
-            unit,
             length,
             cap,
             inset_cap,
@@ -4005,13 +4054,36 @@ impl LineDash {
     }
 
     fn contains(&self, [x, y]: [f64; 2]) -> bool {
-        let (x, y) = (
-            (x - self.origin[0]) * self.scale[0],
-            (y - self.origin[1]) * self.scale[1],
-        );
-        let [ux, uy] = self.unit;
-        let along = x * ux + y * uy;
-        let across = y * ux - x * uy;
+        self.segments.iter().enumerate().any(|(index, segment)| {
+            let (x, y) = (
+                (x - segment.origin[0]) * self.scale[0],
+                (y - segment.origin[1]) * self.scale[1],
+            );
+            let [ux, uy] = segment.unit;
+            let along = x * ux + y * uy;
+            let across = y * ux - x * uy;
+            if along < -0.5 || along > segment.length + 0.5 {
+                return false;
+            }
+            // Miter edges extend to either side of a bend. Hold the pattern at the joint there.
+            let lower = if index == 0 { along } else { 0.0 };
+            let upper = if index + 1 == self.segments.len() {
+                along
+            } else {
+                segment.length
+            };
+            let along = if along < 0.0 {
+                lower
+            } else if along > segment.length {
+                upper
+            } else {
+                along
+            };
+            self.painted_at(along + segment.phase, across)
+        })
+    }
+
+    fn painted_at(&self, along: f64, across: f64) -> bool {
         let Some(&[low, high]) = self
             .bands
             .iter()
@@ -5228,6 +5300,21 @@ mod tests {
         assert!(!preset_square.contains([0.125, 0.0]));
         let custom_square = LineDash::parse("0 0 10 1 1 0 10 2 1 1").unwrap();
         assert!(custom_square.contains([0.125, 0.0]));
+    }
+
+    #[test]
+    fn powerpoint_elbow_dashes_keep_phase_through_the_corner() {
+        let dash = LineDash::parse("0 0 10 10 1 0 7 0 turns=0:0:1:0:3,0.3:0:0:1:4 2 2").unwrap();
+        for (point, visible) in [
+            ([0.15, 0.0], true),
+            ([0.29, 0.0], false),
+            ([0.3, 0.025], false),
+            ([0.3, 0.15], true),
+            ([0.3, 0.28], true),
+            ([0.3, 0.34], false),
+        ] {
+            assert_eq!(dash.contains(point), visible, "{point:?}");
+        }
     }
 
     #[test]
