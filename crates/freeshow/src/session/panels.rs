@@ -54,6 +54,7 @@ pub struct SettingsForm {
     pub icecast_port: String,
     pub icecast_mount: String,
     pub icecast_transport: String,
+    pub icecast_main_mix: bool,
     pub icecast_routed: bool,
     pub theme: String,
     pub themes: Vec<String>,
@@ -433,6 +434,7 @@ impl Session {
                 None => "Automatic",
             }
             .into(),
+            icecast_main_mix: icecast["mainMix"] == true,
             icecast_routed: self.icecast.is_some(),
             theme: prefs.theme.clone().unwrap_or_else(|| "default".into()),
             themes,
@@ -477,6 +479,7 @@ impl Session {
         mount: &str,
         password: &str,
         transport: &str,
+        main_mix: bool,
     ) -> Result<(), String> {
         let root = self.root.as_ref().ok_or("Choose a library folder first.")?;
         let port = port
@@ -497,6 +500,7 @@ impl Session {
                 mount.trim(),
                 (!password.is_empty()).then_some(password),
                 tls,
+                main_mix,
             )
             .map_err(|error| error.to_string())?;
         self.icecast = library.icecast();
@@ -1921,6 +1925,45 @@ mod tests {
     }
 
     #[test]
+    fn icecast_main_mix_from_settings_starts_disabled_and_keeps_speakers() {
+        let (dir, mut session) = library("icecast-main-mix");
+        let speakers = session.audio_routes();
+        assert!(!speakers.is_empty());
+        session
+            .save_icecast_connection("localhost", "8000", "/live.opus", "", "HTTP", true)
+            .unwrap();
+        assert_eq!(session.audio_routes(), speakers);
+        assert!(session.settings_form().icecast_main_mix);
+        assert!(!session.icecast.as_ref().unwrap().1);
+        assert_eq!(
+            session.audio_network_routes()[0].output_id,
+            freeshow_core::ICECAST_BUS
+        );
+        assert_eq!(
+            session.video_network_routes()[0].output_id,
+            freeshow_core::ICECAST_BUS
+        );
+
+        session.toggle_icecast(Some(true));
+        let mut reopened = Session::open(dir.path().to_path_buf());
+        assert!(reopened.icecast.as_ref().unwrap().1);
+        reopened
+            .save_icecast_connection("localhost", "8000", "/live.opus", "", "HTTP", false)
+            .unwrap();
+        assert!(reopened.icecast.is_none());
+        assert!(reopened.audio_network_routes().is_empty());
+        assert_eq!(reopened.audio_routes(), speakers);
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert!(settings.get("audioRouting").is_none());
+        reopened
+            .save_icecast_connection("localhost", "8000", "/live.opus", "", "HTTP", true)
+            .unwrap();
+        assert!(!reopened.icecast.as_ref().unwrap().1);
+    }
+
+    #[test]
     fn icecast_connection_saves_as_one_edit_and_preserves_the_route() {
         let (dir, _) = library("icecast-connection");
         let path = dir.path().join("settings.json");
@@ -1947,14 +1990,14 @@ mod tests {
         ] {
             assert!(
                 session
-                    .save_icecast_connection(host, port, mount, "draft", "TLS")
+                    .save_icecast_connection(host, port, mount, "draft", "TLS", false)
                     .is_err()
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), initial);
             assert_eq!(session.icecast.as_ref().unwrap().0.host, "old.example");
         }
         session
-            .save_icecast_connection("new.example", "443", "live.opus", "", "TLS")
+            .save_icecast_connection("new.example", "443", "live.opus", "", "TLS", false)
             .unwrap();
         let (destination, enabled) = session.icecast.as_ref().unwrap();
         assert!(!enabled);
@@ -1972,6 +2015,7 @@ mod tests {
                 "/live.opus",
                 "new password ",
                 "Automatic",
+                false,
             )
             .unwrap();
         let saved: serde_json::Value =

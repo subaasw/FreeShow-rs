@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use freeshow_core::ICECAST_BUS;
 use serde_json::Value;
 
 pub use freeshow_core::SpeakerRoute as AudioRoute;
@@ -28,6 +29,36 @@ pub fn network_audio_routes(
         .collect()
 }
 
+pub(crate) fn has_icecast_route(settings: &Value) -> bool {
+    settings["audioRouting"]["connections"]
+        .as_array()
+        .is_some_and(|edges| {
+            edges
+                .iter()
+                .any(|edge| edge["to"].as_str() == Some(ICECAST_BUS))
+        })
+}
+
+pub(crate) fn uses_icecast_main_mix(settings: &Value) -> bool {
+    settings["special"]["icecast"]["mainMix"] == true
+        && (settings["audioRouting"].is_null()
+            || settings["audioRouting"]["connections"].is_array())
+        && !has_icecast_route(settings)
+}
+
+fn stored_channel_gain(settings: &Value, id: &str) -> f32 {
+    let channel = &settings["audioChannelsData"][id];
+    if channel["isMuted"] == true {
+        0.0
+    } else {
+        channel["volume"]
+            .as_f64()
+            .filter(|gain| gain.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0) as f32
+    }
+}
+
 fn resolve_routes(
     settings: &Value,
     sources: &[&str],
@@ -35,12 +66,13 @@ fn resolve_routes(
     network: bool,
 ) -> Vec<AudioRoute> {
     let routing = &settings["audioRouting"];
+    let icecast_main_mix = network && uses_icecast_main_mix(settings);
     let Some(connections) = routing["connections"].as_array() else {
         if network {
             if !routing.is_null() {
                 return Vec::new();
             }
-            return settings["outputs"]
+            let mut destinations: Vec<_> = settings["outputs"]
                 .as_object()
                 .into_iter()
                 .flatten()
@@ -51,15 +83,15 @@ fn resolve_routes(
                             .any(|kind| output[kind].as_bool() == Some(true))
                 })
                 .map(|(id, _)| {
-                    let channel = &settings["audioChannelsData"][format!("channel_{id}")];
-                    let gain = if channel["isMuted"].as_bool() == Some(true) {
-                        0.0
-                    } else {
-                        channel["volume"].as_f64().unwrap_or(1.0).clamp(0.0, 1.0) as f32
-                    };
+                    let gain = stored_channel_gain(settings, &format!("channel_{id}"));
                     AudioRoute::stereo(Some(id.clone()), gain)
                 })
                 .collect();
+            if icecast_main_mix && !sources.is_empty() {
+                let gain = main_gain.clamp(0.0, 1.0) * stored_channel_gain(settings, ICECAST_BUS);
+                destinations.push(AudioRoute::stereo(Some(ICECAST_BUS.into()), gain));
+            }
+            return destinations;
         }
         return if routing.is_null() {
             vec![AudioRoute::stereo(None, main_gain.clamp(0.0, 1.0))]
@@ -67,7 +99,6 @@ fn resolve_routes(
             Vec::new()
         };
     };
-    let channels = &settings["audioChannelsData"];
     let channel_gain = |id: &str| {
         let linked = routing["channels"]
             .as_array()
@@ -87,15 +118,7 @@ fn resolve_routes(
         if id == "main" {
             return main_gain.clamp(0.0, 1.0);
         }
-        let data = &channels[id];
-        if data["isMuted"].as_bool() == Some(true) {
-            return 0.0;
-        }
-        data["volume"]
-            .as_f64()
-            .filter(|v| v.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0) as f32
+        stored_channel_gain(settings, id)
     };
     let mut destinations = BTreeMap::<(Option<String>, Option<u16>, Option<u16>), f32>::new();
     let mut stack: Vec<_> = sources
@@ -119,7 +142,12 @@ fn resolve_routes(
         if !visited.insert(id.clone()) {
             continue;
         }
-        if id == freeshow_core::ICECAST_BUS {
+        if icecast_main_mix && id == "main" {
+            *destinations
+                .entry((Some(ICECAST_BUS.into()), input, output_channel))
+                .or_default() += gain * channel_gain(ICECAST_BUS);
+        }
+        if id == ICECAST_BUS {
             if network {
                 *destinations.entry((Some(id), None, None)).or_default() += gain;
             }
@@ -278,6 +306,55 @@ fn resolve_routes(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn icecast_main_mix_leaves_implicit_speakers_and_network_outputs_in_place() {
+        let mut settings = json!({
+            "outputs":{"stream":{"webrtc":true}},
+            "audioChannelsData":{"channel_stream":{"volume":0.5},"icecast":{"volume":0.5}}
+        });
+        let sources = ["drawer_audio", "playlists_default"];
+        let speakers = audio_routes(&settings, &sources, 0.4);
+        let network = network_audio_routes(&settings, &sources, 0.4);
+        settings["special"] = json!({"icecast":{"mainMix":true}});
+        assert_eq!(audio_routes(&settings, &sources, 0.4), speakers);
+        let routes = network_audio_routes(&settings, &sources, 0.4);
+        assert_eq!(routes[..1], network);
+        assert_eq!(routes[1].output_id, ICECAST_BUS);
+        assert!((routes[1].gain - 0.2).abs() < 0.001);
+        assert_eq!(
+            network_audio_routes(&settings, &["output_window"], 0.0)[1].gain,
+            0.0
+        );
+    }
+
+    #[test]
+    fn icecast_main_mix_uses_graph_main_and_yields_to_a_saved_route() {
+        let mut settings = json!({
+            "special":{"icecast":{"mainMix":true}},
+            "audioRouting":{"connections":[
+                {"from":"drawer_audio","to":"main"},
+                {"from":"main","to":"speaker_default"}
+            ]}
+        });
+        let sources = ["drawer_audio"];
+        assert_eq!(
+            audio_routes(&settings, &sources, 0.4),
+            [AudioRoute::stereo(None, 0.4)]
+        );
+        assert_eq!(network_audio_routes(&settings, &sources, 0.4)[0].gain, 0.4);
+        assert!(network_audio_routes(&settings, &["output_window"], 0.4).is_empty());
+
+        settings["audioRouting"]["connections"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"from":"output_window","to":"icecast"}));
+        assert!(network_audio_routes(&settings, &sources, 0.4).is_empty());
+        assert_eq!(
+            network_audio_routes(&settings, &["output_window"], 0.4)[0].gain,
+            1.0
+        );
+    }
 
     #[test]
     fn icecast_is_an_explicit_network_destination_with_mixer_gain() {

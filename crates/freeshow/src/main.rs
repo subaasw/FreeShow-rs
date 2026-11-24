@@ -663,6 +663,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         icecast_port: settings.icecast_port.into(),
         icecast_mount: settings.icecast_mount.into(),
         icecast_transport: settings.icecast_transport.into(),
+        icecast_main_mix: settings.icecast_main_mix,
         icecast_routed: settings.icecast_routed,
         theme: settings.theme.into(),
         profiles: settings.profiles.into(),
@@ -2487,10 +2488,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        control.on_save_icecast(move |host, port, mount, password, transport| {
+        let audio_out = Rc::clone(&audio_out);
+        let video_player = Rc::clone(&video_player);
+        control.on_save_icecast(move |host, port, mount, password, transport, main_mix| {
             let result = session
                 .borrow_mut()
-                .save_icecast_connection(&host, &port, &mount, &password, &transport);
+                .save_icecast_connection(&host, &port, &mount, &password, &transport, main_mix);
+            if result.is_ok() {
+                let session = session.borrow();
+                if let Some(output) = audio_out.borrow().as_ref() {
+                    output.set_network_routes(&session.audio_network_routes());
+                }
+                if let Some(player) = video_player.borrow().as_ref() {
+                    player.set_network_routes(&session.video_network_routes());
+                }
+            }
             if let Some(ui) = ui.upgrade() {
                 match &result {
                     Ok(()) => {

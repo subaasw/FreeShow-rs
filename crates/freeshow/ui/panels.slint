@@ -31,6 +31,7 @@ export struct SettingsData {
     icecast-port: string,
     icecast-mount: string,
     icecast-transport: string,
+    icecast-main-mix: bool,
     icecast-routed: bool,
     theme: string,
     profiles: string,
@@ -249,7 +250,7 @@ export component SettingsPanel inherits Rectangle {
     in property <color> text-color;
     in property <color> close-fill;
     callback apply(string, string);
-    callback save-icecast(string, string, string, string, string) -> bool;
+    callback save-icecast(string, string, string, string, string, bool) -> bool;
     callback close();
     VerticalLayout {
         padding: 10px;
@@ -800,11 +801,21 @@ export component SettingsPanel inherits Rectangle {
                                 }
                             }
                             Row {
+                                SettingLabel { text: "Audio routing"; text-color: root.text-color; }
+                                icecast-main := CheckBox {
+                                    property <bool> saved: root.data.icecast-main-mix;
+                                    text: "Use Main mix when no Icecast route is saved";
+                                    checked: self.saved;
+                                    changed saved => { self.checked = self.saved; }
+                                    enabled: root.data.has-library;
+                                }
+                            }
+                            Row {
                                 Rectangle {}
                                 Text {
                                     text: !root.data.has-library ? "Choose a library folder to configure Icecast." :
                                         root.data.icecast-routed ? "Start or stop streaming from Functions." :
-                                        "Streaming requires an audio route to Icecast.";
+                                        "Choose Main mix or add a library audio route to Icecast.";
                                     color: root.text-color;
                                     wrap: word-wrap;
                                     font-size: 12px * OperatorStyle.font-scale;
@@ -818,7 +829,7 @@ export component SettingsPanel inherits Rectangle {
                                         enabled: root.data.has-library;
                                         clicked => {
                                             if root.save-icecast(icecast-host.text, icecast-port.text,
-                                                icecast-mount.text, icecast-password.text, icecast-transport.current-value) {
+                                                icecast-mount.text, icecast-password.text, icecast-transport.current-value, icecast-main.checked) {
                                                 icecast-password.text = "";
                                             }
                                         }
