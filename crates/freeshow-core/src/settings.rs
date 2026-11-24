@@ -253,6 +253,20 @@ pub fn next_output_monitor(saved: Option<usize>, monitor_count: usize) -> Option
     Some((current + 1) % monitor_count)
 }
 
+/// Header picker index: `0` is Auto (`None`), then each connected display.
+pub fn screen_combo_index(saved: Option<usize>) -> i32 {
+    saved.map(|index| (index + 1) as i32).unwrap_or(0)
+}
+
+/// Saved monitor from a header picker index (`0` → Auto / `None`).
+pub fn screen_from_combo(index: i32) -> Option<usize> {
+    if index <= 0 {
+        None
+    } else {
+        Some((index as usize) - 1)
+    }
+}
+
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("FREESHOW_CONFIG_DIR") {
         return PathBuf::from(dir);

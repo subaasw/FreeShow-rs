@@ -47,6 +47,7 @@ pub struct SettingsForm {
     pub group_numbers: bool,
     pub split_lines: i32,
     pub remote_port: i32,
+    pub remote_password: String,
     pub stage_port: i32,
     pub max_connections: i32,
     pub has_library: bool,
@@ -65,11 +66,13 @@ pub struct SettingsForm {
     pub output_kiosk: bool,
     /// Picture size of the active output, as `WIDTHxHEIGHT`.
     pub output_resolution: String,
-    /// The library-wide slide text and media transitions: kind and milliseconds.
+    /// The library-wide slide text and media transitions: kind, milliseconds, and direction.
     pub text_transition: String,
     pub text_duration: i32,
+    pub text_direction: String,
     pub media_transition: String,
     pub media_duration: i32,
+    pub media_direction: String,
     /// Where phones and tablets on this network open the remote and stage pages.
     pub addresses: String,
     /// Output styles by name, and the look of the one the active output uses.
@@ -126,9 +129,10 @@ pub fn setting_label(key: &str) -> &str {
         "splitLines" => "split lines",
         "maxConnections" => "connections",
         "remotePort" => "remote port (applies after a restart)",
+        "remotePassword" => "remote password (applies after a restart)",
         "stagePort" => "stage port (applies after a restart)",
-        "textTransition" | "textDuration" => "slide transition",
-        "mediaTransition" | "mediaDuration" => "media transition",
+        "textTransition" | "textDuration" | "textDirection" => "slide transition",
+        "mediaTransition" | "mediaDuration" | "mediaDirection" => "media transition",
         "outputAlwaysOnTop" => "always on top",
         "outputKiosk" => "kiosk",
         "theme" => "theme",
@@ -188,6 +192,17 @@ pub const BLEND_MODES: [&str; 9] = [
 ];
 
 /// Transition kinds the output can draw, in the order Settings lists them.
+pub const TRANSITION_DIRECTIONS: [&str; 8] = [
+    "left_right",
+    "right_left",
+    "top_bottom",
+    "bottom_top",
+    "up_left",
+    "up_right",
+    "down_left",
+    "down_right",
+];
+
 pub const TRANSITION_KINDS: [&str; 11] = [
     "none",
     "fade",
@@ -213,6 +228,7 @@ pub struct InspectorForm {
     /// The slide's own transition kind, or "default" when the style transition applies.
     pub slide_transition: String,
     pub slide_transition_ms: i32,
+    pub slide_transition_direction: String,
 }
 
 /// One stage item row in the Stage editor.
@@ -402,6 +418,7 @@ impl Session {
             group_numbers: prefs.group_numbers(),
             split_lines: prefs.split_lines() as i32,
             remote_port: i32::from(prefs.remote_port.unwrap_or(freeshow_remote::REMOTE_PORT)),
+            remote_password: prefs.remote_password.clone().unwrap_or_default(),
             stage_port: i32::from(prefs.stage_port.unwrap_or(freeshow_remote::STAGE_PORT)),
             addresses: {
                 let host = lan_host();
@@ -461,8 +478,10 @@ impl Session {
                 .unwrap_or_else(|| "1920x1080".into()),
             text_transition: self.library_transition(false).kind,
             text_duration: self.library_transition(false).duration_ms as i32,
+            text_direction: self.library_transition(false).direction,
             media_transition: self.library_transition(true).kind,
             media_duration: self.library_transition(true).duration_ms as i32,
+            media_direction: self.library_transition(true).direction,
             output_names: self
                 .audience_outputs()
                 .into_iter()
@@ -701,15 +720,36 @@ impl Session {
                 vec!["ports", "remote"],
                 json!(parse_int(value, 1024, 65535)?),
             ),
+            "remotePassword" => {
+                if value.contains('\0') || value.len() > 256 {
+                    return Err("remote password is too long or invalid".into());
+                }
+                (
+                    vec!["serverData", "remote", "password"],
+                    json!(value),
+                )
+            }
             "stagePort" => (
                 vec!["ports", "stage"],
                 json!(parse_int(value, 1024, 65535)?),
             ),
-            "textTransition" | "mediaTransition" | "textDuration" | "mediaDuration" => {
+            "textTransition"
+            | "mediaTransition"
+            | "textDuration"
+            | "mediaDuration"
+            | "textDirection"
+            | "mediaDirection" => {
                 let media = key.starts_with("media");
                 let mut motion = self.library_transition(media);
                 if key.ends_with("Duration") {
                     motion.duration_ms = parse_int(value, 0, 10_000)? as u64;
+                } else if key.ends_with("Direction") {
+                    if !TRANSITION_DIRECTIONS.contains(&value) {
+                        return Err(format!(
+                            "direction must be one of {TRANSITION_DIRECTIONS:?}"
+                        ));
+                    }
+                    motion.direction = value.to_string();
                 } else if TRANSITION_KINDS.contains(&value) {
                     motion.kind = value.to_string();
                 } else {
@@ -722,6 +762,7 @@ impl Session {
                     &motion.kind,
                     motion.duration_ms,
                     &motion.easing,
+                    &motion.direction,
                 ) {
                     Ok(())
                 } else {
@@ -1169,7 +1210,14 @@ impl Session {
             slide_transition: own_transition
                 .as_ref()
                 .map_or_else(|| "default".to_string(), |t| t.kind.clone()),
-            slide_transition_ms: own_transition.map_or(500, |t| t.duration_ms.min(10_000) as i32),
+            slide_transition_ms: own_transition
+                .as_ref()
+                .map_or(500, |t| t.duration_ms.min(10_000) as i32),
+            slide_transition_direction: own_transition
+                .as_ref()
+                .map(|t| t.direction.clone())
+                .filter(|direction| !direction.is_empty())
+                .unwrap_or_else(|| "left_right".into()),
         }
     }
 
@@ -1294,16 +1342,32 @@ impl Session {
                     show.set_item_filters(slide, item, &filters)
                 })
             }
-            "slide-transition" | "slide-transition-ms" => {
+            "slide-transition" | "slide-transition-ms" | "slide-transition-direction" => {
                 let Some(index) = self.slide_index else {
                     return Err("Pick a slide first".to_string());
                 };
                 let form = self.inspector_form();
-                let (kind, duration) = if key == "slide-transition" {
+                let (kind, duration, direction) = if key == "slide-transition" {
                     if value != "default" && !TRANSITION_KINDS.contains(&value.as_str()) {
                         return Err(format!("unknown transition {value:?}"));
                     }
-                    (value.clone(), form.slide_transition_ms as u64)
+                    (
+                        value.clone(),
+                        form.slide_transition_ms as u64,
+                        form.slide_transition_direction,
+                    )
+                } else if key == "slide-transition-direction" {
+                    if !TRANSITION_DIRECTIONS.contains(&value.as_str()) {
+                        return Err(format!(
+                            "direction must be one of {TRANSITION_DIRECTIONS:?}"
+                        ));
+                    }
+                    let kind = if form.slide_transition == "default" {
+                        "slide".to_string()
+                    } else {
+                        form.slide_transition
+                    };
+                    (kind, form.slide_transition_ms as u64, value.clone())
                 } else {
                     let ms = parse_int(&value, 0, 10_000)?;
                     // A duration on a slide still using the style transition gives it a fade.
@@ -1312,14 +1376,16 @@ impl Session {
                     } else {
                         form.slide_transition
                     };
-                    (kind, ms as u64)
+                    (kind, ms as u64, form.slide_transition_direction)
                 };
                 let kind = if kind == "default" {
                     String::new()
                 } else {
                     kind
                 };
-                self.edit_current_item(|show, _, _| show.set_transition_at(index, &kind, duration))
+                self.edit_current_item(|show, _, _| {
+                    show.set_transition_at_dir(index, &kind, duration, &direction)
+                })
             }
             "line-height" => {
                 let percent = parse_int(&value, 0, 500)? as i32;
@@ -2047,6 +2113,10 @@ mod tests {
         session.apply_setting("autosave", "5min").unwrap();
         session.apply_setting("theme", "sea").unwrap();
         assert!(session.apply_setting("remotePort", "80").is_err());
+        session.apply_setting("remotePassword", "secret").unwrap();
+        assert_eq!(session.preferences.remote_password.as_deref(), Some("secret"));
+        session.apply_setting("remotePassword", "").unwrap();
+        assert!(session.preferences.remote_password.as_deref().unwrap_or("").is_empty());
         assert!(session.apply_setting("autosave", "soon").is_err());
         assert!(session.apply_setting("theme", "nope").is_err());
         assert!(session.apply_setting("bogus", "1").is_err());
@@ -2519,17 +2589,24 @@ mod tests {
         );
         session.apply_setting("textTransition", "none").unwrap();
         session.apply_setting("mediaDuration", "1200").unwrap();
+        session.apply_setting("textDirection", "right_left").unwrap();
         assert!(session.apply_setting("textTransition", "wobble").is_err());
         assert!(session.apply_setting("textDuration", "-5").is_err());
+        assert!(session.apply_setting("textDirection", "sideways").is_err());
         let form = session.settings_form();
         assert_eq!(form.text_transition, "none");
         assert_eq!(form.media_duration, 1200);
+        assert_eq!(form.text_direction, "right_left");
         assert_eq!(session.output_motion().0.kind, "none");
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("settings.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["transitionData"]["media"]["duration"], 1200);
+        assert_eq!(
+            saved["transitionData"]["text"]["custom"]["direction"],
+            "right_left"
+        );
         assert_eq!(saved["unknownKey"]["keep"], 1);
     }
 
@@ -2624,6 +2701,30 @@ mod tests {
         assert_eq!(row.color, "#ff0000");
         assert!(session.remove_stage_item(&id));
         assert!(session.stage_rows().iter().all(|row| row.id != id));
+    }
+
+    #[test]
+    fn stage_media_picker_lists_library_pictures_and_videos() {
+        let (dir, _) = library("stage-media-picker");
+        let media = dir.path().join("Media");
+        std::fs::create_dir(&media).unwrap();
+        let image = freeshow_output::Frame {
+            width: 8,
+            height: 8,
+            pixels: [255, 0, 0, 255].repeat(8 * 8),
+        };
+        std::fs::write(media.join("cue.png"), image.encode_png().unwrap()).unwrap();
+        std::fs::write(media.join("notes.txt"), "skip").unwrap();
+        let session = Session::open(dir.path().to_path_buf());
+        let files = session.stage_media_files();
+        assert!(
+            files.iter().any(|(label, path)| {
+                label.contains("cue.png") && path.ends_with("cue.png")
+            }),
+            "{files:?}"
+        );
+        assert!(session.stage_still_files().iter().any(|(label, _)| label.contains("cue.png")));
+        assert!(!files.iter().any(|(label, _)| label.contains("notes.txt")));
     }
 
     #[test]

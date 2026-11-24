@@ -2,7 +2,7 @@
 // Settings, Inspector and Stage editor panels. Every edit calls back with one
 // key/value pair; Rust validates it, writes the library file, and refreshes `data`.
 
-import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, Switch, TabWidget, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider, SpinBox, Switch, TabWidget, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, BoxButton, HeaderButton, ListRow } from "widgets.slint";
 
 export struct ThemeColorRow {
@@ -24,6 +24,7 @@ export struct SettingsData {
     group-numbers: bool,
     split-lines: int,
     remote-port: int,
+    remote-password: string,
     stage-port: int,
     max-connections: int,
     has-library: bool,
@@ -41,8 +42,10 @@ export struct SettingsData {
     output-resolution: string,
     text-transition: string,
     text-duration: int,
+    text-direction: string,
     media-transition: string,
     media-duration: int,
+    media-direction: string,
     addresses: string,
     style-names: [string],
     style-name: string,
@@ -109,6 +112,7 @@ export struct InspectorData {
     blend: string,
     slide-transition: string,
     slide-transition-ms: int,
+    slide-transition-direction: string,
     valign: string,
     rotation: int,
     text-case: string,
@@ -205,12 +209,293 @@ export global ComboIndex {
     pure callback find([string], string) -> int;
 }
 
+/// Hex ↔ RGB(A) helpers wired from Rust (`parse_color` / `#{:02x}`).
+export global ColorFmt {
+    // a = 0…255; omits the alpha byte when a is 255.
+    pure callback hex(int, int, int, int) -> string;
+    pure callback parse(string) -> color;
+}
+
 /// A line edit that shows `shown` and follows it when the data changes, even after the
 /// operator typed into it (typing would otherwise cut the binding).
+/// Commits on Enter and when the field loses focus, so colors and style values
+/// apply without hunting for Enter.
 export component ValueEdit inherits LineEdit {
     in property <string> shown;
     text: self.shown;
     changed shown => { self.text = self.shown; }
+    changed has-focus => {
+        if !self.has-focus && self.text != self.shown {
+            self.accepted(self.text);
+        }
+    }
+}
+
+/// Small section title for inspector / stage forms.
+component SectionLabel inherits Text {
+    in property <color> text-color;
+    color: root.text-color;
+    opacity: 0.55;
+    font-size: 11px * OperatorStyle.font-scale;
+    font-weight: 700;
+    vertical-alignment: center;
+}
+
+/// Clickable section header that toggles `open` (▾ / ▸).
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in property <color> text-color;
+    in-out property <bool> open: true;
+    height: 22px;
+    HorizontalLayout {
+        spacing: OperatorStyle.space-xs;
+        alignment: center;
+        Text {
+            text: root.open ? "▾" : "▸";
+            color: root.text-color;
+            opacity: 0.55;
+            font-size: 11px * OperatorStyle.font-scale;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        SectionLabel {
+            text: root.title;
+            text-color: root.text-color;
+            horizontal-stretch: 1;
+        }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open = !root.open; }
+    }
+}
+
+/// Preset chips used inside the colour picker popup.
+component QuickColors inherits HorizontalLayout {
+    in property <color> text-color;
+    in property <bool> allow-none: false;
+    in property <bool> enabled: true;
+    callback pick(string);
+    spacing: OperatorStyle.space-xs;
+    if root.allow-none: Rectangle {
+        width: 22px;
+        height: 22px;
+        border-radius: OperatorStyle.chrome-radius;
+        border-width: 1px;
+        border-color: root.text-color.with-alpha(0.35);
+        background: transparent;
+        Text {
+            text: "∅";
+            color: root.text-color;
+            opacity: 0.7;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            enabled: root.enabled;
+            clicked => { root.pick("none"); }
+        }
+    }
+    for swatch in [
+        { fill: #ffffff, hex: "#ffffff" },
+        { fill: #f0f0ff, hex: "#f0f0ff" },
+        { fill: #000000, hex: "#000000" },
+        { fill: #F0008C, hex: "#F0008C" },
+        { fill: #ffee00, hex: "#ffee00" },
+        { fill: #00b140, hex: "#00b140" },
+        { fill: #0047bb, hex: "#0047bb" },
+        { fill: #c0392b, hex: "#c0392b" },
+    ]: Rectangle {
+        width: 22px;
+        height: 22px;
+        border-radius: OperatorStyle.chrome-radius;
+        background: swatch.fill;
+        border-width: 1px;
+        border-color: root.text-color.with-alpha(0.25);
+        TouchArea {
+            enabled: root.enabled;
+            clicked => { root.pick(swatch.hex); }
+        }
+    }
+}
+
+/// Swatch + hex field; click the swatch for RGBA sliders and presets.
+component ColorField inherits HorizontalLayout {
+    in property <string> hex;
+    in property <color> text-color;
+    in property <color> panel: #2a2a32;
+    in property <bool> enabled: true;
+    in property <bool> allow-none: false;
+    in property <string> placeholder: "#ffffff";
+    callback set(string);
+    spacing: OperatorStyle.space-xs;
+    horizontal-stretch: 1;
+    alignment: center;
+    property <color> live: ColorFmt.parse(root.hex);
+    property <bool> empty: root.hex == "" || root.hex == "none" || root.hex == "transparent";
+    property <int> r: root.empty ? 255 : round(root.live.red * 255);
+    property <int> g: root.empty ? 255 : round(root.live.green * 255);
+    property <int> b: root.empty ? 255 : round(root.live.blue * 255);
+    property <int> a: root.empty ? 255 : round(root.live.alpha * 255);
+
+    swatch := Rectangle {
+        width: OperatorStyle.swatch-size;
+        height: OperatorStyle.swatch-size;
+        border-radius: OperatorStyle.chrome-radius;
+        border-width: 1px;
+        border-color: root.text-color.with-alpha(0.35);
+        background: root.empty ? transparent : root.live;
+        if root.empty: Text {
+            text: "∅";
+            color: root.text-color;
+            opacity: 0.55;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { picker.show(); }
+        }
+        picker := PopupWindow {
+            x: 0px;
+            y: parent.height + OperatorStyle.space-xs;
+            width: 256px;
+            close-policy: close-on-click-outside;
+            Rectangle {
+                background: root.panel;
+                border-radius: OperatorStyle.chrome-radius;
+                border-width: 1px;
+                border-color: root.text-color.with-alpha(0.22);
+                VerticalLayout {
+                    padding: OperatorStyle.space;
+                    spacing: OperatorStyle.space-sm;
+                    Rectangle {
+                        height: 40px;
+                        border-radius: OperatorStyle.chrome-radius;
+                        border-width: 1px;
+                        border-color: root.text-color.with-alpha(0.25);
+                        background: root.empty ? transparent : root.live;
+                    }
+                    HorizontalLayout {
+                        spacing: OperatorStyle.space-xs;
+                        Text {
+                            text: "R";
+                            color: root.text-color;
+                            min-width: 14px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.r;
+                            changed(value) => {
+                                root.set(ColorFmt.hex(round(value), root.g, root.b, root.a));
+                            }
+                        }
+                        Text {
+                            text: root.r;
+                            color: root.text-color;
+                            min-width: 28px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: OperatorStyle.space-xs;
+                        Text {
+                            text: "G";
+                            color: root.text-color;
+                            min-width: 14px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.g;
+                            changed(value) => {
+                                root.set(ColorFmt.hex(root.r, round(value), root.b, root.a));
+                            }
+                        }
+                        Text {
+                            text: root.g;
+                            color: root.text-color;
+                            min-width: 28px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: OperatorStyle.space-xs;
+                        Text {
+                            text: "B";
+                            color: root.text-color;
+                            min-width: 14px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.b;
+                            changed(value) => {
+                                root.set(ColorFmt.hex(root.r, root.g, round(value), root.a));
+                            }
+                        }
+                        Text {
+                            text: root.b;
+                            color: root.text-color;
+                            min-width: 28px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: OperatorStyle.space-xs;
+                        Text {
+                            text: "A";
+                            color: root.text-color;
+                            min-width: 14px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.a;
+                            changed(value) => {
+                                root.set(ColorFmt.hex(root.r, root.g, root.b, round(value)));
+                            }
+                        }
+                        Text {
+                            text: root.a;
+                            color: root.text-color;
+                            min-width: 28px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    QuickColors {
+                        text-color: root.text-color;
+                        allow-none: root.allow-none;
+                        enabled: root.enabled;
+                        pick(hex) => { root.set(hex); }
+                    }
+                }
+            }
+        }
+    }
+    ValueEdit {
+        horizontal-stretch: 1;
+        enabled: root.enabled;
+        shown: root.hex;
+        placeholder-text: root.placeholder;
+        accepted(value) => { root.set(value); }
+    }
 }
 
 /// A spin box that shows `shown` and follows it when the data changes, even after the
@@ -219,6 +504,20 @@ component ValueSpin inherits SpinBox {
     in property <int> shown;
     value: self.shown;
     changed shown => { self.value = self.shown; }
+}
+
+/// Checkbox that follows `shown` when the bound data changes (std CheckBox sticks after a click).
+component ValueCheck inherits CheckBox {
+    in property <bool> shown;
+    checked: self.shown;
+    changed shown => { self.checked = self.shown; }
+}
+
+/// Switch that follows `shown` when the bound data changes (std Switch sticks after a click).
+component ValueSwitch inherits Switch {
+    in property <bool> shown;
+    checked: self.shown;
+    changed shown => { self.checked = self.shown; }
 }
 
 /// A combo box that shows `value` and follows it when the data changes, even after the
@@ -249,12 +548,13 @@ export component SettingsPanel inherits Rectangle {
     in property <string> status;
     in property <color> text-color;
     in property <color> close-fill;
+    in property <color> panel: #2a2a32;
     callback apply(string, string);
     callback save-icecast(string, string, string, string, string, bool) -> bool;
     callback close();
     VerticalLayout {
-        padding: 10px;
-        spacing: 6px;
+        padding: OperatorStyle.panel-pad;
+        spacing: OperatorStyle.space-sm;
         PanelHeader {
             title: "Settings";
             status: root.status;
@@ -268,7 +568,7 @@ export component SettingsPanel inherits Rectangle {
                 VerticalLayout {
                 alignment: start;
                 GridLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Language"; text-color: root.text-color; }
@@ -297,9 +597,9 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Updates"; text-color: root.text-color; }
-                        Switch {
+                        ValueSwitch {
                             text: "Alert when a new version is released";
-                            checked: root.data.alert-updates;
+                            shown: root.data.alert-updates;
                             toggled => { root.apply("alertUpdates", Fmt.flag(self.checked)); }
                         }
                     }
@@ -311,39 +611,39 @@ export component SettingsPanel inherits Rectangle {
                 VerticalLayout {
                 alignment: start;
                 GridLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Outputs"; text-color: root.text-color; }
-                        Switch {
+                        ValueSwitch {
                             text: "Open output on startup";
-                            checked: root.data.auto-output;
+                            shown: root.data.auto-output;
                             toggled => { root.apply("autoOutput", Fmt.flag(self.checked)); }
                         }
-                        Switch {
+                        ValueSwitch {
                             text: "Lock output";
-                            checked: root.data.out-locked;
+                            shown: root.data.out-locked;
                             toggled => { root.apply("outLocked", Fmt.flag(self.checked)); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Slides"; text-color: root.text-color; }
-                        Switch {
+                        ValueSwitch {
                             text: "Full group colors";
-                            checked: root.data.full-colors;
+                            shown: root.data.full-colors;
                             toggled => { root.apply("fullColors", Fmt.flag(self.checked)); }
                         }
-                        Switch {
+                        ValueSwitch {
                             text: "Group numbers";
-                            checked: root.data.group-numbers;
+                            shown: root.data.group-numbers;
                             toggled => { root.apply("groupNumbers", Fmt.flag(self.checked)); }
                         }
                     }
                     Row {
                         SettingLabel { text: "Labels"; text-color: root.text-color; }
-                        Switch {
+                        ValueSwitch {
                             text: "Hide button labels";
-                            checked: root.data.labels-disabled;
+                            shown: root.data.labels-disabled;
                             toggled => { root.apply("labelsDisabled", Fmt.flag(self.checked)); }
                         }
                     }
@@ -373,6 +673,15 @@ export component SettingsPanel inherits Rectangle {
                         }
                     }
                     Row {
+                        SettingLabel { text: "Slide direction"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 2;
+                            model: ["left_right", "right_left", "top_bottom", "bottom_top", "up_left", "up_right", "down_left", "down_right"];
+                            value: root.data.text-direction == "" ? "left_right" : root.data.text-direction;
+                            selected(value) => { root.apply("textDirection", value); }
+                        }
+                    }
+                    Row {
                         SettingLabel { text: "Media transition"; text-color: root.text-color; }
                         ValueCombo {
                             model: root.transition-kinds;
@@ -388,10 +697,19 @@ export component SettingsPanel inherits Rectangle {
                         }
                     }
                     Row {
+                        SettingLabel { text: "Media direction"; text-color: root.text-color; }
+                        ValueCombo {
+                            colspan: 2;
+                            model: ["left_right", "right_left", "top_bottom", "bottom_top", "up_left", "up_right", "down_left", "down_right"];
+                            value: root.data.media-direction == "" ? "left_right" : root.data.media-direction;
+                            selected(value) => { root.apply("mediaDirection", value); }
+                        }
+                    }
+                    Row {
                         Rectangle {}
                         Text {
                             colspan: 2;
-                            text: "Durations are in milliseconds. A show or slide with its own transition keeps it.";
+                            text: "Durations are in milliseconds. Direction applies to slide, wipe, push, cover, and uncover. A show or slide with its own transition keeps it.";
                             color: root.text-color;
                             opacity: 0.6;
                             font-size: 12px;
@@ -406,7 +724,7 @@ export component SettingsPanel inherits Rectangle {
                 VerticalLayout {
                 alignment: start;
                 GridLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Theme"; text-color: root.text-color; }
@@ -416,7 +734,7 @@ export component SettingsPanel inherits Rectangle {
                             selected(value) => { root.apply("theme", value); }
                         }
                         HorizontalLayout {
-                            spacing: 6px;
+                            spacing: OperatorStyle.space-sm;
                             Button {
                                 text: "Duplicate";
                                 clicked => { root.apply("themeDuplicate", ""); }
@@ -430,16 +748,12 @@ export component SettingsPanel inherits Rectangle {
                     }
                     for row in root.data.theme-colors: Row {
                         SettingLabel { text: row.label; text-color: root.text-color; }
-                        ValueEdit {
-                            shown: row.hex;
-                            accepted(value) => { root.apply("themeColor." + row.key, value); }
-                        }
-                        Rectangle {
-                            height: 26px;
-                            border-radius: 4px;
-                            border-width: 1px;
-                            border-color: root.text-color.with-alpha(0.3);
-                            background: row.swatch;
+                        ColorField {
+                            colspan: 2;
+                            hex: row.hex;
+                            text-color: root.text-color;
+                            panel: root.panel;
+                            set(value) => { root.apply("themeColor." + row.key, value); }
                         }
                     }
                     Row {
@@ -461,7 +775,7 @@ export component SettingsPanel inherits Rectangle {
                             edited(value) => { root.apply("themeFontSize", value); }
                         }
                         HorizontalLayout {
-                            spacing: 6px;
+                            spacing: OperatorStyle.space-sm;
                             SettingLabel { text: "Corners px"; text-color: root.text-color; }
                             ValueSpin {
                                 minimum: 0;
@@ -490,7 +804,7 @@ export component SettingsPanel inherits Rectangle {
                 VerticalLayout {
                 alignment: start;
                 GridLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Output"; text-color: root.text-color; }
@@ -500,7 +814,7 @@ export component SettingsPanel inherits Rectangle {
                             selected(value) => { root.apply("outputPick", value); }
                         }
                         HorizontalLayout {
-                            spacing: 6px;
+                            spacing: OperatorStyle.space-sm;
                             Button {
                                 text: "New output";
                                 clicked => { root.apply("outputNew", ""); }
@@ -542,14 +856,14 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Window"; text-color: root.text-color; }
-                        Switch {
+                        ValueSwitch {
                             text: "Always on top";
-                            checked: root.data.output-always-on-top;
+                            shown: root.data.output-always-on-top;
                             toggled => { root.apply("outputAlwaysOnTop", Fmt.flag(self.checked)); }
                         }
-                        Switch {
+                        ValueSwitch {
                             text: "Kiosk (fullscreen)";
-                            checked: root.data.output-kiosk;
+                            shown: root.data.output-kiosk;
                             toggled => { root.apply("outputKiosk", Fmt.flag(self.checked)); }
                         }
                     }
@@ -572,7 +886,7 @@ export component SettingsPanel inherits Rectangle {
                 VerticalLayout {
                 alignment: start;
                 GridLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Output style"; text-color: root.text-color; }
@@ -582,7 +896,7 @@ export component SettingsPanel inherits Rectangle {
                             selected(value) => { root.apply("outputStyle", value); }
                         }
                         HorizontalLayout {
-                            spacing: 6px;
+                            spacing: OperatorStyle.space-sm;
                             Button {
                                 text: "New style";
                                 clicked => { root.apply("styleNew", ""); }
@@ -604,34 +918,13 @@ export component SettingsPanel inherits Rectangle {
                     }
                     Row {
                         SettingLabel { text: "Background"; text-color: root.text-color; }
-                        ValueEdit {
-                            shown: root.data.style-background;
-                            placeholder-text: "#000000 (black)";
-                            accepted(value) => { root.apply("styleBackground", value); }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            Rectangle {
-                                width: 28px;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: root.text-color.with-alpha(0.4);
-                                background: root.data.style-swatch;
-                            }
-                            for swatch in [
-                                { fill: #000000, hex: "#000000" },
-                                { fill: #ffffff, hex: "#ffffff" },
-                                { fill: #00b140, hex: "#00b140" },
-                                { fill: #0047bb, hex: "#0047bb" },
-                                { fill: #1e1e1e, hex: "#1e1e1e" },
-                            ]: Rectangle {
-                                width: 24px;
-                                border-radius: 4px;
-                                background: swatch.fill;
-                                border-width: 1px;
-                                border-color: root.text-color.with-alpha(0.25);
-                                TouchArea { clicked => { root.apply("styleBackground", swatch.hex); } }
-                            }
+                        ColorField {
+                            colspan: 2;
+                            hex: root.data.style-background;
+                            text-color: root.text-color;
+                            panel: root.panel;
+                            placeholder: "#000000 (black)";
+                            set(value) => { root.apply("styleBackground", value); }
                         }
                     }
                     Row {
@@ -699,7 +992,7 @@ export component SettingsPanel inherits Rectangle {
                 VerticalLayout {
                 alignment: start;
                 GridLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     Row {
                         SettingLabel { text: "Remote port"; text-color: root.text-color; }
@@ -708,6 +1001,15 @@ export component SettingsPanel inherits Rectangle {
                             maximum: 65535;
                             shown: root.data.remote-port;
                             edited(value) => { root.apply("remotePort", value); }
+                        }
+                    }
+                    Row {
+                        SettingLabel { text: "Remote password"; text-color: root.text-color; }
+                        ValueEdit {
+                            shown: root.data.remote-password;
+                            placeholder-text: "Blank = no password";
+                            input-type: password;
+                            accepted(value) => { root.apply("remotePassword", value); }
                         }
                     }
                     Row {
@@ -755,7 +1057,7 @@ export component SettingsPanel inherits Rectangle {
                     VerticalLayout {
                         alignment: start;
                         icecast-form := GridLayout {
-                            padding: 10px;
+                            padding: OperatorStyle.panel-pad;
                             spacing: 8px;
                             Row {
                                 SettingLabel { text: "Host"; text-color: root.text-color; }
@@ -802,11 +1104,9 @@ export component SettingsPanel inherits Rectangle {
                             }
                             Row {
                                 SettingLabel { text: "Audio routing"; text-color: root.text-color; }
-                                icecast-main := CheckBox {
-                                    property <bool> saved: root.data.icecast-main-mix;
+                                icecast-main := ValueCheck {
                                     text: "Use Main mix when no Icecast route is saved";
-                                    checked: self.saved;
-                                    changed saved => { self.checked = self.saved; }
+                                    shown: root.data.icecast-main-mix;
                                     enabled: root.data.has-library;
                                 }
                             }
@@ -844,7 +1144,7 @@ export component SettingsPanel inherits Rectangle {
             Tab {
                 title: "Profiles";
                 VerticalLayout {
-                    padding: 10px;
+                    padding: OperatorStyle.panel-pad;
                     spacing: 8px;
                     alignment: start;
                     Text {
@@ -867,289 +1167,357 @@ export component SettingsPanel inherits Rectangle {
 export component InspectorPanel inherits VerticalLayout {
     in property <InspectorData> data;
     in property <color> text-color;
+    in property <color> panel: #2a2a32;
     callback set(string, string);
-    // Two fields per row so the boxes fit the narrow editor column without clipping.
-    spacing: 6px;
-    HorizontalLayout {
-        spacing: 6px;
-        ValueEdit {
-            horizontal-stretch: 2;
-            enabled: root.data.has-item;
-            shown: root.data.family;
-            placeholder-text: "Font family";
-            accepted(value) => { root.set("font-family", value); }
-        }
-        ValueSpin {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            minimum: 12;
-            maximum: 400;
-            shown: root.data.font-px;
-            edited(value) => { root.set("font-size", value); }
-        }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        CheckBox {
-            text: "Bold";
-            enabled: root.data.has-item;
-            checked: root.data.bold;
-            toggled => { root.set("bold", Fmt.flag(self.checked)); }
-        }
-        CheckBox {
-            text: "Italic";
-            enabled: root.data.has-item;
-            checked: root.data.italic;
-            toggled => { root.set("italic", Fmt.flag(self.checked)); }
-        }
-        FieldLabel { text: "Align"; text-color: root.text-color; min-width: 40px; }
-        ValueCombo {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            model: ["left", "center", "right", "justify"];
-            value: root.data.align == "" ? "center" : root.data.align;
-            selected(value) => { root.set("align", value); }
-        }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        CheckBox {
-            text: "Underline";
-            enabled: root.data.has-item;
-            checked: root.data.underline;
-            toggled => { root.set("underline", Fmt.flag(self.checked)); }
-        }
-        CheckBox {
-            text: "Strikethrough";
-            enabled: root.data.has-item;
-            checked: root.data.strike;
-            toggled => { root.set("line-through", Fmt.flag(self.checked)); }
-        }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Color"; text-color: root.text-color; min-width: 48px; }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.color;
-            placeholder-text: "#FFFFFF";
-            accepted(value) => { root.set("color", value); }
-        }
-        FieldLabel { text: "Fill"; text-color: root.text-color; min-width: 32px; }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.background;
-            placeholder-text: "none";
-            accepted(value) => { root.set("background-color", value); }
-        }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "X"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.x; edited(value) => { root.set("left", value); } }
-        FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.y; edited(value) => { root.set("top", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Width"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.w; edited(value) => { root.set("width", value); } }
-        FieldLabel { text: "Height"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.h; edited(value) => { root.set("height", value); } }
-    }
-    if root.data.has-item && root.data.has-picture: VerticalLayout {
-        spacing: 4px;
+    // Rare mid-service sections start collapsed so Text/Position stay on screen.
+    property <bool> open-text: true;
+    property <bool> open-position: true;
+    property <bool> open-picture: true;
+    property <bool> open-box: false;
+    property <bool> open-outline: false;
+    property <bool> open-filters: false;
+    property <bool> open-layout: false;
+    property <bool> open-transition: true;
+    spacing: OperatorStyle.space-sm;
+
+    SectionHeader { title: "TEXT"; text-color: root.text-color; open <=> root.open-text; }
+    if root.open-text: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
         HorizontalLayout {
-            spacing: 6px;
-            FieldLabel { text: "Picture fit"; text-color: root.text-color; }
+            spacing: OperatorStyle.space-sm;
+            ValueEdit {
+                horizontal-stretch: 2;
+                enabled: root.data.has-item;
+                shown: root.data.family;
+                placeholder-text: "Font family";
+                accepted(value) => { root.set("font-family", value); }
+            }
+            ValueSpin {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                minimum: 12;
+                maximum: 400;
+                shown: root.data.font-px;
+                edited(value) => { root.set("font-size", value); }
+            }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            ValueCheck {
+                text: "Bold";
+                enabled: root.data.has-item;
+                shown: root.data.bold;
+                toggled => { root.set("bold", Fmt.flag(self.checked)); }
+            }
+            ValueCheck {
+                text: "Italic";
+                enabled: root.data.has-item;
+                shown: root.data.italic;
+                toggled => { root.set("italic", Fmt.flag(self.checked)); }
+            }
+            FieldLabel { text: "Align"; text-color: root.text-color; min-width: 40px; }
             ValueCombo {
                 horizontal-stretch: 1;
-                model: ["contain", "cover", "fill", "tile"];
-                value: root.data.picture-fit == "blur" || root.data.picture-fit == "" ? "contain" : root.data.picture-fit;
-                selected(value) => { root.set("picture-fit", value); }
+                enabled: root.data.has-item;
+                model: ["left", "center", "right", "justify"];
+                value: root.data.align == "" ? "center" : root.data.align;
+                selected(value) => { root.set("align", value); }
             }
         }
         HorizontalLayout {
-            spacing: 6px;
-            CheckBox {
-                text: "Flip horizontally";
-                checked: root.data.picture-flip-x;
-                toggled => { root.set("picture-flip-x", Fmt.flag(self.checked)); }
+            spacing: OperatorStyle.space-sm;
+            ValueCheck {
+                text: "Underline";
+                enabled: root.data.has-item;
+                shown: root.data.underline;
+                toggled => { root.set("underline", Fmt.flag(self.checked)); }
             }
-            CheckBox {
-                text: "Flip vertically";
-                checked: root.data.picture-flip-y;
-                toggled => { root.set("picture-flip-y", Fmt.flag(self.checked)); }
+            ValueCheck {
+                text: "Strikethrough";
+                enabled: root.data.has-item;
+                shown: root.data.strike;
+                toggled => { root.set("line-through", Fmt.flag(self.checked)); }
             }
-        }
-        FieldLabel { text: "Picture crop (%)"; text-color: root.text-color; }
-        HorizontalLayout {
-            spacing: 6px;
-            FieldLabel { text: "Left"; text-color: root.text-color; min-width: 48px; }
-            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-left; accepted(value) => { root.set("crop-left", value); } }
-            FieldLabel { text: "Right"; text-color: root.text-color; min-width: 48px; }
-            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-right; accepted(value) => { root.set("crop-right", value); } }
         }
         HorizontalLayout {
-            spacing: 6px;
-            FieldLabel { text: "Top"; text-color: root.text-color; min-width: 48px; }
-            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-top; accepted(value) => { root.set("crop-top", value); } }
-            FieldLabel { text: "Bottom"; text-color: root.text-color; min-width: 48px; }
-            ValueEdit { horizontal-stretch: 1; shown: root.data.crop-bottom; accepted(value) => { root.set("crop-bottom", value); } }
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Color"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ColorField {
+                hex: root.data.color;
+                text-color: root.text-color;
+                panel: root.panel;
+                enabled: root.data.has-item;
+                placeholder: "#FFFFFF";
+                set(value) => { root.set("color", value); }
+            }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Fill"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ColorField {
+                hex: root.data.background;
+                text-color: root.text-color;
+                panel: root.panel;
+                enabled: root.data.has-item;
+                allow-none: true;
+                placeholder: "none";
+                set(value) => { root.set("background-color", value); }
+            }
         }
     }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Box shadow"; text-color: root.text-color; }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.box-shadow;
-            placeholder-text: "0 4px 12px #0008";
-            accepted(value) => { root.set("box-shadow", value); }
+
+    SectionHeader { title: "POSITION"; text-color: root.text-color; open <=> root.open-position; }
+    if root.open-position: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "X"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.x; edited(value) => { root.set("left", value); } }
+            FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.y; edited(value) => { root.set("top", value); } }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Width"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.w; edited(value) => { root.set("width", value); } }
+            FieldLabel { text: "Height"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.h; edited(value) => { root.set("height", value); } }
         }
     }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Backdrop filter"; text-color: root.text-color; }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.backdrop-filter;
-            placeholder-text: "blur(8px)";
-            accepted(value) => { root.set("backdrop-filter", value); }
+
+    if root.data.has-item && root.data.has-picture: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        SectionHeader { title: "PICTURE"; text-color: root.text-color; open <=> root.open-picture; }
+        if root.open-picture: VerticalLayout {
+            spacing: OperatorStyle.space-sm;
+            HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                FieldLabel { text: "Picture fit"; text-color: root.text-color; }
+                ValueCombo {
+                    horizontal-stretch: 1;
+                    model: ["contain", "cover", "fill", "tile"];
+                    value: root.data.picture-fit == "blur" || root.data.picture-fit == "" ? "contain" : root.data.picture-fit;
+                    selected(value) => { root.set("picture-fit", value); }
+                }
+            }
+            HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                ValueCheck {
+                    text: "Flip horizontally";
+                    shown: root.data.picture-flip-x;
+                    toggled => { root.set("picture-flip-x", Fmt.flag(self.checked)); }
+                }
+                ValueCheck {
+                    text: "Flip vertically";
+                    shown: root.data.picture-flip-y;
+                    toggled => { root.set("picture-flip-y", Fmt.flag(self.checked)); }
+                }
+            }
+            FieldLabel { text: "Picture crop (%)"; text-color: root.text-color; }
+            HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                FieldLabel { text: "Left"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueEdit { horizontal-stretch: 1; shown: root.data.crop-left; accepted(value) => { root.set("crop-left", value); } }
+                FieldLabel { text: "Right"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueEdit { horizontal-stretch: 1; shown: root.data.crop-right; accepted(value) => { root.set("crop-right", value); } }
+            }
+            HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                FieldLabel { text: "Top"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueEdit { horizontal-stretch: 1; shown: root.data.crop-top; accepted(value) => { root.set("crop-top", value); } }
+                FieldLabel { text: "Bottom"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueEdit { horizontal-stretch: 1; shown: root.data.crop-bottom; accepted(value) => { root.set("crop-bottom", value); } }
+            }
         }
     }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Radius"; text-color: root.text-color; min-width: 48px; }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.radius;
-            placeholder-text: "0";
-            accepted(value) => { root.set("border-radius", value); }
+
+    SectionHeader { title: "BOX"; text-color: root.text-color; open <=> root.open-box; }
+    if root.open-box: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Box shadow"; text-color: root.text-color; }
+            ValueEdit {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                shown: root.data.box-shadow;
+                placeholder-text: "0 4px 12px #0008";
+                accepted(value) => { root.set("box-shadow", value); }
+            }
         }
-        FieldLabel { text: "Line %"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.line-height; edited(value) => { root.set("line-height", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Spacing"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -300; maximum: 100; shown: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
-        Rectangle { horizontal-stretch: 1; }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Outline"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; shown: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.outline-color;
-            placeholder-text: "#000000";
-            accepted(value) => { root.set("outline-color", value); }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Backdrop filter"; text-color: root.text-color; }
+            ValueEdit {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                shown: root.data.backdrop-filter;
+                placeholder-text: "blur(8px)";
+                accepted(value) => { root.set("backdrop-filter", value); }
+            }
         }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Shadow"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; shown: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
-        ValueEdit {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            shown: root.data.shadow-color;
-            placeholder-text: "#000000";
-            accepted(value) => { root.set("shadow-color", value); }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Radius"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueEdit {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                shown: root.data.radius;
+                placeholder-text: "0";
+                accepted(value) => { root.set("border-radius", value); }
+            }
+            FieldLabel { text: "Line %"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.line-height; edited(value) => { root.set("line-height", value); } }
         }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Shadow X"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
-        FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Blur"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.blur; edited(value) => { root.set("blur", value); } }
-        FieldLabel { text: "Gray %"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Bright %"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.brightness; edited(value) => { root.set("brightness", value); } }
-        FieldLabel { text: "Contr %"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.contrast; edited(value) => { root.set("contrast", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Satur %"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.saturate; edited(value) => { root.set("saturate", value); } }
-        FieldLabel { text: "Hue °"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 360; step-size: 5; shown: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Sepia %"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.sepia; edited(value) => { root.set("sepia", value); } }
-        FieldLabel { text: "Invert %"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.invert; edited(value) => { root.set("invert", value); } }
-    }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Opacity"; text-color: root.text-color; min-width: 48px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.opacity; edited(value) => { root.set("opacity", value); } }
-        FieldLabel { text: "Blend"; text-color: root.text-color; min-width: 32px; }
-        ValueCombo {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            model: ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference", "exclusion", "color-dodge"];
-            value: root.data.blend == "" ? "normal" : root.data.blend;
-            selected(value) => { root.set("blend", value); }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Spacing"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -300; maximum: 100; shown: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
+            Rectangle { horizontal-stretch: 1; }
         }
     }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Vertical"; text-color: root.text-color; min-width: 48px; }
-        ValueCombo {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            model: ["top", "center", "bottom"];
-            value: root.data.valign;
-            selected(value) => { root.set("valign", value); }
+
+    SectionHeader { title: "OUTLINE & SHADOW"; text-color: root.text-color; open <=> root.open-outline; }
+    if root.open-outline: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Outline"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; shown: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
+            ColorField {
+                hex: root.data.outline-color;
+                text-color: root.text-color;
+                panel: root.panel;
+                enabled: root.data.has-item;
+                placeholder: "#000000";
+                set(value) => { root.set("outline-color", value); }
+            }
         }
-        FieldLabel { text: "Turn °"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 359; step-size: 15; shown: root.data.rotation; edited(value) => { root.set("rotation", value); } }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Shadow"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; shown: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
+            ColorField {
+                hex: root.data.shadow-color;
+                text-color: root.text-color;
+                panel: root.panel;
+                enabled: root.data.has-item;
+                placeholder: "#000000";
+                set(value) => { root.set("shadow-color", value); }
+            }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Shadow X"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
+            FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
+        }
     }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Case"; text-color: root.text-color; min-width: 48px; }
-        ValueCombo {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            model: ["none", "uppercase", "lowercase", "capitalize"];
-            value: root.data.text-case == "" ? "none" : root.data.text-case;
-            selected(value) => { root.set("text-case", value); }
+
+    SectionHeader { title: "FILTERS"; text-color: root.text-color; open <=> root.open-filters; }
+    if root.open-filters: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Blur"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.blur; edited(value) => { root.set("blur", value); } }
+            FieldLabel { text: "Gray %"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
         }
-        Rectangle { horizontal-stretch: 1; }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Bright %"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.brightness; edited(value) => { root.set("brightness", value); } }
+            FieldLabel { text: "Contr %"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.contrast; edited(value) => { root.set("contrast", value); } }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Satur %"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.saturate; edited(value) => { root.set("saturate", value); } }
+            FieldLabel { text: "Hue °"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 360; step-size: 5; shown: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Sepia %"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.sepia; edited(value) => { root.set("sepia", value); } }
+            FieldLabel { text: "Invert %"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.invert; edited(value) => { root.set("invert", value); } }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Opacity"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.opacity; edited(value) => { root.set("opacity", value); } }
+            FieldLabel { text: "Blend"; text-color: root.text-color; min-width: 32px; }
+            ValueCombo {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                model: ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference", "exclusion", "color-dodge"];
+                value: root.data.blend == "" ? "normal" : root.data.blend;
+                selected(value) => { root.set("blend", value); }
+            }
+        }
     }
-    HorizontalLayout {
-        spacing: 6px;
-        FieldLabel { text: "Slide in"; text-color: root.text-color; min-width: 48px; }
-        ValueCombo {
-            horizontal-stretch: 1;
-            enabled: root.data.has-item;
-            model: ["default", "none", "fade", "blur", "scale", "slide", "spin", "push", "fade_through_black", "wipe", "cover", "uncover"];
-            value: root.data.slide-transition;
-            selected(value) => { root.set("slide-transition", value); }
+
+    SectionHeader { title: "LAYOUT"; text-color: root.text-color; open <=> root.open-layout; }
+    if root.open-layout: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Vertical"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueCombo {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                model: ["top", "center", "bottom"];
+                value: root.data.valign;
+                selected(value) => { root.set("valign", value); }
+            }
+            FieldLabel { text: "Turn °"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 359; step-size: 15; shown: root.data.rotation; edited(value) => { root.set("rotation", value); } }
         }
-        FieldLabel { text: "ms"; text-color: root.text-color; min-width: 32px; }
-        ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 10000; step-size: 100; shown: root.data.slide-transition-ms; edited(value) => { root.set("slide-transition-ms", value); } }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Case"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueCombo {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                model: ["none", "uppercase", "lowercase", "capitalize"];
+                value: root.data.text-case == "" ? "none" : root.data.text-case;
+                selected(value) => { root.set("text-case", value); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+
+    SectionHeader { title: "TRANSITION"; text-color: root.text-color; open <=> root.open-transition; }
+    if root.open-transition: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Slide in"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueCombo {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                model: ["default", "none", "fade", "blur", "scale", "slide", "spin", "push", "fade_through_black", "wipe", "cover", "uncover"];
+                value: root.data.slide-transition;
+                selected(value) => { root.set("slide-transition", value); }
+            }
+            FieldLabel { text: "ms"; text-color: root.text-color; min-width: 32px; }
+            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 10000; step-size: 100; shown: root.data.slide-transition-ms; edited(value) => { root.set("slide-transition-ms", value); } }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Direction"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueCombo {
+                horizontal-stretch: 1;
+                enabled: root.data.has-item && root.data.slide-transition != "default" && root.data.slide-transition != "none" && root.data.slide-transition != "fade" && root.data.slide-transition != "blur" && root.data.slide-transition != "scale" && root.data.slide-transition != "spin" && root.data.slide-transition != "fade_through_black";
+                model: ["left_right", "right_left", "top_bottom", "bottom_top", "up_left", "up_right", "down_left", "down_right"];
+                value: root.data.slide-transition-direction == "" ? "left_right" : root.data.slide-transition-direction;
+                selected(value) => { root.set("slide-transition-direction", value); }
+            }
+        }
     }
 }
 
@@ -1173,6 +1541,11 @@ export component StageEditorPanel inherits Rectangle {
     in property <[string]> output-ids;
     in property <[string]> output-names;
     in property <[string]> camera-names;
+    // Media library pictures/videos for media boxes, and stills for web cards.
+    in property <[string]> media-names;
+    in property <[string]> media-paths;
+    in property <[string]> still-names;
+    in property <[string]> still-paths;
     in property <image> preview;
     in property <string> status;
     in-out property <int> selected: 0;
@@ -1180,6 +1553,7 @@ export component StageEditorPanel inherits Rectangle {
     in property <color> accent;
     in property <color> accent-text;
     in property <color> close-fill;
+    in property <color> panel: #2a2a32;
     callback set(string, string, string);
     callback select-layout(string);
     callback create-layout(bool);
@@ -1218,8 +1592,8 @@ export component StageEditorPanel inherits Rectangle {
         }
     }
     VerticalLayout {
-        padding: 10px;
-        spacing: 6px;
+        padding: OperatorStyle.panel-pad;
+        spacing: OperatorStyle.space-sm;
         PanelHeader {
             title: "Stage editor · " + root.layout-name;
             status: root.status;
@@ -1231,9 +1605,9 @@ export component StageEditorPanel inherits Rectangle {
             spacing: 10px;
             VerticalLayout {
                 width: 240px;
-                spacing: 6px;
+                spacing: OperatorStyle.space-sm;
                 if root.layout-ids.length > 0: HorizontalLayout {
-                    spacing: 6px;
+                    spacing: OperatorStyle.space-sm;
                     FieldLabel { text: "Layout"; text-color: root.text-color; min-width: 0px; }
                     ValueCombo {
                         horizontal-stretch: 1;
@@ -1248,7 +1622,7 @@ export component StageEditorPanel inherits Rectangle {
                     }
                 }
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: OperatorStyle.space-sm;
                     BoxButton {
                         label: "New layout";
                         accent: root.accent;
@@ -1265,7 +1639,7 @@ export component StageEditorPanel inherits Rectangle {
                     }
                 }
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: OperatorStyle.space-sm;
                     FieldLabel { text: "Name"; text-color: root.text-color; min-width: 78px; }
                     ValueEdit {
                         horizontal-stretch: 1;
@@ -1274,16 +1648,17 @@ export component StageEditorPanel inherits Rectangle {
                     }
                 }
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: OperatorStyle.space-sm;
                     FieldLabel { text: "Background"; text-color: root.text-color; min-width: 78px; }
-                    ValueEdit {
-                        horizontal-stretch: 1;
-                        shown: root.layout-background;
-                        accepted(value) => { root.set("", "layout-background", value); }
+                    ColorField {
+                        hex: root.layout-background;
+                        text-color: root.text-color;
+                        panel: root.panel;
+                        set(value) => { root.set("", "layout-background", value); }
                     }
                 }
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: OperatorStyle.space-sm;
                     ValueCombo {
                         horizontal-stretch: 1;
                         model: root.add-names;
@@ -1315,9 +1690,11 @@ export component StageEditorPanel inherits Rectangle {
             }
             if root.rows.length > 0: VerticalLayout {
                 horizontal-stretch: 1;
-                spacing: 10px;
-            GridLayout {
-                    spacing: 8px;
+                spacing: OperatorStyle.space-sm;
+                ScrollView {
+                    vertical-stretch: 1;
+                    GridLayout {
+                    spacing: OperatorStyle.space-sm;
                     Row {
                         FieldLabel { text: "Box label"; text-color: root.text-color; }
                         ValueEdit {
@@ -1332,10 +1709,10 @@ export component StageEditorPanel inherits Rectangle {
                         }
                     }
                     Row {
-                        Switch {
+                        ValueSwitch {
                             colspan: 4;
                             text: "Show on stage";
-                            checked: root.current.enabled;
+                            shown: root.current.enabled;
                             toggled => { root.set(root.current.id, "enabled", Fmt.flag(self.checked)); }
                         }
                     }
@@ -1355,10 +1732,12 @@ export component StageEditorPanel inherits Rectangle {
                         FieldLabel { text: "Font size"; text-color: root.text-color; }
                         ValueSpin { minimum: 8; maximum: 800; shown: root.current.font-px; edited(value) => { root.set(root.current.id, "font-size", value); } }
                         FieldLabel { text: "Color"; text-color: root.text-color; }
-                        ValueEdit {
-                            shown: root.current.color;
-                            placeholder-text: "#FFFFFF";
-                            accepted(value) => { root.set(root.current.id, "color", value); }
+                        ColorField {
+                            hex: root.current.color;
+                            text-color: root.text-color;
+                            panel: root.panel;
+                            placeholder: "#FFFFFF";
+                            set(value) => { root.set(root.current.id, "color", value); }
                         }
                     }
                     if root.current.kind == "slide" || root.current.kind == "notes" || root.current.kind == "text" || root.current.kind == "clock" || root.current.kind == "timer" || root.current.kind == "tracker": Row {
@@ -1395,25 +1774,25 @@ export component StageEditorPanel inherits Rectangle {
                             shown: root.current.text-box;
                             edited(value) => { root.set(root.current.id, "text-box", value); }
                         }
-                        Switch {
+                        ValueSwitch {
                             text: "Reverse box order";
-                            checked: root.current.invert-items;
+                            shown: root.current.invert-items;
                             toggled => { root.set(root.current.id, "invert-items", self.checked ? "true" : "false"); }
                         }
                     }
                     if root.current.kind == "slide": Row {
-                        Switch {
+                        ValueSwitch {
                             colspan: 2;
                             text: "Include slide background";
-                            checked: root.current.include-media;
+                            shown: root.current.include-media;
                             toggled => { root.set(root.current.id, "include-media", self.checked ? "true" : "false"); }
                         }
                     }
                     if root.current.kind == "clock": Row {
                         FieldLabel { text: "Seconds"; text-color: root.text-color; }
-                        Switch {
+                        ValueSwitch {
                             text: "Show seconds";
-                            checked: root.current.seconds;
+                            shown: root.current.seconds;
                             toggled => { root.set(root.current.id, "seconds", self.checked ? "true" : "false"); }
                         }
                         FieldLabel { text: "Date"; text-color: root.text-color; }
@@ -1450,6 +1829,25 @@ export component StageEditorPanel inherits Rectangle {
                             accepted(value) => { root.set(root.current.id, "src", value); }
                         }
                     }
+                    if root.current.kind == "media" && root.media-names.length > 0: Row {
+                        FieldLabel { text: "Library"; text-color: root.text-color; }
+                        media-pick := ValueCombo {
+                            colspan: 2;
+                            model: root.media-names;
+                            value: root.media-names[0];
+                        }
+                        BoxButton {
+                            label: "Use";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => {
+                                if (media-pick.current-index >= 0 && media-pick.current-index < root.media-paths.length) {
+                                    root.set(root.current.id, "src", root.media-paths[media-pick.current-index]);
+                                }
+                            }
+                        }
+                    }
                     if root.current.kind == "camera": Row {
                         FieldLabel { text: "Camera"; text-color: root.text-color; }
                         ValueCombo {
@@ -1468,16 +1866,16 @@ export component StageEditorPanel inherits Rectangle {
                         }
                     }
                     if root.current.kind == "camera": Row {
-                        Switch {
+                        ValueSwitch {
                             colspan: 2;
                             text: "Flip horizontally";
-                            checked: root.current.flip-x;
+                            shown: root.current.flip-x;
                             toggled => { root.set(root.current.id, "flip-x", Fmt.flag(self.checked)); }
                         }
-                        Switch {
+                        ValueSwitch {
                             colspan: 2;
                             text: "Flip vertically";
-                            checked: root.current.flip-y;
+                            shown: root.current.flip-y;
                             toggled => { root.set(root.current.id, "flip-y", Fmt.flag(self.checked)); }
                         }
                     }
@@ -1489,10 +1887,12 @@ export component StageEditorPanel inherits Rectangle {
                             selected(value) => { root.set(root.current.id, "tracker-type", self.current-index == 1 ? "bar" : "number"); }
                         }
                         FieldLabel { text: "Bar color"; text-color: root.text-color; }
-                        ValueEdit {
-                            placeholder-text: "Theme accent";
-                            shown: root.current.tracker-accent;
-                            accepted(value) => { root.set(root.current.id, "tracker-accent", value); }
+                        ColorField {
+                            hex: root.current.tracker-accent;
+                            text-color: root.text-color;
+                            panel: root.panel;
+                            placeholder: "Theme accent";
+                            set(value) => { root.set(root.current.id, "tracker-accent", value); }
                         }
                     }
                     if root.current.kind == "qr": Row {
@@ -1505,15 +1905,20 @@ export component StageEditorPanel inherits Rectangle {
                     }
                     if root.current.kind == "qr": Row {
                         FieldLabel { text: "Code color"; text-color: root.text-color; }
-                        ValueEdit {
-                            shown: root.current.qr-color;
-                            accepted(value) => { root.set(root.current.id, "qr-color", value); }
+                        ColorField {
+                            hex: root.current.qr-color;
+                            text-color: root.text-color;
+                            panel: root.panel;
+                            set(value) => { root.set(root.current.id, "qr-color", value); }
                         }
                         FieldLabel { text: "Background"; text-color: root.text-color; }
-                        ValueEdit {
-                            placeholder-text: "Transparent";
-                            shown: root.current.qr-background;
-                            accepted(value) => { root.set(root.current.id, "qr-background", value); }
+                        ColorField {
+                            hex: root.current.qr-background;
+                            text-color: root.text-color;
+                            panel: root.panel;
+                            allow-none: true;
+                            placeholder: "Transparent";
+                            set(value) => { root.set(root.current.id, "qr-background", value); }
                         }
                     }
                     if root.current.kind == "output": Row {
@@ -1527,10 +1932,10 @@ export component StageEditorPanel inherits Rectangle {
                         }
                     }
                     if root.current.kind == "output": Row {
-                        Switch {
+                        ValueSwitch {
                             colspan: 4;
                             text: "Show output name";
-                            checked: root.current.show-output-label;
+                            shown: root.current.show-output-label;
                             toggled => { root.set(root.current.id, "show-output-label", Fmt.flag(self.checked)); }
                         }
                     }
@@ -1549,6 +1954,25 @@ export component StageEditorPanel inherits Rectangle {
                             placeholder-text: "Optional file path";
                             shown: root.current.src;
                             accepted(value) => { root.set(root.current.id, "src", value); }
+                        }
+                    }
+                    if root.current.kind == "web" && root.still-names.length > 0: Row {
+                        FieldLabel { text: "Library"; text-color: root.text-color; }
+                        still-pick := ValueCombo {
+                            colspan: 2;
+                            model: root.still-names;
+                            value: root.still-names[0];
+                        }
+                        BoxButton {
+                            label: "Use";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => {
+                                if (still-pick.current-index >= 0 && still-pick.current-index < root.still-paths.length) {
+                                    root.set(root.current.id, "src", root.still-paths[still-pick.current-index]);
+                                }
+                            }
                         }
                     }
                     if root.current.kind == "chart": Row {
@@ -1609,7 +2033,7 @@ export component StageEditorPanel inherits Rectangle {
                     Row {
                         HorizontalLayout {
                             colspan: 3;
-                            spacing: 6px;
+                            spacing: OperatorStyle.space-sm;
                             Button {
                                 text: "Move backward";
                                 enabled: root.current-index > 0;
@@ -1630,6 +2054,7 @@ export component StageEditorPanel inherits Rectangle {
                             clicked => { root.remove(root.current.id); }
                         }
                     }
+                }
                 }
                 // The whole layout as the stage screen shows it, with the picked item outlined.
                 Rectangle {

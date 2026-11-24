@@ -1381,6 +1381,17 @@ impl ShowFile {
     /// Stores this layout position's own slide transition. An empty kind removes it so the
     /// style transition applies again. FreeShow keeps a child's under its parent's entry.
     pub fn set_transition_at(&mut self, index: usize, kind: &str, duration_ms: u64) -> bool {
+        self.set_transition_at_dir(index, kind, duration_ms, "")
+    }
+
+    /// Like [`Self::set_transition_at`], and stores `custom.direction` when `direction` is set.
+    pub fn set_transition_at_dir(
+        &mut self,
+        index: usize,
+        kind: &str,
+        duration_ms: u64,
+        direction: &str,
+    ) -> bool {
         let Some((position, child)) = self.layout_position(index) else {
             return false;
         };
@@ -1423,11 +1434,18 @@ impl ShowFile {
             && transition.get("type").and_then(Value::as_str) == Some(kind.trim())
         {
             transition["duration"] = serde_json::json!(duration_ms.min(10_000));
+            if !direction.trim().is_empty() {
+                transition["custom"] = serde_json::json!({ "direction": direction.trim() });
+            }
         } else {
-            node.insert(
-                "transition".to_string(),
-                serde_json::json!({ "type": kind.trim(), "duration": duration_ms.min(10_000) }),
-            );
+            let mut value = serde_json::json!({
+                "type": kind.trim(),
+                "duration": duration_ms.min(10_000)
+            });
+            if !direction.trim().is_empty() {
+                value["custom"] = serde_json::json!({ "direction": direction.trim() });
+            }
+            node.insert("transition".to_string(), value);
         }
         true
     }
@@ -3150,6 +3168,21 @@ impl ShowFile {
             return false;
         };
         slide.insert("group".to_string(), Value::String(group.to_string()));
+        true
+    }
+
+    /// Sets the operator/stage notes text for a slide.
+    pub fn set_notes(&mut self, slide_id: &str, notes: &str) -> bool {
+        let Some(slide) = self
+            .show
+            .get_mut("slides")
+            .and_then(Value::as_object_mut)
+            .and_then(|slides| slides.get_mut(slide_id))
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        slide.insert("notes".to_string(), Value::String(notes.to_string()));
         true
     }
 
@@ -5295,7 +5328,15 @@ impl Library {
     }
 
     /// Replaces the text or media transition in `settings.json`.
-    pub fn set_transition(&self, slot: &str, kind: &str, duration_ms: u64, easing: &str) -> bool {
+    /// Empty `direction` keeps a stored `custom.direction`, or defaults to `left_right`.
+    pub fn set_transition(
+        &self,
+        slot: &str,
+        kind: &str,
+        duration_ms: u64,
+        easing: &str,
+        direction: &str,
+    ) -> bool {
         if slot.is_empty() {
             return false;
         }
@@ -5315,12 +5356,24 @@ impl Library {
         if !data.is_object() {
             *data = Value::Object(serde_json::Map::new());
         }
+        let kept = data
+            .pointer(&format!("/{slot}/custom/direction"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("left_right")
+            .to_string();
+        let direction = if direction.trim().is_empty() {
+            kept
+        } else {
+            direction.trim().to_string()
+        };
         data.as_object_mut().expect("transition data").insert(
             slot.to_string(),
             serde_json::json!({
                 "type": kind,
                 "duration": duration_ms,
-                "easing": easing
+                "easing": easing,
+                "custom": { "direction": direction }
             }),
         );
         fs::write(path, json.to_string()).is_ok()
@@ -6990,6 +7043,8 @@ mod tests {
     fn groups_can_be_reordered_and_duplicated() {
         let mut show = ShowFile::blank("song", "Song");
         assert!(show.set_group("s1", "Verse"));
+        assert!(show.set_notes("s1", "cue soft"));
+        assert_eq!(show.show["slides"]["s1"]["notes"], "cue soft");
         assert!(show.add_slide().is_some());
         assert!(show.set_group("s2", "Chorus"));
         assert!(show.reorder_groups(0, 1));
@@ -7101,6 +7156,16 @@ mod tests {
         assert_eq!(
             (transition.kind.as_str(), transition.duration_ms),
             ("spin", 800)
+        );
+        assert!(show.set_transition_at_dir(1, "slide", 600, "top_bottom"));
+        let transition = show.transition_at(1).unwrap();
+        assert_eq!(
+            (
+                transition.kind.as_str(),
+                transition.duration_ms,
+                transition.direction.as_str()
+            ),
+            ("slide", 600, "top_bottom")
         );
         assert!(show.transition_at(0).is_none());
         assert!(show.set_transition_at(1, "", 0));

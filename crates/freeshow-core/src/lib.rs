@@ -12,7 +12,7 @@ mod theme;
 pub use log::{init_logging, local_timestamp, log_file_path};
 pub use settings::{
     AppSettings, SettingsError, WindowPlacement, WindowProfile, config_dir, next_output_monitor,
-    output_monitor_index,
+    output_monitor_index, screen_combo_index, screen_from_combo,
 };
 pub use theme::{BUILT_IN_THEMES, Rgb, Rgba, ThemePalette, theme_by_name};
 
@@ -194,6 +194,12 @@ mod tests {
         assert_eq!(next_output_monitor(Some(0), 2), Some(1));
         assert_eq!(next_output_monitor(Some(1), 3), Some(2));
         assert_eq!(next_output_monitor(Some(2), 3), Some(0));
+        assert_eq!(screen_combo_index(None), 0);
+        assert_eq!(screen_combo_index(Some(0)), 1);
+        assert_eq!(screen_combo_index(Some(2)), 3);
+        assert_eq!(screen_from_combo(0), None);
+        assert_eq!(screen_from_combo(1), Some(0));
+        assert_eq!(screen_from_combo(3), Some(2));
     }
 
     #[test]

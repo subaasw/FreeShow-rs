@@ -552,6 +552,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         ui.set_lyrics(lyrics.into());
     }
     ui.set_group(session.group().into());
+    ui.set_notes(session.notes().into());
     let (item_index, item_count) = session.item_position();
     ui.set_item_index(item_index as i32);
     ui.set_item_count(item_count as i32);
@@ -584,6 +585,8 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     });
     ui.set_volume(session.volume * 100.0);
     ui.set_chrome_status(session.chrome_status().into());
+    ui.set_can_undo(session.can_undo());
+    ui.set_can_redo(session.can_redo());
     ui.set_focus_mode(session.focus_mode);
     ui.set_guide_visible(session.guide_visible);
     ui.set_guide_text(session.guide_text().into());
@@ -656,6 +659,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         group_numbers: settings.group_numbers,
         split_lines: settings.split_lines,
         remote_port: settings.remote_port,
+        remote_password: settings.remote_password.into(),
         stage_port: settings.stage_port,
         max_connections: settings.max_connections,
         has_library: settings.has_library,
@@ -673,8 +677,10 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         output_resolution: settings.output_resolution.into(),
         text_transition: settings.text_transition.into(),
         text_duration: settings.text_duration,
+        text_direction: settings.text_direction.into(),
         media_transition: settings.media_transition.into(),
         media_duration: settings.media_duration,
+        media_direction: settings.media_direction.into(),
         addresses: settings.addresses.into(),
         style_names: strings(&settings.style_names),
         style_name: settings.style_name.into(),
@@ -763,6 +769,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         blend: inspector.filters.blend.into(),
         slide_transition: inspector.slide_transition.into(),
         slide_transition_ms: inspector.slide_transition_ms,
+        slide_transition_direction: inspector.slide_transition_direction.into(),
         valign: inspector.item_box.valign.into(),
         rotation: inspector.item_box.rotation,
         text_case: inspector.typography.text_case.into(),
@@ -851,6 +858,14 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     }
     ui.set_stage_output_ids(strings(&output_ids));
     ui.set_stage_output_names(strings(&output_names));
+    let media = session.stage_media_files();
+    let (media_names, media_paths): (Vec<_>, Vec<_>) = media.into_iter().unzip();
+    ui.set_stage_media_names(strings(&media_names));
+    ui.set_stage_media_paths(strings(&media_paths));
+    let stills = session.stage_still_files();
+    let (still_names, still_paths): (Vec<_>, Vec<_>) = stills.into_iter().unzip();
+    ui.set_stage_still_names(strings(&still_names));
+    ui.set_stage_still_paths(strings(&still_paths));
 }
 
 /// Closing an output or stage window with its title-bar button hides it and
@@ -1667,10 +1682,31 @@ fn monitor_count(window: &slint::Window) -> usize {
         .unwrap_or(0)
 }
 
+/// Header picker rows: Auto, then each connected display by OS name.
+fn monitor_choices(window: &slint::Window) -> Vec<String> {
+    let mut choices = vec!["Auto".to_string()];
+    let named = window
+        .with_winit_window(|winit_window| {
+            winit_window
+                .available_monitors()
+                .enumerate()
+                .map(|(index, monitor)| match monitor.name() {
+                    Some(name) if !name.trim().is_empty() => {
+                        format!("{} · {name}", index + 1)
+                    }
+                    _ => format!("Screen {}", index + 1),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    choices.extend(named);
+    choices
+}
+
 fn screen_label(index: Option<usize>, outputs: &[freeshow_data::OutputPreference]) -> String {
     let screen = match index {
         Some(index) => format!("Screen {}", index + 1),
-        None => "Screen".to_string(),
+        None => "Auto".to_string(),
     };
     let name = outputs
         .iter()
@@ -1683,9 +1719,16 @@ fn screen_label(index: Option<usize>, outputs: &[freeshow_data::OutputPreference
     }
 }
 
-fn apply_chrome(ui: &ControlWindow, session: &Session, output_screen: Option<usize>) {
+fn apply_chrome(
+    ui: &ControlWindow,
+    session: &Session,
+    output_screen: Option<usize>,
+    monitors: &[String],
+) {
     ui.set_show_labels(!session.preferences.labels_disabled());
     ui.set_screen_label(screen_label(output_screen, &session.preferences.outputs).into());
+    ui.set_screen_choices(strings(monitors));
+    ui.set_screen_index(freeshow_core::screen_combo_index(output_screen));
     ui.set_drawer_width(session.preferences.left_panel_width() as i32);
     ui.set_project_width(session.preferences.right_panel_width() as i32);
     ui.set_drawer_height(session.preferences.drawer_height() as i32);
@@ -1972,6 +2015,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .position(|row| row == value)
             .map_or(0, |index| index as i32)
     });
+    control.global::<ColorFmt>().on_hex(|r, g, b, a| {
+        let r = r.clamp(0, 255) as u8;
+        let g = g.clamp(0, 255) as u8;
+        let b = b.clamp(0, 255) as u8;
+        let a = a.clamp(0, 255) as u8;
+        if a == 255 {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        } else {
+            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+        }
+        .into()
+    });
+    control.global::<ColorFmt>().on_parse(|value| {
+        let value = value.trim();
+        if value.is_empty()
+            || value.eq_ignore_ascii_case("none")
+            || value.eq_ignore_ascii_case("transparent")
+        {
+            return slint::Color::from_argb_u8(0, 0, 0, 0);
+        }
+        parse_color(value)
+            .map(|color| slint::Color::from_argb_u8(color.a, color.r, color.g, color.b))
+            .unwrap_or_else(|| slint::Color::from_argb_u8(0, 0, 0, 0))
+    });
     let startup_import = session
         .root
         .clone()
@@ -2002,15 +2069,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     control.set_active_tab(session.tab.clone().into());
     control.set_panel_title("Shows".into());
     refresh(&control, &session);
-    apply_chrome(&control, &session, settings.output_screen);
+    apply_chrome(&control, &session, settings.output_screen, &[]);
     let output_width = session.output_width;
     let output_height = session.output_height;
 
     let output = OutputWindow::new()?;
     let stage = StageWindow::new()?;
-    let chosen =
-        freeshow_core::output_monitor_index(settings.output_screen, monitor_count(output.window()));
-    apply_chrome(&control, &session, chosen);
+    let monitors = monitor_choices(output.window());
+    apply_chrome(&control, &session, settings.output_screen, &monitors);
     let output_weak = output.as_weak();
     let output_redraw = output.as_weak();
     let output_slot = attach_frame(
@@ -2357,21 +2423,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let settings_path_for_screen = settings_path.clone();
         let session_for_screen = Rc::clone(&session);
         let ui = control.as_weak();
-        control.on_choose_screen(move || {
+        control.on_pick_screen(move |index| {
             let Some(output) = output_for_screen.upgrade() else {
                 return;
             };
+            let next = freeshow_core::screen_from_combo(index);
             let count = monitor_count(output.window());
-            let next = freeshow_core::next_output_monitor(
-                settings_for_screen.borrow().output_screen,
-                count,
-            );
+            if let Some(chosen) = next
+                && chosen >= count
+            {
+                return;
+            }
             settings_for_screen.borrow_mut().output_screen = next;
             if output.window().is_visible() {
                 place_output(output.window(), next);
             }
             if let Some(ui) = ui.upgrade() {
-                apply_chrome(&ui, &session_for_screen.borrow(), next);
+                apply_chrome(
+                    &ui,
+                    &session_for_screen.borrow(),
+                    next,
+                    &monitor_choices(output.window()),
+                );
             }
             if let Err(err) = settings_for_screen.borrow().save(&settings_path_for_screen) {
                 tracing::error!("could not save settings: {err}");
@@ -2473,7 +2546,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         apply_theme(&ui, &theme);
                     }
                     // Labels, language and output names in the header follow at once.
-                    apply_chrome(&ui, &current, settings.borrow().output_screen);
+                    let monitors = output_window
+                        .upgrade()
+                        .map(|output| monitor_choices(output.window()))
+                        .unwrap_or_default();
+                    apply_chrome(
+                        &ui,
+                        &current,
+                        settings.borrow().output_screen,
+                        &monitors,
+                    );
                     refresh(&ui, &current);
                     publish(&edit_slot, edit_frame(&current));
                 }
@@ -3513,6 +3595,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        control.on_save_notes(move |text| {
+            if session.borrow().notes() == text.as_str() {
+                return;
+            }
+            if !session.borrow_mut().save_notes(text.as_str()) {
+                tracing::error!("could not save notes");
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+            }
+        });
+    }
+
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_prev_item(move || {
             session.borrow_mut().prev_item();
@@ -3526,8 +3624,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
+        control.on_undo_edit(move || {
+            if session.borrow_mut().undo()
+                && let Some(ui) = ui.upgrade()
+            {
+                refresh(&ui, &session.borrow());
+                publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_redo_edit(move || {
+            if session.borrow_mut().redo()
+                && let Some(ui) = ui.upgrade()
+            {
+                refresh(&ui, &session.borrow());
+                publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
         control.on_next_item(move || {
             session.borrow_mut().next_item();
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let session = Rc::clone(&session);
+        control.on_edit_box_at(move |x, y| {
+            session
+                .borrow()
+                .item_box_at(x, y)
+                .map_or(-1, |index| index as i32)
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_select_edit_box(move |index| {
+            if index >= 0 {
+                session.borrow_mut().select_item(index as usize);
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &session.borrow());
+                publish(&edit_slot, edit_frame(&session.borrow()));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_edit_geometry(move |first, second, resize| {
+            if !session
+                .borrow_mut()
+                .set_item_geometry(first, second, resize)
+            {
+                tracing::error!("could not save item geometry");
+            }
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
                 publish(&edit_slot, edit_frame(&session.borrow()));
