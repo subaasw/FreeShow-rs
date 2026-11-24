@@ -5574,6 +5574,11 @@ mod tests {
         slide.items[0].style = "left:0px;top:0px;width:70px;height:80px;white-space:nowrap;".into();
         let single = render_styled(&slide);
         assert!(lowest_ink(&broken) > lowest_ink(&single));
+        let mut next = slide.items[0].lines[0].clone();
+        next.runs[0].text = "End".into();
+        slide.items[0].lines.push(next);
+        let manual_break = render_styled(&slide);
+        assert!(lowest_ink(&manual_break) > lowest_ink(&single));
     }
 
     #[test]

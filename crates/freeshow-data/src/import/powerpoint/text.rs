@@ -12,6 +12,7 @@ use super::{
 pub(super) struct TextBody {
     pub align: String,
     pub insets: [f64; 4],
+    pub nowrap: bool,
     pub lines: Vec<Value>,
 }
 
@@ -130,6 +131,7 @@ impl TextBody {
             };
             Self {
                 align: align.into(),
+                nowrap: properties.and_then(|node| node.attribute("wrap")) == Some("none"),
                 insets: [
                     size.px_x(inset("lIns", 91_440.0)),
                     size.px_y(inset("tIns", 45_720.0)),

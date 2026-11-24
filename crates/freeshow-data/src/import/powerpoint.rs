@@ -556,6 +556,9 @@ impl SlideObject {
                     style.push_str(&format!(
                         "--pptx-text-insets:{left} {top} {right} {bottom};"
                     ));
+                    if text.nowrap {
+                        style.push_str("white-space:nowrap;");
+                    }
                     (text.align, text.lines)
                 } else {
                     (String::new(), self.lines.iter().map(|line| {
@@ -1806,7 +1809,7 @@ mod tests {
                     </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef>
                         <a:fontRef idx="major"><a:schemeClr val="accent1"/></a:fontRef>
                     </p:style>
-                    <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100"/><a:lstStyle>
+                    <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100" wrap="none"/><a:lstStyle>
                         <a:lvl1pPr algn="r" marL="127000" marR="63500"><a:spcBef><a:spcPct val="25000"/></a:spcBef>
                             <a:buClr><a:schemeClr val="accent1"/></a:buClr><a:buSzPct val="75000"/>
                             <a:buFont typeface="Symbol"/><a:buChar char="&#xf0b7;"/>
@@ -1859,6 +1862,7 @@ mod tests {
         assert!(direct.contains("transform:rotate(45deg);"));
         assert!(direct.contains("--pptx-fill-flip-x:1;"));
         assert!(direct.contains("--pptx-text-insets:0 2 4 6;"));
+        assert!(direct.contains("white-space:nowrap;"));
         assert_eq!(items[0]["align"], "align-items:flex-end;");
         assert_eq!(items[0]["lines"][0]["align"], "right");
         assert_eq!(items[0]["lines"][0]["pptxMargins"], json!([20, 10, -10]));
@@ -1904,6 +1908,7 @@ mod tests {
         let transparent = items[2]["style"].as_str().unwrap();
         assert!(!transparent.contains("background:"));
         assert!(transparent.contains("--pptx-text-insets:14.4 7.2 14.4 7.2;"));
+        assert!(!transparent.contains("white-space:nowrap;"));
     }
 
     #[test]
