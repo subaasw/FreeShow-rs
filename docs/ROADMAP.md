@@ -9,33 +9,35 @@ run a stage layout, play media, and control the show from the remote page.
 
 GPL-3.0-only.
 
-## Architecture
+## Release plan
 
-The crate layout, UI-stack decision, performance budgets, and the remaining
-milestones to feature parity are in `MIGRATION_PLAN.md`. This file stays
-the short working plan. Do not replace Slint or the headless compositor.
+The [implementation plan](IMPLEMENTATION_PLAN.md) specifies data and UI boundaries,
+feature slices, and acceptance checks. The [execution plan](EXECUTION_PLAN.md)
+sets the merge order, dependencies, and release sign-off steps. The
+[team rehearsal](EXECUTION_PLAN.md#6-team-rehearsal-and-handoffs) gives
+operators and testers a shared service and pass criteria. The
+[migration plan](MIGRATION_PLAN.md)
+describes the crate layout and performance budgets. The [parity inventory](PARITY.md)
+tracks existing compatibility independently of the 1.0 release gates.
 
-## Where the project is
+| Order | Milestone | Release gate |
+| --- | --- | --- |
+| 1 | Establish the baseline and protect live output | Review the integrated operator UI, measure installed-app paths, and verify that an edit or undo can only change an on-air slide through the live update workflow. A failed save has a recoverable draft. |
+| 2 | Finish core authoring and operator UX | Keep a familiar Present workspace and a responsive, accessible Edit workspace. A volunteer can build and revise an announcement, arrange layers, and rehearse the project with a keyboard or pointer. |
+| 3 | Ship rich, predictable motion | Existing effects have previews and clear controls. New object builds behave consistently with operator, remote, and scheduled cues. Rapid Takes and Clear work during transitions and video starts. Shared-object motion is stretch scope. |
+| 4 | Make templates and media portable | A volunteer can apply or share an editable template and move a service with local assets between supported operating systems. Missing media can be relinked and the show can run offline. |
+| 5 | Qualify the release | Verify stage and output setup, audio and remote reconnect, representative library imports, accessibility, performance, recovery, and installed-app upgrades. Run a full-length service rehearsal and publish the tested platform and transport matrix. |
 
-- The workspace builds and its tests pass.
-- The service path works end to end: library files, shows, projects, scripture,
-  stage layouts, media, output/stage windows, and the phone remote.
-- `PARITY.md` is the detailed, feature-by-feature status. It is the source of
-  truth for what is done, partial, or not-yet.
-- The largest remaining gaps are network audio routing, deeper output
-  and stage customization, importer media, and packaging.
+Template browsing, offline media, and release baselining can proceed alongside
+the editor and transition work. Prioritize regressions that interrupt a real
+service. Additional ProPresenter import fidelity is lowest priority. Spotify
+and similar provider expansions are out of scope for this release. A built-in
+YouTube download workflow is optional research. The media plan prioritizes
+local import and authorized acquisition.
 
-## Priorities
+## Migration milestones and backlog
 
-1. **Correctness and trust** — a show must not lose data or expose the room's
-   lyrics to anyone on the network.
-2. **Service-path depth** — the features a volunteer touches every Sunday:
-   audio routing, stage layouts, media, scripture.
-3. **Compatibility** — read what FreeShow already wrote, including settings,
-   themes, media metadata, and import formats.
-4. **Packaging** — installers and reproducible release builds.
-
-## Milestones
+These milestones record compatibility work across the migration.
 
 ### M1. Library settings compatibility — complete
 
@@ -185,14 +187,13 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint decimal, Latin alphabetic, and Roman numbering with saved starts and nested list counters.
 - [ ] PowerPoint custom gradient geometry and backgrounds from other import formats.
 
-Acceptance: importing a ProPresenter bundle produces shows that present with
-their original backgrounds.
+Acceptance: bundles with supported media produce shows that present with
+their original backgrounds. Further ProPresenter fidelity is backlog work.
 
 ### M7. Remaining compositor and remote parity
 
-Work down the `partial` rows in `PARITY.md`, highest user impact first. Each
-item gets a test at the layer that owns it (`freeshow-output` for painting,
-`freeshow-data` for storage, `freeshow-remote` for protocol).
+Use the release milestones above to decide which partial rows affect 1.0.
+Test fixes at the owning layer and verify the affected operator workflow.
 
 ## Working method
 
