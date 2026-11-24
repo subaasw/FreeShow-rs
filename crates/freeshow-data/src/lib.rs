@@ -5035,11 +5035,8 @@ impl Library {
     pub fn icecast(&self) -> Option<(freeshow_core::IcecastDestination, bool)> {
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(self.settings_path()).ok()?).ok()?;
-        let connections = settings.pointer("/audioRouting/connections")?.as_array()?;
-        if !connections
-            .iter()
-            .any(|edge| edge["to"].as_str() == Some(freeshow_core::ICECAST_BUS))
-        {
+        let saved_route = audio_routing::has_icecast_route(&settings);
+        if !saved_route && !audio_routing::uses_icecast_main_mix(&settings) {
             return None;
         }
         let value = &settings["special"]["icecast"];
@@ -5071,6 +5068,10 @@ impl Library {
         } else {
             format!("/{mount}")
         };
+        let enabled = match value["enabled"].as_bool() {
+            Some(enabled) => enabled,
+            None => saved_route,
+        };
         Some((
             freeshow_core::IcecastDestination {
                 host: host.to_owned(),
@@ -5079,12 +5080,12 @@ impl Library {
                 password: password.to_owned(),
                 tls,
             },
-            value["enabled"].as_bool() != Some(false),
+            enabled,
         ))
     }
 
     pub fn set_icecast_enabled(&self, enabled: bool) -> Result<(), DataError> {
-        self.patch_icecast(false, |icecast| {
+        self.patch_icecast(false, |icecast, _| {
             icecast.insert("enabled".into(), Value::Bool(enabled));
         })
     }
@@ -5096,6 +5097,7 @@ impl Library {
         mount: &str,
         password: Option<&str>,
         tls: Option<bool>,
+        main_mix: bool,
     ) -> Result<(), DataError> {
         let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
         if !valid_icecast_host(host) {
@@ -5110,7 +5112,7 @@ impl Library {
         if password.is_some_and(|password| password.contains('\0')) {
             return Err(invalid("The Icecast password contains an invalid character.").into());
         }
-        self.patch_icecast(true, |icecast| {
+        self.patch_icecast(true, |icecast, saved_route| {
             use serde_json::json;
             icecast.insert("host".into(), json!(host));
             icecast.insert("port".into(), json!(port));
@@ -5120,6 +5122,14 @@ impl Library {
                 format!("/{mount}")
             };
             icecast.insert("mount".into(), json!(mount));
+            if main_mix {
+                if !saved_route && icecast.get("mainMix").and_then(Value::as_bool) != Some(true) {
+                    icecast.insert("enabled".into(), json!(false));
+                }
+                icecast.insert("mainMix".into(), json!(true));
+            } else {
+                icecast.remove("mainMix");
+            }
             if let Some(password) = password {
                 icecast.insert("password".into(), json!(password));
             }
@@ -5134,7 +5144,7 @@ impl Library {
     fn patch_icecast(
         &self,
         create: bool,
-        edit: impl FnOnce(&mut serde_json::Map<String, Value>),
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>, bool),
     ) -> Result<(), DataError> {
         let path = self.settings_path();
         let mut settings: Value = match fs::read_to_string(&path) {
@@ -5144,6 +5154,7 @@ impl Library {
             }
             Err(error) => return Err(error.into()),
         };
+        let saved_route = audio_routing::has_icecast_route(&settings);
         let invalid = || {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -5159,7 +5170,7 @@ impl Library {
             .entry("icecast")
             .or_insert_with(|| serde_json::json!({}));
         let icecast = icecast.as_object_mut().ok_or_else(invalid)?;
-        edit(icecast);
+        edit(icecast, saved_route);
         atomic_write(&path, &serde_json::to_vec_pretty(&settings)?)
     }
 

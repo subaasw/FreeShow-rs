@@ -115,7 +115,7 @@ export component ControlWindow inherits Window {
     in property <[string]> transition-kinds;
     in property <string> settings-status;
     callback apply-setting(string, string);
-    callback save-icecast(string, string, string, string, string) -> bool;
+    callback save-icecast(string, string, string, string, string, bool) -> bool;
     in property <string> update-label: "";
     callback get-update();
     in-out property <string> spelling: "";
@@ -1227,8 +1227,8 @@ export component ControlWindow inherits Window {
             text-color: root.text-color;
             close-fill: root.primary-lighter;
             apply(key, value) => { root.apply-setting(key, value); }
-            save-icecast(host, port, mount, password, transport) => {
-                return root.save-icecast(host, port, mount, password, transport);
+            save-icecast(host, port, mount, password, transport, main-mix) => {
+                return root.save-icecast(host, port, mount, password, transport, main-mix);
             }
             close => { root.show-settings = false; window-keys.focus(); }
         }
