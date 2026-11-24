@@ -1512,15 +1512,16 @@ fn draw_item_content(
     } else {
         Vec::new()
     };
-    let spacing: Vec<_> = visual
+    let layouts: Vec<_> = visual
         .iter()
-        .map(|line| pptx_spacing(line, style, slide))
+        .map(|line| line_layout(line, style, slide, &item.style))
         .collect();
-    let mut cursor_y = text_y.saturating_add(vertical_offset(
-        item, &visual, &spacing, style, slide, text_h, gap,
-    ));
+    let mut cursor_y = text_y.saturating_add(vertical_offset(item, &visual, &layouts, text_h, gap));
     let text_bottom = text_y.saturating_add(text_h).min(y.saturating_add(h));
-    for (index, (line, &[height, before, after])) in visual.iter().zip(&spacing).enumerate() {
+    for (index, (line, layout)) in visual.iter().zip(&layouts).enumerate() {
+        let Some(layout) = layout else {
+            continue;
+        };
         let bullet = line
             .pptx_bullet
             .as_ref()
@@ -1546,30 +1547,8 @@ fn draw_item_content(
                 (run.clone(), run_style)
             })
             .collect();
-        if runs.is_empty() {
-            continue;
-        }
-        let (height_family, height_bold, height_px, height_css) = {
-            let (run, height_style) = runs
-                .iter()
-                .find(|(run, _)| run.paint && !run.text.is_empty())
-                .unwrap_or(&runs[0]);
-            (
-                height_style.font_family.clone(),
-                height_style.bold,
-                height_style.font_px,
-                run.style.clone(),
-            )
-        };
-        let font_px = scale(height_px, slide.output_height, slide.source_height).max(1) as f32;
-        let line_face = text::Typeface {
-            family: height_family.as_str(),
-            bold: height_bold,
-            italic: false,
-        };
-        let bar_h =
-            height.unwrap_or_else(|| line_box(&height_css, &item.style, font_px, line_face, slide));
-        cursor_y = cursor_y.saturating_add(before.unwrap_or(0));
+        let bar_h = layout.height;
+        cursor_y = cursor_y.saturating_add(layout.before);
         if cursor_y >= text_bottom {
             break;
         }
@@ -1638,7 +1617,7 @@ fn draw_item_content(
             .map(|(_, run_style)| {
                 scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32
             })
-            .unwrap_or(font_px);
+            .unwrap_or(layout.font_px);
         let spacer_family = spacer
             .map(|(_, run_style)| run_style.font_family.clone())
             .unwrap_or_default();
@@ -1652,9 +1631,7 @@ fn draw_item_content(
         let spacer_case = spacer
             .map(|(_, run_style)| run_style.text_case)
             .unwrap_or(TextCase::AsWritten);
-        let font_line = text::line_height(font_px, line_face) as f32;
-        let leading = (bar_h as f32 - font_line).max(0.0) / 2.0;
-        let baseline = cursor_y as f32 + leading + text::ascent(font_px, line_face)
+        let baseline = cursor_y as f32 + layout.baseline
             - scale(
                 line.shift_y as f32,
                 slide.output_height,
@@ -1671,7 +1648,7 @@ fn draw_item_content(
                 origin - bullet_gap as f32,
                 baseline,
                 &clip,
-                bullet_face(style),
+                typeface(style),
                 0.0,
                 0.0,
             );
@@ -1813,9 +1790,7 @@ fn draw_item_content(
                 cursor_x += width as f32;
             }
         }
-        cursor_y = cursor_y
-            .saturating_add(bar_h)
-            .saturating_add(after.unwrap_or(0));
+        cursor_y = cursor_y.saturating_add(bar_h).saturating_add(layout.after);
         let later_bar = visual[index + 1..]
             .iter()
             .any(|next| next.line_bar && !next.runs.is_empty());
@@ -2535,7 +2510,7 @@ fn bullet_style(line: &StyledLine, bullet: &TextRun, item: &BoxStyle) -> BoxStyl
     style
 }
 
-fn bullet_face(style: &BoxStyle) -> text::Typeface<'_> {
+fn typeface(style: &BoxStyle) -> text::Typeface<'_> {
     text::Typeface {
         family: &style.font_family,
         bold: style.bold,
@@ -2548,7 +2523,7 @@ fn bullet_width(bullet: &TextRun, style: &BoxStyle, slide: &StyledSlide) -> i32 
     text::measure(
         &format!("{} ", bullet.text),
         size,
-        bullet_face(style),
+        typeface(style),
         0.0,
         0.0,
     )
@@ -2736,35 +2711,25 @@ fn piece_width(text: &str, css: &str, item_style: &str, slide: &StyledSlide) -> 
 fn vertical_offset(
     item: &StyledItem,
     lines: &[StyledLine],
-    spacing: &[[Option<i32>; 3]],
-    style: &BoxStyle,
-    slide: &StyledSlide,
+    layouts: &[Option<LineLayout>],
     box_h: i32,
     gap: i32,
 ) -> i32 {
     let mut content: i32 = 0;
-    let mut counted = 0;
-    for (line, &[height, before, after]) in lines.iter().zip(spacing) {
-        let Some(bar_h) = height.or_else(|| line_bar_height(line, style, slide, &item.style))
-        else {
+    let mut has_bar = false;
+    for (line, layout) in lines.iter().zip(layouts) {
+        let Some(layout) = layout else {
             continue;
         };
         content = content
-            .saturating_add(bar_h)
-            .saturating_add(before.unwrap_or(0))
-            .saturating_add(after.unwrap_or(0));
-        counted += 1;
+            .saturating_add(layout.height)
+            .saturating_add(layout.before)
+            .saturating_add(layout.after);
         if line.line_bar {
-            content = content.saturating_add(gap);
-        }
-    }
-    if counted > 0 {
-        let bars = lines
-            .iter()
-            .filter(|line| line.line_bar && !line.runs.is_empty())
-            .count();
-        if bars > 0 {
-            content -= gap;
+            if has_bar {
+                content = content.saturating_add(gap);
+            }
+            has_bar = true;
         }
     }
     let spare = (box_h - content).max(0);
@@ -2799,29 +2764,49 @@ fn pptx_spacing(line: &StyledLine, style: &BoxStyle, slide: &StyledSlide) -> [Op
     })
 }
 
-fn line_bar_height(
+struct LineLayout {
+    height: i32,
+    baseline: f32,
+    font_px: f32,
+    before: i32,
+    after: i32,
+}
+
+fn line_layout(
     line: &StyledLine,
     style: &BoxStyle,
     slide: &StyledSlide,
     item_css: &str,
-) -> Option<i32> {
-    let run = line
+) -> Option<LineLayout> {
+    let mut painted = line
         .runs
         .iter()
-        .find(|run| run.paint && !run.text.is_empty())
-        .or_else(|| line.runs.first())?;
-    if run.text.is_empty() && line.runs.iter().all(|run| run.text.is_empty()) {
-        return None;
+        .filter(|run| run.paint && !run.text.is_empty());
+    let first = painted.next().or_else(|| line.runs.first())?;
+    let mut ascent: f32 = 0.0;
+    let mut below: f32 = 0.0;
+    let mut font_px: f32 = 1.0;
+    for run in std::iter::once(first).chain(painted) {
+        let mut run_style = style.clone();
+        apply_run_style(&mut run_style, &run.style);
+        let size = scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
+        let face = typeface(&run_style);
+        let top = text::ascent(size, face);
+        ascent = ascent.max(top);
+        below = below.max(text::line_height(size, face) as f32 - top);
+        font_px = font_px.max(size);
     }
-    let mut run_style = style.clone();
-    apply_run_style(&mut run_style, &run.style);
-    let font_px = scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
-    let face = text::Typeface {
-        family: run_style.font_family.as_str(),
-        bold: run_style.bold,
-        italic: run_style.italic,
-    };
-    Some(line_box(&run.style, item_css, font_px, face, slide))
+    let natural_height = (ascent + below).ceil() as i32;
+    let [height, before, after] = pptx_spacing(line, style, slide);
+    let height =
+        height.unwrap_or_else(|| line_box(&first.style, item_css, font_px, natural_height, slide));
+    Some(LineLayout {
+        height,
+        baseline: ascent + (height - natural_height).max(0) as f32 / 2.0,
+        font_px,
+        before: before.unwrap_or(0),
+        after: after.unwrap_or(0),
+    })
 }
 
 /// `line-height` is a multiplier of the font size, a percent, or a source pixel size.
@@ -2829,10 +2814,9 @@ fn line_box(
     run_css: &str,
     item_css: &str,
     font_px: f32,
-    face: text::Typeface<'_>,
+    font_line: i32,
     slide: &StyledSlide,
 ) -> i32 {
-    let font_line = text::line_height(font_px, face);
     let Some(value) =
         css_value(run_css, "line-height").or_else(|| css_value(item_css, "line-height"))
     else {
@@ -5534,6 +5518,43 @@ mod tests {
             "font-size: 32px;color: #FFFFFF;letter-spacing: 30px;".into();
         let spaced = render_styled(&slide);
         assert!(rightmost_ink(&spaced) >= rightmost_ink(&plain) + 20);
+    }
+
+    #[test]
+    fn a_larger_run_keeps_its_full_height_regardless_of_run_order() {
+        let mut slide = shadow_slide("font-size:12px;color:#f00;");
+        let item = &mut slide.items[0];
+        item.align = "align-items:flex-end;".into();
+        item.line_bg = Some(Rgba {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        });
+        let mut large = item.lines[0].runs[0].clone();
+        large.text = "G".into();
+        large.style = "font-size:40px;color:#0f0;".into();
+        let second = item.lines[0].clone();
+        item.lines[0].runs.push(large);
+        item.lines.push(second);
+
+        let frame = render_styled(&slide);
+        let bar_top =
+            |frame: &crate::Frame| (0..80).find(|&y| frame.pixel(159, y).b == 255).unwrap();
+        let green_rows = |frame: &crate::Frame| -> Vec<_> {
+            (0..80)
+                .filter(|&y| (0..140).any(|x| frame.pixel(x, y).g > 200))
+                .collect()
+        };
+        let top = bar_top(&frame);
+        let green = green_rows(&frame);
+        assert!(top < 30);
+        assert!(green.len() > 20);
+
+        slide.items[0].lines[0].runs.reverse();
+        let reversed = render_styled(&slide);
+        assert_eq!(bar_top(&reversed), top);
+        assert_eq!(green_rows(&reversed), green);
     }
 
     #[test]
