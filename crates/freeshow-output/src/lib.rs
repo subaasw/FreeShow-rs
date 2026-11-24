@@ -15,12 +15,13 @@ pub use charts::{
 pub use styled::qr_image;
 pub use styled::{
     Align, Blend, Crop, Fit, Raster, SOURCE_HEIGHT, SOURCE_WIDTH, SlideWay, StyledItem, StyledLine,
-    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, crop_raster,
-    crossfade, decode_image, ease_progress, fade_through_black, filter_blur, filter_brightness,
-    filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity,
-    filter_saturate, filter_sepia, fit_raster, image_frame, over, parse_color, parse_style,
-    placed_image, push_frames, render_styled, scale_frames, slide_frames, slide_way, spin_frames,
-    valid_backdrop_filter, valid_box_gradient, valid_box_radius, valid_box_shadow, with_underlay,
+    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, cover_frames,
+    crop_raster, crossfade, decode_image, ease_progress, fade_through_black, filter_blur,
+    filter_brightness, filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert,
+    filter_opacity, filter_saturate, filter_sepia, fit_raster, image_frame, over, parse_color,
+    parse_style, placed_image, push_frames, render_styled, scale_frames, slide_frames, slide_way,
+    spin_frames, uncover_frames, valid_backdrop_filter, valid_box_gradient, valid_box_radius,
+    valid_box_shadow, wipe_frames, with_underlay,
 };
 
 use font8x8::{BASIC_FONTS, LATIN_FONTS, UnicodeFonts};

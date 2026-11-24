@@ -8,11 +8,11 @@ use freeshow_data::ShowFile;
 use freeshow_output::render_styled;
 use freeshow_output::{
     Blend, Fit, Frame, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine,
-    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, crossfade,
-    decode_image, ease_progress, fade_through_black, filter_blur, filter_brightness,
+    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, cover_frames,
+    crossfade, decode_image, ease_progress, fade_through_black, filter_blur, filter_brightness,
     filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity,
     filter_saturate, filter_sepia, parse_color, placed_image, push_frames, scale_frames,
-    slide_frames, slide_way, spin_frames,
+    slide_frames, slide_way, spin_frames, uncover_frames, wipe_frames,
 };
 #[cfg(test)]
 use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
@@ -31,6 +31,9 @@ pub fn motion_frame(
     match motion.kind.as_str() {
         "slide" => slide_frames(from, to, t, slide_way(&motion.direction)),
         "push" => push_frames(from, to, t, slide_way(&motion.direction)),
+        "wipe" => wipe_frames(from, to, t, slide_way(&motion.direction)),
+        "cover" => cover_frames(from, to, t, slide_way(&motion.direction)),
+        "uncover" => uncover_frames(from, to, t, slide_way(&motion.direction)),
         "fade_through_black" => fade_through_black(from, to, t),
         "scale" => scale_frames(from, to, t),
         "blur" => blur_frames(from, to, t),
@@ -1466,6 +1469,42 @@ fn lines_slide_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powerpoint_wipe_reveals_pixels_in_place_and_covers_move_the_correct_slide() {
+        let patterned = |r, b| Frame {
+            width: 4,
+            height: 4,
+            pixels: (0..16).flat_map(|g| [r, g, b, 255]).collect(),
+        };
+        let from = patterned(255, 0);
+        let to = patterned(0, 255);
+        let render = |kind: &str, direction: &str, t| {
+            let motion = freeshow_data::TextTransition {
+                kind: kind.into(),
+                direction: direction.into(),
+                easing: "linear".into(),
+                ..Default::default()
+            };
+            motion_frame(&from, &to, &motion, t)
+        };
+        let wipe = render("wipe", "right_left", 0.5);
+        assert_eq!(wipe.pixel(1, 2), to.pixel(1, 2));
+        assert_eq!(wipe.pixel(2, 2), from.pixel(2, 2));
+
+        let cover = render("cover", "up_left", 0.5);
+        assert_eq!(cover.pixel(2, 2), to.pixel(0, 0));
+        assert_eq!(cover.pixel(1, 2), from.pixel(1, 2));
+
+        let uncover = render("uncover", "up_left", 0.5);
+        assert_eq!(uncover.pixel(0, 0), from.pixel(2, 2));
+        assert_eq!(uncover.pixel(2, 0), to.pixel(2, 0));
+
+        for kind in ["wipe", "cover", "uncover"] {
+            assert_eq!(render(kind, "up_left", 0.0), from);
+            assert_eq!(render(kind, "up_left", 1.0), to);
+        }
+    }
 
     #[test]
     fn powerpoint_push_fills_the_frame_and_fade_through_black_reaches_black() {
