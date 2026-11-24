@@ -657,6 +657,25 @@ pub enum SlideWay {
     RightLeft,
     TopBottom,
     BottomTop,
+    UpLeft,
+    DownLeft,
+    UpRight,
+    DownRight,
+}
+
+impl SlideWay {
+    fn vector(self) -> (i32, i32) {
+        match self {
+            Self::LeftRight => (-1, 0),
+            Self::RightLeft => (1, 0),
+            Self::TopBottom => (0, -1),
+            Self::BottomTop => (0, 1),
+            Self::UpLeft => (-1, -1),
+            Self::DownLeft => (-1, 1),
+            Self::UpRight => (1, -1),
+            Self::DownRight => (1, 1),
+        }
+    }
 }
 
 pub fn slide_way(direction: &str) -> SlideWay {
@@ -664,6 +683,10 @@ pub fn slide_way(direction: &str) -> SlideWay {
         "right_left" => SlideWay::RightLeft,
         "top_bottom" => SlideWay::TopBottom,
         "bottom_top" => SlideWay::BottomTop,
+        "up_left" => SlideWay::UpLeft,
+        "down_left" => SlideWay::DownLeft,
+        "up_right" => SlideWay::UpRight,
+        "down_right" => SlideWay::DownRight,
         _ => SlideWay::LeftRight,
     }
 }
@@ -696,23 +719,90 @@ fn move_frames(
             -((height as f32 * (1.0 - t)).round() as i32),
         )
     };
-    let (out_x, out_y, in_x, in_y) = match way {
-        SlideWay::LeftRight => (-shift_x, 0, remain_x, 0),
-        SlideWay::RightLeft => (shift_x, 0, -remain_x, 0),
-        SlideWay::TopBottom => (0, -shift_y, 0, remain_y),
-        SlideWay::BottomTop => (0, shift_y, 0, -remain_y),
-    };
+    let (dx, dy) = way.vector();
     let mut pixels = vec![0u8; from.pixels.len()];
     for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
-    blit_frame(&mut pixels, width, height, from, out_x, out_y);
-    blit_frame(&mut pixels, width, height, to, in_x, in_y);
+    blit_frame(&mut pixels, width, height, from, dx * shift_x, dy * shift_y);
+    blit_frame(
+        &mut pixels,
+        width,
+        height,
+        to,
+        -dx * remain_x,
+        -dy * remain_y,
+    );
     crate::Frame {
         width: from.width,
         height: from.height,
         pixels,
     }
+}
+
+pub fn cover_frames(from: &crate::Frame, to: &crate::Frame, t: f32, way: SlideWay) -> crate::Frame {
+    let (dx, dy) = way.vector();
+    overlay_moving_frame(from, to, 1.0 - t, -dx, -dy)
+}
+
+pub fn uncover_frames(
+    from: &crate::Frame,
+    to: &crate::Frame,
+    t: f32,
+    way: SlideWay,
+) -> crate::Frame {
+    let (dx, dy) = way.vector();
+    overlay_moving_frame(to, from, t, dx, dy)
+}
+
+fn overlay_moving_frame(
+    base: &crate::Frame,
+    overlay: &crate::Frame,
+    progress: f32,
+    dx: i32,
+    dy: i32,
+) -> crate::Frame {
+    let progress = progress.clamp(0.0, 1.0);
+    let mut frame = base.clone();
+    let x = dx * (frame.width as f32 * progress).round() as i32;
+    let y = dy * (frame.height as f32 * progress).round() as i32;
+    blit_frame(
+        &mut frame.pixels,
+        frame.width as i32,
+        frame.height as i32,
+        overlay,
+        x,
+        y,
+    );
+    frame
+}
+
+pub fn wipe_frames(from: &crate::Frame, to: &crate::Frame, t: f32, way: SlideWay) -> crate::Frame {
+    let t = t.clamp(0.0, 1.0);
+    let (dx, dy) = way.vector();
+    let range = |size: u32, direction| {
+        let revealed = (size as f32 * t).round() as usize;
+        let size = size as usize;
+        match direction {
+            -1 => (size - revealed)..size,
+            1 => 0..revealed,
+            _ => 0..size,
+        }
+    };
+    let mut frame = from.clone();
+    let cols = range(frame.width, dx);
+    for y in range(frame.height, dy) {
+        let src = (y * to.width as usize + cols.start) * 4;
+        let dst = (y * frame.width as usize + cols.start) * 4;
+        let len = cols.len() * 4;
+        if y < to.height as usize
+            && cols.end <= to.width as usize
+            && let Some(row) = to.pixels.get(src..src + len)
+        {
+            frame.pixels[dst..dst + len].copy_from_slice(row);
+        }
+    }
+    frame
 }
 
 /// FreeShow's scale transition. The current slide shrinks and fades, and the

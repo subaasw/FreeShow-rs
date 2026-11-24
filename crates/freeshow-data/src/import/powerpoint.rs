@@ -332,6 +332,9 @@ fn slide_visual_transition(xml: &str) -> Option<serde_json::Value> {
             "fade" if through_black => "fade_through_black",
             "fade" => "fade",
             "push" => "push",
+            "wipe" => "wipe",
+            "cover" => "cover",
+            "pull" => "uncover",
             _ => return None,
         };
         let duration = transition
@@ -355,6 +358,10 @@ fn slide_visual_transition(xml: &str) -> Option<serde_json::Value> {
             Some("r") => "right_left",
             Some("u") => "top_bottom",
             Some("d") => "bottom_top",
+            Some("lu") => "up_left",
+            Some("ld") => "down_left",
+            Some("ru") => "up_right",
+            Some("rd") => "down_right",
             _ => "left_right",
         };
         Some(json!({"type":kind,"duration":duration,"custom":{"direction":direction}}))
@@ -1691,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_fade_cut_and_directional_push_transitions() {
+    fn imports_supported_visual_transitions_with_duration_and_direction() {
         let files = archive(&[
             ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:mc="mc" xmlns:modern="http://schemas.microsoft.com/office/powerpoint/2010/main"><p:cSld/>
                 <mc:AlternateContent><mc:Choice Requires="modern"><p:transition modern:dur="825"><p:push dir="u"/></p:transition></mc:Choice>
@@ -1699,7 +1706,10 @@ mod tests {
             ("ppt/slides/slide2.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition spd="fast"><p:fade thruBlk="true"/></p:transition></p:sld>"#),
             ("ppt/slides/slide3.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:cut/></p:transition></p:sld>"#),
             ("ppt/slides/slide4.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:fade/></p:transition></p:sld>"#),
-            ("ppt/slides/slide5.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:randomBar/></p:transition></p:sld>"#),
+            ("ppt/slides/slide5.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition spd="slow"><p:wipe dir="d"/></p:transition></p:sld>"#),
+            ("ppt/slides/slide6.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition spd="fast"><p:cover dir="rd"/></p:transition></p:sld>"#),
+            ("ppt/slides/slide7.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:pull dir="lu"/></p:transition></p:sld>"#),
+            ("ppt/slides/slide8.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:randomBar/></p:transition></p:sld>"#),
         ]);
         let mut show = import("Transitions.pptx", &files, None).unwrap();
         for (index, (kind, duration, direction)) in [
@@ -1707,6 +1717,9 @@ mod tests {
             ("fade_through_black", 500, "left_right"),
             ("none", 0, "left_right"),
             ("fade", 1000, "left_right"),
+            ("wipe", 2000, "bottom_top"),
+            ("cover", 500, "down_right"),
+            ("uncover", 1000, "up_left"),
         ]
         .into_iter()
         .enumerate()
@@ -1721,7 +1734,7 @@ mod tests {
                 (kind, duration, direction)
             );
         }
-        assert!(show.transition_at(4).is_none());
+        assert!(show.transition_at(7).is_none());
         assert!(show.set_transition_at(0, "push", 600));
         assert_eq!(show.transition_at(0).unwrap().direction, "top_bottom");
         assert_eq!(show.transition_at(0).unwrap().duration_ms, 600);
