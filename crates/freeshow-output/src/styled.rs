@@ -29,6 +29,7 @@ pub struct BoxStyle {
     pub background: Option<Rgba>,
     pub elliptical_background: bool,
     fill_paths: Vec<FillPath>,
+    pptx_path_shades: Vec<i8>,
     fill_even_odd: bool,
     pub font_px: f32,
     pub align: Align,
@@ -188,6 +189,7 @@ impl Default for BoxStyle {
             background: None,
             elliptical_background: false,
             fill_paths: Vec::new(),
+            pptx_path_shades: Vec::new(),
             fill_even_odd: false,
             font_px: 100.0,
             align: Align::Center,
@@ -458,6 +460,19 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     .map(|contour| vec![vec![contour]])
                     .unwrap_or_default();
                 style.fill_even_odd = true;
+            }
+            "--pptx-path-shades" => {
+                style.pptx_path_shades = value
+                    .split_ascii_whitespace()
+                    .take(342)
+                    .map(|value| {
+                        value
+                            .parse::<i8>()
+                            .ok()
+                            .filter(|value| matches!(value, -40 | -20 | 0 | 20 | 40))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default();
             }
             "--pptx-fill-paths" => {
                 style.fill_paths = parse_fill_paths(value).unwrap_or_default();
@@ -3922,6 +3937,14 @@ fn fill_item_background(
     }
     let frame_w = slide.output_width;
     let frame_h = slide.output_height;
+    let path_shade = |index| {
+        if style.pptx_path_shades.len() == style.fill_paths.len() {
+            style.pptx_path_shades.get(index).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    };
+    let bounds = text::Clip { x, y, w, h };
     if let Some(gradient) = &style.gradient
         && !gradient.stops.is_empty()
     {
@@ -4024,7 +4047,7 @@ fn fill_item_background(
                 .collect();
             PolygonGradient::new(&points, point).map(|gradient| (point, gradient))
         });
-        let mut draw_stop = |px, py| {
+        let mut draw_stop = |px, py, stops: &[(f32, Rgba)]| {
             let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
                 (columns[(px - x0) as usize], rows[(py - y0) as usize])
             } else if let Some(GradientSpace {
@@ -4087,23 +4110,43 @@ fn fill_item_background(
                 frame_h,
                 px,
                 py,
-                interpolate_stops(&gradient.stops, position, style.pptx_gradient_gamma),
+                interpolate_stops(stops, position, style.pptx_gradient_gamma),
             );
         };
         if style.fill_paths.is_empty() {
             for py in y0..y1 {
                 for px in x0..x1 {
                     if in_item_shape(px, py, x, y, w, h, radius) {
-                        draw_stop(px, py);
+                        draw_stop(px, py, &gradient.stops);
                     }
                 }
             }
         } else {
-            for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
-                for px in start..end {
-                    draw_stop(px, py);
-                }
-            });
+            for (index, path) in style.fill_paths.iter().enumerate() {
+                let shade = path_shade(index);
+                let shaded;
+                let stops = if shade != 0 {
+                    shaded = gradient
+                        .stops
+                        .iter()
+                        .map(|&(t, color)| (t, shade_path(color, shade)))
+                        .collect::<Vec<_>>();
+                    shaded.as_slice()
+                } else {
+                    gradient.stops.as_slice()
+                };
+                for_path_span(
+                    slide,
+                    &bounds,
+                    path,
+                    style.fill_even_odd,
+                    |py, start, end| {
+                        for px in start..end {
+                            draw_stop(px, py, stops);
+                        }
+                    },
+                );
+            }
         }
         return;
     }
@@ -4111,22 +4154,46 @@ fn fill_item_background(
         return;
     };
     if !style.fill_paths.is_empty() {
-        for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
-            fill_rect(
-                pixels,
-                frame_w,
-                frame_h,
-                start,
-                py,
-                end.saturating_sub(start),
-                1,
-                background,
+        for (index, path) in style.fill_paths.iter().enumerate() {
+            let color = shade_path(background, path_shade(index));
+            for_path_span(
+                slide,
+                &bounds,
+                path,
+                style.fill_even_odd,
+                |py, start, end| {
+                    fill_rect(
+                        pixels,
+                        frame_w,
+                        frame_h,
+                        start,
+                        py,
+                        end.saturating_sub(start),
+                        1,
+                        color,
+                    );
+                },
             );
-        });
+        }
     } else if radius != Radii::default() {
         fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
     } else {
         fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
+    }
+}
+
+fn shade_path(color: Rgba, shade: i8) -> Rgba {
+    let channel = |value: u8| {
+        let value = i32::from(value);
+        let target = if shade < 0 { 0 } else { 255 };
+        let weight = i32::from(shade).abs();
+        ((value * (100 - weight) + target * weight + 50) / 100) as u8
+    };
+    Rgba {
+        r: channel(color.r),
+        g: channel(color.g),
+        b: channel(color.b),
+        a: color.a,
     }
 }
 
@@ -4950,6 +5017,32 @@ mod tests {
         ));
         assert_eq!(frame.pixel(337, 320), parse_color("#FF0000").unwrap());
         assert!(frame.pixel(959, 539).b > 250);
+    }
+
+    #[test]
+    fn powerpoint_path_shades_preserve_fill_order_and_gradient_stops() {
+        let background = "0 0,1 0,1 1,0 1";
+        let lighten = "0.1 0.1,0.6 0.1,0.6 0.6,0.1 0.6";
+        let darken = "0.4 0.4,0.9 0.4,0.9 0.9,0.4 0.9";
+        let render = |fill| {
+            let mut slide = style_slide(&format!(
+                "left:0px;top:0px;width:100px;height:100px;background:{fill};--pptx-fill-paths:{background}|{lighten}|{darken};--pptx-path-shades:0 40 -20;"
+            ));
+            slide.output_width = 100;
+            slide.output_height = 100;
+            slide.source_width = 100.0;
+            slide.source_height = 100.0;
+            render_styled(&slide)
+        };
+        let solid = render("#646464");
+        assert_eq!(solid.pixel(5, 50).r, 100);
+        assert_eq!(solid.pixel(25, 50).r, 162);
+        assert_eq!(solid.pixel(50, 50).r, 80);
+        let gradient = render("linear-gradient(180deg, #000000 0%, #C8C8C8 100%)");
+        assert!((99..=102).contains(&gradient.pixel(5, 50).r));
+        assert!((161..=164).contains(&gradient.pixel(25, 50).r));
+        assert!((79..=82).contains(&gradient.pixel(50, 50).r));
+        assert_eq!(shade_path(parse_color("#64646480").unwrap(), -40).a, 128);
     }
 
     #[test]
