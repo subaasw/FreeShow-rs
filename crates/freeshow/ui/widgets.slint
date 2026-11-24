@@ -5,7 +5,20 @@ export global OperatorStyle {
     in-out property <float> font-scale: 1;
     in-out property <color> hover: rgba(255, 255, 255, 0.05);
     in-out property <color> focus-fill: rgba(255, 255, 255, 0.1);
-    in-out property <length> chrome-radius: 4px;
+    // 8px grid chrome: header / rail / fields / swatches share these.
+    in-out property <length> chrome-radius: 6px;
+    in-out property <length> space-xs: 4px;
+    in-out property <length> space-sm: 8px;
+    in-out property <length> space: 12px;
+    in-out property <length> space-lg: 16px;
+    in-out property <length> header-height: 48px;
+    in-out property <length> rail-width: 80px;
+    in-out property <length> rail-btn: 56px;
+    in-out property <length> status-height: 28px;
+    in-out property <length> field-height: 32px;
+    in-out property <length> swatch-size: 28px;
+    in-out property <length> label-width: 56px;
+    in-out property <length> panel-pad: 12px;
 }
 
 export component RailButton inherits Rectangle {
@@ -16,9 +29,9 @@ export component RailButton inherits Rectangle {
     in property <color> text-color;
     in property <color> accent-text;
     callback clicked();
-    min-height: 34px;
-    preferred-height: 58px;
-    max-height: 58px;
+    min-height: OperatorStyle.rail-btn;
+    preferred-height: OperatorStyle.rail-btn;
+    max-height: OperatorStyle.rail-btn;
     border-radius: OperatorStyle.chrome-radius;
     background: root.active ? root.accent : root.primary;
     Rectangle {
@@ -57,7 +70,7 @@ export component BoxButton inherits Rectangle {
     in property <color> accent-text;
     callback clicked();
     horizontal-stretch: 1;
-    height: 28px;
+    height: OperatorStyle.field-height;
     border-radius: OperatorStyle.chrome-radius;
     background: root.accent;
     Rectangle {
@@ -96,7 +109,7 @@ export component HeaderButton inherits Rectangle {
     min-width: max(56px, label-text.preferred-width + 12px);
     preferred-width: max(88px, label-text.preferred-width + 20px);
     max-width: max(88px, label-text.preferred-width + 20px);
-    height: 32px;
+    height: OperatorStyle.field-height;
     border-radius: OperatorStyle.chrome-radius;
     background: root.accent;
     Rectangle {

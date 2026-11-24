@@ -1392,6 +1392,19 @@ impl Session {
             .unwrap_or_default()
     }
 
+    pub fn notes(&self) -> String {
+        if self.tab != "shows" {
+            return String::new();
+        }
+        let Some(show) = self.current_show() else {
+            return String::new();
+        };
+        self.slide_index
+            .and_then(|index| show.ordered_slides().get(index).cloned())
+            .map(|slide| slide.notes)
+            .unwrap_or_default()
+    }
+
     pub fn lyrics(&self) -> String {
         if self.tab == "scripture" {
             return self
@@ -3467,6 +3480,7 @@ impl Session {
             &change.kind,
             change.duration_ms,
             &change.easing,
+            "",
         );
     }
 
@@ -4485,6 +4499,41 @@ impl Session {
         ok
     }
 
+    pub fn save_notes(&mut self, notes: &str) -> bool {
+        if self.tab != "shows" {
+            return false;
+        }
+        let snap = self.edit_snapshot("Edit notes");
+        let Some(slide_index) = self.slide_index else {
+            return false;
+        };
+        let Some(show_index) = self.show_index else {
+            return false;
+        };
+        let Some(show) = self.shows.get_mut(show_index) else {
+            return false;
+        };
+        let Some(slide_id) = show
+            .ordered_slides()
+            .get(slide_index)
+            .map(|slide| slide.id.clone())
+        else {
+            return false;
+        };
+        if !show.set_notes(&slide_id, notes) {
+            return false;
+        }
+        let Some(path) = show.path.clone() else {
+            self.commit_edit(snap);
+            return true;
+        };
+        let ok = show.save(&path).is_ok();
+        if ok {
+            self.commit_edit(snap);
+        }
+        ok
+    }
+
     fn current_item(&self, show: &freeshow_data::ShowFile) -> usize {
         let Some(slide_index) = self.slide_index else {
             return 0;
@@ -4615,6 +4664,35 @@ impl Session {
         true
     }
 
+    /// Front-most slide item under a 1920×1080 point, for click-to-select in the editor.
+    pub fn item_box_at(&self, x: f32, y: f32) -> Option<usize> {
+        let show = self.current_show()?;
+        let slide = show.ordered_slides().get(self.slide_index?)?.id.clone();
+        let count = show.item_count(&slide);
+        (0..count).rev().find(|&index| {
+            let area = show.item_box(&slide, index);
+            x >= area.left as f32
+                && x < (area.left + area.width) as f32
+                && y >= area.top as f32
+                && y < (area.top + area.height) as f32
+        })
+    }
+
+    /// Moves or resizes the selected slide item; `resize` writes width/height, otherwise left/top.
+    pub fn set_item_geometry(&mut self, first: i32, second: i32, resize: bool) -> bool {
+        let (horizontal, vertical, minimum) = if resize {
+            ("width", "height", 1)
+        } else {
+            ("left", "top", -8000)
+        };
+        let first = first.clamp(minimum, 8000);
+        let second = second.clamp(minimum, 8000);
+        self.edit_current_item(|show, slide, item| {
+            show.set_item_box_css(slide, item, horizontal, &format!("{first}px"))
+                && show.set_item_box_css(slide, item, vertical, &format!("{second}px"))
+        })
+    }
+
     pub fn prev_item(&mut self) -> bool {
         let index = self.item_index;
         self.select_item(index.saturating_sub(1))
@@ -4632,6 +4710,28 @@ impl Session {
         self.media
             .iter()
             .filter(|entry| entry.kind == MediaEntryKind::Image && entry.exists)
+    }
+
+    /// Library pictures and videos for the stage media picker: `(label, path)`.
+    pub fn stage_media_files(&self) -> Vec<(String, String)> {
+        self.media
+            .iter()
+            .filter(|entry| {
+                entry.exists
+                    && matches!(
+                        entry.kind,
+                        MediaEntryKind::Image | MediaEntryKind::Video
+                    )
+            })
+            .map(|entry| (entry.label(), entry.path.display().to_string()))
+            .collect()
+    }
+
+    /// Library stills for stage web preview cards: `(label, path)`.
+    pub fn stage_still_files(&self) -> Vec<(String, String)> {
+        self.slide_pictures()
+            .map(|entry| (entry.label(), entry.path.display().to_string()))
+            .collect()
     }
 
     pub fn add_picture_box(&mut self, index: usize) -> Result<(), String> {
@@ -6476,12 +6576,10 @@ impl Session {
         self.restore_snapshot(next)
     }
 
-    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.history.is_empty()
     }
 
-    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
@@ -8773,6 +8871,36 @@ Second line"
         assert_eq!(session.metronome_beat, 0);
         session.toggle_metronome();
         assert!(!session.metronome_on);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn edit_preview_hit_test_and_geometry_follow_the_selected_box() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-rust-edit-hit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Front"));
+        assert!(session.add_item_box());
+        assert!(session.save_lyrics("Back"));
+        session.inspector_set("left", "100").unwrap();
+        session.inspector_set("top", "100").unwrap();
+        session.inspector_set("width", "200").unwrap();
+        session.inspector_set("height", "200").unwrap();
+        // Default lyric box is left:50 top:88; the second box sits on top at 100,100.
+        assert_eq!(session.item_box_at(150.0, 150.0), Some(1));
+        assert_eq!(session.item_box_at(80.0, 200.0), Some(0));
+        assert_eq!(session.item_box_at(5.0, 5.0), None);
+        assert!(session.select_item(0));
+        assert!(session.set_item_geometry(40, 50, false));
+        let area = session.inspector_form().item_box;
+        assert_eq!((area.left, area.top), (40, 50));
+        assert!(session.set_item_geometry(300, 180, true));
+        let area = session.inspector_form().item_box;
+        assert_eq!((area.width, area.height), (300, 180));
         let _ = std::fs::remove_dir_all(&root);
     }
 

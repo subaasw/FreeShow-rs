@@ -3,9 +3,9 @@
 
 import { Button, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow, HotkeyScope, SlideCard } from "widgets.slint";
-import { ComboIndex, ValueEdit, SettingsPanel, SettingsData, ThemeColorRow, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
+import { ComboIndex, ColorFmt, ValueEdit, SettingsPanel, SettingsData, ThemeColorRow, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
 
-export { ComboIndex, OperatorStyle, SettingsData, ThemeColorRow, InspectorData, StageRowData }
+export { ComboIndex, ColorFmt, OperatorStyle, SettingsData, ThemeColorRow, InspectorData, StageRowData }
 
 struct DrawerTab { id: string, label: string, short: string }
 
@@ -66,6 +66,7 @@ export component ControlWindow inherits Window {
     in-out property <string> project-title: "Project";
     in-out property <string> lyrics: "";
     in-out property <string> group: "";
+    in-out property <string> notes: "";
     in-out property <float> volume: 100;
     in-out property <int> selected-drawer: -1;
     // Calendar, Player and RSS form under the drawer tabs.
@@ -93,8 +94,15 @@ export component ControlWindow inherits Window {
     callback cancel-import();
     callback open-output();
     callback open-stage();
-    callback choose-screen();
+    // Picks an audience monitor: 0 = Auto, then each connected display.
+    callback pick-screen(int);
+    in property <[string]> screen-choices;
+    in-out property <int> screen-index: 0;
     in-out property <string> screen-label: "Screen";
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
+    callback undo-edit();
+    callback redo-edit();
     in-out property <bool> output-open: false;
     in-out property <bool> stage-open: false;
     in-out property <string> search-query: "";
@@ -147,6 +155,10 @@ export component ControlWindow inherits Window {
     in property <[string]> stage-output-ids;
     in property <[string]> stage-output-names;
     in property <[string]> stage-camera-names;
+    in property <[string]> stage-media-names;
+    in property <[string]> stage-media-paths;
+    in property <[string]> stage-still-names;
+    in property <[string]> stage-still-paths;
     in property <string> stage-status;
     in-out property <int> stage-selected: 0;
     callback stage-set(string, string, string);
@@ -175,6 +187,7 @@ export component ControlWindow inherits Window {
     callback choose-slide(int);
     callback save-lyrics(string);
     callback save-group(string);
+    callback save-notes(string);
     in property <int> item-index;
     in property <int> item-count;
     in property <[string]> picture-choices;
@@ -184,6 +197,10 @@ export component ControlWindow inherits Window {
     callback add-picture(int);
     callback move-item(bool);
     callback remove-item();
+    // Click/drag on the edit preview: hit-test and move/resize the selected box.
+    callback edit-box-at(float, float) -> int;
+    callback select-edit-box(int);
+    callback edit-geometry(int, int, bool);
     callback go-slide(string);
     callback move-project(int);
     // Moves the project item at the first index to the second, from a drag in the list.
@@ -246,12 +263,12 @@ export component ControlWindow inherits Window {
     VerticalLayout {
         spacing: 0;
         Rectangle {
-            height: 48px;
+            height: OperatorStyle.header-height;
             background: root.primary-darker;
             HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 12px;
-                spacing: 8px;
+                padding-left: OperatorStyle.space-lg;
+                padding-right: OperatorStyle.space;
+                spacing: OperatorStyle.space-sm;
                 alignment: center;
                 Text {
                     text: "FreeShow";
@@ -289,13 +306,12 @@ export component ControlWindow inherits Window {
                     accent-text: root.accent-text;
                     clicked => { root.get-update(); }
                 }
-                // Picking the output screen is an action, not an on/off state, so it stays neutral.
-                HeaderButton {
-                    label: root.screen-label;
-                    accent: root.primary-lighter;
-                    text-color: root.text-color;
-                    accent-text: root.text-color;
-                    clicked => { root.choose-screen(); }
+                if root.screen-choices.length > 0: ComboBox {
+                    width: 168px;
+                    model: root.screen-choices;
+                    current-index: root.screen-index;
+                    accessible-label: "Audience screen";
+                    selected(value) => { root.pick-screen(self.current-index); }
                 }
                 HeaderButton {
                     label: root.show-labels ? "Output" : "O";
@@ -316,11 +332,13 @@ export component ControlWindow inherits Window {
         HorizontalLayout {
             spacing: 0;
             Rectangle {
-                width: 96px;
+                width: OperatorStyle.rail-width;
                 background: root.primary-darker;
                 VerticalLayout {
                     alignment: start;
-                    spacing: 0;
+                    spacing: OperatorStyle.space-xs;
+                    padding-top: OperatorStyle.space-xs;
+                    padding-bottom: OperatorStyle.space-xs;
                     for tab in root.tabs: RailButton {
                         label: root.show-labels ? tab.label : tab.short;
                         active: root.active-tab == tab.id;
@@ -370,14 +388,14 @@ export component ControlWindow inherits Window {
                             accent-text: root.text-color;
                             clicked => { root.edit-mode = true; root.text-mode = false; root.create-show(); }
                         }
-                        if root.active-tab == "shows" && root.show-name != "": HeaderButton {
+                        if root.editing: HeaderButton {
                             label: "Duplicate";
                             accent: root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-color;
                             clicked => { root.library-action("duplicate-show", ""); }
                         }
-                        if root.active-tab == "shows" && root.show-name != "": HeaderButton {
+                        if root.editing: HeaderButton {
                             label: root.confirm-show-delete ? "Confirm" : "Delete";
                             accent: root.confirm-show-delete ? #c0392b : root.primary-lighter;
                             text-color: root.text-color;
@@ -392,11 +410,39 @@ export component ControlWindow inherits Window {
                             }
                         }
                         if root.active-tab == "shows" && root.show-name != "": HeaderButton {
-                            label: "Edit";
+                            label: root.edit-mode ? "Done" : "Edit";
                             accent: root.edit-mode ? root.accent : root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.edit-mode ? root.accent-text : root.text-color;
-                            clicked => { root.edit-mode = !root.edit-mode; root.text-mode = false; }
+                            clicked => { root.edit-mode = !root.edit-mode; root.text-mode = false; root.confirm-show-delete = false; }
+                        }
+                        if root.active-tab == "shows" && root.show-name != "" && !root.edit-mode: HeaderButton {
+                            label: "Prev";
+                            accent: root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.hotkey("PageUp", false, false, false); }
+                        }
+                        if root.active-tab == "shows" && root.show-name != "" && !root.edit-mode: HeaderButton {
+                            label: "Next";
+                            accent: root.primary-lighter;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { root.hotkey("PageDown", false, false, false); }
+                        }
+                        if root.editing: HeaderButton {
+                            label: "Undo";
+                            accent: root.can-undo ? root.primary-lighter : root.primary-darker;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { if (root.can-undo) { root.undo-edit(); } }
+                        }
+                        if root.editing: HeaderButton {
+                            label: "Redo";
+                            accent: root.can-redo ? root.primary-lighter : root.primary-darker;
+                            text-color: root.text-color;
+                            accent-text: root.text-color;
+                            clicked => { if (root.can-redo) { root.redo-edit(); } }
                         }
                         if root.editing: HeaderButton {
                             label: root.text-mode ? "Slide text" : "Show text";
@@ -419,7 +465,7 @@ export component ControlWindow inherits Window {
                             changed(value) => { root.set-volume(value); }
                         }
                         HeaderButton {
-                            label: "Go";
+                            label: root.editing ? "Present" : "Go";
                             accent: root.accent;
                             text-color: root.text-color;
                             accent-text: root.accent-text;
@@ -534,13 +580,99 @@ export component ControlWindow inherits Window {
                             wrap: word-wrap;
                         }
                         Rectangle {
-                            height: root.editing ? 180px : max(120px, min((editor-scroll.width - 40px) * 9 / 16, editor-scroll.height - 110px));
+                            height: root.editing ? 220px : max(120px, min((editor-scroll.width - 40px) * 9 / 16, editor-scroll.height - 110px));
                             background: black;
-                            Image {
-                                source: root.editing ? root.edit-preview : root.preview;
-                                width: 100%;
-                                height: 100%;
-                                image-fit: contain;
+                            // Letterbox like the stage editor so clicks map to 1920×1080.
+                            edit-frame := Rectangle {
+                                property <image> frame: root.editing ? root.edit-preview : root.preview;
+                                property <float> aspect: self.frame.width > 0 && self.frame.height > 0 ? self.frame.width / self.frame.height : 1920.0 / 1080.0;
+                                property <length> unit-x: self.width / 1920;
+                                property <length> unit-y: self.height / 1080;
+                                width: min(parent.width, parent.height * self.aspect);
+                                height: self.width / self.aspect;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                clip: true;
+                                Image {
+                                    source: edit-frame.frame;
+                                    width: 100%;
+                                    height: 100%;
+                                    image-fit: fill;
+                                }
+                                if root.editing: Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    if root.inspector-data.has-item: Rectangle {
+                                        x: edit-drag.preview-x * edit-frame.unit-x;
+                                        y: edit-drag.preview-y * edit-frame.unit-y;
+                                        width: edit-drag.preview-width * edit-frame.unit-x;
+                                        height: edit-drag.preview-height * edit-frame.unit-y;
+                                        border-width: 2px;
+                                        border-color: root.accent;
+                                        Rectangle {
+                                            width: edit-drag.handle-size;
+                                            height: self.width;
+                                            x: parent.width - self.width;
+                                            y: parent.height - self.height;
+                                            background: root.accent;
+                                        }
+                                    }
+                                    edit-drag := TouchArea {
+                                        width: 100%;
+                                        height: 100%;
+                                        property <length> box-x: root.inspector-data.x * edit-frame.unit-x;
+                                        property <length> box-y: root.inspector-data.y * edit-frame.unit-y;
+                                        property <length> box-width: root.inspector-data.w * edit-frame.unit-x;
+                                        property <length> box-height: root.inspector-data.h * edit-frame.unit-y;
+                                        property <length> right: self.box-x + self.box-width;
+                                        property <length> bottom: self.box-y + self.box-height;
+                                        property <bool> resizing;
+                                        property <bool> holding;
+                                        property <int> hit-index: -1;
+                                        property <length> handle-size: min(10px, min(self.box-width, self.box-height) * 0.45);
+                                        property <bool> over-box: self.mouse-x >= self.box-x && self.mouse-x < self.right && self.mouse-y >= self.box-y && self.mouse-y < self.bottom;
+                                        property <bool> over-handle: self.over-box && self.mouse-x >= self.right - self.handle-size && self.mouse-y >= self.bottom - self.handle-size;
+                                        property <length> dx: self.mouse-x - self.pressed-x;
+                                        property <length> dy: self.mouse-y - self.pressed-y;
+                                        property <bool> moved-far: abs(self.dx) > 3px || abs(self.dy) > 3px;
+                                        property <int> slide-dx: round(self.dx / max(0.001px, edit-frame.unit-x));
+                                        property <int> slide-dy: round(self.dy / max(0.001px, edit-frame.unit-y));
+                                        property <int> drop-x: clamp(root.inspector-data.x + self.slide-dx, -8000, 8000);
+                                        property <int> drop-y: clamp(root.inspector-data.y + self.slide-dy, -8000, 8000);
+                                        property <int> drop-width: clamp(root.inspector-data.w + self.slide-dx, 1, 8000);
+                                        property <int> drop-height: clamp(root.inspector-data.h + self.slide-dy, 1, 8000);
+                                        property <bool> preview-drag: self.pressed && self.holding && self.moved-far;
+                                        property <int> preview-x: self.preview-drag && !self.resizing ? self.drop-x : root.inspector-data.x;
+                                        property <int> preview-y: self.preview-drag && !self.resizing ? self.drop-y : root.inspector-data.y;
+                                        property <int> preview-width: self.preview-drag && self.resizing ? self.drop-width : root.inspector-data.w;
+                                        property <int> preview-height: self.preview-drag && self.resizing ? self.drop-height : root.inspector-data.h;
+                                        mouse-cursor: (self.pressed ? self.resizing : self.over-handle) ? MouseCursor.se-resize : self.pressed && self.holding ? MouseCursor.grabbing : self.over-box ? MouseCursor.grab : MouseCursor.default;
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                                self.resizing = self.over-handle;
+                                                if (self.resizing) {
+                                                    self.holding = true;
+                                                } else {
+                                                    self.hit-index = root.edit-box-at(
+                                                        self.mouse-x / max(0.001px, edit-frame.unit-x),
+                                                        self.mouse-y / max(0.001px, edit-frame.unit-y)
+                                                    );
+                                                    root.select-edit-box(self.hit-index);
+                                                    self.holding = self.hit-index >= 0;
+                                                }
+                                            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left && self.holding && self.moved-far) {
+                                                if (self.resizing) {
+                                                    root.edit-geometry(self.drop-width, self.drop-height, true);
+                                                } else {
+                                                    root.edit-geometry(self.drop-x, self.drop-y, false);
+                                                }
+                                                self.holding = false;
+                                            } else if (event.kind == PointerEventKind.up) {
+                                                self.holding = false;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         HorizontalLayout {
@@ -555,6 +687,11 @@ export component ControlWindow inherits Window {
                             text <=> root.group;
                             placeholder-text: "Group name, e.g. Verse 1 or Chorus";
                             edited(value) => { root.save-group(value); }
+                        }
+                        if root.editing && !root.text-mode: ValueEdit {
+                            shown: root.notes;
+                            placeholder-text: "Stage notes for this slide";
+                            accepted(value) => { root.save-notes(value); }
                         }
                         if root.editing && !root.text-mode: TextEdit {
                             text <=> root.lyrics;
@@ -620,6 +757,7 @@ export component ControlWindow inherits Window {
                         if root.editing && !root.text-mode: InspectorPanel {
                             data: root.inspector-data;
                             text-color: root.text-color;
+                            panel: root.primary-darker;
                             set(key, value) => { root.inspector-set(key, value); }
                         }
                         if root.editing && root.spelling != "": Text {
@@ -1172,11 +1310,11 @@ export component ControlWindow inherits Window {
             }
         }
         Rectangle {
-            height: 28px;
+            height: OperatorStyle.status-height;
             background: root.primary-darker;
             HorizontalLayout {
-                padding-left: 12px;
-                spacing: root.chrome-status != "" ? 16px : 0px;
+                padding-left: OperatorStyle.space;
+                spacing: root.chrome-status != "" ? OperatorStyle.space-lg : 0px;
                 alignment: center;
                 Text {
                     text: root.chrome-status;
@@ -1215,9 +1353,9 @@ export component ControlWindow inherits Window {
     }
         if root.show-settings: SettingsPanel {
             x: 0;
-            y: 48px;
+            y: OperatorStyle.header-height;
             width: parent.width;
-            height: parent.height - 48px - 28px;
+            height: parent.height - OperatorStyle.header-height - OperatorStyle.status-height;
             background: root.primary;
             data: root.settings-data;
             themes: root.theme-names;
@@ -1226,6 +1364,7 @@ export component ControlWindow inherits Window {
             status: root.settings-status;
             text-color: root.text-color;
             close-fill: root.primary-lighter;
+            panel: root.primary-darker;
             apply(key, value) => { root.apply-setting(key, value); }
             save-icecast(host, port, mount, password, transport, main-mix) => {
                 return root.save-icecast(host, port, mount, password, transport, main-mix);
@@ -1234,9 +1373,9 @@ export component ControlWindow inherits Window {
         }
         if root.show-stage-editor && !root.show-settings: StageEditorPanel {
             x: 0;
-            y: 48px;
+            y: OperatorStyle.header-height;
             width: parent.width;
-            height: parent.height - 48px - 28px;
+            height: parent.height - OperatorStyle.header-height - OperatorStyle.status-height;
             background: root.primary;
             layout-name: root.stage-layout-name;
             layout-background: root.stage-layout-background;
@@ -1254,6 +1393,10 @@ export component ControlWindow inherits Window {
             output-ids: root.stage-output-ids;
             output-names: root.stage-output-names;
             camera-names: root.stage-camera-names;
+            media-names: root.stage-media-names;
+            media-paths: root.stage-media-paths;
+            still-names: root.stage-still-names;
+            still-paths: root.stage-still-paths;
             preview: root.stage-preview;
             status: root.stage-status;
             selected <=> root.stage-selected;
@@ -1261,6 +1404,7 @@ export component ControlWindow inherits Window {
             accent: root.accent;
             accent-text: root.accent-text;
             close-fill: root.primary-lighter;
+            panel: root.primary-darker;
             set(id, key, value) => { root.stage-set(id, key, value); }
             select-layout(id) => { root.stage-layout-select(id); }
             create-layout(duplicate) => { root.stage-layout-create(duplicate); }
