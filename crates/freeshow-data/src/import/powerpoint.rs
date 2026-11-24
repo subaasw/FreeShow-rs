@@ -829,6 +829,20 @@ impl SlideObject {
             style.push_str(&format!("--pptx-group-matrix:{a} {b} {c} {d};"));
         }
         if !matches!(self.kind, ObjectKind::Picture) {
+            if !self.style.polygon.is_empty() {
+                let polygon = self
+                    .style
+                    .polygon
+                    .iter()
+                    .map(|&[x, y]| {
+                        let x = if self.flip_x { 1.0 - x } else { x };
+                        let y = if self.flip_y { 1.0 - y } else { y };
+                        format!("{x} {y}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                style.push_str(&format!("--shape-fill-polygon:{polygon};"));
+            }
             if let Some(fill) = &self.style.fill {
                 style.push_str(fill);
             }
@@ -2400,6 +2414,32 @@ mod tests {
         let outside = items[2]["style"].as_str().unwrap();
         assert!(outside.starts_with("left:10px;top:20px;"));
         assert!(!outside.contains("--pptx-group-matrix"));
+    }
+
+    #[test]
+    fn imports_a_custom_polygon_and_its_shape_path_gradient() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+                <a:xfrm flipH="1"><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                <a:custGeom><a:pathLst><a:path w="40" h="20">
+                    <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+                    <a:lnTo><a:pt x="40" y="0"/></a:lnTo>
+                    <a:lnTo><a:pt x="0" y="20"/></a:lnTo><a:close/>
+                </a:path></a:pathLst></a:custGeom>
+                <a:gradFill><a:gsLst>
+                    <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                    <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                </a:gsLst><a:path path="shape"><a:fillToRect l="25000" t="25000" r="75000" b="75000"/></a:path></a:gradFill>
+            </p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Polygon.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(style.contains("--shape-fill-polygon:1 0,0 0,1 1;"));
+        assert!(style.contains("--pptx-polygon-focus:0.25 0.25;"));
+        assert!(style.contains("--pptx-fill-flip-x:1;"));
     }
 
     #[test]

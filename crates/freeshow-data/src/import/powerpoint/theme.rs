@@ -154,6 +154,13 @@ pub(super) enum GradientFocus {
     Shape([f64; 4]),
 }
 
+#[derive(Clone, Copy)]
+enum GradientShape {
+    Rectangle,
+    Ellipse,
+    Polygon,
+}
+
 impl GradientFocus {
     pub(super) fn from_path(path: &str, [left, top, right, bottom]: [f64; 4]) -> Option<Self> {
         let edges = [left, top, right, bottom];
@@ -234,7 +241,7 @@ impl GradientFill {
     fn resolve(
         &self,
         scheme: impl Fn(&str) -> Option<ResolvedColor>,
-        ellipse_shape: bool,
+        shape: GradientShape,
     ) -> Option<ResolvedFill> {
         let mut resolved = Vec::new();
         for (pos, color) in &self.stops {
@@ -277,11 +284,20 @@ impl GradientFill {
             Some(GradientFocus::RadialEllipse([x, y, rx, ry])) => {
                 style.push_str(&format!("--pptx-radial-ellipse:{x} {y} {rx} {ry};"))
             }
-            Some(GradientFocus::Shape([l, t, r, b])) if ellipse_shape => {
+            Some(GradientFocus::Shape([l, t, r, b])) if matches!(shape, GradientShape::Ellipse) => {
                 let (x, y) = (l - r, t - b);
                 let (rx, ry) = ((1.0 - l - r).max(0.0), (1.0 - t - b).max(0.0));
                 style.push_str(&format!(
                     "--pptx-radial-ellipse:{x} {y} {rx} {ry};--pptx-shape-ellipse:1;"
+                ));
+            }
+            Some(GradientFocus::Shape([l, t, r, b]))
+                if matches!(shape, GradientShape::Polygon)
+                    && (l + r - 1.0).abs() < 1e-9
+                    && (t + b - 1.0).abs() < 1e-9 =>
+            {
+                style.push_str(&format!(
+                    "--pptx-rectangular-focus:{l:.5} {t:.5} {r:.5} {b:.5};--pptx-polygon-focus:{l} {t};"
                 ));
             }
             Some(GradientFocus::Rectangle([l, t, r, b]) | GradientFocus::Shape([l, t, r, b])) => {
@@ -681,12 +697,12 @@ impl Context {
         &self,
         index: u32,
         placeholder: Option<&Color>,
-        ellipse: bool,
+        shape: GradientShape,
     ) -> Option<ResolvedFill> {
         let color = |slot: &str| self.color_with_placeholder(slot, placeholder);
         match self.theme.as_ref()?.style(index)? {
             StyleFill::Solid(fill) => fill.hex_in(color).map(ResolvedFill::Color),
-            StyleFill::Gradient(fill) => fill.resolve(color, ellipse),
+            StyleFill::Gradient(fill) => fill.resolve(color, shape),
         }
     }
 }
@@ -702,6 +718,40 @@ pub(super) struct ThemeReader {
 pub(super) struct ObjectStyle {
     pub fill: Option<String>,
     pub text: Option<TextBody>,
+    pub polygon: Vec<[f64; 2]>,
+}
+
+fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
+    let geometry = child(properties, "custGeom")?;
+    let paths = child(geometry, "pathLst")?;
+    let mut paths = paths.children().filter(Node::is_element);
+    let path = paths.next().filter(|node| node.has_tag_name("path"))?;
+    if paths.next().is_some() || !matches!(path.attribute("fill"), None | Some("norm")) {
+        return None;
+    }
+    let dimension = |key| path.attribute(key)?.parse::<u32>().ok().filter(|n| *n > 0);
+    let (width, height) = (f64::from(dimension("w")?), f64::from(dimension("h")?));
+    let mut commands = path.children().filter(Node::is_element);
+    let first = commands.next().filter(|node| node.has_tag_name("moveTo"))?;
+    let point = |command| {
+        let node = child(command, "pt")?;
+        let coordinate = |key, extent| {
+            let value = node.attribute(key)?.parse::<f64>().ok()? / extent;
+            (0.0..=1.0).contains(&value).then_some(value)
+        };
+        Some([coordinate("x", width)?, coordinate("y", height)?])
+    };
+    let mut polygon = vec![point(first)?];
+    while let Some(command) = commands.next() {
+        if command.has_tag_name("close") {
+            return (polygon.len() >= 3 && commands.next().is_none()).then_some(polygon);
+        }
+        if !command.has_tag_name("lnTo") || polygon.len() == 128 {
+            return None;
+        }
+        polygon.push(point(command)?);
+    }
+    None
 }
 
 impl ThemeReader {
@@ -722,7 +772,7 @@ impl ThemeReader {
         }
         let scheme = |slot: &str| context.color_with_placeholder(slot, color);
         Ok(match style {
-            Some(index) => context.style(index, color, false),
+            Some(index) => context.style(index, color, GradientShape::Rectangle),
             None => color.and_then(|color| color.hex_in(scheme).map(ResolvedFill::Color)),
         })
     }
@@ -735,7 +785,7 @@ impl ThemeReader {
         fill: &GradientFill,
     ) -> Result<Option<ResolvedFill>, DataError> {
         let context = self.context(archive, slide, Some(xml), 0)?;
-        Ok(fill.resolve(|slot| context.color(slot), false))
+        Ok(fill.resolve(|slot| context.color(slot), GradientShape::Rectangle))
     }
 
     pub(super) fn object_styles(
@@ -763,8 +813,16 @@ impl ThemeReader {
             let Some(properties) = child(shape, "spPr") else {
                 continue;
             };
-            let ellipse = child(properties, "prstGeom").and_then(|geom| geom.attribute("prst"))
-                == Some("ellipse");
+            let polygon = custom_polygon(properties).unwrap_or_default();
+            let geometry = if !polygon.is_empty() {
+                GradientShape::Polygon
+            } else if child(properties, "prstGeom").and_then(|geom| geom.attribute("prst"))
+                == Some("ellipse")
+            {
+                GradientShape::Ellipse
+            } else {
+                GradientShape::Rectangle
+            };
             let reference = child(shape, "style").and_then(|style| child(style, "fillRef"));
             let placeholder = reference.and_then(Color::in_node);
             let scheme = |slot: &str| context.color_with_placeholder(slot, placeholder.as_ref());
@@ -779,13 +837,13 @@ impl ThemeReader {
                     .and_then(|color| color.hex_in(scheme))
                     .map(ResolvedFill::Color),
                 Some(fill) if fill.has_tag_name("gradFill") => {
-                    GradientFill::from_node(fill).and_then(|fill| fill.resolve(scheme, ellipse))
+                    GradientFill::from_node(fill).and_then(|fill| fill.resolve(scheme, geometry))
                 }
                 Some(_) => None,
                 None => reference
                     .and_then(|reference| reference.attribute("idx"))
                     .and_then(|index| index.parse().ok())
-                    .and_then(|index| context.style(index, placeholder.as_ref(), ellipse)),
+                    .and_then(|index| context.style(index, placeholder.as_ref(), geometry)),
             };
             let fill = match fill {
                 Some(ResolvedFill::Color(fill)) => Some(format!("background:{fill};")),
@@ -795,7 +853,14 @@ impl ThemeReader {
             };
             let text = TextBody::read(shape, &context, size);
             if fill.is_some() || text.is_some() {
-                styles.insert(shape.range().start as u64, ObjectStyle { fill, text });
+                styles.insert(
+                    shape.range().start as u64,
+                    ObjectStyle {
+                        fill,
+                        text,
+                        polygon,
+                    },
+                );
             }
         }
         Ok(styles)
