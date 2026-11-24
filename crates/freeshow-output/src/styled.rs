@@ -1338,10 +1338,8 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
         return;
     }
     if !style.backdrop.trim().is_empty() {
-        let radius = item_radius(&style, slide, w, h);
-        apply_backdrop(pixels, slide, &bounds, &style.backdrop, |px, py| {
-            in_item_shape(px, py, x, y, w, h, radius, style.elliptical_background)
-        });
+        let contains = item_backdrop_mask(slide, &style, &bounds);
+        apply_backdrop(pixels, slide, &bounds, &style.backdrop, contains);
     }
     draw_item_content(
         pixels, slide, item, &style, bounds, opacity, item.blend, None,
@@ -1462,31 +1460,6 @@ fn draw_transformed_item(
     if layer_len > pixels.len().saturating_mul(4) {
         return false;
     }
-    if backdrop {
-        let viewport = text::Clip {
-            x: x0,
-            y: y0,
-            w: x1 - x0,
-            h: y1 - y0,
-        };
-        let radius = item_radius(style, slide, w, h);
-        apply_backdrop(pixels, slide, &viewport, &style.backdrop, |px, py| {
-            let (sx, sy) = sample(px, py);
-            in_item_shape(
-                (sx as f32 / raster_x).floor() as i32,
-                (sy as f32 / raster_y).floor() as i32,
-                0,
-                0,
-                w,
-                h,
-                radius,
-                style.elliptical_background,
-            )
-        });
-        if opacity == 0.0 {
-            return true;
-        }
-    }
     let local = StyledSlide {
         output_width: width,
         output_height: height,
@@ -1495,6 +1468,28 @@ fn draw_transformed_item(
         background: Rgba::TRANSPARENT,
         items: Vec::new(),
     };
+    let local_bounds = text::Clip {
+        x: -sx0,
+        y: -sy0,
+        w: raster_w,
+        h: raster_h,
+    };
+    if backdrop {
+        let viewport = text::Clip {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        };
+        let contains = item_backdrop_mask(&local, style, &local_bounds);
+        apply_backdrop(pixels, slide, &viewport, &style.backdrop, |px, py| {
+            let (sx, sy) = sample(px, py);
+            contains(sx - sx0, sy - sy0)
+        });
+        if opacity == 0.0 {
+            return true;
+        }
+    }
     let mut layer = vec![0; layer_len];
     let gradient_space = if style.pptx_gradient_fixed && style.gradient.is_some() {
         let (gx, gy) = if style.elliptical_background {
@@ -1520,12 +1515,7 @@ fn draw_transformed_item(
         &local,
         item,
         style,
-        text::Clip {
-            x: -sx0,
-            y: -sy0,
-            w: raster_w,
-            h: raster_h,
-        },
+        local_bounds,
         1.0,
         Blend::Normal,
         gradient_space,
@@ -3295,6 +3285,42 @@ fn item_radius(style: &BoxStyle, slide: &StyledSlide, w: i32, h: i32) -> Radii {
     }
 }
 
+fn item_backdrop_mask(
+    slide: &StyledSlide,
+    style: &BoxStyle,
+    bounds: &text::Clip,
+) -> impl Fn(i32, i32) -> bool + use<> {
+    let text::Clip { x, y, w, h } = *bounds;
+    let radius = item_radius(style, slide, w, h);
+    let ellipse = style.elliptical_background;
+    let (x0, y0, x1, y1) = clipped_rect(slide.output_width, slide.output_height, x, y, w, h);
+    let stride = (x1 - x0) as usize;
+    let polygon = (!style.fill_polygon.is_empty()).then(|| {
+        let mut mask = vec![false; stride * (y1 - y0) as usize];
+        for_polygon_span(
+            slide,
+            text::Clip { x, y, w, h },
+            &style.fill_polygon,
+            |py, start, end| {
+                if start < end {
+                    let row = (py - y0) as usize * stride;
+                    mask[row + (start - x0) as usize..row + (end - x0) as usize].fill(true);
+                }
+            },
+        );
+        mask
+    });
+    move |px, py| {
+        if let Some(mask) = &polygon {
+            (x0..x1).contains(&px)
+                && (y0..y1).contains(&py)
+                && mask[(py - y0) as usize * stride + (px - x0) as usize]
+        } else {
+            in_item_shape(px, py, x, y, w, h, radius, ellipse)
+        }
+    }
+}
+
 fn apply_backdrop(
     pixels: &mut [u8],
     slide: &StyledSlide,
@@ -4953,6 +4979,25 @@ mod tests {
         assert_eq!(frame.pixel(50, 70), parse_color("#FFFF00").unwrap());
         assert_eq!(frame.pixel(40, 20), slide.background);
         assert_eq!(frame.pixel(75, 50), slide.background);
+    }
+
+    #[test]
+    fn backdrop_filter_matches_the_polygon_fill_mask_before_and_after_rotation() {
+        let shape = "left:20px;top:20px;width:60px;height:40px;--shape-fill-polygon:0.5 0,1 1,0 1;";
+        for transform in ["", "transform:rotate(90deg);"] {
+            let mut slide = style_slide(&format!("{shape}{transform}backdrop-filter:invert(1);"));
+            slide.output_width = 100;
+            slide.output_height = 100;
+            slide.source_width = 100.0;
+            slide.source_height = 100.0;
+            slide.background = parse_color("#0000ff").unwrap();
+            let filtered = render_styled(&slide);
+            slide.items[0].style = format!("{shape}{transform}background-color:#ffff00;");
+            let filled = render_styled(&slide);
+            assert_eq!(filtered.pixels, filled.pixels, "{transform}");
+            assert_eq!(filtered.pixel(50, 40), parse_color("#ffff00").unwrap());
+            assert_eq!(filtered.pixel(20, 20), slide.background);
+        }
     }
 
     #[test]

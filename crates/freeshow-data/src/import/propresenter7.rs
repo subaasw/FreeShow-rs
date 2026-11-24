@@ -748,6 +748,20 @@ fn box_fill(element: &wire::Element) -> Option<String> {
     let fill = element.fill.as_ref().filter(|fill| fill.enabled)?;
     let background = if let Some(gradient) = &fill.gradient {
         gradient_fill(gradient)?
+    } else if let Some(effect) = &fill.background_effect {
+        match effect.kind.as_ref()? {
+            wire::BackgroundEffectKind::Invert(_) => "backdrop-filter:invert(1);".to_owned(),
+            wire::BackgroundEffectKind::Blur(blur)
+                if blur.blur_amount.is_finite() && blur.saturation.is_finite() =>
+            {
+                format!(
+                    "backdrop-filter:blur({}px) saturate({});",
+                    blur.blur_amount.max(0.0),
+                    blur.saturation.max(0.0)
+                )
+            }
+            wire::BackgroundEffectKind::Blur(_) => return None,
+        }
     } else {
         let color = fill.color.as_ref().filter(|color| color.alpha > 0.0)?;
         format!("background-color:{};", css_color(color))
@@ -1247,6 +1261,15 @@ mod tests {
             number_points: 4,
             inner_radius: 0.35,
         });
+        let effect_shape = |kind, effect| {
+            let mut item = shape(kind as i32, true, false);
+            item.element.as_mut().unwrap().fill = Some(wire::Fill {
+                enabled: true,
+                background_effect: Some(wire::BackgroundEffect { kind: Some(effect) }),
+                ..Default::default()
+            });
+            item
+        };
         elements.insert(0, shape(1, true, false));
         elements.extend([
             shape(2, true, false),
@@ -1260,13 +1283,24 @@ mod tests {
             gradient_shape(2, wire::GradientType::Radial as i32),
             polygon,
             star,
+            effect_shape(
+                wire::ShapeType::Rhombus,
+                wire::BackgroundEffectKind::Invert(wire::BackgroundInvert {}),
+            ),
+            effect_shape(
+                wire::ShapeType::Ellipse,
+                wire::BackgroundEffectKind::Blur(wire::BackgroundBlur {
+                    saturation: 0.5,
+                    blur_amount: 12.0,
+                }),
+            ),
         ]);
 
         let show = crate::import::import_show("Shapes.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
         let items = show.show["slides"][&verse.id]["items"].as_array().unwrap();
         let style = "left:160px;top:90px;width:320px;height:180px;background-color:#ff000080;";
-        assert_eq!(items.len(), 12);
+        assert_eq!(items.len(), 14);
         assert_eq!(items[0], json!({"type":"shape","style":style,"lines":[]}));
         assert!(
             !items[1]["lines"][0]["text"][0]["value"]
@@ -1310,6 +1344,16 @@ mod tests {
             format!(
                 "{style}--shape-fill-polygon:0.500000 0.000000,0.623744 0.376256,1.000000 0.500000,0.623744 0.623744,0.500000 1.000000,0.376256 0.623744,0.000000 0.500000,0.376256 0.376256;"
             )
+        );
+        assert_eq!(
+            items[12]["style"],
+            format!(
+                "{bounds}backdrop-filter:invert(1);--shape-fill-polygon:0.5 0,1 0.5,0.5 1,0 0.5;"
+            )
+        );
+        assert_eq!(
+            items[13]["style"],
+            format!("{bounds}backdrop-filter:blur(12px) saturate(0.5);border-radius:50%;")
         );
     }
 

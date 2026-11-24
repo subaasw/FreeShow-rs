@@ -123,6 +123,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 triangle and rhombus fills follow the shape while text uses the rectangular text box.
 - [x] ProPresenter 7 regular polygons and stars use the stored side or point count and the star's inner radius.
 - [x] ProPresenter 7 linear and centered radial shape fills preserve gradient stop colors, transparency, and positions.
+- [x] ProPresenter 7 Background Blur and Color Invert fills use the saved shape for their effect on the underlying picture.
 - [x] ProPresenter 7 timed next-slide, loop-to-start, and specific-cue jumps within an arrangement, including slides with background media.
 - [x] ProPresenter 7 enabled, immediate global clear-audio and clear-background cues. Standalone cues retain the content already on audience and stage output.
 - [x] ProPresenter 7 timeline slide cues play at their recorded times in the imported arrangement.
