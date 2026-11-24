@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use super::{Archive, invalid, read_xml, relationships, theme::child};
+use super::{Archive, SlidePart, invalid, read_xml, relationships, theme::child};
 use crate::{DataError, ShowFile};
 
 const PRESENTATION: &str = "ppt/presentation.xml";
@@ -85,7 +85,7 @@ impl Playback {
         show: &mut ShowFile,
         archive: &mut Archive<'_>,
         presentation: Option<&str>,
-        parts: &[String],
+        parts: &[SlidePart],
         warnings: &mut Vec<String>,
     ) {
         let main = show.show["layouts"]["main"]["slides"].as_array().unwrap();
@@ -142,7 +142,7 @@ impl Playback {
 fn custom_arrangements(
     archive: &mut Archive<'_>,
     presentation: Option<&str>,
-    parts: &[String],
+    parts: &[SlidePart],
     main: &[Value],
     repeat: bool,
     warnings: &mut Vec<String>,
@@ -158,7 +158,7 @@ fn custom_arrangements(
     let parts: HashMap<_, _> = parts
         .iter()
         .enumerate()
-        .map(|(index, part)| (part.as_str(), index))
+        .map(|(index, part)| (part.path.as_str(), index))
         .collect();
     let rels = relationships(archive, PRESENTATION)?;
     let steps: HashMap<_, _> = rels
