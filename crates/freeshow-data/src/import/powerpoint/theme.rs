@@ -749,6 +749,8 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
         Some([short / width, short / height])
     };
     let name = geometry.attribute("prst")?;
+    let arc_angle = |guide, default| adjustment(guide, default).clamp(0.0, DRAWINGML_TURN - 1.0);
+    let band_width = |guide, default| adjustment(guide, default).clamp(0.0, 50_000.0) / 100_000.0;
     let outline = match name {
         "triangle" => vec![
             [0.0, 1.0],
@@ -810,27 +812,27 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             rect_corner_outline(name, short_side()?, adjustment)?
         }
         "pie" | "chord" | "arc" => {
-            let [sx, sy] = short_side()?;
             let defaults = match name {
                 "pie" => [0.0, 16_200_000.0],
                 "chord" => [2_700_000.0, 16_200_000.0],
                 _ => [16_200_000.0, 0.0],
             };
-            let angle =
-                |guide, default| adjustment(guide, default).clamp(0.0, DRAWINGML_TURN - 1.0);
-            let start = angle("adj1", defaults[0]);
-            let end = angle("adj2", defaults[1]);
-            let parameter = ellipse_ray_parameter([sy, sx], start);
-            let span = if end == start {
-                std::f64::consts::TAU
-            } else {
-                (ellipse_ray_parameter([sy, sx], end) - parameter).rem_euclid(std::f64::consts::TAU)
-            };
-            let mut outline = ellipse_contour([0.5; 2], parameter, span)?;
-            if end != start && name != "chord" {
+            let start = arc_angle("adj1", defaults[0]);
+            let end = arc_angle("adj2", defaults[1]);
+            let sweep = clockwise_sweep(start, end);
+            let mut outline = preset_ellipse_arc([0.5; 2], short_side()?, start, sweep)?;
+            if sweep != DRAWINGML_TURN && name != "chord" {
                 outline.push([0.5, 0.5]);
             }
             outline
+        }
+        "blockArc" => {
+            return block_arc_paths(
+                short_side()?,
+                arc_angle("adj1", 10_800_000.0),
+                arc_angle("adj2", 0.0),
+                band_width("adj3", 25_000.0),
+            );
         }
         "pieWedge" => {
             let mut outline = vec![[0.0, 1.0]];
@@ -843,18 +845,33 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             outline.push([1.0, 1.0]);
             outline
         }
-        "donut" => {
+        "donut" | "noSmoking" => {
             use std::f64::consts::{PI, TAU};
 
-            let [sx, sy] = short_side()?;
-            let thickness = adjustment("adj", 25_000.0).clamp(0.0, 50_000.0) / 100_000.0;
+            let size @ [sx, sy] = short_side()?;
+            let thickness = band_width("adj", if name == "donut" { 25_000.0 } else { 18_750.0 });
             if thickness == 0.0 {
                 return Some(Vec::new());
             }
             let mut contours = vec![ellipse_contour([0.5; 2], PI, TAU)?];
-            let inner = [0.5 - sx * thickness, 0.5 - sy * thickness];
-            if inner.into_iter().all(|r| r > 0.0) {
-                contours.push(ellipse_contour(inner, PI, -TAU)?);
+            let inner @ [rx, ry] = [0.5 - sx * thickness, 0.5 - sy * thickness];
+            if rx > 0.0 && ry > 0.0 {
+                if name == "donut" {
+                    contours.push(ellipse_contour(inner, PI, -TAU)?);
+                } else {
+                    let diagonal = sx.atan2(sy);
+                    let (sin, cos) = diagonal.sin_cos();
+                    let radius = 1.0 / (cos * sx / rx).hypot(sin * sy / ry);
+                    let offset = (thickness / 2.0).atan2(radius);
+                    let start = (diagonal - offset).to_degrees() * 60_000.0;
+                    let sweep = (2.0 * offset - PI).to_degrees() * 60_000.0;
+                    for angle in [start, start - DRAWINGML_TURN / 2.0] {
+                        let hole = preset_ellipse_arc(inner, size, angle, sweep)?;
+                        if hole.len() >= 3 {
+                            contours.push(hole);
+                        }
+                    }
+                }
             }
             return Some(vec![contours]);
         }
@@ -950,6 +967,66 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     } else {
         vec![vec![outline]]
     })
+}
+
+fn clockwise_sweep(start: f64, end: f64) -> f64 {
+    if end > start {
+        end - start
+    } else {
+        end - start + DRAWINGML_TURN
+    }
+}
+
+fn preset_ellipse_arc(
+    radii @ [rx, ry]: [f64; 2],
+    [sx, sy]: [f64; 2],
+    start: f64,
+    sweep: f64,
+) -> Option<Vec<[f64; 2]>> {
+    // Restore the original aspect ratio before converting the saved ray angles.
+    let raw_radii = [rx * sy, ry * sx];
+    let parameter = ellipse_ray_parameter(raw_radii, start);
+    let span = ellipse_parameter_span(raw_radii, parameter, start, sweep);
+    ellipse_contour(radii, parameter, span)
+}
+
+fn block_arc_paths(
+    size @ [sx, sy]: [f64; 2],
+    start: f64,
+    end: f64,
+    thickness: f64,
+) -> Option<Vec<CustomPath>> {
+    if thickness == 0.0 {
+        return Some(Vec::new());
+    }
+    let sweep = clockwise_sweep(start, end);
+    let inner = [0.5 - sx * thickness, 0.5 - sy * thickness];
+    let outline = |from, sweep| preset_ellipse_arc([0.5; 2], size, from, sweep);
+    let hole = |to, sweep: f64| preset_ellipse_arc(inner, size, to, -sweep);
+    let mut outer = outline(start, sweep)?;
+    if inner.into_iter().any(|r| r == 0.0) {
+        if sweep != DRAWINGML_TURN {
+            outer.push([0.5, 0.5]);
+        }
+        return Some(vec![vec![outer]]);
+    }
+    let reverse = hole(end, sweep)?;
+    if sweep == DRAWINGML_TURN {
+        return Some(vec![vec![outer, reverse]]);
+    }
+    if outer.len() + reverse.len() <= 128 {
+        outer.extend(reverse);
+        return Some(vec![vec![outer]]);
+    }
+
+    // Divide very long bands into adjoining contours to keep each within the compositor limit.
+    let half = sweep / 2.0;
+    let middle = start + half;
+    let mut first = outline(start, half)?;
+    first.extend(hole(middle, half)?);
+    let mut second = outline(middle, half)?;
+    second.extend(hole(end, half)?);
+    Some(vec![vec![first, second]])
 }
 
 fn ellipse_contour([rx, ry]: [f64; 2], start: f64, span: f64) -> Option<Vec<[f64; 2]>> {
@@ -1076,6 +1153,51 @@ fn block_arrow(name: &str, [sx, sy]: [f64; 2], shaft: f64, head: f64) -> Vec<[f6
         };
     }
     points
+}
+
+#[test]
+fn block_arc_preserves_its_inner_band_on_wide_and_almost_closed_shapes() {
+    let wide = block_arc_paths([0.5, 1.0], 0.0, 5_400_000.0, 0.25).unwrap();
+    let points = &wide[0][0];
+    assert!(same_path_point(points[0], [1.0, 0.5]));
+    assert!(
+        points
+            .iter()
+            .any(|&point| same_path_point(point, [0.5, 1.0]))
+    );
+    assert!(
+        points
+            .iter()
+            .any(|&point| same_path_point(point, [0.5, 0.75]))
+    );
+    assert!(same_path_point(*points.last().unwrap(), [0.875, 0.5]));
+    let long = block_arc_paths([1.0; 2], 0.0, 21_599_999.0, 0.01).unwrap();
+    assert_eq!(long[0].len(), 2);
+    assert!(
+        long[0]
+            .iter()
+            .all(|points| (3..=128).contains(&points.len()))
+    );
+    let full = block_arc_paths([0.5, 1.0], 0.0, 0.0, 0.25).unwrap();
+    assert!(full[0][0][1][1] > 0.5 && full[0][1][1][1] < 0.5);
+}
+
+#[test]
+fn prohibition_symbol_has_two_mirrored_cutouts() {
+    let document = Document::parse(
+        r#"<spPr><xfrm><ext cx="4000" cy="2000"/></xfrm>
+            <prstGeom prst="noSmoking"/></spPr>"#,
+    )
+    .unwrap();
+    let paths = preset_paths(document.root_element()).unwrap();
+    let [_, first, second] = paths[0].as_slice() else {
+        panic!("expected two cutouts")
+    };
+    assert!(first.len() > 3);
+    assert_eq!(first.len(), second.len());
+    for (&[x, y], &opposite) in first.iter().zip(second) {
+        assert!(same_path_point(opposite, [1.0 - x, 1.0 - y]));
+    }
 }
 
 #[test]
@@ -1408,8 +1530,6 @@ fn flatten_arc_path(
     [width, height]: [f64; 2],
     value: impl Fn(&str) -> Option<f64>,
 ) -> Option<()> {
-    use std::f64::consts::TAU;
-
     let number = |key| value(command.attribute(key)?);
     let (rx, ry) = (number("wR")?, number("hR")?);
     let start_angle = number("stAng")?.rem_euclid(DRAWINGML_TURN);
@@ -1423,16 +1543,23 @@ fn flatten_arc_path(
     if rx == 0.0 || ry == 0.0 {
         return None;
     }
-    let start = ellipse_ray_parameter([rx, ry], start_angle);
-    let stop = ellipse_ray_parameter([rx, ry], start_angle + sweep);
-    let span = if sweep.abs() == DRAWINGML_TURN {
+    let radii = [rx, ry];
+    let start = ellipse_ray_parameter(radii, start_angle);
+    let span = ellipse_parameter_span(radii, start, start_angle, sweep);
+    append_ellipse_arc(vertices, [rx / width, ry / height], start, span)
+}
+
+fn ellipse_parameter_span(radii: [f64; 2], parameter: f64, start: f64, sweep: f64) -> f64 {
+    use std::f64::consts::TAU;
+
+    let stop = ellipse_ray_parameter(radii, start + sweep);
+    if sweep.abs() == DRAWINGML_TURN {
         TAU.copysign(sweep)
     } else if sweep > 0.0 {
-        (stop - start).rem_euclid(TAU)
+        (stop - parameter).rem_euclid(TAU)
     } else {
-        -(start - stop).rem_euclid(TAU)
-    };
-    append_ellipse_arc(vertices, [rx / width, ry / height], start, span)
+        -(parameter - stop).rem_euclid(TAU)
+    }
 }
 
 fn ellipse_ray_parameter([rx, ry]: [f64; 2], angle: f64) -> f64 {
