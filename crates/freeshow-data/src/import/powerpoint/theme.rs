@@ -1452,29 +1452,36 @@ fn custom_path(
     };
     let mut polygon = Vec::new();
     let mut contours = Vec::new();
-    let mut vertices = 0;
+    let mut remaining_vertices = 1024usize;
+    let mut finish_contour = |polygon: &mut Vec<[f64; 2]>| {
+        if polygon
+            .first()
+            .zip(polygon.last())
+            .is_some_and(|(&first, &last)| same_path_point(first, last))
+        {
+            polygon.pop();
+        }
+        match polygon.len() {
+            0..=2 => polygon.clear(),
+            3..=128 => {
+                remaining_vertices = remaining_vertices.checked_sub(polygon.len())?;
+                contours.push(std::mem::take(polygon));
+            }
+            _ => return None,
+        }
+        Some(())
+    };
     for command in path.children().filter(Node::is_element) {
         let mut points = command.children().filter(Node::is_element);
         match command.tag_name().name() {
             "moveTo" => {
-                polygon.clear();
+                finish_contour(&mut polygon)?;
                 push_path_vertex(&mut polygon, point(points.next()?)?)?;
             }
             "close" => {
-                if same_path_point(*polygon.last()?, polygon[0]) {
-                    polygon.pop();
-                }
-                if polygon.len() > 128 {
-                    return None;
-                }
-                if polygon.len() >= 3 {
-                    vertices += polygon.len();
-                    if vertices > 1024 {
-                        return None;
-                    }
-                    contours.push(std::mem::take(&mut polygon));
-                }
-                polygon.clear();
+                let start = *polygon.first()?;
+                finish_contour(&mut polygon)?;
+                polygon.push(start);
             }
             "lnTo" if !polygon.is_empty() => {
                 push_path_vertex(&mut polygon, point(points.next()?)?)?;
@@ -1502,18 +1509,25 @@ fn custom_path(
             return None;
         }
     }
+    finish_contour(&mut polygon)?;
     Some(contours)
 }
 
 fn push_path_vertex(vertices: &mut Vec<[f64; 2]>, point: [f64; 2]) -> Option<()> {
-    // Trigonometric endpoints can round just outside a cardinal edge.
-    if !point
-        .iter()
-        .all(|axis| (-1e-12..=1.0 + 1e-12).contains(axis))
-    {
+    // Match the compositor's range for paths that extend beyond the item box.
+    if !point.iter().all(|axis| (-1.0..=2.0).contains(axis)) {
         return None;
     }
-    let point = point.map(|axis| axis.clamp(0.0, 1.0));
+    // Trigonometric endpoints can round just outside a cardinal edge.
+    let point = point.map(|axis| {
+        if (-1e-12..0.0).contains(&axis) {
+            0.0
+        } else if (1.0..=1.0 + 1e-12).contains(&axis) {
+            1.0
+        } else {
+            axis
+        }
+    });
     if vertices
         .last()
         .is_some_and(|&last| same_path_point(last, point))
