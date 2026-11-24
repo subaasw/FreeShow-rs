@@ -355,8 +355,9 @@ mod gst_player {
     pub fn video_thumbnail(path: &Path, width: u32, height: u32) -> Option<Raster> {
         gst::init().ok()?;
         let uri = gst::glib::filename_to_uri(path, None).ok()?;
+        let decoder_options = video_decoder_options();
         let pipeline = gst::parse::launch(&format!(
-            "uridecodebin uri=\"{uri}\" ! videoconvert ! videoscale add-borders=true ! \
+            "uridecodebin uri=\"{uri}\" {decoder_options} ! videoconvert ! videoscale add-borders=true ! \
              video/x-raw,format=RGBA,width={width},height={height},pixel-aspect-ratio=1/1 ! \
              appsink name=sink sync=false max-buffers=1"
         ))
@@ -369,6 +370,9 @@ mod gst_player {
             pipeline.set_state(gst::State::Paused).ok()?;
             let (state, ..) = pipeline.state(wait);
             state.ok()?;
+            let first = sink
+                .try_pull_preroll(gst::ClockTime::ZERO)
+                .and_then(VideoPlayer::sample_raster);
             // The very first frame is often black, so step a little in when the clip allows.
             let long_enough = pipeline
                 .query_duration::<gst::ClockTime>()
@@ -382,9 +386,15 @@ mod gst_player {
                     .is_ok()
             {
                 let _ = pipeline.state(wait);
+                return sink
+                    .try_pull_preroll(wait)
+                    .and_then(VideoPlayer::sample_raster)
+                    .or(first);
             }
-            sink.try_pull_preroll(wait)
-                .and_then(VideoPlayer::sample_raster)
+            first.or_else(|| {
+                sink.try_pull_preroll(wait)
+                    .and_then(VideoPlayer::sample_raster)
+            })
         })();
         let _ = pipeline.set_state(gst::State::Null);
         still
@@ -909,16 +919,20 @@ mod gst_player {
             .unwrap_or(0.0)
     }
 
-    fn video_launch(path: &Path) -> String {
-        let raw = path.to_string_lossy();
-        let location = raw.replace('\\', "\\\\").replace('"', "\\\"");
+    fn video_decoder_options() -> &'static str {
         // This pipeline feeds CPU pixels to the compositor. On macOS,
         // VideoToolbox cold-probes hardware even for small local clips.
-        let decoder_options = if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") {
             "name=dec force-sw-decoders=true"
         } else {
             "name=dec"
-        };
+        }
+    }
+
+    fn video_launch(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        let location = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        let decoder_options = video_decoder_options();
         let source = if crate::is_remote_url(&raw) {
             format!("uridecodebin uri=\"{location}\" {decoder_options}")
         } else {
