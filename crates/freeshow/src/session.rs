@@ -11183,11 +11183,12 @@ Second line"
         std::fs::create_dir(&root).unwrap();
         std::fs::write(library.settings_path(), r#"{
             "audioRouting":{"connections":[{"from":"main","to":"icecast"}]},
-            "special":{"icecast":{"host":"stream.local","port":"8123","mount":"live.opus","password":"test"}}
+            "special":{"icecast":{"host":"stream.local","port":"8123","mount":"live.opus","password":"test","tls":true}}
         }"#).unwrap();
         let mut session = Session::open(root.clone());
         let (configured, enabled) = session.icecast.as_ref().unwrap();
         assert!(*enabled);
+        assert_eq!(configured.tls, Some(true));
         assert_eq!(
             (configured.port, configured.mount.as_str()),
             (8123, "/live.opus")
@@ -11208,6 +11209,7 @@ Second line"
         session.apply_remote(freeshow_remote::Command::ToggleIcecast(Some(true)));
         let (saved, enabled) = library.icecast().unwrap();
         assert!(enabled);
+        assert_eq!(saved.tls, Some(true));
         assert_eq!(
             (saved.host.as_str(), saved.password.as_str()),
             ("stream.local", "test")

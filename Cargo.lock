@@ -2013,8 +2013,10 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-sdp",
  "gstreamer-webrtc",
+ "rustls",
  "tracing",
  "ureq",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
