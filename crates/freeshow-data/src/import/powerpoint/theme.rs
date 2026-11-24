@@ -586,6 +586,7 @@ struct LineStyle {
     cap: Option<StrokeCap>,
     dash: Option<DashPattern>,
     ends: [LineEnd; 2],
+    compound: Option<CompoundStroke>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -681,6 +682,33 @@ impl DashPattern {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub(super) enum CompoundStroke {
+    #[default]
+    Single,
+    Double,
+    ThickThin,
+    ThinThick,
+    Triple,
+}
+
+impl CompoundStroke {
+    pub fn bands(self) -> &'static [[f64; 2]] {
+        // DrawingML names the relative weights without specifying exact band boundaries.
+        match self {
+            Self::Single => &[[-0.5, 0.5]],
+            Self::Double => &[[-0.5, -1.0 / 6.0], [1.0 / 6.0, 0.5]],
+            Self::ThickThin => &[[-0.5, 0.1], [0.3, 0.5]],
+            Self::ThinThick => &[[-0.5, -0.3], [-0.1, 0.5]],
+            Self::Triple => &[
+                [-0.5, -1.0 / 3.0],
+                [-1.0 / 6.0, 1.0 / 6.0],
+                [1.0 / 3.0, 0.5],
+            ],
+        }
+    }
+}
+
 enum LinePaint {
     Solid(Color),
     Suppressed,
@@ -731,8 +759,17 @@ impl LineStyle {
                     preset: false,
                 })
             });
+        let compound = match line.attribute("cmpd") {
+            Some("sng") => Some(CompoundStroke::Single),
+            Some("dbl") => Some(CompoundStroke::Double),
+            Some("thickThin") => Some(CompoundStroke::ThickThin),
+            Some("thinThick") => Some(CompoundStroke::ThinThick),
+            Some("tri") => Some(CompoundStroke::Triple),
+            _ => None,
+        };
         Self {
             emu,
+            compound,
             paint,
             cap,
             dash,
@@ -915,6 +952,7 @@ pub(super) struct ConnectorStroke {
     pub cap: StrokeCap,
     pub dash: DashPattern,
     pub markers: [Option<StrokeMarker>; 2],
+    pub compound: CompoundStroke,
 }
 
 fn connector_direction(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<bool> {
@@ -971,6 +1009,10 @@ fn connector_stroke(
         cap: direct
             .cap
             .or_else(|| themed.and_then(|line| line.cap))
+            .unwrap_or_default(),
+        compound: direct
+            .compound
+            .or_else(|| themed.and_then(|line| line.compound))
             .unwrap_or_default(),
         markers: std::array::from_fn(|i| {
             direct.ends[i].resolve(themed.map(|line| line.ends[i]).unwrap_or_default())

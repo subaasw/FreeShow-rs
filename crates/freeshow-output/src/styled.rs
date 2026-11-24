@@ -3932,6 +3932,7 @@ struct LineDash {
     length: f64,
     cap: u8,
     inset_cap: bool,
+    bands: Vec<[f64; 2]>,
     painted: Vec<[f64; 2]>,
     period: f64,
 }
@@ -3957,6 +3958,26 @@ impl LineDash {
         if inset_cap {
             fields.next();
         }
+        let mut bands = Vec::new();
+        if let Some(encoded) = fields
+            .clone()
+            .next()
+            .and_then(|token| token.strip_prefix("bands="))
+        {
+            fields.next();
+            let mut previous = -0.5;
+            for interval in encoded.split(',') {
+                let (low, high) = interval.split_once(':')?;
+                let (low, high) = (low.parse::<f64>().ok()?, high.parse::<f64>().ok()?);
+                if !(previous <= low && low < high && high <= 0.5) || bands.len() == 3 {
+                    return None;
+                }
+                bands.push([low, high]);
+                previous = high;
+            }
+        } else {
+            bands.push([-0.5, 0.5]);
+        }
         let mut painted = Vec::new();
         let mut period = 0.0;
         while let Some(dash) = fields.next() {
@@ -3977,6 +3998,7 @@ impl LineDash {
             length,
             cap,
             inset_cap,
+            bands,
             painted,
             period,
         })
@@ -3990,6 +4012,15 @@ impl LineDash {
         let [ux, uy] = self.unit;
         let along = x * ux + y * uy;
         let across = y * ux - x * uy;
+        let Some(&[low, high]) = self
+            .bands
+            .iter()
+            .find(|&&[low, high]| (low..=high).contains(&across))
+        else {
+            return false;
+        };
+        let radius = (high - low) / 2.0;
+        let across = across - (high + low) / 2.0;
         let clamped = along.clamp(0.0, self.length);
         let cycle = (clamped / self.period).floor() * self.period;
         [cycle - self.period, cycle, cycle + self.period]
@@ -4018,17 +4049,18 @@ impl LineDash {
                             if self.cap != 1 {
                                 return true;
                             }
-                            // A one-width dash is a dot. Shorter dashes use a compressed cap.
-                            let radius = ((end - start) / 2.0).min(0.5);
-                            let cap_distance = (start + radius - along)
-                                .max(along - (end - radius))
+                            // Dashes shorter than a band width use a compressed cap.
+                            let cap_radius = ((end - start) / 2.0).min(radius);
+                            let cap_distance = (start + cap_radius - along)
+                                .max(along - (end - cap_radius))
                                 .max(0.0);
-                            return (cap_distance / radius).powi(2) + (2.0 * across).powi(2) <= 1.0;
+                            return (cap_distance / cap_radius).powi(2) + (across / radius).powi(2)
+                                <= 1.0;
                         }
                         let distance = (start - along).max(along - end).max(0.0);
                         match self.cap {
-                            1 => distance * distance + across * across <= 0.25,
-                            2 => distance <= 0.5,
+                            1 => distance * distance + across * across <= radius * radius,
+                            2 => distance <= radius,
                             _ => (start..end).contains(&along),
                         }
                     })
@@ -4276,7 +4308,7 @@ fn fill_item_background(
             if flip { 1.0 - v } else { v }
         };
         let mut marker_spans = Vec::new();
-        if let Some(markers) = path.get(1..)
+        if let Some(markers) = path.get(dash.bands.len()..)
             && !markers.is_empty()
         {
             for_path_span(slide, &bounds, markers, false, |y, left, right| {
@@ -5196,6 +5228,17 @@ mod tests {
         assert!(!preset_square.contains([0.125, 0.0]));
         let custom_square = LineDash::parse("0 0 10 1 1 0 10 2 1 1").unwrap();
         assert!(custom_square.contains([0.125, 0.0]));
+    }
+
+    #[test]
+    fn powerpoint_compound_dashes_cap_each_band_without_filling_the_gap() {
+        let dash = LineDash::parse("0 0 10 1 1 0 10 1 inset bands=-0.5:-0.2,0.2:0.5 1 1").unwrap();
+        assert!(dash.contains([0.05, -0.35]));
+        assert!(dash.contains([0.05, 0.35]));
+        assert!(!dash.contains([0.05, 0.0]));
+        assert!(!dash.contains([0.002, 0.49]));
+        assert!(dash.contains([0.002, 0.35]));
+        assert!(!dash.contains([0.15, -0.35]));
     }
 
     #[test]

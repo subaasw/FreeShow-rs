@@ -827,12 +827,16 @@ impl SlideObject {
             let trim = stroke.markers.map(|marker| marker.map_or(0.0, marker_trim));
             let from = trim[0].min(length / 2.0);
             let to = length - trim[1].min(length / 2.0);
-            let mut contours = vec![
-                connector_shaft(from, to, stroke.cap)
-                    .into_iter()
-                    .map(local)
-                    .collect::<Vec<_>>(),
-            ];
+            let bands = stroke.compound.bands();
+            let mut contours: Vec<Vec<_>> = bands
+                .iter()
+                .map(|&band| {
+                    connector_shaft(from, to, stroke.cap, band)
+                        .into_iter()
+                        .map(local)
+                        .collect()
+                })
+                .collect();
             for (index, marker) in stroke.markers.into_iter().enumerate() {
                 if let Some(marker) = marker {
                     let mut points = marker_outline(marker);
@@ -882,8 +886,17 @@ impl SlideObject {
                 } else {
                     ""
                 };
+                let bands = if bands.len() > 1 {
+                    let ranges = bands
+                        .iter()
+                        .map(|[low, high]| format!("{low}:{high}"))
+                        .collect::<Vec<_>>();
+                    format!("bands={} ", ranges.join(","))
+                } else {
+                    String::new()
+                };
                 dash_style = format!(
-                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {inset}{dash};",
+                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {inset}{bands}{dash};",
                     stroke.cap.code()
                 );
             }
@@ -1017,30 +1030,37 @@ fn marker_trim(marker: theme::StrokeMarker) -> f64 {
     }
 }
 
-fn connector_shaft(from: f64, to: f64, cap: theme::StrokeCap) -> Vec<[f64; 2]> {
+fn connector_shaft(
+    from: f64,
+    to: f64,
+    cap: theme::StrokeCap,
+    [low, high]: [f64; 2],
+) -> Vec<[f64; 2]> {
     use std::f64::consts::{FRAC_PI_2, PI};
     use theme::StrokeCap;
 
+    let radius = (high - low) / 2.0;
+    let center = (high + low) / 2.0;
     if matches!(cap, StrokeCap::Round) {
         let mut outline = Vec::with_capacity(34);
         for (end, start) in [(to, FRAC_PI_2), (from, -FRAC_PI_2)] {
             for step in 0..=16 {
                 let (sin, cos) = (start - f64::from(step) * PI / 16.0).sin_cos();
-                outline.push([end + cos / 2.0, sin / 2.0]);
+                outline.push([end + cos * radius, center + sin * radius]);
             }
         }
         outline
     } else {
         let extra = if matches!(cap, StrokeCap::Square) {
-            0.5
+            radius
         } else {
             0.0
         };
         vec![
-            [from - extra, 0.5],
-            [to + extra, 0.5],
-            [to + extra, -0.5],
-            [from - extra, -0.5],
+            [from - extra, high],
+            [to + extra, high],
+            [to + extra, low],
+            [from - extra, low],
         ]
     }
 }
@@ -2618,7 +2638,7 @@ mod tests {
                 </p:spPr><p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef></p:style></p:cxnSp>
                 <p:sp><p:spPr>
                     <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
-                    <a:prstGeom prst="lineInv"/><a:ln w="200000"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>
+                    <a:prstGeom prst="lineInv"/><a:ln w="200000" cmpd="tri"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>
                         <a:custDash><a:ds d="50000" sp="125%"/><a:ds d="200000" sp="25000"/>
                         <a:ds d="100%" sp="75000"/><a:ds d="150000" sp="50000"/></a:custDash>
                         <a:headEnd type="oval" w="sm"/><a:tailEnd type="triangle" len="lg"/>
@@ -2638,7 +2658,7 @@ mod tests {
             ("ppt/theme/theme1.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
                 <a:clrScheme><a:accent1><a:srgbClr val="2244D0"/></a:accent1></a:clrScheme>
                 <a:fmtScheme><a:lnStyleLst>
-                    <a:ln w="100000" cap="rnd"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="sysDot"/></a:ln>
+                    <a:ln w="100000" cap="rnd" cmpd="dbl"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="sysDot"/></a:ln>
                 </a:lnStyleLst></a:fmtScheme>
             </a:themeElements></a:theme>"#),
         ]);
@@ -2660,10 +2680,12 @@ mod tests {
         assert!(dash(0).ends_with("20 0 4 3"));
         assert!(style(1).starts_with("left:795px;top:295px;width:10px;height:410px;"));
         assert!(style(1).contains("background:#2244D0;"));
-        assert!(dash(1).ends_with("40 1 inset 1 1"));
+        assert!(dash(1).contains("40 1 inset bands="));
+        assert!(dash(1).ends_with("1 1"));
         assert!(style(2).contains("--pptx-fill-flip-y:1;"));
         assert!(style(2).contains("background:#00FF00;"));
-        assert!(dash(2).ends_with("0 0.5 1.25 2 0.25 1 0.75 1.5 0.5"));
+        assert!(dash(2).contains("0 bands="));
+        assert!(dash(2).ends_with("0.5 1.25 2 0.25 1 0.75 1.5 0.5"));
         let contours = style(2)
             .split_once("--pptx-fill-paths:")
             .unwrap()
@@ -2671,7 +2693,7 @@ mod tests {
             .split(';')
             .next()
             .unwrap();
-        assert_eq!(contours.split('/').count(), 3);
+        assert_eq!(contours.split('/').count(), 5);
         assert!(!style(3).contains("background:"));
         assert!(!style(3).contains("--pptx-fill-paths:"));
     }
