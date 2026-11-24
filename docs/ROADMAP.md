@@ -166,6 +166,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint section names as FreeShow slide groups across all arrangements.
 - [x] PowerPoint cuts, fades, fades through black, and directional pushes with saved transition durations.
 - [x] PowerPoint directional wipes, covers, and uncovers, including corner motion for cover and uncover.
+- [x] PowerPoint embedded transition sounds with saved loop and stop cues.
 - [x] PowerPoint line spacing and paragraph spacing before and after, including wrapped text and hard breaks.
 - [x] PowerPoint paragraph margins and first-line or hanging indents, including wrapped continuations.
 - [x] PowerPoint character bullets with inherited font, size, and color and one marker per paragraph.

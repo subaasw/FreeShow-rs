@@ -22,7 +22,7 @@ mod theme;
 use theme::{Color, GradientFill, ObjectStyle, ResolvedFill, ThemeReader};
 
 const XML_LIMIT: u64 = 8 * 1024 * 1024;
-const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+const MEDIA_LIMIT: u64 = 64 * 1024 * 1024;
 type Archive<'a> = ZipArchive<Cursor<&'a [u8]>>;
 
 #[derive(Clone)]
@@ -84,7 +84,7 @@ pub(super) fn import(
     let mut cached = HashMap::new();
     let mut themes = ThemeReader::default();
     let mut assets = BTreeMap::new();
-    let mut image_bytes = 0_u64;
+    let mut media_bytes = 0_u64;
     let mut object_items: Vec<Vec<SlideObject>> = Vec::new();
     let mut speaker_notes = Vec::new();
     let mut notes_xml_bytes = 0;
@@ -120,22 +120,12 @@ pub(super) fn import(
         if let Some(Background::Picture { part, linked, .. }) = &fill
             && media.is_some()
             && !linked
-            && !assets.contains_key(part)
         {
-            let mut file = archive.by_name(part).map_err(invalid)?;
-            if file.size() > IMAGE_LIMIT || image_bytes + file.size() > 256 * 1024 * 1024 {
-                return Err(invalid("embedded backgrounds exceed size limits"));
-            }
-            let mut data = Vec::new();
-            file.by_ref().take(IMAGE_LIMIT + 1).read_to_end(&mut data)?;
-            if data.len() as u64 != file.size() {
-                return Err(invalid("embedded background is truncated"));
-            }
-            image_bytes += data.len() as u64;
-            assets.insert(part.clone(), data);
+            load_embedded_asset(&mut archive, part, &mut assets, &mut media_bytes)?;
         }
         let picture_ids = content.picture_ids.clone();
         let rels = relationships(&mut archive, part)?;
+        transitions.push(slide_transition(&xml, &rels));
         let notes = rels
             .iter()
             .find(|rel| rel.kind == "notesSlide" && !rel.external);
@@ -153,18 +143,8 @@ pub(super) fn import(
         }));
         for rid in picture_ids {
             if let Some(rel) = rels.iter().find(|rel| rel.id == rid && rel.kind == "image") {
-                if !rel.external && media.is_some() && !assets.contains_key(&rel.target) {
-                    let mut file = archive.by_name(&rel.target).map_err(invalid)?;
-                    if file.size() > IMAGE_LIMIT || image_bytes + file.size() > 256 * 1024 * 1024 {
-                        return Err(invalid("embedded pictures exceed size limits"));
-                    }
-                    let mut data = Vec::new();
-                    file.by_ref().take(IMAGE_LIMIT + 1).read_to_end(&mut data)?;
-                    if data.len() as u64 != file.size() {
-                        return Err(invalid("embedded picture is truncated"));
-                    }
-                    image_bytes += data.len() as u64;
-                    assets.insert(rel.target.clone(), data);
+                if !rel.external && media.is_some() {
+                    load_embedded_asset(&mut archive, &rel.target, &mut assets, &mut media_bytes)?;
                 }
                 content.resolve_picture(rel);
             }
@@ -183,10 +163,20 @@ pub(super) fn import(
         fills.push(fill);
         hidden.push(disabled);
         advance_times.push(content.advance_ms);
-        transitions.push(slide_visual_transition(&xml));
     }
     let mut files = HashMap::new();
     if let Some(directory) = media {
+        for (index, (_, sound)) in transitions.iter().enumerate() {
+            if let Some(TransitionSound::Start { part, .. }) = sound
+                && let Err(error) =
+                    load_embedded_asset(&mut archive, part, &mut assets, &mut media_bytes)
+            {
+                import_warnings.push(format!(
+                    "Slide {}: Could not import transition sound: {error}",
+                    index + 1
+                ));
+            }
+        }
         for (part, bytes) in assets {
             files.insert(
                 part.clone(),
@@ -196,7 +186,7 @@ pub(super) fn import(
     }
     let mut show = show_file(file_name, &file_stem_str(file_name), sections);
     show.show["origin"] = json!("powerpoint");
-    for (index, ((fill, notes), transition)) in fills
+    for (index, ((fill, notes), (transition, sound))) in fills
         .into_iter()
         .zip(speaker_notes)
         .zip(transitions)
@@ -283,6 +273,20 @@ pub(super) fn import(
         if let Some(transition) = transition {
             show.show["layouts"]["main"]["slides"][index]["transition"] = transition;
         }
+        match sound {
+            Some(TransitionSound::Start { part, looping }) => {
+                if let Some(path) = files.get(&part) {
+                    let id = format!("powerpoint-transition-sound-{}", index + 1);
+                    show.show["media"][&id] = json!({"path": path, "loop": looping, "retrigger": true, "transitionSound": true});
+                    show.show["layouts"]["main"]["slides"][index]["audio"] = json!([id]);
+                }
+            }
+            Some(TransitionSound::Stop) => {
+                show.show["layouts"]["main"]["slides"][index]["actions"]["stopTransitionSound"] =
+                    json!(true);
+            }
+            None => {}
+        }
         if playback.use_timings
             && let Some(millis) = advance_times[index]
         {
@@ -304,13 +308,46 @@ pub(super) fn import(
     Ok(show)
 }
 
-fn slide_visual_transition(xml: &str) -> Option<serde_json::Value> {
+fn load_embedded_asset(
+    archive: &mut Archive<'_>,
+    part: &str,
+    assets: &mut BTreeMap<String, Vec<u8>>,
+    media_bytes: &mut u64,
+) -> Result<(), DataError> {
+    if assets.contains_key(part) {
+        return Ok(());
+    }
+    let mut file = archive.by_name(part).map_err(invalid)?;
+    if file.size() > MEDIA_LIMIT || *media_bytes + file.size() > 256 * 1024 * 1024 {
+        return Err(invalid("embedded media exceeds size limits"));
+    }
+    let mut data = Vec::new();
+    file.by_ref().take(MEDIA_LIMIT + 1).read_to_end(&mut data)?;
+    if data.len() as u64 != file.size() {
+        return Err(invalid("embedded media is truncated"));
+    }
+    *media_bytes += data.len() as u64;
+    assets.insert(part.to_owned(), data);
+    Ok(())
+}
+
+enum TransitionSound {
+    Start { part: String, looping: bool },
+    Stop,
+}
+
+fn slide_transition(
+    xml: &str,
+    rels: &[Relationship],
+) -> (Option<serde_json::Value>, Option<TransitionSound>) {
     use theme::child;
 
     if !xml.contains("transition") {
-        return None;
+        return (None, None);
     }
-    let doc = roxmltree::Document::parse(xml).ok()?;
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return (None, None);
+    };
     let root = doc.root_element();
     let read = |transition: roxmltree::Node<'_, '_>| {
         let effect = transition.children().find(|node| {
@@ -356,16 +393,43 @@ fn slide_visual_transition(xml: &str) -> Option<serde_json::Value> {
         };
         Some(json!({"type":kind,"duration":duration,"custom":{"direction":direction}}))
     };
+    let read_sound = |transition: roxmltree::Node<'_, '_>| {
+        let actions = child(transition, "sndAc")?;
+        if child(actions, "endSnd").is_some() {
+            return Some(TransitionSound::Stop);
+        }
+        let start = child(actions, "stSnd")?;
+        let sound = child(start, "snd")?;
+        let id = sound
+            .attributes()
+            .find(|attr| attr.name() == "embed" && attr.namespace().is_some())?
+            .value();
+        let rel = rels
+            .iter()
+            .find(|rel| rel.id == id && rel.kind == "audio" && !rel.external)?;
+        if crate::media_entry_kind(Path::new(&rel.target)) != crate::MediaEntryKind::Audio {
+            return None;
+        }
+        Some(TransitionSound::Start {
+            part: rel.target.clone(),
+            looping: matches!(start.attribute("loop"), Some("1" | "true")),
+        })
+    };
     if let Some(transition) = child(root, "transition") {
-        return read(transition);
+        return (read(transition), read_sound(transition));
     }
-    root.children()
+    let mut transitions = root
+        .children()
         .filter(|node| node.has_tag_name("AlternateContent"))
         .flat_map(|node| {
             node.children()
                 .filter(|branch| branch.has_tag_name("Choice") || branch.has_tag_name("Fallback"))
         })
-        .find_map(|branch| read(child(branch, "transition")?))
+        .filter_map(|branch| child(branch, "transition"));
+    (
+        transitions.clone().find_map(read),
+        transitions.find_map(read_sound),
+    )
 }
 
 struct SlideSize {
@@ -1889,6 +1953,52 @@ mod tests {
         assert!(show.set_transition_at(0, "push", 600));
         assert_eq!(show.transition_at(0).unwrap().direction, "top_bottom");
         assert_eq!(show.transition_at(0).unwrap().duration_ms, 600);
+    }
+
+    #[test]
+    fn imports_embedded_transition_sounds_and_stop_cues() {
+        let wave = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
+        let audio_rel = br#"<Relationships><Relationship Id="audio" Type="o/audio" Target="../media/cue.wav"/></Relationships>"#;
+        let files = archive(&[
+            ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:r="r"><p:cSld/><p:transition><p:fade/><p:sndAc><p:stSnd loop="1"><p:snd r:embed="audio"/></p:stSnd></p:sndAc></p:transition></p:sld>"#),
+            ("ppt/slides/slide2.xml", br#"<p:sld xmlns:p="p" xmlns:r="r" xmlns:mc="mc"><p:cSld/><mc:AlternateContent><mc:Fallback><p:transition><p:sndAc><p:stSnd><p:snd r:embed="audio"/></p:stSnd></p:sndAc></p:transition></mc:Fallback></mc:AlternateContent></p:sld>"#),
+            ("ppt/slides/slide3.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition><p:sndAc><p:endSnd/></p:sndAc></p:transition></p:sld>"#),
+            ("ppt/slides/slide4.xml", br#"<p:sld xmlns:p="p" xmlns:r="r"><p:cSld/><p:transition><p:sndAc><p:stSnd><p:snd r:embed="audio"/></p:stSnd></p:sndAc></p:transition></p:sld>"#),
+            ("ppt/slides/_rels/slide1.xml.rels", audio_rel),
+            ("ppt/slides/_rels/slide2.xml.rels", audio_rel),
+            ("ppt/slides/_rels/slide4.xml.rels", br#"<Relationships><Relationship Id="audio" Type="o/audio" Target="../media/missing.wav"/></Relationships>"#),
+            ("ppt/media/cue.wav", wave),
+        ]);
+        let directory = std::env::temp_dir().join(crate::new_id());
+        let show = import("Sounds.pptx", &files, Some(&directory)).unwrap();
+        let audio = show.audio_at(0);
+        assert_eq!(audio.len(), 1);
+        assert_eq!(std::fs::read(&audio[0]).unwrap(), wave);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(show.audio_at(1), audio);
+        let cue = show.audio_media_at(0)[0];
+        assert_eq!(cue["loop"], true);
+        assert_eq!(cue["retrigger"], true);
+        assert_eq!(cue["transitionSound"], true);
+        assert_eq!(show.audio_media_at(1)[0]["loop"], false);
+        assert_eq!(show.transition_at(0).unwrap().kind, "fade");
+        assert!(show.stops_transition_sound_at(2));
+        assert!(!show.clears_audio_at(2));
+        assert!(show.audio_at(3).is_empty());
+        assert_eq!(
+            show.show["settings"]["importWarnings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            import("Sounds.pptx", &files, None)
+                .unwrap()
+                .audio_at(0)
+                .is_empty()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

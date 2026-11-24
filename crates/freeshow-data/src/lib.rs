@@ -2839,6 +2839,11 @@ impl ShowFile {
             || action_trigger(node, "clear_all")
     }
 
+    pub fn stops_transition_sound_at(&self, index: usize) -> bool {
+        self.layout_node_at(index)
+            .is_some_and(|node| node["actions"]["stopTransitionSound"] == true)
+    }
+
     /// This slide hides the lyrics and leaves the picture.
     pub fn clears_slide_at(&self, index: usize) -> bool {
         let steps = self.layout_steps();
