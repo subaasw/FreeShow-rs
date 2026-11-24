@@ -809,7 +809,32 @@ impl SlideObject {
         }
     }
 
-    fn into_item(self) -> Option<serde_json::Value> {
+    fn into_item(mut self) -> Option<serde_json::Value> {
+        if let Some(stroke) = self.style.connector.take() {
+            let [px, py] = stroke.width.map(|width| width / 2.0);
+            let (dx, dy) = (self.width / px, self.height / py);
+            let length = dx.hypot(dy);
+            if !length.is_finite() || length == 0.0 {
+                return None;
+            }
+            let (nx, ny) = (-dy * px / length, dx * py / length);
+            let (pad_x, pad_y) = (px.ceil(), py.ceil());
+            let width = self.width + 2.0 * pad_x;
+            let height = self.height + 2.0 * pad_y;
+            let point = |x, y| [(pad_x + x) / width, (pad_y + y) / height];
+            self.style.paths = vec![vec![vec![
+                point(nx, ny),
+                point(self.width + nx, self.height + ny),
+                point(self.width - nx, self.height - ny),
+                point(-nx, -ny),
+            ]]];
+            self.style.fill = Some(format!("background:{};", stroke.color));
+            self.x -= pad_x;
+            self.y -= pad_y;
+            self.width = width;
+            self.height = height;
+            self.flip_y ^= stroke.inverse;
+        }
         let mut style = format!(
             "left:{}px;top:{}px;width:{}px;height:{}px;",
             self.x.round(),
@@ -2434,6 +2459,56 @@ mod tests {
         let outside = items[2]["style"].as_str().unwrap();
         assert!(outside.starts_with("left:10px;top:20px;"));
         assert!(!outside.contains("--pptx-group-matrix"));
+    }
+
+    #[test]
+    fn imports_straight_connector_width_colors_and_direction() {
+        let files = archive(&[
+            ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p"><p:sldSz cx="19200000" cy="10800000"/></p:presentation>"#),
+            ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:cxnSp><p:spPr>
+                    <a:xfrm><a:off x="2000000" y="3000000"/><a:ext cx="4000000" cy="0"/></a:xfrm>
+                    <a:prstGeom prst="straightConnector1"/>
+                    <a:ln w="200000"><a:solidFill><a:srgbClr val="E04422"/></a:solidFill></a:ln>
+                </p:spPr></p:cxnSp>
+                <p:cxnSp><p:spPr>
+                    <a:xfrm><a:off x="8000000" y="3000000"/><a:ext cx="0" cy="4000000"/></a:xfrm>
+                    <a:prstGeom prst="straightConnector1"/>
+                </p:spPr><p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef></p:style></p:cxnSp>
+                <p:sp><p:spPr>
+                    <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
+                    <a:prstGeom prst="lineInv"/><a:ln w="200000"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln>
+                </p:spPr></p:sp>
+                <p:cxnSp><p:spPr>
+                    <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
+                    <a:prstGeom prst="straightConnector1"/>
+                    <a:solidFill><a:srgbClr val="FF00FF"/></a:solidFill><a:ln><a:noFill/></a:ln>
+                </p:spPr></p:cxnSp>
+            </p:spTree></p:cSld></p:sld>"#),
+            ("ppt/slides/_rels/slide1.xml.rels", br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#),
+            ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#),
+            ("ppt/slideMasters/slideMaster1.xml", br#"<p:sldMaster xmlns:p="p"><p:cSld/></p:sldMaster>"#),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels", br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme1.xml"/></Relationships>"#),
+            ("ppt/theme/theme1.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
+                <a:clrScheme><a:accent1><a:srgbClr val="2244D0"/></a:accent1></a:clrScheme>
+                <a:fmtScheme><a:lnStyleLst>
+                    <a:ln w="100000"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                </a:lnStyleLst></a:fmtScheme>
+            </a:themeElements></a:theme>"#),
+        ]);
+        let show = import("Connectors.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        let style = |i: usize| items[i]["style"].as_str().unwrap();
+        assert!(style(0).starts_with("left:190px;top:290px;width:420px;height:20px;"));
+        assert!(style(0).contains("background:#E04422;"));
+        assert!(style(1).starts_with("left:795px;top:295px;width:10px;height:410px;"));
+        assert!(style(1).contains("background:#2244D0;"));
+        assert!(style(2).contains("--pptx-fill-flip-y:1;"));
+        assert!(style(2).contains("background:#00FF00;"));
+        assert!(!style(3).contains("background:"));
+        assert!(!style(3).contains("--pptx-fill-paths:"));
     }
 
     #[test]
