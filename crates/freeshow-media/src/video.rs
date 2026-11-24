@@ -69,7 +69,7 @@ mod gst_player {
             source
                 .link(&pipeline.by_name("dec").expect("camera decoder exists"))
                 .map_err(video_error)?;
-            let player = Self::from_pipeline(pipeline, AudioBranch::new_targets(Vec::new())?)?;
+            let player = Self::from_pipeline(pipeline, AudioBranch::new_routed(Vec::new())?)?;
             player.set_looping(false);
             Ok(player)
         }
@@ -100,23 +100,11 @@ mod gst_player {
             }
             let mut sinks = Vec::new();
             for (device, routes) in groups {
-                sinks.push((routes, speaker_sink(device.as_deref())?, false));
+                sinks.push((routes, speaker_sink(device.as_deref())?));
             }
-            for route in network {
-                let sink = gst::ElementFactory::make("interaudiosink")
-                    .property("channel", crate::network_channel(&route.output_id, true))
-                    .build()
-                    .map_err(video_error)?;
-                sinks.push((
-                    vec![SpeakerRoute::stereo(
-                        Some(route.output_id.clone()),
-                        route.gain,
-                    )],
-                    sink,
-                    true,
-                ));
-            }
-            Self::from_launch_with_audio(description, AudioBranch::new_targets(sinks)?)
+            let audio = AudioBranch::new_routed(sinks)?;
+            audio.network.lock().unwrap().set_routes(network)?;
+            Self::from_launch_with_audio(description, audio)
         }
 
         fn from_launch_with_audio(
@@ -198,8 +186,10 @@ mod gst_player {
         }
 
         pub fn set_network_routes(&self, routes: &[NetworkRoute]) {
-            if let Ok(mut mix) = self.audio.mix.lock() {
-                mix.set_network_routes(routes);
+            if let Ok(mut network) = self.audio.network.lock()
+                && let Err(error) = network.set_routes(routes)
+            {
+                eprintln!("video network audio routing: {error}");
             }
         }
 
@@ -535,6 +525,7 @@ mod gst_player {
         bin: gst::Bin,
         volume: gst::Element,
         mix: std::sync::Arc<std::sync::Mutex<ChannelMix>>,
+        network: std::sync::Mutex<crate::network::NetworkBranches>,
     }
 
     impl AudioBranch {
@@ -548,18 +539,8 @@ mod gst_player {
             )
         }
 
-        #[cfg(test)]
-        fn new_routed(sinks: Vec<(Vec<SpeakerRoute>, gst::Element)>) -> Result<Self, MediaError> {
-            Self::new_targets(
-                sinks
-                    .into_iter()
-                    .map(|(routes, sink)| (routes, sink, false))
-                    .collect(),
-            )
-        }
-
-        fn new_targets(
-            mut sinks: Vec<(Vec<SpeakerRoute>, gst::Element, bool)>,
+        fn new_routed(
+            mut sinks: Vec<(Vec<SpeakerRoute>, gst::Element)>,
         ) -> Result<Self, MediaError> {
             let bin = gst::Bin::new();
             let queue = gst::ElementFactory::make("queue")
@@ -593,11 +574,10 @@ mod gst_player {
                         .property("sync", true)
                         .build()
                         .map_err(video_error)?,
-                    false,
                 ));
             }
             let mut outputs = Vec::new();
-            for (routes, sink, network) in sinks {
+            for (routes, sink) in sinks {
                 let queue = gst::ElementFactory::make("queue")
                     .build()
                     .map_err(video_error)?;
@@ -645,7 +625,6 @@ mod gst_player {
                 ])
                 .map_err(video_error)?;
                 outputs.push(ChannelOutput {
-                    network,
                     device: routes[0].device.clone(),
                     routes,
                     upstream,
@@ -661,16 +640,18 @@ mod gst_player {
                 outputs,
             };
             mix.apply();
+            let network =
+                std::sync::Mutex::new(crate::network::NetworkBranches::new(&bin, tee, true));
             Ok(Self {
                 bin,
                 volume,
                 mix: std::sync::Arc::new(std::sync::Mutex::new(mix)),
+                network,
             })
         }
     }
 
     struct ChannelOutput {
-        network: bool,
         device: Option<String>,
         routes: Vec<SpeakerRoute>,
         upstream: gst::Pad,
@@ -788,31 +769,13 @@ mod gst_player {
     impl ChannelMix {
         fn set_routes(&mut self, routes: &[SpeakerRoute]) {
             let mut changed = false;
-            for output in self.outputs.iter_mut().filter(|output| !output.network) {
+            for output in &mut self.outputs {
                 let selected: Vec<_> = routes
                     .iter()
                     .filter(|route| route.device == output.device)
                     .cloned()
                     .collect();
                 if output.routes != selected {
-                    output.routes = selected;
-                    changed = true;
-                }
-            }
-            if changed {
-                self.apply();
-            }
-        }
-
-        fn set_network_routes(&mut self, routes: &[NetworkRoute]) {
-            let mut changed = false;
-            for output in self.outputs.iter_mut().filter(|output| output.network) {
-                let selected: Vec<_> = routes
-                    .iter()
-                    .filter(|route| Some(&route.output_id) == output.device.as_ref())
-                    .map(|route| SpeakerRoute::stereo(Some(route.output_id.clone()), route.gain))
-                    .collect();
-                if selected != output.routes {
                     output.routes = selected;
                     changed = true;
                 }
@@ -1024,7 +987,7 @@ mod gst_player {
         #[test]
         fn secondary_preview_reads_the_preroll_before_playing() {
             gst::init().unwrap();
-            let audio = AudioBranch::new_targets(Vec::new()).unwrap();
+            let audio = AudioBranch::new_routed(Vec::new()).unwrap();
             let mut player = VideoPlayer::from_launch_with_audio(
                 "videotestsrc pattern=red num-buffers=2 ! video/x-raw,format=RGBA,width=8,height=8 ! appsink name=sink",
                 audio,
@@ -1185,10 +1148,25 @@ mod gst_player {
                 .dynamic_cast::<AppSink>()
                 .unwrap();
             receiver.set_state(gst::State::Playing).unwrap();
-            let player=VideoPlayer::from_launch_network(
-                "videotestsrc is-live=true ! video/x-raw,width=2,height=2 ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink max-buffers=1 drop=true sync=false audiotestsrc is-live=true wave=square volume=0.8 samplesperbuffer=480 ! audio/x-raw,format=F32LE,channels=1,rate=48000 ! decodebin name=dec",&[],&[NetworkRoute {output_id:id.clone(),gain:0.25}]).unwrap();
+            let mut player = VideoPlayer::from_launch_network(
+                "videotestsrc is-live=true ! video/x-raw,width=2,height=2 ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink max-buffers=1 drop=true sync=false audiotestsrc is-live=true wave=square volume=0.8 samplesperbuffer=480 ! audio/x-raw,format=F32LE,channels=1,rate=48000 ! decodebin name=dec",&[],&[]).unwrap();
             player.set_volume(1.0);
+            assert!(
+                player
+                    .next_frame_wait(std::time::Duration::from_secs(1))
+                    .is_some()
+            );
+            expect_amplitude(&sink, 0.0);
+            player.set_network_routes(&[NetworkRoute {
+                output_id: id.clone(),
+                gain: 0.25,
+            }]);
             expect_amplitude(&sink, 0.2);
+            assert!(
+                player
+                    .next_frame_wait(std::time::Duration::from_secs(1))
+                    .is_some()
+            );
             player.set_network_routes(&[NetworkRoute {
                 output_id: id.clone(),
                 gain: 0.5,
