@@ -4022,7 +4022,7 @@ fn fill_item_background(
                     ]
                 })
                 .collect();
-            polygon_gradient_edges(&points, point).map(|edges| (point, edges))
+            PolygonGradient::new(&points, point).map(|gradient| (point, gradient))
         });
         let mut draw_stop = |px, py| {
             let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
@@ -4053,11 +4053,9 @@ fn fill_item_background(
             let position = match linear {
                 Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
                 None => {
-                    if let Some(([fx, fy], edges)) = &polygon_focus {
+                    if let Some(([fx, fy], gradient)) = &polygon_focus {
                         let (dx, dy) = (local_x / fill_w - fx, local_y / fill_h - fy);
-                        edges
-                            .iter()
-                            .fold(0.0f32, |position, [a, b]| position.max(a * dx + b * dy))
+                        gradient.position(dx, dy)
                     } else if let Some([left, top, right, bottom]) = rectangular_focus {
                         // Each stop lies on the rectangle interpolated between the focus and the box.
                         1.0 - (local_x * left)
@@ -4132,28 +4130,73 @@ fn fill_item_background(
     }
 }
 
-fn polygon_gradient_edges(vertices: &[[f32; 2]], [fx, fy]: [f32; 2]) -> Option<Vec<[f32; 2]>> {
-    let mut edges = Vec::new();
-    for (&[ax, ay], &[bx, by]) in vertices.iter().zip(vertices.iter().cycle().skip(1)) {
-        let (nx, ny) = (by - ay, ax - bx);
-        if nx == 0.0 && ny == 0.0 {
-            continue;
+enum PolygonGradient {
+    Convex(Vec<[f32; 2]>),
+    Concave(Vec<(f32, [f32; 2])>),
+}
+
+impl PolygonGradient {
+    fn new(vertices: &[[f32; 2]], [fx, fy]: [f32; 2]) -> Option<Self> {
+        let mut sectors = Vec::new();
+        let mut direction = 0.0f32;
+        let mut wraps = 0;
+        let mut convex = true;
+        for (&[ax, ay], &[bx, by]) in vertices.iter().zip(vertices.iter().cycle().skip(1)) {
+            if ax == bx && ay == by {
+                continue;
+            }
+            let (nx, ny) = (by - ay, ax - bx);
+            let distance = nx * (ax - fx) + ny * (ay - fy);
+            // The focus must see each edge on the same side as it traverses the outline.
+            if distance.abs() < 1e-6 || distance * direction < 0.0 {
+                return None;
+            }
+            direction = distance.signum();
+            let (start, end) = ((ay - fy).atan2(ax - fx), (by - fy).atan2(bx - fx));
+            let (start, end) = if direction > 0.0 {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            wraps += i32::from(start > end);
+            let (nx, ny) = (nx / distance, ny / distance);
+            convex = convex
+                && !vertices
+                    .iter()
+                    .any(|&[x, y]| nx * (x - fx) + ny * (y - fy) > 1.0 + 1e-4);
+            sectors.push((start, [nx, ny]));
         }
-        let focus = nx * (fx - ax) + ny * (fy - ay);
-        if focus.abs() < 1e-6 {
+        if sectors.len() < 3 || wraps != 1 {
             return None;
         }
-        let (nx, ny) = (-nx / focus, -ny / focus);
-        // Each edge must bound both the focus and all vertices for the contours to stay nested.
-        if vertices
-            .iter()
-            .any(|&[x, y]| nx * (x - fx) + ny * (y - fy) > 1.0 + 1e-4)
-        {
-            return None;
+        if convex {
+            return Some(Self::Convex(
+                sectors.into_iter().map(|(_, normal)| normal).collect(),
+            ));
         }
-        edges.push([nx, ny]);
+        sectors.sort_unstable_by(|(a, _), (b, _)| a.total_cmp(b));
+        Some(Self::Concave(sectors))
     }
-    (edges.len() >= 3).then_some(edges)
+
+    fn position(&self, dx: f32, dy: f32) -> f32 {
+        match self {
+            Self::Convex(edges) => edges
+                .iter()
+                .fold(0.0f32, |position, [a, b]| position.max(a * dx + b * dy)),
+            Self::Concave(sectors) => {
+                // Each direction hits the segment in its angular sector first.
+                let angle = dy.atan2(dx);
+                let index = sectors.partition_point(|(start, _)| *start <= angle);
+                let [a, b] = sectors[if index == 0 {
+                    sectors.len() - 1
+                } else {
+                    index - 1
+                }]
+                .1;
+                a * dx + b * dy
+            }
+        }
+    }
 }
 
 fn parse_fill_polygon(value: &str) -> Option<Vec<[f32; 2]>> {
@@ -4962,6 +5005,41 @@ mod tests {
         for (x, y) in [(25, 25), (37, 37), (49, 49), (80, 80)] {
             assert_eq!(flipped.pixel(99 - x, y), frame.pixel(x, y));
         }
+    }
+
+    #[test]
+    fn powerpoint_concave_shape_gradient_reaches_the_notches_and_tips() {
+        let render = |outline: &str| {
+            let mut slide = style_slide(&format!(
+                "left:0px;top:0px;width:100px;height:100px;background:radial-gradient(circle at center,#f00 0%,#00f 100%);--pptx-fill-paths:{outline};--pptx-polygon-focus:0.5 0.5;--pptx-rectangular-focus:0.5 0.5 0.5 0.5;"
+            ));
+            slide.output_width = 100;
+            slide.output_height = 100;
+            slide.source_width = 100.0;
+            slide.source_height = 100.0;
+            render_styled(&slide)
+        };
+        let star = "0.5 0.05,0.62 0.38,0.95 0.5,0.62 0.62,0.5 0.95,0.38 0.62,0.05 0.5,0.38 0.38";
+        let frame = render(star);
+        assert!(frame.pixel(50, 50).r > 240);
+        let halfway = frame.pixel(56, 56);
+        assert!((115..=120).contains(&halfway.r), "{halfway:?}");
+        assert!((135..=140).contains(&halfway.b), "{halfway:?}");
+        assert!(frame.pixel(61, 61).b > 240);
+        assert!(frame.pixel(50, 92).b > 230);
+        assert_eq!(frame.pixel(80, 80), Rgba::BLACK);
+        let reversed = star.split(',').rev().collect::<Vec<_>>().join(",");
+        assert_eq!(render(&reversed).pixels, frame.pixels);
+
+        let elbow = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.4],
+            [0.4, 0.4],
+            [0.4, 1.0],
+            [0.0, 1.0],
+        ];
+        assert!(PolygonGradient::new(&elbow, [0.8, 0.2]).is_none());
     }
 
     #[test]
