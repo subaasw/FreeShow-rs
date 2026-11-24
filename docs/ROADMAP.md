@@ -161,6 +161,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Direct and theme gradient fills for positioned PowerPoint shapes and text boxes.
 - [x] PowerPoint custom polygons with straight, closed paths retain their outlines. Point-focus shape-path gradients follow convex outlines and concave outlines when the focus can see the full boundary.
 - [x] PowerPoint triangle, right-triangle, diamond, and 4- to 32-point star presets retain their outlines and saved numeric adjustments.
+- [x] PowerPoint block arrows, chevrons, pentagonal arrows, parallelograms, trapezoids, hexagons, octagons, and plus shapes retain their saved adjustments and short-side scaling.
 - [x] PowerPoint quadratic and cubic Bézier segments in closed custom outlines follow their saved control points.
 - [x] PowerPoint elliptical arcs in closed custom outlines keep their radii, start angles, and signed sweeps.
 - [x] PowerPoint compound contours preserve cutouts, and independent normal-fill paths paint in document order.

@@ -742,6 +742,16 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             })
             .unwrap_or(default)
     };
+    let short_side = || {
+        let ext = child(child(properties, "xfrm")?, "ext")?;
+        let dimension = |axis| {
+            let size = ext.attribute(axis)?.parse::<f64>().ok()?;
+            (size.is_finite() && size > 0.0).then_some(size)
+        };
+        let (width, height) = (dimension("cx")?, dimension("cy")?);
+        let short = width.min(height);
+        Some([short / width, short / height])
+    };
     let name = geometry.attribute("prst")?;
     let outline = match name {
         "triangle" => vec![
@@ -754,6 +764,102 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
         ],
         "rtTriangle" => vec![[0.0, 1.0], [0.0, 0.0], [1.0, 1.0]],
         "diamond" => vec![[0.0, 0.5], [0.5, 0.0], [1.0, 0.5], [0.5, 1.0]],
+        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" | "leftRightArrow" | "upDownArrow" => {
+            block_arrow(
+                name,
+                short_side()?,
+                adjustment("adj1", 50_000.0),
+                adjustment("adj2", 50_000.0),
+            )
+        }
+        "chevron" | "homePlate" => {
+            let [sx, _] = short_side()?;
+            let head = (sx * adjustment("adj", 50_000.0) / 100_000.0).clamp(0.0, 1.0);
+            let shoulder = 1.0 - head;
+            let mut points = vec![
+                [0.0, 0.0],
+                [shoulder, 0.0],
+                [1.0, 0.5],
+                [shoulder, 1.0],
+                [0.0, 1.0],
+            ];
+            if name == "chevron" {
+                points.push([head, 0.5]);
+            }
+            points
+        }
+        "parallelogram" | "trapezoid" | "nonIsoscelesTrapezoid" => {
+            let [sx, _] = short_side()?;
+            let offset =
+                |guide, limit| (sx * adjustment(guide, 25_000.0) / 100_000.0).clamp(0.0, limit);
+            match name {
+                "parallelogram" => {
+                    let x = offset("adj", 1.0);
+                    vec![[0.0, 1.0], [x, 0.0], [1.0, 0.0], [1.0 - x, 1.0]]
+                }
+                "trapezoid" => {
+                    let x = offset("adj", 0.5);
+                    vec![[0.0, 1.0], [x, 0.0], [1.0 - x, 0.0], [1.0, 1.0]]
+                }
+                _ => vec![
+                    [0.0, 1.0],
+                    [offset("adj1", 0.5), 0.0],
+                    [1.0 - offset("adj2", 0.5), 0.0],
+                    [1.0, 1.0],
+                ],
+            }
+        }
+        "hexagon" => {
+            let [sx, _] = short_side()?;
+            let x = (sx * adjustment("adj", 25_000.0) / 100_000.0).clamp(0.0, 0.5);
+            let dy = (adjustment("vf", 115_470.0) / 200_000.0).clamp(0.0, 1.0)
+                * (std::f64::consts::PI / 3.0).sin();
+            vec![
+                [0.0, 0.5],
+                [x, 0.5 - dy],
+                [1.0 - x, 0.5 - dy],
+                [1.0, 0.5],
+                [1.0 - x, 0.5 + dy],
+                [x, 0.5 + dy],
+            ]
+        }
+        "octagon" | "plus" => {
+            let [sx, sy] = short_side()?;
+            let default = if name == "octagon" {
+                29_289.0
+            } else {
+                25_000.0
+            };
+            let inset = adjustment("adj", default).clamp(0.0, 50_000.0) / 100_000.0;
+            let (x, y) = (sx * inset, sy * inset);
+            if name == "octagon" {
+                vec![
+                    [0.0, y],
+                    [x, 0.0],
+                    [1.0 - x, 0.0],
+                    [1.0, y],
+                    [1.0, 1.0 - y],
+                    [1.0 - x, 1.0],
+                    [x, 1.0],
+                    [0.0, 1.0 - y],
+                ]
+            } else {
+                vec![
+                    [0.0, y],
+                    [x, y],
+                    [x, 0.0],
+                    [1.0 - x, 0.0],
+                    [1.0 - x, y],
+                    [1.0, y],
+                    [1.0, 1.0 - y],
+                    [1.0 - x, 1.0 - y],
+                    [1.0 - x, 1.0],
+                    [x, 1.0],
+                    [x, 1.0 - y],
+                    [0.0, 1.0 - y],
+                ]
+            }
+        }
         name => {
             // Default DrawingML star adjustments and ellipse scale factors from ECMA-376.
             let (points, inner, horizontal, vertical) = match name {
@@ -791,6 +897,98 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
         }
     };
     Some(vec![vec![outline]])
+}
+
+fn block_arrow(name: &str, [sx, sy]: [f64; 2], shaft: f64, head: f64) -> Vec<[f64; 2]> {
+    let vertical = matches!(name, "upArrow" | "downArrow" | "upDownArrow");
+    let double = matches!(name, "leftRightArrow" | "upDownArrow");
+    let along = if vertical { sy } else { sx };
+    let head = (along * head / 100_000.0).clamp(0.0, if double { 0.5 } else { 1.0 });
+    let top = 0.5 - shaft.clamp(0.0, 100_000.0) / 200_000.0;
+    let bottom = 1.0 - top;
+    let shoulder = 1.0 - head;
+    let mut points = if double {
+        vec![
+            [0.0, 0.5],
+            [head, 0.0],
+            [head, top],
+            [shoulder, top],
+            [shoulder, 0.0],
+            [1.0, 0.5],
+            [shoulder, 1.0],
+            [shoulder, bottom],
+            [head, bottom],
+            [head, 1.0],
+        ]
+    } else {
+        vec![
+            [0.0, top],
+            [shoulder, top],
+            [shoulder, 0.0],
+            [1.0, 0.5],
+            [shoulder, 1.0],
+            [shoulder, bottom],
+            [0.0, bottom],
+        ]
+    };
+    for point in &mut points {
+        let [x, y] = *point;
+        *point = match name {
+            "leftArrow" => [1.0 - x, y],
+            "upArrow" => [y, 1.0 - x],
+            "downArrow" | "upDownArrow" => [y, x],
+            _ => [x, y],
+        };
+    }
+    points
+}
+
+#[test]
+fn adjusted_block_presets_use_the_short_side_in_both_orientations() {
+    let outline = |name, width, height, guides| {
+        let xml = format!(
+            r#"<spPr><xfrm><ext cx="{width}" cy="{height}"/></xfrm>
+                <prstGeom prst="{name}"><avLst>{guides}</avLst></prstGeom></spPr>"#
+        );
+        let document = Document::parse(&xml).unwrap();
+        preset_paths(document.root_element())
+            .unwrap()
+            .remove(0)
+            .remove(0)
+    };
+    let guides = r#"<gd name="adj1" fmla="val 25000"/><gd name="adj2" fmla="val 80000"/>"#;
+    let right = outline("rightArrow", 4000, 2000, guides);
+    assert_eq!(
+        right,
+        [
+            [0.0, 0.375],
+            [0.6, 0.375],
+            [0.6, 0.0],
+            [1.0, 0.5],
+            [0.6, 1.0],
+            [0.6, 0.625],
+            [0.0, 0.625]
+        ]
+    );
+    let up = outline("upArrow", 2000, 4000, guides);
+    assert_eq!(
+        up,
+        [
+            [0.375, 1.0],
+            [0.375, 0.4],
+            [0.0, 0.4],
+            [0.5, 0.0],
+            [1.0, 0.4],
+            [0.625, 0.4],
+            [0.625, 1.0]
+        ]
+    );
+    let double = outline("leftRightArrow", 1000, 2000, guides);
+    assert_eq!((double[1], double[4]), ([0.5, 0.0], [0.5, 0.0]));
+    let outer = r#"<gd name="adj" fmla="val 25000"/>"#;
+    assert_eq!(outline("chevron", 4000, 2000, outer)[5], [0.125, 0.5]);
+    let octagon = outline("octagon", 4000, 2000, outer);
+    assert_eq!((octagon[0], octagon[1]), ([0.0, 0.25], [0.125, 0.0]));
 }
 
 fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
