@@ -669,18 +669,38 @@ pub fn slide_way(direction: &str) -> SlideWay {
 }
 
 pub fn slide_frames(from: &crate::Frame, to: &crate::Frame, t: f32, way: SlideWay) -> crate::Frame {
+    move_frames(from, to, t, way, false)
+}
+
+pub fn push_frames(from: &crate::Frame, to: &crate::Frame, t: f32, way: SlideWay) -> crate::Frame {
+    move_frames(from, to, t, way, true)
+}
+
+fn move_frames(
+    from: &crate::Frame,
+    to: &crate::Frame,
+    t: f32,
+    way: SlideWay,
+    push: bool,
+) -> crate::Frame {
     let t = t.clamp(0.0, 1.0);
     let width = from.width as i32;
     let height = from.height as i32;
     let shift_x = (width as f32 * t).round() as i32;
     let shift_y = (height as f32 * t).round() as i32;
-    let remain_x = (width as f32 * (1.0 - t)).round() as i32;
-    let remain_y = (height as f32 * (1.0 - t)).round() as i32;
+    let (remain_x, remain_y) = if push {
+        (width - shift_x, height - shift_y)
+    } else {
+        (
+            -((width as f32 * (1.0 - t)).round() as i32),
+            -((height as f32 * (1.0 - t)).round() as i32),
+        )
+    };
     let (out_x, out_y, in_x, in_y) = match way {
-        SlideWay::LeftRight => (-shift_x, 0, -remain_x, 0),
-        SlideWay::RightLeft => (shift_x, 0, remain_x, 0),
-        SlideWay::TopBottom => (0, -shift_y, 0, -remain_y),
-        SlideWay::BottomTop => (0, shift_y, 0, remain_y),
+        SlideWay::LeftRight => (-shift_x, 0, remain_x, 0),
+        SlideWay::RightLeft => (shift_x, 0, -remain_x, 0),
+        SlideWay::TopBottom => (0, -shift_y, 0, remain_y),
+        SlideWay::BottomTop => (0, shift_y, 0, -remain_y),
     };
     let mut pixels = vec![0u8; from.pixels.len()];
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -957,6 +977,23 @@ pub fn crossfade(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Frame
         height,
         pixels,
     }
+}
+
+pub fn fade_through_black(from: &crate::Frame, to: &crate::Frame, t: f32) -> crate::Frame {
+    let t = t.clamp(0.0, 1.0);
+    let (source, strength) = if t < 0.5 {
+        (from, 1.0 - 2.0 * t)
+    } else {
+        (to, 2.0 * t - 1.0)
+    };
+    let mut frame = source.clone();
+    for [r, g, b, a] in frame.pixels.as_chunks_mut::<4>().0 {
+        *r = (f32::from(*r) * strength).round() as u8;
+        *g = (f32::from(*g) * strength).round() as u8;
+        *b = (f32::from(*b) * strength).round() as u8;
+        *a = (255.0 + (f32::from(*a) - 255.0) * strength).round() as u8;
+    }
+    frame
 }
 
 pub fn image_frame(image: &Raster, width: u32, height: u32) -> crate::Frame {

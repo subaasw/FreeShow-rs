@@ -181,7 +181,16 @@ pub const BLEND_MODES: [&str; 9] = [
 ];
 
 /// Transition kinds the output can draw, in the order Settings lists them.
-pub const TRANSITION_KINDS: [&str; 6] = ["none", "fade", "blur", "scale", "slide", "spin"];
+pub const TRANSITION_KINDS: [&str; 8] = [
+    "none",
+    "fade",
+    "blur",
+    "scale",
+    "slide",
+    "spin",
+    "push",
+    "fade_through_black",
+];
 
 /// The selected slide item as the Inspector shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
