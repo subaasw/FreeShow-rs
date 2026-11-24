@@ -26,6 +26,12 @@ export struct SettingsData {
     remote-port: int,
     stage-port: int,
     max-connections: int,
+    has-library: bool,
+    icecast-host: string,
+    icecast-port: string,
+    icecast-mount: string,
+    icecast-transport: string,
+    icecast-routed: bool,
     theme: string,
     profiles: string,
     output-name: string,
@@ -243,6 +249,7 @@ export component SettingsPanel inherits Rectangle {
     in property <color> text-color;
     in property <color> close-fill;
     callback apply(string, string);
+    callback save-icecast(string, string, string, string, string) -> bool;
     callback close();
     VerticalLayout {
         padding: 10px;
@@ -738,6 +745,89 @@ export component SettingsPanel inherits Rectangle {
                         }
                     }
                 }
+                }
+            }
+            Tab {
+                title: "Icecast";
+                ScrollView {
+                    content-height: max(self.visible-height, icecast-form.min-height);
+                    VerticalLayout {
+                        alignment: start;
+                        icecast-form := GridLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            Row {
+                                SettingLabel { text: "Host"; text-color: root.text-color; }
+                                icecast-host := ValueEdit {
+                                    shown: root.data.icecast-host;
+                                    accessible-label: "Icecast host";
+                                    enabled: root.data.has-library;
+                                }
+                            }
+                            Row {
+                                SettingLabel { text: "Port"; text-color: root.text-color; }
+                                icecast-port := ValueEdit {
+                                    shown: root.data.icecast-port;
+                                    input-type: number;
+                                    accessible-label: "Icecast port";
+                                    enabled: root.data.has-library;
+                                }
+                            }
+                            Row {
+                                SettingLabel { text: "Mount"; text-color: root.text-color; }
+                                icecast-mount := ValueEdit {
+                                    shown: root.data.icecast-mount;
+                                    accessible-label: "Icecast mount";
+                                    enabled: root.data.has-library;
+                                }
+                            }
+                            Row {
+                                SettingLabel { text: "Source password"; text-color: root.text-color; }
+                                icecast-password := LineEdit {
+                                    input-type: password;
+                                    placeholder-text: "Leave blank to keep the current password";
+                                    accessible-label: "Icecast source password";
+                                    enabled: root.data.has-library;
+                                }
+                            }
+                            Row {
+                                SettingLabel { text: "Transport"; text-color: root.text-color; }
+                                icecast-transport := ValueCombo {
+                                    model: ["Automatic", "HTTP", "TLS"];
+                                    value: root.data.icecast-transport;
+                                    accessible-label: "Icecast transport";
+                                    enabled: root.data.has-library;
+                                }
+                            }
+                            Row {
+                                Rectangle {}
+                                Text {
+                                    text: !root.data.has-library ? "Choose a library folder to configure Icecast." :
+                                        root.data.icecast-routed ? "Start or stop streaming from Functions." :
+                                        "Streaming requires an audio route to Icecast.";
+                                    color: root.text-color;
+                                    wrap: word-wrap;
+                                    font-size: 12px * OperatorStyle.font-scale;
+                                }
+                            }
+                            Row {
+                                Rectangle {}
+                                HorizontalLayout {
+                                    Button {
+                                        text: "Save connection";
+                                        enabled: root.data.has-library;
+                                        clicked => {
+                                            if root.save-icecast(icecast-host.text, icecast-port.text,
+                                                icecast-mount.text, icecast-password.text, icecast-transport.current-value) {
+                                                icecast-password.text = "";
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Tab {
