@@ -41,10 +41,13 @@ pub(super) fn decode(file_name: &str, bytes: &[u8]) -> Result<ShowFile, DataErro
         if action.is_none()
             && cue_picture(cue).is_none()
             && cue_audio(cue).is_none()
-            && !cue
-                .actions
-                .iter()
-                .any(|action| immediate_clear_target(action).is_some())
+            && !cue.actions.iter().any(|action| {
+                immediate_clear_target(action).is_some()
+                    || (action_delay(action).is_some()
+                        && (clear_target(action).is_some()
+                            || audio_media(action).is_some()
+                            || (action.enabled && picture_media(action).is_some())))
+            })
         {
             continue;
         }
@@ -365,6 +368,21 @@ fn add_slide(
             settings["actionOnly"] = json!(true);
         }
     }
+    let delayed: Vec<_> = cue
+        .actions
+        .iter()
+        .filter_map(|action| {
+            let time = action_delay(action)?;
+            let (kind, data) = media_or_clear_action(action, media)?;
+            Some(json!({"time": time, "type": kind, "data": data}))
+        })
+        .collect();
+    if !delayed.is_empty() {
+        node["delayedActions"] = json!(delayed);
+        if action.is_none() && node["background"].is_null() {
+            settings["actionOnly"] = json!(true);
+        }
+    }
     slides.insert(
         slide_id,
         json!({
@@ -402,7 +420,7 @@ fn unsupported_actions(cue: &wire::Cue) -> Vec<&'static str> {
     for action in &cue.actions {
         if action_carries_slide(action).is_some()
             || action_carries_media(action).is_some()
-            || immediate_clear_target(action).is_some()
+            || (timeline_millis(action.delay).is_some() && clear_target(action).is_some())
         {
             continue;
         }
@@ -447,34 +465,10 @@ fn layout_timeline(
             continue;
         };
         let (kind, data) = if let Some(action) = &cue.action {
-            if let Some(target) = clear_target(action) {
-                let kind = match target {
-                    wire::ClearTarget::Audio => "clear_audio",
-                    wire::ClearTarget::Background => "clear_background",
-                    wire::ClearTarget::Slide => "clear_slide",
-                    wire::ClearTarget::All => "clear_all",
-                };
-                (kind, json!({}))
-            } else if let Some((audio, path)) = audio_media(action) {
-                (
-                    "audio",
-                    json!({"id": insert_media(media, audio, path, false)}),
-                )
-            } else if action.enabled
-                && let Some((picture, path, foreground)) = picture_media(action)
-            {
-                let id = insert_media(media, picture, path, foreground);
-                (
-                    if foreground {
-                        "foreground"
-                    } else {
-                        "background"
-                    },
-                    json!({"id": id}),
-                )
-            } else {
+            let Some(media_action) = media_or_clear_action(action, media) else {
                 continue;
-            }
+            };
+            media_action
         } else {
             let Some(occurrences) = id(&cue.cue_id)
                 .and_then(|cue_id| cue_slides.get(cue_id))
@@ -529,6 +523,44 @@ fn timeline_millis(seconds: f64) -> Option<u64> {
     (seconds >= 0.0 && millis < u64::MAX as f64).then_some(millis as u64)
 }
 
+fn action_delay(action: &wire::Action) -> Option<u64> {
+    timeline_millis(action.delay).filter(|_| action.delay > 0.0)
+}
+
+fn media_or_clear_action(
+    action: &wire::Action,
+    media: &mut Map<String, Value>,
+) -> Option<(&'static str, Value)> {
+    if let Some(target) = clear_target(action) {
+        let kind = match target {
+            wire::ClearTarget::Audio => "clear_audio",
+            wire::ClearTarget::Background => "clear_background",
+            wire::ClearTarget::Slide => "clear_slide",
+            wire::ClearTarget::All => "clear_all",
+        };
+        return Some((kind, json!({})));
+    }
+    if !action.enabled {
+        return None;
+    }
+    if let Some((audio, path)) = audio_media(action) {
+        return Some((
+            "audio",
+            json!({"id": insert_media(media, audio, path, false)}),
+        ));
+    }
+    let (picture, path, foreground) = picture_media(action)?;
+    let kind = if foreground {
+        "foreground"
+    } else {
+        "background"
+    };
+    Some((
+        kind,
+        json!({"id": insert_media(media, picture, path, foreground)}),
+    ))
+}
+
 fn immediate_clear_target(action: &wire::Action) -> Option<wire::ClearTarget> {
     (action.delay == 0.0)
         .then(|| clear_target(action))
@@ -559,13 +591,17 @@ fn cue_picture(cue: &wire::Cue) -> Option<CuePicture<'_>> {
     {
         return Some(CuePicture::Clear);
     }
-    cue.actions.iter().rev().find_map(|action| {
-        if immediate_clear_target(action) == Some(wire::ClearTarget::Background) {
-            return Some(CuePicture::Clear);
-        }
-        let (media, path, foreground) = picture_media(action)?;
-        Some(CuePicture::Media(media, path, foreground))
-    })
+    cue.actions
+        .iter()
+        .rev()
+        .filter(|action| action.delay == 0.0)
+        .find_map(|action| {
+            if immediate_clear_target(action) == Some(wire::ClearTarget::Background) {
+                return Some(CuePicture::Clear);
+            }
+            let (media, path, foreground) = picture_media(action)?;
+            Some(CuePicture::Media(media, path, foreground))
+        })
 }
 
 fn picture_media(action: &wire::Action) -> Option<(&wire::MediaAction, &str, bool)> {
@@ -1067,6 +1103,8 @@ mod tests {
         assert!(!show.clears_audio_at(1));
         assert!(show.clears_audio_at(2));
         assert!(show.clears_slide_at(2));
+        assert_eq!(show.delayed_actions_at(1)[0].kind, "clear_background");
+        assert_eq!(show.delayed_actions_at(1)[0].time_ms, 1000);
         let warnings = show.show["settings"]["importWarnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(
@@ -1086,6 +1124,59 @@ mod tests {
         assert!(show.clears_audio_at(2));
         assert!(show.clears_slide_at(2));
         assert!(show.show["media"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_delayed_picture_and_audio_as_action_only_child_cues() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let mut foreground = presentation.cues[2].actions[1].clone();
+        foreground.delay = 1.0;
+        foreground.enabled = true;
+        foreground.kind = wire::ActionType::ForegroundMedia as i32;
+        let mut audio = foreground.clone();
+        audio.delay = 0.25;
+        audio.kind = wire::ActionType::Media as i32;
+        let media = audio.media.as_mut().unwrap();
+        media.audio = Some(wire::Audio::default());
+        media.element.as_mut().unwrap().url = Some(wire::Url {
+            relative: "Sound.wav".into(),
+            ..Default::default()
+        });
+        presentation.cues[1].enabled = true;
+        presentation.cues[1].actions = vec![
+            foreground.clone(),
+            audio,
+            wire::Action {
+                enabled: false,
+                ..foreground
+            },
+        ];
+        let show =
+            crate::import::import_show("Delayed.pro", &presentation.encode_to_vec()).unwrap();
+        let index = (0..show.ordered_slides().len())
+            .find(|&index| show.delayed_actions_at(index).len() == 2)
+            .unwrap();
+        let id = &show.ordered_slides()[index].id;
+        assert_eq!(show.show["slides"][id]["settings"]["actionOnly"], true);
+        assert!(show.audio_at(index).is_empty());
+        assert!(!matches!(
+            show.backdrop_at(index),
+            crate::SlideBackdrop::Picture {
+                foreground: true,
+                ..
+            }
+        ));
+        let cues = show.delayed_actions_at(index);
+        assert_eq!((cues[0].time_ms, cues[0].kind.as_str()), (250, "audio"));
+        assert_eq!(
+            show.show["media"][cues[0].data.as_deref().unwrap()]["path"],
+            "Sound.wav"
+        );
+        assert_eq!(
+            (cues[1].time_ms, cues[1].kind.as_str()),
+            (1000, "foreground")
+        );
     }
 
     #[test]

@@ -2279,15 +2279,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let mut current = session.borrow_mut();
                 let now = std::time::Instant::now();
-                let timeline = current.tick_timeline(now);
-                current.refresh_output |= timeline;
+                let changed = current.tick_timeline(now) | current.run_due_cue_actions(now);
+                current.refresh_output |= changed;
                 if current.metronome_on {
                     current.update_metronome(now);
                 }
-                if timeline || current.metronome_on {
+                if changed || current.metronome_on {
                     let status = current.chrome_status();
                     drop(current);
-                    if timeline {
+                    if changed {
                         refresh(&ui, &session.borrow());
                     } else {
                         ui.set_chrome_status(status.into());

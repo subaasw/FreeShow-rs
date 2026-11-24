@@ -1602,6 +1602,12 @@ impl ShowFile {
             .unwrap_or_default()
     }
 
+    pub fn delayed_actions_at(&self, index: usize) -> Vec<TimelineCue> {
+        self.layout_node_at(index)
+            .map(|node| timeline_cues_from_actions(&node["delayedActions"], true))
+            .unwrap_or_default()
+    }
+
     /// Sound-effect files this slide plays, in order.
     pub fn effect_audio_at(&self, index: usize) -> Vec<String> {
         let steps = self.layout_steps();
@@ -6338,7 +6344,11 @@ pub fn timeline_cues_from_show(show: &Value) -> Vec<TimelineCue> {
         return Vec::new();
     };
     let imported_ms = layout.is_some() && show["origin"] == "propresenter";
-    let Some(actions) = timeline["actions"].as_array() else {
+    timeline_cues_from_actions(&timeline["actions"], imported_ms)
+}
+
+fn timeline_cues_from_actions(actions: &Value, imported_ms: bool) -> Vec<TimelineCue> {
+    let Some(actions) = actions.as_array() else {
         return Vec::new();
     };
     let mut cues = Vec::new();

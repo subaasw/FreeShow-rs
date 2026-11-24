@@ -135,6 +135,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 global clear-slide cues clear the slide layer in standalone cues and on timelines.
 - [x] ProPresenter 7 global Clear All cues use native output clearing and stop both audio and video.
 - [x] ProPresenter 7 audio actions use native playback as slide cues or timeline events, with standard loop and retrigger settings.
+- [x] ProPresenter 7 slide-triggered media and global clear actions honor saved delays.
 - [x] ProPresenter 7 videos honor hold, stop on black or clear, and fade to black or clear.
 - [x] ProPresenter 7 slide and timeline videos honor saved in and out points and playback rate, even when cues share a file.
 - [x] ProPresenter 7 slide audio, timeline audio cues, and timeline soundtracks honor saved in and out points and playback rate.

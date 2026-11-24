@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use freeshow_core::{NetworkRoute, SpeakerRoute};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -83,6 +83,13 @@ struct PendingCueCompletion {
     show_id: String,
     layout_id: String,
     index: usize,
+}
+
+struct PendingCueActions {
+    started: Instant,
+    show_id: String,
+    slide_index: usize,
+    cues: VecDeque<TimelineCue>,
 }
 
 /// An index in `0..count` that is not `current`.
@@ -356,6 +363,7 @@ pub struct Session {
     /// Countdown captured when this slide was shown. A later timer action does not change it.
     timed_seconds: Option<f64>,
     pending_cue_completion: Option<PendingCueCompletion>,
+    pending_cue_actions: Option<PendingCueActions>,
     pub stage: StageLayout,
     pub(crate) stage_layout_id: Option<String>,
     pub stage_media: std::cell::RefCell<crate::stage::StageMedia>,
@@ -580,6 +588,7 @@ impl Session {
             pending_actions: None,
             timed_seconds: None,
             pending_cue_completion: None,
+            pending_cue_actions: None,
             stage: default_stage(),
             stage_layout_id: None,
             stage_media: Default::default(),
@@ -777,6 +786,7 @@ impl Session {
             pending_actions: None,
             timed_seconds: None,
             pending_cue_completion: None,
+            pending_cue_actions: None,
             stage,
             stage_layout_id,
             stage_media: Default::default(),
@@ -1497,6 +1507,7 @@ impl Session {
         }
         self.program_content.get_mut().take();
         self.pending_cue_completion = None;
+        self.pending_cue_actions = None;
         self.replace_underlay(None);
         self.reset_background_look();
         self.playing_audio = None;
@@ -2059,7 +2070,7 @@ impl Session {
                 break;
             }
             self.timeline_fired += 1;
-            changed |= self.run_timeline_cue(&cue);
+            changed |= self.run_timeline_cue(&cue, self.show_index);
         }
         if self.timeline_playing
             && self.timeline_fired >= self.timeline_cues.len()
@@ -2116,7 +2127,7 @@ impl Session {
         }
     }
 
-    fn run_timeline_cue(&mut self, cue: &TimelineCue) -> bool {
+    fn run_timeline_cue(&mut self, cue: &TimelineCue, source: Option<usize>) -> bool {
         match cue.kind.to_ascii_lowercase().as_str() {
             "next" | "next_slide" | "go" => self.advance_show(),
             "previous" | "previous_slide" => self.retreat_show(),
@@ -2124,10 +2135,14 @@ impl Session {
             "audio" if !self.preferences.out_locked() => cue
                 .data
                 .as_deref()
-                .is_some_and(|id| self.run_timeline_audio(id)),
+                .is_some_and(|id| self.run_timeline_audio(source, id)),
             "background" | "foreground" if !self.preferences.out_locked() => {
                 cue.data.as_deref().is_some_and(|id| {
-                    self.run_timeline_picture(id, cue.kind.eq_ignore_ascii_case("foreground"))
+                    self.run_timeline_picture(
+                        source,
+                        id,
+                        cue.kind.eq_ignore_ascii_case("foreground"),
+                    )
                 })
             }
             "overlay" => {
@@ -2160,9 +2175,9 @@ impl Session {
         }
     }
 
-    fn run_timeline_audio(&mut self, id: &str) -> bool {
-        let Some(media) = self
-            .current_show()
+    fn run_timeline_audio(&mut self, source: Option<usize>, id: &str) -> bool {
+        let Some(media) = source
+            .and_then(|index| self.shows.get(index))
             .and_then(|show| show.show["media"].get(id))
         else {
             return false;
@@ -2180,9 +2195,9 @@ impl Session {
         self.queue_cue_audio(path, looping, retrigger, transport)
     }
 
-    fn run_timeline_picture(&mut self, id: &str, foreground: bool) -> bool {
-        let Some(media) = self
-            .current_show()
+    fn run_timeline_picture(&mut self, source: Option<usize>, id: &str, foreground: bool) -> bool {
+        let Some(media) = source
+            .and_then(|index| self.shows.get(index))
             .and_then(|show| show.show["media"].get(id))
         else {
             return false;
@@ -2894,7 +2909,40 @@ impl Session {
             return;
         }
         self.pending_actions = None;
+        self.pending_cue_actions = self.current_show().and_then(|show| {
+            let slide_index = self.slide_index?;
+            let cues = show.delayed_actions_at(slide_index);
+            (!cues.is_empty()).then(|| PendingCueActions {
+                started: Instant::now(),
+                show_id: show.id.clone(),
+                slide_index,
+                cues: cues.into(),
+            })
+        });
         self.apply_action_slice(None);
+    }
+
+    pub fn run_due_cue_actions(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        while let Some(pending) = &mut self.pending_cue_actions {
+            let Some(next) = pending.cues.front() else {
+                self.pending_cue_actions = None;
+                break;
+            };
+            let elapsed = now.saturating_duration_since(pending.started);
+            if elapsed.as_millis() < u128::from(next.time_ms) {
+                break;
+            }
+            let cue = pending.cues.pop_front().unwrap();
+            let source = self
+                .shows
+                .iter()
+                .position(|show| show.id == pending.show_id);
+            if source.is_some() {
+                changed |= self.run_timeline_cue(&cue, source);
+            }
+        }
+        changed
     }
 
     /// Runs one slice of the slide actions. A wait stores the rest until it is due.
@@ -4258,6 +4306,17 @@ impl Session {
 
     /// The selection becomes the program again.
     pub fn go_live(&mut self) {
+        if self.tab == "scripture"
+            || (self.program_held
+                && self.pending_cue_actions.as_ref().is_some_and(|pending| {
+                    self.slide_index != Some(pending.slide_index)
+                        || self
+                            .current_show()
+                            .is_none_or(|show| show.id != pending.show_id)
+                }))
+        {
+            self.pending_cue_actions = None;
+        }
         self.blanked = false;
         self.program_held = false;
     }
@@ -8399,6 +8458,48 @@ Second line"
             );
         }
         std::fs::remove_file(video).unwrap();
+    }
+
+    #[test]
+    fn delayed_slide_actions_follow_the_triggered_cue_while_browsing() {
+        let root = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let sound = root.join("sound.wav");
+        std::fs::write(&sound, b"fixture").unwrap();
+        let mut show = ShowFile::blank("delayed", "Delayed");
+        show.add_slide().unwrap();
+        show.show["media"]["sound"] = serde_json::json!({"path": sound});
+        show.show["layouts"]["main"]["slides"][0]["delayedActions"] = serde_json::json!([
+            {"time": 250, "type": "audio", "data": {"id": "sound"}},
+            {"time": 500, "type": "clear_audio"}
+        ]);
+        let mut session = Session::empty();
+        session.shows = vec![show, ShowFile::blank("browse", "Browse")];
+        assert!(session.present_show_id("delayed"));
+        let started = session.pending_cue_actions.as_ref().unwrap().started;
+        session.go_live();
+        session.hold_program();
+        session.show_index = Some(1);
+
+        assert!(!session.run_due_cue_actions(started + Duration::from_millis(249)));
+        assert!(session.run_due_cue_actions(started + Duration::from_millis(250)));
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Audio(path)), None] if path == sound)
+        );
+        assert!(session.run_due_cue_actions(started + Duration::from_millis(500)));
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::StopAudio), None]
+        ));
+        assert!(session.pending_cue_actions.is_none());
+        assert_eq!(session.show_index, Some(1));
+
+        assert!(session.present_show_id("delayed"));
+        let started = session.pending_cue_actions.as_ref().unwrap().started;
+        session.select_slide(1);
+        assert!(!session.run_due_cue_actions(started + Duration::from_secs(1)));
+        assert!(matches!(session.take_plays(), [None, None]));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
