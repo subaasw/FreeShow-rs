@@ -2558,42 +2558,42 @@ fn split_line(
     });
     let (_, mut row_limit, _) = paragraph_text_row(line.pptx_margins, slide, max_width, bullet);
     let (_, continuation_limit) = paragraph_row([left, right, 0], slide, max_width);
-    let total: i32 = words
-        .iter()
-        .map(|(text, css)| piece_width(text, css, item_style, slide))
-        .sum();
+    let measure = |text: &str, css: &str| piece_width(text, css, item_style, slide);
+    let width_of = |pieces: &[TextPiece<'_>]| {
+        pieces.iter().fold(0_i32, |width, &(text, css)| {
+            width.saturating_add(measure(text, css))
+        })
+    };
+    let total = line.runs.iter().fold(0_i32, |width, run| {
+        width.saturating_add(measure(&run.text, &run.style))
+    });
     if total <= row_limit {
         return vec![line.clone()];
     }
-    let mut rows: Vec<Vec<(String, String)>> = vec![Vec::new()];
+    let mut rows = vec![Vec::new()];
     let mut width: i32 = 0;
-    for (text, css) in words {
-        let word = piece_width(&text, &css, item_style, slide);
-        if width.saturating_add(word) > row_limit && rows.last().is_some_and(|row| !row.is_empty())
+    for word in words {
+        let word_width = width_of(&word);
+        if width.saturating_add(word_width) > row_limit
+            && rows.last().is_some_and(|row| !row.is_empty())
         {
             rows.push(Vec::new());
             width = 0;
             row_limit = continuation_limit;
         }
-        if word > row_limit {
-            for chunk in break_piece(
-                &text,
-                &css,
-                item_style,
-                slide,
-                [row_limit, continuation_limit],
-            ) {
+        if word_width > row_limit {
+            for chunk in break_word(word, &measure, [row_limit, continuation_limit]) {
                 if rows.last().is_some_and(|row| !row.is_empty()) {
                     rows.push(Vec::new());
                     row_limit = continuation_limit;
                 }
-                width = piece_width(&chunk, &css, item_style, slide);
-                rows.last_mut().unwrap().push((chunk, css.clone()));
+                width = width_of(&chunk);
+                rows.last_mut().unwrap().extend(chunk);
             }
             continue;
         }
-        rows.last_mut().unwrap().push((text, css));
-        width = width.saturating_add(word);
+        rows.last_mut().unwrap().extend(word);
+        width = width.saturating_add(word_width);
     }
     let last = rows.len() - 1;
     rows.into_iter()
@@ -2619,54 +2619,62 @@ fn split_line(
         .collect()
 }
 
-fn line_words(line: &StyledLine) -> Vec<(String, String)> {
+type TextPiece<'a> = (&'a str, &'a str);
+
+fn line_words(line: &StyledLine) -> Vec<Vec<TextPiece<'_>>> {
     let mut words = Vec::new();
+    let mut word = Vec::new();
     for run in &line.runs {
-        if run.text.is_empty() {
-            continue;
-        }
-        let mut current = String::new();
-        for ch in run.text.chars() {
-            current.push(ch);
-            if ch.is_whitespace() {
-                words.push((std::mem::take(&mut current), run.style.clone()));
+        for part in run
+            .text
+            .split_inclusive(char::is_whitespace)
+            .filter(|part| !part.is_empty())
+        {
+            word.push((part, run.style.as_str()));
+            if part.ends_with(char::is_whitespace) {
+                words.push(std::mem::take(&mut word));
             }
         }
-        if !current.is_empty() {
-            words.push((current, run.style.clone()));
-        }
+    }
+    if !word.is_empty() {
+        words.push(word);
     }
     words
 }
 
-fn break_piece(
-    text: &str,
-    css: &str,
-    item_style: &str,
-    slide: &StyledSlide,
+fn break_word<'a>(
+    word: Vec<TextPiece<'a>>,
+    measure: &impl Fn(&str, &str) -> i32,
     [mut max_width, continuation_width]: [i32; 2],
-) -> Vec<String> {
+) -> Vec<Vec<TextPiece<'a>>> {
     let mut chunks = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        let mut trial = current.clone();
-        trial.push(ch);
-        if !current.is_empty() && piece_width(&trial, css, item_style, slide) > max_width {
-            chunks.push(std::mem::take(&mut current));
-            max_width = continuation_width;
+    let mut chunk = Vec::new();
+    let mut width = 0_i32;
+    for (text, css) in word {
+        let mut start = 0;
+        for (index, ch) in text.char_indices() {
+            let end = index + ch.len_utf8();
+            if (index > start || !chunk.is_empty())
+                && width.saturating_add(measure(&text[start..end], css)) > max_width
+            {
+                if index > start {
+                    chunk.push((&text[start..index], css));
+                }
+                chunks.push(std::mem::take(&mut chunk));
+                width = 0;
+                max_width = continuation_width;
+                start = index;
+            }
         }
-        current.push(ch);
+        let tail = &text[start..];
+        width = width.saturating_add(measure(tail, css));
+        chunk.push((tail, css));
     }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    if chunks.is_empty() {
-        chunks.push(text.to_string());
-    }
+    chunks.push(chunk);
     chunks
 }
 
-fn merge_words(words: Vec<(String, String)>) -> Vec<TextRun> {
+fn merge_words(words: Vec<TextPiece<'_>>) -> Vec<TextRun> {
     let mut runs = Vec::new();
     for (text, style) in words {
         if let Some(last) = runs.last_mut() {
@@ -2675,14 +2683,14 @@ fn merge_words(words: Vec<(String, String)>) -> Vec<TextRun> {
                 text: last_text,
                 ..
             } = last;
-            if last_style == &style {
-                last_text.push_str(&text);
+            if last_style == style {
+                last_text.push_str(text);
                 continue;
             }
         }
         runs.push(TextRun {
-            text,
-            style,
+            text: text.into(),
+            style: style.into(),
             place_on: None,
             paint: true,
         });
@@ -5567,6 +5575,35 @@ mod tests {
             "font-size: 28px;color: #FFFFFF;white-space: nowrap;".into();
         let single = render_styled(&slide);
         assert!(lowest_ink(&wrapped) > lowest_ink(&single));
+    }
+
+    #[test]
+    fn a_word_wraps_as_one_unit_across_style_changes() {
+        let mut slide = shadow_slide("font-size:20px;color:#f00;");
+        let runs = &mut slide.items[0].lines[0].runs;
+        runs[0].text = "Previously Foot".into();
+        let mut second = runs[0].clone();
+        second.text = "notes".into();
+        second.style = "font-size:20px;color:#0f0;".into();
+        runs.push(second);
+        let line = &slide.items[0].lines[0];
+        let room = piece_width("Previously ", &line.runs[0].style, "", &slide)
+            + piece_width("Foot", &line.runs[0].style, "", &slide);
+        let rows = wrap_lines(&slide.items[0].lines, "", &slide, room);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].runs[0].text, "Previously ");
+        assert_eq!(rows[1].runs[0].text, "Foot");
+        assert_eq!(rows[1].runs[1], line.runs[1]);
+
+        let mut long = line.clone();
+        long.runs[0].text = "Foot".into();
+        let room = piece_width("Foot", &long.runs[0].style, "", &slide)
+            + piece_width("n", &long.runs[1].style, "", &slide);
+        let rows = wrap_lines(&[long], "", &slide, room);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].runs[1].text, "n");
+        assert_eq!(rows[1].runs[0].text, "otes");
+        assert_eq!(rows[1].runs[0].style, line.runs[1].style);
     }
 
     #[test]
