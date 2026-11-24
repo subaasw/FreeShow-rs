@@ -2783,8 +2783,9 @@ mod tests {
         assert!(
             frame
                 .pixels
-                .chunks_exact(4)
-                .any(|pixel| pixel == [208, 36, 131, 255])
+                .as_chunks::<4>()
+                .0
+                .contains(&[208, 36, 131, 255])
         );
         assert_eq!(
             frame.pixel(80, 0),
@@ -2875,8 +2876,9 @@ mod tests {
         assert!(
             frame
                 .pixels
-                .chunks_exact(4)
-                .any(|pixel| pixel == [192, 16, 84, 255])
+                .as_chunks::<4>()
+                .0
+                .contains(&[192, 16, 84, 255])
         );
 
         reopened.stage_set(&id, "chart-data", "A: 5\nB: 6").unwrap();

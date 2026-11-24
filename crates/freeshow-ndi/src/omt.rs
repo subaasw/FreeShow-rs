@@ -86,7 +86,7 @@ fn send_video(
     loop {
         match frames.recv_timeout(next.saturating_duration_since(Instant::now())) {
             Ok(mut pixels) => {
-                for pixel in pixels.chunks_exact_mut(4) {
+                for pixel in pixels.as_chunks_mut::<4>().0 {
                     pixel.swap(0, 2);
                 }
                 bgra = pixels;
@@ -164,7 +164,7 @@ fn audio_frame(buffer: &gst::BufferRef) -> Option<MediaFrame> {
     }
     let mut planar = Vec::with_capacity(interleaved.len());
     for offset in [0, 4] {
-        for pair in interleaved.chunks_exact(8) {
+        for pair in interleaved.as_chunks::<8>().0 {
             planar.extend_from_slice(&pair[offset..offset + 4]);
         }
     }

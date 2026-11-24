@@ -2221,7 +2221,7 @@ mod tests {
             frame_for_slide_at(show, 0, Some(&root), false, None, true, None, &[], 4, 4)
         };
         let frame = render(&show);
-        for pixel in frame.pixels.chunks_exact(4) {
+        for &pixel in frame.pixels.as_chunks::<4>().0 {
             assert_eq!(pixel, [0, 255, 0, 255]);
         }
         show.show["slides"]["s1"]["items"][0]["cropping"]["type"] = serde_json::json!("native");
