@@ -161,4 +161,6 @@ pub struct IcecastDestination {
     pub port: u16,
     pub mount: String,
     pub password: String,
+    /// An explicit transport choice. Omission preserves legacy negotiation.
+    pub tls: Option<bool>,
 }

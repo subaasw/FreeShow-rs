@@ -3,6 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use freeshow_core::{ICECAST_BUS, IcecastDestination};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app::AppSink;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -23,14 +25,10 @@ pub struct IcecastSender {
 
 impl IcecastSender {
     pub fn new() -> std::io::Result<Self> {
-        Self::spawn(true)
-    }
-
-    fn spawn(prefer_libshout: bool) -> std::io::Result<Self> {
         let (send, receive) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("freeshow-icecast".into())
-            .spawn(move || serve(receive, prefer_libshout))?;
+            .spawn(move || serve(receive))?;
         Ok(Self {
             commands: Some(send),
             worker: Some(worker),
@@ -53,7 +51,7 @@ impl Drop for IcecastSender {
     }
 }
 
-fn serve(commands: Receiver<Option<IcecastDestination>>, prefer_libshout: bool) {
+fn serve(commands: Receiver<Option<IcecastDestination>>) {
     let mut desired = None;
     loop {
         let Some(destination) = desired.take() else {
@@ -63,7 +61,7 @@ fn serve(commands: Receiver<Option<IcecastDestination>>, prefer_libshout: bool) 
             }
             continue;
         };
-        let Ok((pipeline, sink)) = pipeline(&destination, prefer_libshout) else {
+        let Ok((pipeline, sink)) = pipeline(&destination) else {
             tracing::warn!("Icecast needs GStreamer stereo mixing, Opus, and Ogg plugins");
             continue;
         };
@@ -85,7 +83,7 @@ fn serve(commands: Receiver<Option<IcecastDestination>>, prefer_libshout: bool) 
                         Err(TryRecvError::Empty) => {
                             if let Some(sample) =
                                 sink.try_pull_sample(gst::ClockTime::from_mseconds(100))
-                                && write_sample(stream, &sample).is_err()
+                                && write_sample(stream.writer(), &sample).is_err()
                             {
                                 break;
                             }
@@ -114,6 +112,11 @@ fn serve(commands: Receiver<Option<IcecastDestination>>, prefer_libshout: bool) 
                     break;
                 }
             }
+            if (interrupted || disconnected)
+                && let Some(stream) = stream.as_mut()
+            {
+                stream.close();
+            }
         }
         let _ = pipeline.set_state(gst::State::Null);
         if disconnected {
@@ -133,10 +136,9 @@ fn serve(commands: Receiver<Option<IcecastDestination>>, prefer_libshout: bool) 
 
 fn pipeline(
     destination: &IcecastDestination,
-    prefer_libshout: bool,
 ) -> Result<(gst::Pipeline, Option<AppSink>), Box<dyn std::error::Error>> {
     gst::init()?;
-    let libshout = prefer_libshout && gst::ElementFactory::find("shout2send").is_some();
+    let libshout = destination.tls.is_none() && gst::ElementFactory::find("shout2send").is_some();
     let sink = if libshout {
         "shout2send name=icecast timeout=2000"
     } else {
@@ -165,7 +167,54 @@ fn pipeline(
     }
 }
 
-fn connect_source(destination: &IcecastDestination) -> io::Result<TcpStream> {
+enum SourceConnection {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ClientConnection, StartupSocket>>),
+}
+
+impl SourceConnection {
+    fn writer(&mut self) -> &mut dyn Write {
+        match self {
+            Self::Plain(socket) => socket,
+            Self::Tls(socket) => socket.as_mut(),
+        }
+    }
+
+    fn close(&mut self) {
+        if let Self::Tls(socket) = self {
+            socket.conn.send_close_notify();
+            let _ = socket.flush();
+        }
+    }
+}
+
+fn connect_source(destination: &IcecastDestination) -> io::Result<SourceConnection> {
+    connect_source_with(destination, || {
+        static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+        CONFIG
+            .get_or_init(|| {
+                tls_config(RootCertStore::from_iter(
+                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                ))
+            })
+            .clone()
+    })
+}
+
+fn tls_config(roots: RootCertStore) -> Arc<ClientConfig> {
+    Arc::new(
+        ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default TLS versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
+fn connect_source_with(
+    destination: &IcecastDestination,
+    config: impl FnOnce() -> Arc<ClientConfig>,
+) -> io::Result<SourceConnection> {
     let host = destination.host.as_str();
     let mount = destination.mount.as_str();
     if host.is_empty()
@@ -188,29 +237,89 @@ fn connect_source(destination: &IcecastDestination) -> io::Result<TcpStream> {
     let port = destination.port;
     let addresses = (host, port).to_socket_addrs()?;
     let deadline = Instant::now() + IO_TIMEOUT;
-    let mut stream = addresses
+    let stream = addresses
         .take_while(|_| Instant::now() < deadline)
         .find_map(|address| TcpStream::connect_timeout(&address, remaining(deadline).ok()?).ok())
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "could not connect to Icecast")
         })?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let authority = if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
     };
-    let auth = STANDARD.encode(format!("source:{}", destination.password));
+    let mut socket = StartupSocket {
+        stream,
+        deadline: Some(Instant::now() + IO_TIMEOUT),
+    };
+    if destination.tls == Some(true) {
+        let name =
+            ServerName::try_from(host.to_owned()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let connection = ClientConnection::new(config(), name).map_err(io::Error::other)?;
+        let mut stream = StreamOwned::new(connection, socket);
+        authenticate_source(&mut stream, mount, &authority, &destination.password)?;
+        stream.sock.start_streaming()?;
+        Ok(SourceConnection::Tls(Box::new(stream)))
+    } else {
+        authenticate_source(&mut socket, mount, &authority, &destination.password)?;
+        socket.start_streaming()?;
+        Ok(SourceConnection::Plain(socket.stream))
+    }
+}
+
+// Rustls can perform multiple reads and writes inside one handshake or flush.
+struct StartupSocket {
+    stream: TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl StartupSocket {
+    fn start_streaming(&mut self) -> io::Result<()> {
+        self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        self.stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        self.deadline = None;
+        Ok(())
+    }
+}
+
+impl Read for StartupSocket {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            self.stream.set_read_timeout(Some(remaining(deadline)?))?;
+        }
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for StartupSocket {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            self.stream.set_write_timeout(Some(remaining(deadline)?))?;
+        }
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn authenticate_source(
+    mut stream: impl Read + Write,
+    mount: &str,
+    authority: &str,
+    password: &str,
+) -> io::Result<()> {
+    let auth = STANDARD.encode(format!("source:{password}"));
     // SOURCE streams a raw body and is accepted by Icecast 2.4 and 2.5.
     write!(
         stream,
         "SOURCE {mount} HTTP/1.0\r\nHost: {authority}\r\nAuthorization: Basic {auth}\r\nContent-Type: application/ogg\r\nIce-Name: FreeShow Audio Stream\r\nIce-Public: 0\r\n\r\n"
     )?;
-    let deadline = Instant::now() + IO_TIMEOUT;
+    stream.flush()?;
     let mut status = [0; 1024];
     let mut used = 0;
     while used < status.len() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
         let count = stream.read(&mut status[used..])?;
         if count == 0 {
             break;
@@ -225,7 +334,7 @@ fn connect_source(destination: &IcecastDestination) -> io::Result<TcpStream> {
             if matches!(fields.next(), Some(b"HTTP/1.0" | b"HTTP/1.1"))
                 && fields.next() == Some(b"200")
             {
-                return Ok(stream);
+                return Ok(());
             }
             break;
         }
@@ -244,20 +353,102 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
         .ok_or(io::ErrorKind::TimedOut.into())
 }
 
-fn write_sample(stream: &mut TcpStream, sample: &gst::Sample) -> io::Result<()> {
+fn write_sample(stream: &mut dyn Write, sample: &gst::Sample) -> io::Result<()> {
     let buffer = sample.buffer().ok_or(io::ErrorKind::InvalidData)?;
     let map = buffer
         .map_readable()
         .map_err(|_| io::ErrorKind::InvalidData)?;
-    stream.write_all(map.as_slice())
+    stream.write_all(map.as_slice())?;
+    stream.flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::{ServerConfig, ServerConnection, pki_types::PrivatePkcs8KeyDer};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::time::Instant;
+
+    #[test]
+    fn tls_source_authenticates_only_after_verifying_the_server() {
+        // The fixture key is public test material for localhost only.
+        let ca = include_bytes!("../tests/fixtures/icecast-test-ca.der");
+        let certificate = include_bytes!("../tests/fixtures/icecast-test-cert.der");
+        let key = include_bytes!("../tests/fixtures/icecast-test-key.der");
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.as_slice().into()).unwrap();
+        let client = tls_config(roots);
+        let server = Arc::new(
+            ServerConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![certificate.as_slice().into()],
+                    PrivatePkcs8KeyDer::from(key.as_slice()).into(),
+                )
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let receiver = thread::spawn(move || {
+            for authorized in [false, false, true] {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+                let connection = ServerConnection::new(Arc::clone(&server)).unwrap();
+                let mut stream = BufReader::new(StreamOwned::new(connection, stream));
+                let mut request = String::new();
+                let read = stream.read_line(&mut request);
+                if !authorized {
+                    assert!(request.is_empty());
+                    continue;
+                }
+                read.unwrap();
+                assert_eq!(request, "SOURCE /secure.opus HTTP/1.0\r\n");
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(stream.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                }
+                assert!(headers.contains("Authorization: Basic c291cmNlOnRlc3Q="));
+                stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\n\r\n")
+                    .unwrap();
+                stream.get_mut().flush().unwrap();
+                let mut body = Vec::new();
+                stream.read_to_end(&mut body).unwrap();
+                assert_eq!(body, b"OggS");
+            }
+        });
+
+        let mut destination = IcecastDestination {
+            host: "localhost".into(),
+            port,
+            mount: "/secure.opus".into(),
+            password: "test".into(),
+            tls: Some(true),
+        };
+        assert!(
+            connect_source(&destination)
+                .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+        );
+        destination.host = "127.0.0.1".into();
+        assert!(
+            connect_source_with(&destination, || Arc::clone(&client))
+                .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+        );
+        destination.host = "localhost".into();
+        let mut stream = connect_source_with(&destination, || client).unwrap();
+        stream.writer().write_all(b"OggS").unwrap();
+        stream.close();
+        receiver.join().unwrap();
+    }
 
     #[test]
     fn sends_authenticated_stereo_ogg_opus_and_disconnects_on_disable() {
@@ -343,13 +534,14 @@ mod tests {
             port,
             mount: "/service.opus".into(),
             password: "wrong".into(),
+            tls: Some(false),
         };
-        assert_eq!(
-            connect_source(&destination).unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied
+        assert!(
+            connect_source(&destination)
+                .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
         );
         destination.password = "test".into();
-        let sender = IcecastSender::spawn(false).unwrap();
+        let sender = IcecastSender::new().unwrap();
         sender.update(Some(destination));
         let bytes = audio.recv_timeout(Duration::from_secs(7)).unwrap();
         assert_eq!(&bytes[..4], b"OggS");

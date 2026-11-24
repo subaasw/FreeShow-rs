@@ -15,8 +15,10 @@ gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-sdp = { version = "0.23", optional = true }
 gstreamer-webrtc = { version = "0.23", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tracing = "0.1"
 ureq = "2.12"
+webpki-roots = "1"
 
 [features]
 default = ["webrtc"]

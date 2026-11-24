@@ -5038,6 +5038,10 @@ impl Library {
             .filter(|mount| !mount.is_empty())
             .unwrap_or("/stream.opus");
         let password = value["password"].as_str().unwrap_or("hackme");
+        let tls = match value.get("tls") {
+            Some(value) => Some(value.as_bool()?),
+            None => None,
+        };
         let port = if value["port"].is_null() {
             8000
         } else {
@@ -5066,6 +5070,7 @@ impl Library {
                 port,
                 mount,
                 password: password.to_owned(),
+                tls,
             },
             value["enabled"].as_bool() != Some(false),
         ))
