@@ -87,6 +87,14 @@ pub(super) fn import(
     let mut speaker_notes = Vec::new();
     let mut notes_xml_bytes = 0;
     let mut import_warnings = Vec::new();
+    let (use_timings, loop_show) = match show_timing(&mut archive) {
+        Ok(timing) => timing,
+        Err(error) => {
+            import_warnings.push(format!("Could not import slideshow timings: {error}"));
+            (false, false)
+        }
+    };
+    let mut advance_times = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let xml = read_xml(&mut archive, part)?.ok_or_else(|| invalid("slide part is missing"))?;
         slide_xml_bytes += xml.len();
@@ -161,6 +169,7 @@ pub(super) fn import(
         sections.push(Section::plain(format!("Slide {}", index + 1), lines));
         fills.push(fill);
         hidden.push(disabled);
+        advance_times.push(content.advance_ms);
     }
     let mut files = HashMap::new();
     if let Some(directory) = media {
@@ -173,6 +182,7 @@ pub(super) fn import(
     }
     let mut show = show_file(file_name, &file_stem_str(file_name), sections);
     show.show["origin"] = json!("powerpoint");
+    let last_playable = hidden.iter().rposition(|disabled| !disabled);
     for (index, (fill, notes)) in fills.into_iter().zip(speaker_notes).enumerate() {
         let slide = &mut show.show["slides"][format!("s{}", index + 1)];
         if let Some(notes) = notes {
@@ -252,11 +262,46 @@ pub(super) fn import(
         if hidden[index] {
             show.show["layouts"]["main"]["slides"][index]["disabled"] = json!(true);
         }
+        if use_timings && let Some(millis) = advance_times[index] {
+            let step = &mut show.show["layouts"]["main"]["slides"][index];
+            step["nextTimer"] = json!(f64::from(millis.max(1)) / 1000.0);
+            step["nextTimerTarget"] = json!(if loop_show && last_playable == Some(index) {
+                "first"
+            } else {
+                "next"
+            });
+        }
     }
     if !import_warnings.is_empty() {
         show.show["settings"]["importWarnings"] = json!(import_warnings);
     }
     Ok(show)
+}
+
+fn show_timing(archive: &mut Archive<'_>) -> Result<(bool, bool), DataError> {
+    use theme::child;
+
+    let rels = relationships(archive, "ppt/presentation.xml")?;
+    let Some(props) = rels
+        .iter()
+        .find(|rel| rel.kind == "presProps" && !rel.external)
+    else {
+        return Ok((true, false));
+    };
+    let xml = read_xml(archive, &props.target)?
+        .ok_or_else(|| invalid("presentation properties are missing"))?;
+    let doc = roxmltree::Document::parse(&xml).map_err(invalid)?;
+    let root = doc.root_element();
+    if !root.has_tag_name("presentationPr") {
+        return Err(invalid("expected presentation properties"));
+    }
+    let Some(show) = child(root, "showPr") else {
+        return Ok((true, false));
+    };
+    let use_timings = !matches!(show.attribute("useTimings"), Some("0" | "false"));
+    let all_slides = child(show, "sldRg").is_none() && child(show, "custShow").is_none();
+    let loop_show = all_slides && matches!(show.attribute("loop"), Some("1" | "true"));
+    Ok((use_timings, loop_show))
 }
 
 struct SlideSize {
@@ -437,6 +482,7 @@ fn read_speaker_notes(
 struct SlideContent {
     lines: Vec<String>,
     hidden: bool,
+    advance_ms: Option<u32>,
     objects: Vec<SlideObject>,
     warnings: Vec<String>,
     picture_ids: Vec<String>,
@@ -670,12 +716,35 @@ fn slide_content(
     let mut picture_ids = Vec::new();
     let mut groups = Vec::new();
     let mut group_bounds: Option<GroupBounds> = None;
+    let mut advance = None;
+    let mut choice_advance = None;
+    let mut fallback_advance = None;
     loop {
         let start = reader.buffer_position();
         match reader.read_event().map_err(invalid)? {
             Event::Start(element) => {
                 let name = local_name(element.name().as_ref());
                 match (stack.last().map(String::as_str), name.as_str()) {
+                    (Some("sld"), "transition") if stack.len() == 1 => {
+                        advance = Some(
+                            attribute(&element, "advTm")
+                                .and_then(|value| value.trim().parse().ok()),
+                        );
+                    }
+                    (Some("Choice" | "Fallback"), "transition")
+                        if stack.len() == 3
+                            && stack[0] == "sld"
+                            && stack[1] == "AlternateContent" =>
+                    {
+                        let selected = if stack[2] == "Fallback" {
+                            &mut fallback_advance
+                        } else {
+                            &mut choice_advance
+                        };
+                        selected.get_or_insert_with(|| {
+                            attribute(&element, "advTm").and_then(|value| value.trim().parse().ok())
+                        });
+                    }
                     (_, "spTree") => in_tree = true,
                     (Some("spTree" | "grpSp"), "grpSp") if in_tree => {
                         groups.push(groups.last().copied().unwrap_or(GroupTransform::IDENTITY));
@@ -859,6 +928,7 @@ fn slide_content(
     Ok(SlideContent {
         lines,
         hidden,
+        advance_ms: advance.or(fallback_advance).or(choice_advance).flatten(),
         objects,
         warnings,
         picture_ids,
@@ -1508,6 +1578,49 @@ mod tests {
                 .unwrap()
                 .starts_with("Slide 2: Could not import speaker notes")
         );
+    }
+
+    #[test]
+    fn saved_slide_timings_use_native_cues_and_respect_manual_mode() {
+        let read = |show_properties: &[u8]| {
+            let files = archive(&[
+                ("ppt/_rels/presentation.xml.rels", br#"<Relationships><Relationship Id="props" Type="o/presProps" Target="custom/properties.xml"/></Relationships>"#),
+                ("ppt/custom/properties.xml", show_properties),
+                ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition advTm="1250" advClick="0"/></p:sld>"#),
+                ("ppt/slides/slide2.xml", br#"<p:sld xmlns:p="p"><p:cSld/><p:transition advClick="1"/></p:sld>"#),
+                ("ppt/slides/slide3.xml", br#"<p:sld xmlns:p="p" xmlns:mc="mc"><p:cSld/>
+                    <mc:AlternateContent><mc:Choice Requires="p"><p:transition advTm="2500"/></mc:Choice>
+                        <mc:Fallback><p:transition advTm="3000"/></mc:Fallback></mc:AlternateContent></p:sld>"#),
+                ("ppt/slides/slide4.xml", br#"<p:sld xmlns:p="p" show="0"><p:cSld/><p:transition advTm="0"/></p:sld>"#),
+            ]);
+            import("Timed.pptx", &files, None).unwrap()
+        };
+        let default = read(br#"<p:presentationPr xmlns:p="p"/>"#);
+        assert_eq!(default.next_timer_at(0), Some(1.25));
+        assert_eq!(
+            default.timed_cue_target_at(0),
+            Some(crate::TimedCueTarget::Next)
+        );
+        assert_eq!(default.next_timer_at(1), None);
+        assert_eq!(default.next_timer_at(2), Some(3.0));
+        assert_eq!(
+            default.timed_cue_target_at(2),
+            Some(crate::TimedCueTarget::Next)
+        );
+        assert_eq!(default.next_timer_at(3), Some(0.001));
+        assert_eq!(default.step_enabled(2, 1), None);
+
+        let looping =
+            read(br#"<p:presentationPr xmlns:p="p"><p:showPr loop="true"/></p:presentationPr>"#);
+        assert_eq!(
+            looping.timed_cue_target_at(2),
+            Some(crate::TimedCueTarget::First)
+        );
+        let manual = read(br#"<p:presentationPr xmlns:p="p"><p:showPr loop="true" useTimings="0"/></p:presentationPr>"#);
+        for index in 0..4 {
+            assert_eq!(manual.next_timer_at(index), None);
+            assert_eq!(manual.timed_cue_target_at(index), None);
+        }
     }
 
     #[test]
