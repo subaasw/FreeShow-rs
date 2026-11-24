@@ -809,6 +809,55 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
         | "snip2SameRect" | "snip2DiagRect" | "snipRoundRect" => {
             rect_corner_outline(name, short_side()?, adjustment)?
         }
+        "pie" | "chord" | "arc" => {
+            let [sx, sy] = short_side()?;
+            let defaults = match name {
+                "pie" => [0.0, 16_200_000.0],
+                "chord" => [2_700_000.0, 16_200_000.0],
+                _ => [16_200_000.0, 0.0],
+            };
+            let angle =
+                |guide, default| adjustment(guide, default).clamp(0.0, DRAWINGML_TURN - 1.0);
+            let start = angle("adj1", defaults[0]);
+            let end = angle("adj2", defaults[1]);
+            let parameter = ellipse_ray_parameter([sy, sx], start);
+            let span = if end == start {
+                std::f64::consts::TAU
+            } else {
+                (ellipse_ray_parameter([sy, sx], end) - parameter).rem_euclid(std::f64::consts::TAU)
+            };
+            let mut outline = ellipse_contour([0.5; 2], parameter, span)?;
+            if end != start && name != "chord" {
+                outline.push([0.5, 0.5]);
+            }
+            outline
+        }
+        "pieWedge" => {
+            let mut outline = vec![[0.0, 1.0]];
+            append_ellipse_arc(
+                &mut outline,
+                [1.0; 2],
+                -std::f64::consts::PI,
+                std::f64::consts::FRAC_PI_2,
+            )?;
+            outline.push([1.0, 1.0]);
+            outline
+        }
+        "donut" => {
+            use std::f64::consts::{PI, TAU};
+
+            let [sx, sy] = short_side()?;
+            let thickness = adjustment("adj", 25_000.0).clamp(0.0, 50_000.0) / 100_000.0;
+            if thickness == 0.0 {
+                return Some(Vec::new());
+            }
+            let mut contours = vec![ellipse_contour([0.5; 2], PI, TAU)?];
+            let inner = [0.5 - sx * thickness, 0.5 - sy * thickness];
+            if inner.into_iter().all(|r| r > 0.0) {
+                contours.push(ellipse_contour(inner, PI, -TAU)?);
+            }
+            return Some(vec![contours]);
+        }
         "hexagon" => {
             let [sx, _] = short_side()?;
             let x = (sx * adjustment("adj", 25_000.0) / 100_000.0).clamp(0.0, 0.5);
@@ -896,7 +945,28 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
                 .collect()
         }
     };
-    Some(vec![vec![outline]])
+    Some(if outline.len() < 3 {
+        Vec::new()
+    } else {
+        vec![vec![outline]]
+    })
+}
+
+fn ellipse_contour([rx, ry]: [f64; 2], start: f64, span: f64) -> Option<Vec<[f64; 2]>> {
+    let point = |angle: f64| {
+        let (sin, cos) = angle.sin_cos();
+        [0.5 + rx * cos, 0.5 + ry * sin]
+    };
+    let mut outline = vec![point(start)];
+    append_ellipse_arc(&mut outline, [rx, ry], start, span)?;
+    if same_path_point(outline[0], *outline.last()?) {
+        outline.pop();
+    }
+    if outline.len() == 2 {
+        // A narrow chord still has a curved edge when one segment meets the tolerance.
+        outline.insert(1, point(start + span / 2.0));
+    }
+    Some(outline)
 }
 
 fn rect_corner_outline(
@@ -1006,6 +1076,37 @@ fn block_arrow(name: &str, [sx, sy]: [f64; 2], shaft: f64, head: f64) -> Vec<[f6
         };
     }
     points
+}
+
+#[test]
+fn curved_presets_preserve_the_ray_angle_and_donut_cutout() {
+    let paths = |name, guides| {
+        let xml = format!(
+            r#"<spPr><xfrm><ext cx="4000" cy="2000"/></xfrm>
+                <prstGeom prst="{name}"><avLst>{guides}</avLst></prstGeom></spPr>"#
+        );
+        let document = Document::parse(&xml).unwrap();
+        preset_paths(document.root_element()).unwrap()
+    };
+
+    let pie = paths("pie", r#"<gd name="adj1" fmla="val 2700000"/>"#);
+    let outline = &pie[0][0];
+    let [x, y] = outline[0];
+    assert!((x - (0.5 + 0.5 / 5.0f64.sqrt())).abs() < 1e-12);
+    assert!((y - (0.5 + 1.0 / 5.0f64.sqrt())).abs() < 1e-12);
+    assert_eq!(outline.last(), Some(&[0.5, 0.5]));
+
+    let small = r#"<gd name="adj1" fmla="val 0"/><gd name="adj2" fmla="val 60000"/>"#;
+    assert_eq!(paths("chord", small)[0][0].len(), 3);
+
+    let ring = paths("donut", "");
+    let [outer, inner] = ring[0].as_slice() else {
+        panic!("expected a donut with a cutout")
+    };
+    assert!(same_path_point(outer[0], [0.0, 0.5]));
+    assert!(same_path_point(inner[0], [0.125, 0.5]));
+    assert!(outer[1][1] < 0.5 && inner[1][1] > 0.5);
+    assert!(paths("donut", r#"<gd name="adj" fmla="val 0"/>"#).is_empty());
 }
 
 #[test]
@@ -1322,13 +1423,8 @@ fn flatten_arc_path(
     if rx == 0.0 || ry == 0.0 {
         return None;
     }
-    let parameter = |angle: f64| {
-        // DrawingML measures the ray from the ellipse center in path coordinates.
-        let (sin, cos) = (angle * TAU / DRAWINGML_TURN).sin_cos();
-        (rx * sin).atan2(ry * cos)
-    };
-    let start = parameter(start_angle);
-    let stop = parameter(start_angle + sweep);
+    let start = ellipse_ray_parameter([rx, ry], start_angle);
+    let stop = ellipse_ray_parameter([rx, ry], start_angle + sweep);
     let span = if sweep.abs() == DRAWINGML_TURN {
         TAU.copysign(sweep)
     } else if sweep > 0.0 {
@@ -1337,6 +1433,12 @@ fn flatten_arc_path(
         -(start - stop).rem_euclid(TAU)
     };
     append_ellipse_arc(vertices, [rx / width, ry / height], start, span)
+}
+
+fn ellipse_ray_parameter([rx, ry]: [f64; 2], angle: f64) -> f64 {
+    // DrawingML measures the ray from the ellipse center in path coordinates.
+    let (sin, cos) = (angle * std::f64::consts::TAU / DRAWINGML_TURN).sin_cos();
+    (rx * sin).atan2(ry * cos)
 }
 
 fn append_ellipse_arc(
