@@ -756,13 +756,14 @@ fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
         let mut points = command.children().filter(Node::is_element);
         match command.tag_name().name() {
             "close" => {
-                if polygon.last() == Some(&start) {
+                if same_path_point(*polygon.last()?, start) {
                     polygon.pop();
                 }
                 return ((3..=128).contains(&polygon.len()) && commands.next().is_none())
                     .then_some(polygon);
             }
             "lnTo" => push_path_vertex(&mut polygon, point(points.next()?)?)?,
+            "arcTo" => flatten_arc_path(&mut polygon, command, [width, height])?,
             "quadBezTo" | "cubicBezTo" => {
                 let first = point(points.next()?)?;
                 let second = point(points.next()?)?;
@@ -789,14 +790,89 @@ fn custom_polygon(properties: Node<'_, '_>) -> Option<Vec<[f64; 2]>> {
 }
 
 fn push_path_vertex(vertices: &mut Vec<[f64; 2]>, point: [f64; 2]) -> Option<()> {
-    if vertices.last() == Some(&point) {
+    // Trigonometric endpoints can round just outside a cardinal edge.
+    if !point
+        .iter()
+        .all(|axis| (-1e-12..=1.0 + 1e-12).contains(axis))
+    {
+        return None;
+    }
+    let point = point.map(|axis| axis.clamp(0.0, 1.0));
+    if vertices
+        .last()
+        .is_some_and(|&last| same_path_point(last, point))
+    {
         return Some(());
     }
     // Allow a repeated starting point until close removes it before checking the size.
-    if vertices.len() > 128 || !point.iter().all(|axis| (0.0..=1.0).contains(axis)) {
+    if vertices.len() > 128 {
         return None;
     }
     vertices.push(point);
+    Some(())
+}
+
+fn same_path_point(a: [f64; 2], b: [f64; 2]) -> bool {
+    a.into_iter().zip(b).all(|(a, b)| (a - b).abs() <= 1e-12)
+}
+
+const PATH_FLATNESS: f64 = 1.0 / 2048.0;
+
+fn flatten_arc_path(
+    vertices: &mut Vec<[f64; 2]>,
+    command: Node<'_, '_>,
+    [width, height]: [f64; 2],
+) -> Option<()> {
+    use std::f64::consts::TAU;
+
+    const TURN: i64 = 360 * 60_000;
+    let number = |key| command.attribute(key)?.parse::<i64>().ok();
+    let (rx, ry) = (number("wR")? as f64, number("hR")? as f64);
+    let start_angle = number("stAng")?.rem_euclid(TURN);
+    let sweep = number("swAng")?;
+    if rx <= 0.0 || ry <= 0.0 || !(-TURN..=TURN).contains(&sweep) {
+        return None;
+    }
+    if sweep == 0 {
+        return Some(());
+    }
+    let parameter = |angle| {
+        // DrawingML measures the ray from the ellipse center in path coordinates.
+        let (sin, cos) = (angle as f64 * TAU / TURN as f64).sin_cos();
+        (rx * sin).atan2(ry * cos)
+    };
+    let start = parameter(start_angle);
+    let stop = parameter(start_angle + sweep);
+    let span = if sweep.abs() == TURN {
+        TAU.copysign(sweep as f64)
+    } else if sweep > 0 {
+        (stop - start).rem_euclid(TAU)
+    } else {
+        -(start - stop).rem_euclid(TAU)
+    };
+    let (rx, ry) = (rx / width, ry / height);
+    let offset = |angle: f64| {
+        let (sin, cos) = angle.sin_cos();
+        [rx * cos, ry * sin]
+    };
+    let current @ [x, y] = *vertices.last()?;
+    let [dx, dy] = offset(start);
+    let (cx, cy) = (x - dx, y - dy);
+    // For an ellipse the circular chord error scales by at most its largest radius.
+    let max_step = 2.0 * (1.0 - PATH_FLATNESS / rx.max(ry)).clamp(0.0, 1.0).acos();
+    let segments = (span.abs() / max_step).ceil().max(1.0) as usize;
+    if segments > 129 - vertices.len() {
+        return None;
+    }
+    for segment in 1..=segments {
+        let [dx, dy] = offset(start + span * (segment as f64 / segments as f64));
+        let point = if sweep.abs() == TURN && segment == segments {
+            current
+        } else {
+            [cx + dx, cy + dy]
+        };
+        push_path_vertex(vertices, point)?;
+    }
     Some(())
 }
 
@@ -815,7 +891,7 @@ fn flatten_cubic_path(
         control
             .into_iter()
             .zip(chord)
-            .all(|(p, q)| (p - q).abs() <= 1.0 / 2048.0)
+            .all(|(p, q)| (p - q).abs() <= PATH_FLATNESS)
     };
     if near(b, lerp_path(a, d, 1.0 / 3.0)) && near(c, lerp_path(a, d, 2.0 / 3.0)) {
         return push_path_vertex(vertices, d);
@@ -849,6 +925,38 @@ fn a_closed_bezier_outline_does_not_count_the_repeated_starting_point() {
     assert_eq!(vertices.len(), 128);
     assert_eq!(vertices[0], [0.5, 0.0]);
     assert_ne!(vertices.first(), vertices.last());
+}
+
+#[cfg(test)]
+#[test]
+fn full_turn_arcs_close_without_a_repeated_vertex() {
+    for sweep in [21_600_000, -21_600_000] {
+        let xml = format!(
+            r#"<spPr><custGeom><pathLst><path w="200" h="100">
+            <moveTo><pt x="200" y="50"/></moveTo>
+            <arcTo wR="100" hR="50" stAng="0" swAng="{sweep}"/><close/>
+            </path></pathLst></custGeom></spPr>"#
+        );
+        let document = Document::parse(&xml).unwrap();
+        let vertices = custom_polygon(document.root_element()).unwrap();
+        assert!((60..=128).contains(&vertices.len()));
+        assert_eq!(vertices[0], [1.0, 0.5]);
+        assert_ne!(vertices.first(), vertices.last());
+        assert_eq!(vertices[1][1] > 0.5, sweep > 0);
+        assert!(vertices.iter().any(|&[x, _]| x < 0.001));
+    }
+    let xml = r#"<spPr><custGeom><pathLst><path w="200" h="100">
+        <moveTo><pt x="180" y="50"/></moveTo>
+        <arcTo wR="80" hR="30" stAng="0" swAng="5400000"/>
+        <arcTo wR="80" hR="30" stAng="5400000" swAng="5400000"/>
+        <arcTo wR="80" hR="30" stAng="10800000" swAng="5400000"/>
+        <arcTo wR="80" hR="30" stAng="16200000" swAng="5400000"/>
+        <close/>
+    </path></pathLst></custGeom></spPr>"#;
+    let document = Document::parse(xml).unwrap();
+    let vertices = custom_polygon(document.root_element()).unwrap();
+    assert_eq!(vertices.len() % 4, 0);
+    assert!(!same_path_point(vertices[0], *vertices.last().unwrap()));
 }
 
 impl ThemeReader {
