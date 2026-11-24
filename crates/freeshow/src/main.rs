@@ -34,7 +34,7 @@ use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
 use freeshow_timecode::TimecodeSource;
 use live::{OpeningFade, audience_frame, edit_frame, motion_frame, stage_frame};
-use present::{FrameSlot, attach_frame};
+use present::{FrameSlot, FrameTarget, attach_frame, attach_frames};
 use session::{DrawerAction, PendingPlay, Session};
 use slint::winit_030::WinitWindowAccessor;
 
@@ -2110,43 +2110,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     )?;
+    // The live preview and the slide being edited share the control window, so
+    // they share its single rendering notifier.
     let preview_weak = control.as_weak();
-    let preview_redraw = control.as_weak();
-    let preview_slot = attach_frame(
-        control.window(),
-        clear_frame(output_width, output_height),
-        move |image| {
-            if let Some(control) = preview_weak.upgrade() {
-                control.set_preview(image);
-            }
-        },
-        move || {
-            if let Some(control) = preview_redraw.upgrade() {
-                control.window().request_redraw();
-            }
-        },
-    )?;
-
-    // The slide being edited, shown in place of the live picture while editing.
     let edit_weak = control.as_weak();
-    let edit_redraw = control.as_weak();
-    let edit_slot = Rc::new(attach_frame(
-        control.window(),
-        clear_frame(output_width, output_height),
-        move |image| {
-            if let Some(control) = edit_weak.upgrade() {
-                control.set_edit_preview(image);
-            }
-        },
-        move || {
-            if let Some(control) = edit_redraw.upgrade() {
-                control.window().request_redraw();
-            }
-        },
-    )?);
+    let control_redraw = control.as_weak();
+    let control_apply: Vec<FrameTarget> = vec![
+        (
+            clear_frame(output_width, output_height),
+            Box::new(move |image| {
+                if let Some(control) = preview_weak.upgrade() {
+                    control.set_preview(image);
+                }
+            }),
+        ),
+        (
+            clear_frame(output_width, output_height),
+            Box::new(move |image| {
+                if let Some(control) = edit_weak.upgrade() {
+                    control.set_edit_preview(image);
+                }
+            }),
+        ),
+    ];
+    let mut control_slots = attach_frames(control.window(), control_apply, move || {
+        if let Some(control) = control_redraw.upgrade() {
+            control.window().request_redraw();
+        }
+    })?
+    .into_iter();
+    let preview_slot = Rc::new(control_slots.next().expect("preview slot"));
+    // The slide being edited, shown in place of the live picture while editing.
+    let edit_slot = Rc::new(control_slots.next().expect("edit slot"));
     let output_slot = Rc::new(output_slot);
     let stage_slot = Rc::new(stage_slot);
-    let preview_slot = Rc::new(preview_slot);
     let output_fade = Rc::new(slint::Timer::default());
     let stage_fade = Rc::new(slint::Timer::default());
     let next_slide = Rc::new(slint::Timer::default());
