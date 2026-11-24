@@ -421,10 +421,42 @@ pub(super) struct Size {
 pub(super) struct Text {
     #[prost(message, optional, tag = "3")]
     pub attributes: Option<Attributes>,
+    #[prost(message, optional, tag = "4")]
+    pub shadow: Option<TextShadow>,
     #[prost(bytes, tag = "5")]
     pub rtf: Vec<u8>,
     #[prost(int32, tag = "6")]
     pub vertical: i32,
+    #[prost(message, optional, tag = "8")]
+    pub margins: Option<EdgeInsets>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct EdgeInsets {
+    #[prost(double, tag = "1")]
+    pub left: f64,
+    #[prost(double, tag = "2")]
+    pub right: f64,
+    #[prost(double, tag = "3")]
+    pub top: f64,
+    #[prost(double, tag = "4")]
+    pub bottom: f64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct TextShadow {
+    #[prost(double, tag = "2")]
+    pub angle: f64,
+    #[prost(double, tag = "3")]
+    pub offset: f64,
+    #[prost(double, tag = "4")]
+    pub radius: f64,
+    #[prost(message, optional, tag = "5")]
+    pub color: Option<Color>,
+    #[prost(double, tag = "6")]
+    pub opacity: f64,
+    #[prost(bool, tag = "7")]
+    pub enabled: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -441,6 +473,10 @@ pub(super) struct Attributes {
     pub kerning: f64,
     #[prost(message, optional, tag = "9")]
     pub strikethrough: Option<Decoration>,
+    #[prost(double, tag = "11")]
+    pub stroke_width: f64,
+    #[prost(message, optional, tag = "12")]
+    pub stroke_color: Option<Color>,
 }
 
 #[derive(Clone, PartialEq, Message)]
