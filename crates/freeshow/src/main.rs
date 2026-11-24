@@ -658,6 +658,12 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         remote_port: settings.remote_port,
         stage_port: settings.stage_port,
         max_connections: settings.max_connections,
+        has_library: settings.has_library,
+        icecast_host: settings.icecast_host.into(),
+        icecast_port: settings.icecast_port.into(),
+        icecast_mount: settings.icecast_mount.into(),
+        icecast_transport: settings.icecast_transport.into(),
+        icecast_routed: settings.icecast_routed,
         theme: settings.theme.into(),
         profiles: settings.profiles.into(),
         output_name: settings.output_name.into(),
@@ -2476,6 +2482,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     refresh_panels(&ui, &session.borrow());
                 }
             }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_save_icecast(move |host, port, mount, password, transport| {
+            let result = session
+                .borrow_mut()
+                .save_icecast_connection(&host, &port, &mount, &password, &transport);
+            if let Some(ui) = ui.upgrade() {
+                match &result {
+                    Ok(()) => {
+                        ui.set_settings_status("Saved Icecast connection".into());
+                        refresh(&ui, &session.borrow());
+                    }
+                    Err(error) => ui.set_settings_status(error.as_str().into()),
+                }
+            }
+            result.is_ok()
         });
     }
     {

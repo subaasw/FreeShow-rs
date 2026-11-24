@@ -49,6 +49,12 @@ pub struct SettingsForm {
     pub remote_port: i32,
     pub stage_port: i32,
     pub max_connections: i32,
+    pub has_library: bool,
+    pub icecast_host: String,
+    pub icecast_port: String,
+    pub icecast_mount: String,
+    pub icecast_transport: String,
+    pub icecast_routed: bool,
     pub theme: String,
     pub themes: Vec<String>,
     pub profiles: String,
@@ -367,6 +373,7 @@ fn stage_kind_name(kind: &freeshow_data::StageItemKind) -> &'static str {
 impl Session {
     pub fn settings_form(&self) -> SettingsForm {
         let prefs = &self.preferences;
+        let icecast = &prefs.special["icecast"];
         let mut themes: Vec<String> = freeshow_core::BUILT_IN_THEMES
             .iter()
             .map(|theme| theme.name.to_ascii_lowercase())
@@ -404,6 +411,29 @@ impl Session {
                 )
             },
             max_connections: prefs.max_connections.unwrap_or(10) as i32,
+            has_library: self.root.is_some(),
+            icecast_host: icecast["host"]
+                .as_str()
+                .filter(|host| !host.is_empty())
+                .unwrap_or("localhost")
+                .into(),
+            icecast_port: icecast["port"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| icecast["port"].as_u64().map(|port| port.to_string()))
+                .unwrap_or_else(|| "8000".into()),
+            icecast_mount: icecast["mount"]
+                .as_str()
+                .filter(|mount| !mount.is_empty())
+                .unwrap_or("/stream.opus")
+                .into(),
+            icecast_transport: match icecast["tls"].as_bool() {
+                Some(true) => "TLS",
+                Some(false) => "HTTP",
+                None => "Automatic",
+            }
+            .into(),
+            icecast_routed: self.icecast.is_some(),
             theme: prefs.theme.clone().unwrap_or_else(|| "default".into()),
             themes,
             profiles: if profiles.is_empty() {
@@ -438,6 +468,40 @@ impl Session {
                 .collect(),
             ..self.style_and_theme_form()
         }
+    }
+
+    pub fn save_icecast_connection(
+        &mut self,
+        host: &str,
+        port: &str,
+        mount: &str,
+        password: &str,
+        transport: &str,
+    ) -> Result<(), String> {
+        let root = self.root.as_ref().ok_or("Choose a library folder first.")?;
+        let port = port
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| "Enter an Icecast port from 1 to 65535.")?;
+        let tls = match transport {
+            "Automatic" => None,
+            "HTTP" => Some(false),
+            "TLS" => Some(true),
+            _ => return Err("Select an Icecast transport.".into()),
+        };
+        let library = freeshow_data::Library::open(root);
+        library
+            .save_icecast_connection(
+                host.trim(),
+                port,
+                mount.trim(),
+                (!password.is_empty()).then_some(password),
+                tls,
+            )
+            .map_err(|error| error.to_string())?;
+        self.icecast = library.icecast();
+        self.preferences = library.preferences();
+        Ok(())
     }
 
     fn style_and_theme_form(&self) -> SettingsForm {
@@ -1854,6 +1918,76 @@ mod tests {
         .unwrap();
         let session = Session::open(dir.path().to_path_buf());
         (dir, session)
+    }
+
+    #[test]
+    fn icecast_connection_saves_as_one_edit_and_preserves_the_route() {
+        let (dir, _) = library("icecast-connection");
+        let path = dir.path().join("settings.json");
+        let initial = r#"{
+            "audioRouting":{"connections":[{"from":"custom_mix","to":"icecast"}]},
+            "special":{"keep":1,"icecast":{"host":"old.example","port":"8000",
+                "mount":"/old.opus","password":"old source password","enabled":false,"extra":2}}
+        }"#;
+        std::fs::write(&path, initial).unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        let form = session.settings_form();
+        assert_eq!(
+            (form.icecast_port.as_str(), form.icecast_transport.as_str()),
+            ("8000", "Automatic")
+        );
+        assert!(form.icecast_routed);
+        assert!(!format!("{form:?}").contains("old source password"));
+
+        for (host, port, mount) in [
+            ("https://new.example", "443", "/live.opus"),
+            ("new.example", "0", "/live.opus"),
+            ("new.example", "65536", "/live.opus"),
+            ("new.example", "443", "/live stream.opus"),
+        ] {
+            assert!(
+                session
+                    .save_icecast_connection(host, port, mount, "draft", "TLS")
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), initial);
+            assert_eq!(session.icecast.as_ref().unwrap().0.host, "old.example");
+        }
+        session
+            .save_icecast_connection("new.example", "443", "live.opus", "", "TLS")
+            .unwrap();
+        let (destination, enabled) = session.icecast.as_ref().unwrap();
+        assert!(!enabled);
+        assert_eq!(
+            (&*destination.host, destination.port, &*destination.mount),
+            ("new.example", 443, "/live.opus")
+        );
+        assert_eq!(destination.tls, Some(true));
+        assert_eq!(destination.password, "old source password");
+
+        session
+            .save_icecast_connection(
+                "new.example",
+                "8000",
+                "/live.opus",
+                "new password ",
+                "Automatic",
+            )
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["audioRouting"]["connections"],
+            serde_json::json!([{"from":"custom_mix","to":"icecast"}])
+        );
+        assert_eq!(saved["special"]["keep"], 1);
+        assert_eq!(saved["special"]["icecast"]["extra"], 2);
+        assert!(saved["special"]["icecast"].get("tls").is_none());
+        let reopened = Session::open(dir.path().to_path_buf());
+        let (destination, enabled) = reopened.icecast.unwrap();
+        assert!(!enabled);
+        assert_eq!(destination.password, "new password ");
+        assert_eq!(destination.tls, None);
     }
 
     #[test]

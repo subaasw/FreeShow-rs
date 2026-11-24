@@ -4302,6 +4302,20 @@ impl BibleFile {
     }
 }
 
+fn valid_icecast_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host.contains(['/', '@', '?', '#', '\\'])
+        && !host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+fn valid_icecast_mount(mount: &str) -> bool {
+    !mount.is_empty()
+        && !mount.contains(['?', '#'])
+        && !mount
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
 #[derive(Debug, Clone)]
 pub struct Library {
     root: PathBuf,
@@ -5049,14 +5063,7 @@ impl Library {
                 .ok()
                 .filter(|port| *port != 0)?
         };
-        if host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
-            || host.contains(['/', '@', '?', '#', '\\'])
-            || mount
-                .chars()
-                .any(|ch| ch.is_control() || ch.is_whitespace())
-            || mount.contains(['?', '#'])
-            || password.contains('\0')
-        {
+        if !valid_icecast_host(host) || !valid_icecast_mount(mount) || password.contains('\0') {
             return None;
         }
         let mount = if mount.starts_with('/') {
@@ -5077,18 +5084,82 @@ impl Library {
     }
 
     pub fn set_icecast_enabled(&self, enabled: bool) -> Result<(), DataError> {
+        self.patch_icecast(false, |icecast| {
+            icecast.insert("enabled".into(), Value::Bool(enabled));
+        })
+    }
+
+    pub fn save_icecast_connection(
+        &self,
+        host: &str,
+        port: u16,
+        mount: &str,
+        password: Option<&str>,
+        tls: Option<bool>,
+    ) -> Result<(), DataError> {
+        let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+        if !valid_icecast_host(host) {
+            return Err(invalid("Enter an Icecast hostname or IP address.").into());
+        }
+        if port == 0 {
+            return Err(invalid("Enter an Icecast port from 1 to 65535.").into());
+        }
+        if !valid_icecast_mount(mount) {
+            return Err(invalid("Enter a mount without spaces, ? or #.").into());
+        }
+        if password.is_some_and(|password| password.contains('\0')) {
+            return Err(invalid("The Icecast password contains an invalid character.").into());
+        }
+        self.patch_icecast(true, |icecast| {
+            use serde_json::json;
+            icecast.insert("host".into(), json!(host));
+            icecast.insert("port".into(), json!(port));
+            let mount = if mount.starts_with('/') {
+                mount.to_owned()
+            } else {
+                format!("/{mount}")
+            };
+            icecast.insert("mount".into(), json!(mount));
+            if let Some(password) = password {
+                icecast.insert("password".into(), json!(password));
+            }
+            if let Some(tls) = tls {
+                icecast.insert("tls".into(), json!(tls));
+            } else {
+                icecast.remove("tls");
+            }
+        })
+    }
+
+    fn patch_icecast(
+        &self,
+        create: bool,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) -> Result<(), DataError> {
         let path = self.settings_path();
-        let mut settings: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-        let root = settings.as_object_mut().ok_or(DataError::ShowShape)?;
+        let mut settings: Value = match fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)?,
+            Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::json!({})
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Icecast settings must be stored in JSON objects.",
+            )
+        };
+        let root = settings.as_object_mut().ok_or_else(invalid)?;
         let special = root
             .entry("special")
             .or_insert_with(|| serde_json::json!({}));
-        let special = special.as_object_mut().ok_or(DataError::ShowShape)?;
+        let special = special.as_object_mut().ok_or_else(invalid)?;
         let icecast = special
             .entry("icecast")
             .or_insert_with(|| serde_json::json!({}));
-        let icecast = icecast.as_object_mut().ok_or(DataError::ShowShape)?;
-        icecast.insert("enabled".into(), Value::Bool(enabled));
+        let icecast = icecast.as_object_mut().ok_or_else(invalid)?;
+        edit(icecast);
         atomic_write(&path, &serde_json::to_vec_pretty(&settings)?)
     }
 
