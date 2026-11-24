@@ -15,6 +15,7 @@ use super::{Section, attribute, file_stem_str, local_name, show_file};
 
 use crate::{DataError, ShowFile};
 
+mod arrangements;
 mod numbering;
 mod text;
 mod theme;
@@ -70,7 +71,8 @@ pub(super) fn import(
             return Err(invalid("duplicate ZIP part"));
         }
     }
-    let (parts, size) = slide_order(&mut archive)?;
+    let presentation = read_xml(&mut archive, "ppt/presentation.xml")?;
+    let (parts, size) = slide_order(&mut archive, presentation.as_deref())?;
     let height = size.height;
     if parts.is_empty() || parts.len() > 2000 {
         return Err(invalid("expected between 1 and 2000 slides"));
@@ -87,11 +89,11 @@ pub(super) fn import(
     let mut speaker_notes = Vec::new();
     let mut notes_xml_bytes = 0;
     let mut import_warnings = Vec::new();
-    let (use_timings, loop_show) = match show_timing(&mut archive) {
-        Ok(timing) => timing,
+    let playback = match arrangements::Playback::read(&mut archive) {
+        Ok(playback) => playback,
         Err(error) => {
             import_warnings.push(format!("Could not import slideshow timings: {error}"));
-            (false, false)
+            arrangements::Playback::without_timings()
         }
     };
     let mut advance_times = Vec::new();
@@ -184,7 +186,6 @@ pub(super) fn import(
     }
     let mut show = show_file(file_name, &file_stem_str(file_name), sections);
     show.show["origin"] = json!("powerpoint");
-    let last_playable = hidden.iter().rposition(|disabled| !disabled);
     for (index, ((fill, notes), transition)) in fills
         .into_iter()
         .zip(speaker_notes)
@@ -272,46 +273,25 @@ pub(super) fn import(
         if let Some(transition) = transition {
             show.show["layouts"]["main"]["slides"][index]["transition"] = transition;
         }
-        if use_timings && let Some(millis) = advance_times[index] {
+        if playback.use_timings
+            && let Some(millis) = advance_times[index]
+        {
             let step = &mut show.show["layouts"]["main"]["slides"][index];
             step["nextTimer"] = json!(f64::from(millis.max(1)) / 1000.0);
-            step["nextTimerTarget"] = json!(if loop_show && last_playable == Some(index) {
-                "first"
-            } else {
-                "next"
-            });
+            step["nextTimerTarget"] = json!("next");
         }
     }
+    playback.install(
+        &mut show,
+        &mut archive,
+        presentation.as_deref(),
+        &parts,
+        &mut import_warnings,
+    );
     if !import_warnings.is_empty() {
         show.show["settings"]["importWarnings"] = json!(import_warnings);
     }
     Ok(show)
-}
-
-fn show_timing(archive: &mut Archive<'_>) -> Result<(bool, bool), DataError> {
-    use theme::child;
-
-    let rels = relationships(archive, "ppt/presentation.xml")?;
-    let Some(props) = rels
-        .iter()
-        .find(|rel| rel.kind == "presProps" && !rel.external)
-    else {
-        return Ok((true, false));
-    };
-    let xml = read_xml(archive, &props.target)?
-        .ok_or_else(|| invalid("presentation properties are missing"))?;
-    let doc = roxmltree::Document::parse(&xml).map_err(invalid)?;
-    let root = doc.root_element();
-    if !root.has_tag_name("presentationPr") {
-        return Err(invalid("expected presentation properties"));
-    }
-    let Some(show) = child(root, "showPr") else {
-        return Ok((true, false));
-    };
-    let use_timings = !matches!(show.attribute("useTimings"), Some("0" | "false"));
-    let all_slides = child(show, "sldRg").is_none() && child(show, "custShow").is_none();
-    let loop_show = all_slides && matches!(show.attribute("loop"), Some("1" | "true"));
-    Ok((use_timings, loop_show))
 }
 
 fn slide_visual_transition(xml: &str) -> Option<serde_json::Value> {
@@ -412,12 +392,15 @@ impl SlideSize {
     }
 }
 
-fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, SlideSize), DataError> {
+fn slide_order(
+    archive: &mut Archive<'_>,
+    xml: Option<&str>,
+) -> Result<(Vec<String>, SlideSize), DataError> {
     let part = "ppt/presentation.xml";
     let mut size = SlideSize::from_emu(12_192_000.0, 6_858_000.0);
     let mut ids = Vec::new();
-    if let Some(xml) = read_xml(archive, part)? {
-        elements(&xml, |name, element| {
+    if let Some(xml) = xml {
+        elements(xml, |name, element| {
             if name == "sldId" {
                 if let Some(id) = relationship_attr(element, "id") {
                     ids.push(id);
@@ -460,6 +443,7 @@ fn slide_order(archive: &mut Archive<'_>) -> Result<(Vec<String>, SlideSize), Da
 fn slide_text(xml: &str) -> Result<(Vec<String>, bool), DataError> {
     let mut lines = Vec::new();
     let mut reader = Reader::from_str(xml);
+    reader.config_mut().expand_empty_elements = true;
     let mut capture = false;
     let mut paragraph = false;
     let mut hidden = false;
@@ -476,9 +460,6 @@ fn slide_text(xml: &str) -> Result<(Vec<String>, bool), DataError> {
                 "br" if paragraph => chunk.push('\n'),
                 _ => {}
             },
-            Event::Empty(element) if paragraph && local_name(element.name().as_ref()) == "br" => {
-                chunk.push('\n');
-            }
             Event::Text(text) if capture => chunk.push_str(&text.unescape().map_err(invalid)?),
             Event::End(element) => {
                 let name = local_name(element.name().as_ref());
@@ -1695,6 +1676,84 @@ mod tests {
             assert_eq!(manual.next_timer_at(index), None);
             assert_eq!(manual.timed_cue_target_at(index), None);
         }
+    }
+
+    #[test]
+    fn custom_shows_and_slide_ranges_keep_order_repeats_and_local_loops() {
+        let read = |show_properties: &[u8]| {
+            let files = archive(&[
+                ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst>
+                    <p:sldId r:id="a"/><p:sldId r:id="b"/><p:sldId r:id="c"/><p:sldId r:id="d"/>
+                </p:sldIdLst><p:custShowLst><p:custShow id="7" name="Short"><p:sldLst>
+                    <p:sld r:id="c"/><p:sld r:id="a"/><p:sld r:id="c"/><p:sld r:id="b"/>
+                </p:sldLst></p:custShow><p:custShow id="8" name="First slide"><p:sldLst><p:sld r:id="a"/></p:sldLst></p:custShow>
+                </p:custShowLst></p:presentation>"#),
+                ("ppt/_rels/presentation.xml.rels", br#"<Relationships>
+                    <Relationship Id="a" Type="o/slide" Target="slides/slide4.xml"/>
+                    <Relationship Id="b" Type="o/slide" Target="slides/slide2.xml"/>
+                    <Relationship Id="c" Type="o/slide" Target="slides/slide1.xml"/>
+                    <Relationship Id="d" Type="o/slide" Target="slides/slide3.xml"/>
+                    <Relationship Id="props" Type="o/presProps" Target="presProps.xml"/>
+                </Relationships>"#),
+                ("ppt/presProps.xml", show_properties),
+                ("ppt/slides/slide4.xml", br#"<p:sld xmlns:p="p"><p:transition advTm="1250"/></p:sld>"#),
+                ("ppt/slides/slide2.xml", br#"<p:sld xmlns:p="p" show="0"/>"#),
+                ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p"><p:transition advTm="3000"><p:fade/></p:transition></p:sld>"#),
+                ("ppt/slides/slide3.xml", br#"<p:sld xmlns:p="p"><p:transition advTm="4000"/></p:sld>"#),
+            ]);
+            import("Arrangements.pptx", &files, None).unwrap()
+        };
+        let ids = |show: &ShowFile| {
+            show.ordered_slides()
+                .into_iter()
+                .map(|slide| slide.id)
+                .collect::<Vec<_>>()
+        };
+        let mut custom = read(br#"<p:presentationPr xmlns:p="p"><p:showPr loop="1"><p:custShow id="7"/></p:showPr></p:presentationPr>"#);
+        assert_eq!(custom.active_layout(), "powerpoint-custom-7");
+        assert_eq!(
+            custom.show["layouts"]["powerpoint-custom-7"]["name"],
+            "Short"
+        );
+        assert_eq!(ids(&custom), ["s3", "s1", "s3", "s2"]);
+        assert_eq!(custom.next_timer_at(1), Some(1.25));
+        assert_eq!(
+            custom.timed_cue_target_at(0),
+            Some(crate::TimedCueTarget::Next)
+        );
+        assert_eq!(
+            custom.timed_cue_target_at(2),
+            Some(crate::TimedCueTarget::First)
+        );
+        assert_eq!(custom.transition_at(2).unwrap().kind, "fade");
+        assert_eq!(custom.step_enabled(2, 1), None);
+        assert!(custom.set_active_layout("powerpoint-custom-8"));
+        assert_eq!(ids(&custom), ["s1"]);
+        assert!(custom.set_active_layout("main"));
+        assert_eq!(ids(&custom), ["s1", "s2", "s3", "s4"]);
+        assert_eq!(
+            custom.timed_cue_target_at(3),
+            Some(crate::TimedCueTarget::First)
+        );
+
+        let range = read(br#"<p:presentationPr xmlns:p="p"><p:showPr loop="true"><p:sldRg st="2" end="3"/></p:showPr></p:presentationPr>"#);
+        assert_eq!(range.active_layout(), "powerpoint-range");
+        assert_eq!(ids(&range), ["s2", "s3"]);
+        assert_eq!(
+            range.timed_cue_target_at(1),
+            Some(crate::TimedCueTarget::First)
+        );
+
+        let missing = read(br#"<p:presentationPr xmlns:p="p"><p:showPr><p:custShow id="99"/></p:showPr></p:presentationPr>"#);
+        assert_eq!(missing.active_layout(), "main");
+        assert_eq!(ids(&missing), ["s1", "s2", "s3", "s4"]);
+        assert_eq!(
+            missing.show["settings"]["importWarnings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
