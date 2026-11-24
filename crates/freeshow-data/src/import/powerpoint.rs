@@ -812,55 +812,63 @@ impl SlideObject {
     fn into_item(mut self) -> Option<serde_json::Value> {
         let mut dash_style = String::new();
         if let Some(stroke) = self.style.connector.take() {
-            let [px, py] = stroke.width.map(|width| width / 2.0);
-            let (dx, dy) = (self.width / px, self.height / py);
-            let length = dx.hypot(dy);
+            let (x, y) = (self.width / stroke.width[0], self.height / stroke.width[1]);
+            let length = x.hypot(y);
             if !length.is_finite() || length == 0.0 {
                 return None;
             }
-            use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
-            use theme::StrokeCap;
-
-            let (ux, uy) = (dx / length, dy / length);
-            let (nx, ny) = (-uy * px, ux * py);
-            let padding = if matches!(stroke.cap, StrokeCap::Square) {
-                1.0 / FRAC_1_SQRT_2
-            } else {
-                1.0
-            };
-            let (pad_x, pad_y) = ((px * padding).ceil(), (py * padding).ceil());
-            let width = self.width + 2.0 * pad_x;
-            let height = self.height + 2.0 * pad_y;
-            let point = |x, y| [(pad_x + x) / width, (pad_y + y) / height];
-            let outline = if matches!(stroke.cap, StrokeCap::Round) {
-                let angle = uy.atan2(ux);
-                let mut outline = Vec::with_capacity(34);
-                for (x, y, start) in [
-                    (self.width, self.height, angle + FRAC_PI_2),
-                    (0.0, 0.0, angle - FRAC_PI_2),
-                ] {
-                    for step in 0..=16 {
-                        let (sin, cos) = (start - f64::from(step) * PI / 16.0).sin_cos();
-                        outline.push(point(x + px * cos, y + py * sin));
-                    }
-                }
-                outline
-            } else {
-                let (ex, ey) = if matches!(stroke.cap, StrokeCap::Square) {
-                    (ux * px, uy * py)
-                } else {
-                    (0.0, 0.0)
-                };
-                vec![
-                    point(-ex + nx, -ey + ny),
-                    point(self.width + ex + nx, self.height + ey + ny),
-                    point(self.width + ex - nx, self.height + ey - ny),
-                    point(-ex - nx, -ey - ny),
+            let (ux, uy) = (x / length, y / length);
+            let local = |[along, across]: [f64; 2]| {
+                [
+                    stroke.width[0] * (ux * along - uy * across),
+                    stroke.width[1] * (uy * along + ux * across),
                 ]
             };
-            self.style.paths = vec![vec![outline]];
+            let trim = stroke.markers.map(|marker| marker.map_or(0.0, marker_trim));
+            let from = trim[0].min(length / 2.0);
+            let to = length - trim[1].min(length / 2.0);
+            let mut contours = vec![
+                connector_shaft(from, to, stroke.cap)
+                    .into_iter()
+                    .map(local)
+                    .collect::<Vec<_>>(),
+            ];
+            for (index, marker) in stroke.markers.into_iter().enumerate() {
+                if let Some(marker) = marker {
+                    let mut points = marker_outline(marker);
+                    if index == 1 {
+                        // Reflect both coordinates to keep the shaft's winding for a single paint pass.
+                        for [along, across] in &mut points {
+                            *along = length - *along;
+                            *across = -*across;
+                        }
+                    }
+                    contours.push(points.into_iter().map(local).collect());
+                }
+            }
+
+            let padding = if matches!(stroke.cap, theme::StrokeCap::Square) {
+                std::f64::consts::SQRT_2 / 2.0
+            } else {
+                0.5
+            };
+            let [mut pad_x, mut pad_y] = stroke.width.map(|width| width * padding);
+            for &[x, y] in contours.iter().flatten() {
+                pad_x = pad_x.max(-x).max(x - self.width);
+                pad_y = pad_y.max(-y).max(y - self.height);
+            }
+            let (pad_x, pad_y) = (pad_x.ceil(), pad_y.ceil());
+            let width = self.width + 2.0 * pad_x;
+            let height = self.height + 2.0 * pad_y;
+            let point = |[x, y]: [f64; 2]| [(pad_x + x) / width, (pad_y + y) / height];
+            for contour in &mut contours {
+                for vertex in contour {
+                    *vertex = point(*vertex);
+                }
+            }
+            self.style.paths = vec![contours];
             if !stroke.dash.is_empty() {
-                let [x, y] = point(0.0, 0.0);
+                let [x, y] = point([0.0, 0.0]);
                 let (sx, sy) = (width / stroke.width[0], height / stroke.width[1]);
                 let dash = stroke
                     .dash
@@ -869,8 +877,7 @@ impl SlideObject {
                     .collect::<Vec<_>>()
                     .join(" ");
                 dash_style = format!(
-                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {} {} {dash};",
-                    length / 2.0,
+                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {dash};",
                     stroke.cap.code()
                 );
             }
@@ -992,6 +999,87 @@ impl SlideObject {
                     "lines": lines
                 }))
             }
+        }
+    }
+}
+
+fn marker_trim(marker: theme::StrokeMarker) -> f64 {
+    match marker.kind {
+        theme::MarkerKind::Triangle => marker.length * 0.75,
+        theme::MarkerKind::Stealth => marker.length * 0.7,
+        _ => 0.0,
+    }
+}
+
+fn connector_shaft(from: f64, to: f64, cap: theme::StrokeCap) -> Vec<[f64; 2]> {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    use theme::StrokeCap;
+
+    if matches!(cap, StrokeCap::Round) {
+        let mut outline = Vec::with_capacity(34);
+        for (end, start) in [(to, FRAC_PI_2), (from, -FRAC_PI_2)] {
+            for step in 0..=16 {
+                let (sin, cos) = (start - f64::from(step) * PI / 16.0).sin_cos();
+                outline.push([end + cos / 2.0, sin / 2.0]);
+            }
+        }
+        outline
+    } else {
+        let extra = if matches!(cap, StrokeCap::Square) {
+            0.5
+        } else {
+            0.0
+        };
+        vec![
+            [from - extra, 0.5],
+            [to + extra, 0.5],
+            [to + extra, -0.5],
+            [from - extra, -0.5],
+        ]
+    }
+}
+
+fn marker_outline(marker: theme::StrokeMarker) -> Vec<[f64; 2]> {
+    use theme::MarkerKind;
+
+    let (length, half_width) = (marker.length, marker.width / 2.0);
+    match marker.kind {
+        MarkerKind::None => Vec::new(),
+        MarkerKind::Triangle => vec![[0.0, 0.0], [length, half_width], [length, -half_width]],
+        MarkerKind::Stealth => vec![
+            [0.0, 0.0],
+            [length, half_width],
+            [length * 0.6, 0.0],
+            [length, -half_width],
+        ],
+        MarkerKind::Diamond => vec![
+            [-length / 2.0, 0.0],
+            [0.0, half_width],
+            [length / 2.0, 0.0],
+            [0.0, -half_width],
+        ],
+        MarkerKind::Oval => (0..32)
+            .map(|step| {
+                let angle = std::f64::consts::PI - f64::from(step) * std::f64::consts::TAU / 32.0;
+                let (sin, cos) = angle.sin_cos();
+                [length / 2.0 * cos, half_width * sin]
+            })
+            .collect(),
+        MarkerKind::Arrow => {
+            let inset = 0.75 / marker.width;
+            let base = length * (1.0 - inset);
+            let join = length * (2.75 / marker.width).min(1.0);
+            vec![
+                [0.0, 0.0],
+                [base, half_width],
+                [length, half_width - 0.75],
+                [join, 0.5],
+                [length, 0.5],
+                [length, -0.5],
+                [join, -0.5],
+                [length, 0.75 - half_width],
+                [base, -half_width],
+            ]
         }
     }
 }
@@ -2527,6 +2615,7 @@ mod tests {
                     <a:prstGeom prst="lineInv"/><a:ln w="200000"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>
                         <a:custDash><a:ds d="50000" sp="125%"/><a:ds d="200000" sp="25000"/>
                         <a:ds d="100%" sp="75000"/><a:ds d="150000" sp="50000"/></a:custDash>
+                        <a:headEnd type="oval" w="sm"/><a:tailEnd type="triangle" len="lg"/>
                     </a:ln>
                 </p:spPr></p:sp>
                 <p:cxnSp><p:spPr>
@@ -2569,6 +2658,14 @@ mod tests {
         assert!(style(2).contains("--pptx-fill-flip-y:1;"));
         assert!(style(2).contains("background:#00FF00;"));
         assert!(dash(2).ends_with("0 0.5 1.25 2 0.25 1 0.75 1.5 0.5"));
+        let contours = style(2)
+            .split_once("--pptx-fill-paths:")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        assert_eq!(contours.split('/').count(), 3);
         assert!(!style(3).contains("background:"));
         assert!(!style(3).contains("--pptx-fill-paths:"));
     }
