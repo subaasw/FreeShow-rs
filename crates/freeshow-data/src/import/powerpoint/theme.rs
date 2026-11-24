@@ -584,7 +584,7 @@ struct LineStyle {
     emu: Option<u32>,
     paint: Option<LinePaint>,
     cap: Option<StrokeCap>,
-    dash: Option<&'static [u8]>,
+    dash: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -632,20 +632,20 @@ impl LineStyle {
         };
         let dash = child(line, "prstDash")
             .and_then(|dash| match dash.attribute("val")? {
-                "solid" => Some(&[][..]),
-                "dot" => Some(&[1, 3]),
-                "dash" => Some(&[4, 3]),
-                "dashDot" => Some(&[4, 3, 1, 3]),
-                "lgDash" => Some(&[8, 3]),
-                "lgDashDot" => Some(&[8, 3, 1, 3]),
-                "lgDashDotDot" => Some(&[8, 3, 1, 3, 1, 3]),
-                "sysDot" => Some(&[1, 1]),
-                "sysDash" => Some(&[3, 1]),
-                "sysDashDot" => Some(&[3, 1, 1, 1]),
-                "sysDashDotDot" => Some(&[3, 1, 1, 1, 1, 1]),
+                "solid" => Some(Vec::new()),
+                "dot" => Some(vec![1.0, 3.0]),
+                "dash" => Some(vec![4.0, 3.0]),
+                "dashDot" => Some(vec![4.0, 3.0, 1.0, 3.0]),
+                "lgDash" => Some(vec![8.0, 3.0]),
+                "lgDashDot" => Some(vec![8.0, 3.0, 1.0, 3.0]),
+                "lgDashDotDot" => Some(vec![8.0, 3.0, 1.0, 3.0, 1.0, 3.0]),
+                "sysDot" => Some(vec![1.0, 1.0]),
+                "sysDash" => Some(vec![3.0, 1.0]),
+                "sysDashDot" => Some(vec![3.0, 1.0, 1.0, 1.0]),
+                "sysDashDotDot" => Some(vec![3.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
                 _ => None,
             })
-            .or_else(|| child(line, "custDash").map(|_| &[][..]));
+            .or_else(|| child(line, "custDash").map(|dash| custom_dash(dash).unwrap_or_default()));
         Self {
             emu,
             paint,
@@ -653,6 +653,20 @@ impl LineStyle {
             dash,
         }
     }
+}
+
+fn custom_dash(dash: Node<'_, '_>) -> Option<Vec<f64>> {
+    let mut lengths = Vec::new();
+    for stop in dash.children().filter(|node| node.has_tag_name("ds")) {
+        for attribute in ["d", "sp"] {
+            let length = percentage(stop.attribute(attribute)?)?;
+            if length <= 0.0 {
+                return None;
+            }
+            lengths.push(length);
+        }
+    }
+    Some(lengths)
 }
 
 impl Theme {
@@ -812,7 +826,7 @@ pub(super) struct ConnectorStroke {
     pub color: String,
     pub inverse: bool,
     pub cap: StrokeCap,
-    pub dash: &'static [u8],
+    pub dash: Vec<f64>,
 }
 
 fn connector_direction(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<bool> {
@@ -872,8 +886,8 @@ fn connector_stroke(
             .unwrap_or_default(),
         dash: direct
             .dash
-            .or_else(|| themed.and_then(|line| line.dash))
-            .unwrap_or(&[]),
+            .or_else(|| themed.and_then(|line| line.dash.clone()))
+            .unwrap_or_default(),
     })
 }
 
