@@ -949,21 +949,45 @@ pub(super) struct ConnectorStroke {
     pub width: [f64; 2],
     pub color: String,
     pub inverse: bool,
+    pub route: Vec<[f64; 2]>,
     pub cap: StrokeCap,
     pub dash: DashPattern,
     pub markers: [Option<StrokeMarker>; 2],
     pub compound: CompoundStroke,
 }
 
-fn connector_direction(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<bool> {
-    match child(properties, "prstGeom").and_then(|geom| geom.attribute("prst")) {
-        Some("line" | "straightConnector1") => Some(false),
-        Some("lineInv") => Some(true),
-        None if shape.has_tag_name("cxnSp") && child(properties, "custGeom").is_none() => {
-            Some(false)
+fn connector_route(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<(bool, Vec<[f64; 2]>)> {
+    let geometry = child(properties, "prstGeom");
+    let bend = |guide| {
+        geometry.map_or(50_000.0, |geometry| {
+            preset_adjustment(geometry, guide, 50_000.0)
+        }) / 100_000.0
+    };
+    let middle = match geometry.and_then(|geom| geom.attribute("prst")) {
+        Some("lineInv") => return Some((true, vec![[0.0, 0.0], [1.0, 1.0]])),
+        Some("line" | "straightConnector1") => Vec::new(),
+        Some("bentConnector2") => vec![[1.0, 0.0]],
+        Some("bentConnector3") => {
+            let x = bend("adj1");
+            vec![[x, 0.0], [x, 1.0]]
         }
-        _ => None,
-    }
+        Some("bentConnector4") => {
+            let (x, y) = (bend("adj1"), bend("adj2"));
+            vec![[x, 0.0], [x, y], [1.0, y]]
+        }
+        Some("bentConnector5") => {
+            let (x1, y, x2) = (bend("adj1"), bend("adj2"), bend("adj3"));
+            vec![[x1, 0.0], [x1, y], [x2, y], [x2, 1.0]]
+        }
+        None if shape.has_tag_name("cxnSp") && child(properties, "custGeom").is_none() => {
+            Vec::new()
+        }
+        _ => return None,
+    };
+    let mut route = vec![[0.0, 0.0]];
+    route.extend(middle);
+    route.push([1.0, 1.0]);
+    Some((false, route))
 }
 
 fn connector_stroke(
@@ -971,7 +995,7 @@ fn connector_stroke(
     properties: Node<'_, '_>,
     context: &Context,
     size: &SlideSize,
-    inverse: bool,
+    (inverse, route): (bool, Vec<[f64; 2]>),
 ) -> Option<ConnectorStroke> {
     let reference = child(shape, "style").and_then(|style| child(style, "lnRef"));
     let index = reference
@@ -1006,6 +1030,7 @@ fn connector_stroke(
         width,
         color,
         inverse,
+        route,
         cap: direct
             .cap
             .or_else(|| themed.and_then(|line| line.cap))
@@ -1027,25 +1052,27 @@ fn connector_stroke(
 type CustomPath = Vec<Vec<[f64; 2]>>;
 type ShadedPaths = (Vec<CustomPath>, Vec<i8>);
 
+fn preset_adjustment(geometry: Node<'_, '_>, name: &str, default: f64) -> f64 {
+    child(geometry, "avLst")
+        .and_then(|guides| {
+            guides
+                .children()
+                .find(|guide| guide.has_tag_name("gd") && guide.attribute("name") == Some(name))
+        })
+        .and_then(|guide| {
+            let mut formula = guide.attribute("fmla")?.split_ascii_whitespace();
+            if formula.next()? != "val" {
+                return None;
+            }
+            let value = f64::from(formula.next()?.parse::<i32>().ok()?);
+            formula.next().is_none().then_some(value)
+        })
+        .unwrap_or(default)
+}
+
 fn preset_paths(properties: Node<'_, '_>) -> Option<ShadedPaths> {
     let geometry = child(properties, "prstGeom")?;
-    let adjustment = |name: &str, default| {
-        child(geometry, "avLst")
-            .and_then(|guides| {
-                guides
-                    .children()
-                    .find(|guide| guide.has_tag_name("gd") && guide.attribute("name") == Some(name))
-            })
-            .and_then(|guide| {
-                let mut formula = guide.attribute("fmla")?.split_ascii_whitespace();
-                if formula.next()? != "val" {
-                    return None;
-                }
-                let value = f64::from(formula.next()?.parse::<i32>().ok()?);
-                formula.next().is_none().then_some(value)
-            })
-            .unwrap_or(default)
-    };
+    let adjustment = |name: &str, default| preset_adjustment(geometry, name, default);
     let short_side = || {
         let ext = child(child(properties, "xfrm")?, "ext")?;
         let (width, height) = (shape_extent(ext, "cx")?, shape_extent(ext, "cy")?);
@@ -2180,9 +2207,9 @@ impl ThemeReader {
                     .and_then(|index| index.parse().ok())
                     .and_then(|index| context.style(index, placeholder.as_ref(), geometry)),
             };
-            let direction = connector_direction(shape, properties);
+            let route = connector_route(shape, properties);
             let fill = match fill {
-                _ if direction.is_some()
+                _ if route.is_some()
                     || paths.as_ref().is_some_and(|(paths, _)| paths.is_empty()) =>
                 {
                     Some(String::new())
@@ -2193,8 +2220,8 @@ impl ThemeReader {
                 None => None,
             };
             let text = TextBody::read(shape, &context, size);
-            let connector = direction
-                .and_then(|inverse| connector_stroke(shape, properties, &context, size, inverse));
+            let connector =
+                route.and_then(|route| connector_stroke(shape, properties, &context, size, route));
             if fill.is_some() || text.is_some() {
                 let (paths, path_shades) = paths.unwrap_or_default();
                 styles.insert(
