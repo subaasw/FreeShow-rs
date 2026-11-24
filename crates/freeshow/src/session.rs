@@ -287,6 +287,7 @@ pub struct Session {
     pub pending_also: Option<PendingPlay>,
     pub playing_audio: Option<PathBuf>,
     audio_loop_override: Option<bool>,
+    transition_sound_playing: bool,
     /// The audio playlist started by a slide, when one is running.
     playlist_id: Option<String>,
     playlist_index: usize,
@@ -523,6 +524,7 @@ impl Session {
             pending_also: None,
             playing_audio: None,
             audio_loop_override: None,
+            transition_sound_playing: false,
             playlist_id: None,
             playlist_index: 0,
             playlist_songs: Vec::new(),
@@ -717,6 +719,7 @@ impl Session {
             pending_also: None,
             playing_audio: None,
             audio_loop_override: None,
+            transition_sound_playing: false,
             playlist_id: None,
             playlist_index: 0,
             playlist_songs: Vec::new(),
@@ -1473,6 +1476,7 @@ impl Session {
         self.replace_underlay(None);
         self.reset_background_look();
         self.playing_audio = None;
+        self.transition_sound_playing = false;
         self.audio_paused = false;
         self.video_time = 0.0;
         self.video_duration = 0.0;
@@ -3016,7 +3020,7 @@ impl Session {
             }
         }
         self.stop_slide_audio();
-        self.start_slide_audio();
+        self.start_slide_audio(continuation);
         self.start_slide_stream();
         self.apply_camera();
         self.apply_media_toggle();
@@ -3487,7 +3491,12 @@ impl Session {
     fn stop_slide_audio(&mut self) {
         let clear = self
             .current_show()
-            .and_then(|show| self.slide_index.map(|index| show.clears_audio_at(index)))
+            .and_then(|show| {
+                self.slide_index.map(|index| {
+                    show.clears_audio_at(index)
+                        || (self.transition_sound_playing && show.stops_transition_sound_at(index))
+                })
+            })
             .unwrap_or(false);
         if clear {
             self.stop_audio();
@@ -3496,6 +3505,7 @@ impl Session {
 
     fn stop_audio(&mut self) {
         self.playing_audio = None;
+        self.transition_sound_playing = false;
         self.audio_loop_override = None;
         self.audio_paused = false;
         self.keep_video_then(PendingPlay::StopAudio);
@@ -3524,21 +3534,28 @@ impl Session {
     }
 
     /// Starts the first audio file listed on this slide, unless that file is already playing.
-    fn start_slide_audio(&mut self) {
+    fn start_slide_audio(&mut self, continuation: bool) {
         let audio = self.current_show().and_then(|show| {
             self.slide_index.and_then(|index| {
                 show.audio_media_at(index).into_iter().find_map(|media| {
+                    let transition_sound = media["transitionSound"] == true;
+                    if transition_sound && continuation {
+                        return None;
+                    }
                     let path = PathBuf::from(media["path"].as_str()?);
                     (media_kind(&path) == MediaKind::Audio).then_some((
                         path,
                         media["loop"].as_bool(),
                         media["retrigger"] == true,
+                        transition_sound,
                     ))
                 })
             })
         });
-        if let Some((path, looping, retrigger)) = audio {
-            self.queue_cue_audio(path, looping, retrigger);
+        if let Some((path, looping, retrigger, transition_sound)) = audio
+            && self.queue_cue_audio(path, looping, retrigger)
+        {
+            self.transition_sound_playing = transition_sound;
         }
     }
 
@@ -3559,6 +3576,7 @@ impl Session {
     fn queue_audio(&mut self, path: PathBuf) {
         self.media_finished = None;
         self.audio_loop_override = None;
+        self.transition_sound_playing = false;
         if let Some(track) = &mut self.timeline_soundtrack {
             track.owned = false;
         }
@@ -8927,6 +8945,47 @@ Second line"
             Some(PendingPlay::Audio(ref path)) if path == &click
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transition_sound_repeats_on_entry_and_stop_leaves_manual_audio_alone() {
+        let mut show = ShowFile::blank("sounds", "Sounds");
+        assert!(show.add_slide().is_some());
+        show.show["media"]["tone"] = serde_json::json!({
+            "path": "transition.wav", "loop": true, "retrigger": true, "transitionSound": true
+        });
+        show.show["layouts"]["main"]["slides"][0]["audio"] = serde_json::json!(["tone"]);
+        show.show["layouts"]["main"]["slides"][1]["actions"]["stopTransitionSound"] =
+            serde_json::json!(true);
+        let mut session = Session::empty();
+        session.shows.push(show);
+        session.show_index = Some(0);
+
+        for _ in 0..2 {
+            session.select_slide(0);
+            assert!(session.take_plays().into_iter().flatten().any(|play| {
+                matches!(play, PendingPlay::Audio(path) if path == Path::new("transition.wav"))
+            }));
+            assert_eq!(session.audio_loop_override, Some(true));
+        }
+        session.apply_slide_actions_now(true);
+        assert!(!session.audio_change_pending());
+        session.select_slide(1);
+        assert!(
+            session
+                .take_plays()
+                .into_iter()
+                .flatten()
+                .any(|play| { matches!(play, PendingPlay::StopAudio) })
+        );
+        assert!(session.playing_audio.is_none());
+
+        let manual = PathBuf::from("manual.wav");
+        session.queue_audio(manual.clone());
+        session.take_plays();
+        session.select_slide(1);
+        assert!(!session.audio_change_pending());
+        assert_eq!(session.playing_audio, Some(manual));
     }
 
     #[test]
