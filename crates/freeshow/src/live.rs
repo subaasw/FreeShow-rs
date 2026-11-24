@@ -1989,6 +1989,43 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_backdrop_blurs_and_desaturates_the_live_media_frame() {
+        let mut session = Session::empty();
+        session.output_width = 96;
+        session.output_height = 54;
+        let mut show = ShowFile::blank("blur", "Blur");
+        show.show["slides"]["s1"]["items"] = serde_json::json!([{
+            "type": "shape",
+            "style": "left:480px;top:270px;width:960px;height:540px;backdrop-filter:blur(100px) saturate(0);border-radius:50%;",
+            "lines": []
+        }]);
+        session.shows.push(show);
+        session.show_index = Some(0);
+        session.slide_index = Some(0);
+        session.replace_underlay(Some(freeshow_output::Raster {
+            width: 96,
+            height: 54,
+            rgba: (0..96 * 54)
+                .flat_map(|i| {
+                    if i % 96 < 48 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    }
+                })
+                .collect(),
+        }));
+        let frame = audience_frame(&session);
+        let red = frame.pixel(31, 27);
+        let mixed = frame.pixel(48, 27);
+        let blue = frame.pixel(63, 27);
+        assert_eq!(mixed.r, mixed.g);
+        assert_eq!(mixed.g, mixed.b);
+        assert!(blue.r < mixed.r && mixed.r < red.r);
+        assert_eq!(frame.pixel(24, 14), parse_color("#ff0000").unwrap());
+    }
+
+    #[test]
     fn an_overlay_is_painted_on_a_cleared_screen() {
         let mut session = Session::empty();
         session.blanked = true;

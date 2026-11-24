@@ -339,7 +339,34 @@ pub(super) struct Fill {
     pub gradient: Option<Gradient>,
     #[prost(bool, tag = "4")]
     pub enabled: bool,
+    #[prost(message, optional, tag = "5")]
+    pub background_effect: Option<BackgroundEffect>,
 }
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct BackgroundEffect {
+    #[prost(oneof = "BackgroundEffectKind", tags = "2, 3")]
+    pub kind: Option<BackgroundEffectKind>,
+}
+
+#[derive(Clone, PartialEq, prost::Oneof)]
+pub(super) enum BackgroundEffectKind {
+    #[prost(message, tag = "2")]
+    Blur(BackgroundBlur),
+    #[prost(message, tag = "3")]
+    Invert(BackgroundInvert),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct BackgroundBlur {
+    #[prost(double, tag = "1")]
+    pub saturation: f64,
+    #[prost(double, tag = "2")]
+    pub blur_amount: f64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct BackgroundInvert {}
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct Gradient {
