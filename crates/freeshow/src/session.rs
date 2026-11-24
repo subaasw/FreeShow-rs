@@ -1621,7 +1621,12 @@ impl Session {
         let Some(path) = path else {
             return;
         };
-        match media_kind(&path) {
+        let kind = media_kind(&path);
+        if matches!(kind, MediaKind::Image | MediaKind::Video) {
+            self.video_end = VideoEnd::Hold;
+            self.video_end_fade = None;
+        }
+        match kind {
             MediaKind::Image => {
                 let raster = self.load_still(&path);
                 self.set_still_underlay(path, raster);
@@ -2601,16 +2606,11 @@ impl Session {
 
     /// Starts the video behind this slide. The same clip is left running.
     fn play_slide_video(&mut self, path: &Path, foreground: bool) {
-        let flags = self.current_show().and_then(|show| {
-            show.backdrop_media_flags_at(self.slide_index?, &path.to_string_lossy())
+        let entry = self.current_show().and_then(|show| {
+            show.backdrop_media_entry_at(self.slide_index?, &path.to_string_lossy())
         });
-        let end = self
-            .current_show()
-            .and_then(|show| {
-                show.backdrop_media_entry_at(self.slide_index?, &path.to_string_lossy())
-            })
-            .map(VideoEnd::from_media)
-            .unwrap_or_default();
+        let flags = entry.map(ShowFile::media_entry_flags);
+        let end = entry.map(VideoEnd::from_media).unwrap_or_default();
         if self.background_path.as_deref() == Some(path) {
             self.video_end = end;
             if !self.timeline_playing {
@@ -5428,7 +5428,9 @@ impl Session {
         let background = self.background_transition;
         self.background_transition = false;
         if let Some(fade) = self.video_end_fade.take() {
-            let mut motion = self.library_motion(true);
+            let mut motion = self
+                .style_motion("media")
+                .unwrap_or_else(|| self.library_motion(true));
             if fade && motion.duration_ms > 0 {
                 motion.kind = "fade".into();
             } else if fade {
@@ -8211,6 +8213,33 @@ Second line"
         assert!(!session.slide_hidden);
         assert!(session.underlay.is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scene_video_replaces_the_previous_cues_end_behavior() {
+        let video = std::env::temp_dir().join(format!("{}.mp4", new_id()));
+        std::fs::write(
+            &video,
+            include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4"),
+        )
+        .unwrap();
+        let mut session = Session::empty();
+        session.video_end = VideoEnd::Clear { fade: true };
+        session.video_end_fade = Some(true);
+        session.play_scene_media(&video.to_string_lossy());
+        assert!(session.video_end_fade.is_none());
+        assert!(matches!(
+            session.take_plays(),
+            [Some(PendingPlay::Video(_)), None]
+        ));
+        session.replace_underlay(Some(Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        }));
+        assert!(!session.finish_media(&video.to_string_lossy(), false));
+        assert_eq!(session.underlay.unwrap().rgba, [255, 0, 0, 255]);
+        std::fs::remove_file(video).unwrap();
     }
 
     #[test]
