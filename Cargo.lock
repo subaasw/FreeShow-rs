@@ -1988,6 +1988,8 @@ dependencies = [
  "font8x8",
  "image",
  "qrcode",
+ "unicode-linebreak",
+ "unicode-segmentation",
 ]
 
 [[package]]
