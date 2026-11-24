@@ -22,7 +22,7 @@ SYSTEM = re.compile(r"^(?:linux-vdso|ld-linux|lib(?:c|m|pthread|dl|rt|resolv|uti
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
 audioconvert audioresample audiomixer volume inter audioparsers isomp4 matroska
 avi ogg libav flac opus vorbis wavparse wavenc mpg123 jpeg png autodetect rtmp curl
-videoparsersbad flv x264 videotestsrc audiotestsrc shout2 alsa pulseaudio video4linux2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
+videoparsersbad flv x264 videotestsrc audiotestsrc alsa pulseaudio video4linux2 rtp rtpmanager webrtc dtls srtp sctp nice""".split()
 # Winit/wgpu can load these at runtime rather than through DT_NEEDED.
 DISPLAY_LIBS = """libxkbcommon.so.0 libX11.so.6 libXcursor.so.1 libXrandr.so.2
 libXi.so.6 libXext.so.6 libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1""".split()
@@ -174,7 +174,8 @@ def main():
     bundle = Bundle(directory)
     bundle.add(args.binary, directory / "bin/freeshow")
     plugins = Path(output("pkg-config", "--variable=pluginsdir", "gstreamer-1.0"))
-    for name in PLUGINS + (["ndi"] if (plugins / "libgstndi.so").is_file() else []):
+    optional = [name for name in ("ndi", "shout2") if (plugins / f"libgst{name}.so").is_file()]
+    for name in PLUGINS + optional:
         bundle.add(plugins / f"libgst{name}.so", directory / "lib/gstreamer-1.0" / f"libgst{name}.so")
     scanner = Path(output("pkg-config", "--variable=libexecdir", "gstreamer-1.0")) / "gstreamer-1.0/gst-plugin-scanner"
     bundle.add(scanner, directory / "libexec/gst-plugin-scanner")
