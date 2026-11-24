@@ -2428,6 +2428,52 @@ mod tests {
     }
 
     #[test]
+    fn imports_rounded_and_snipped_corners_with_shape_gradients() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:sp><p:spPr>
+                    <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                    <a:prstGeom prst="snipRoundRect"><a:avLst>
+                        <a:gd name="adj1" fmla="val 40000"/><a:gd name="adj2" fmla="val 20000"/>
+                    </a:avLst></a:prstGeom>
+                    <a:gradFill><a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst><a:path path="shape"/></a:gradFill>
+                </p:spPr></p:sp>
+            </p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Corners.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(style.contains("--pptx-polygon-focus:0.5 0.5;"), "{style}");
+        let path = style.split_once("--pptx-fill-paths:").unwrap().1;
+        let path = path.split_once(';').unwrap().0;
+        let points: Vec<[f64; 2]> = path
+            .split(',')
+            .map(|point| {
+                let (x, y) = point.split_once(' ').unwrap();
+                [x.parse().unwrap(), y.parse().unwrap()]
+            })
+            .collect();
+        let arc_end = points.len() - 4;
+        assert!(arc_end > 2);
+        for &[x, y] in &points[..arc_end] {
+            let radius_squared = ((x - 0.2) / 0.2).powi(2) + ((y - 0.4) / 0.4).powi(2);
+            assert!((radius_squared - 1.0).abs() < 1e-12, "{points:?}");
+        }
+        assert_eq!(points[0], [0.0, 0.4]);
+        let [x, y] = points[arc_end - 1];
+        assert!((x - 0.2).abs() < 1e-12 && y.abs() < 1e-12);
+        assert_eq!(
+            points[arc_end..],
+            [[0.9, 0.0], [1.0, 0.2], [1.0, 1.0], [0.0, 1.0]]
+        );
+    }
+
+    #[test]
     fn imports_preset_shape_adjustments_and_star_gradients() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",

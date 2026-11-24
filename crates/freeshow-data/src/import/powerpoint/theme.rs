@@ -725,7 +725,7 @@ type CustomPath = Vec<Vec<[f64; 2]>>;
 
 fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
     let geometry = child(properties, "prstGeom")?;
-    let adjustment = |name, default| {
+    let adjustment = |name: &str, default| {
         child(geometry, "avLst")
             .and_then(|guides| {
                 guides
@@ -808,6 +808,10 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
                     [1.0, 1.0],
                 ],
             }
+        }
+        "roundRect" | "round1Rect" | "round2SameRect" | "round2DiagRect" | "snip1Rect"
+        | "snip2SameRect" | "snip2DiagRect" | "snipRoundRect" => {
+            rect_corner_outline(name, short_side()?, adjustment)?
         }
         "hexagon" => {
             let [sx, _] = short_side()?;
@@ -897,6 +901,71 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
         }
     };
     Some(vec![vec![outline]])
+}
+
+fn rect_corner_outline(
+    name: &str,
+    [sx, sy]: [f64; 2],
+    adjustment: impl Fn(&str, f64) -> f64,
+) -> Option<Vec<[f64; 2]>> {
+    let inset = |guide, default| adjustment(guide, default).clamp(0.0, 50_000.0) / 100_000.0;
+    let single = || inset("adj", 16_667.0);
+    let first = |default| inset("adj1", default);
+    let second = |default| inset("adj2", default);
+    // Corners run clockwise from the top left.
+    let (insets, rounded) = match name {
+        "roundRect" => ([single(); 4], [true; 4]),
+        "round1Rect" => ([0.0, single(), 0.0, 0.0], [true; 4]),
+        "round2SameRect" => {
+            let (a, b) = (first(16_667.0), second(0.0));
+            ([a, a, b, b], [true; 4])
+        }
+        "round2DiagRect" => {
+            let (a, b) = (first(16_667.0), second(0.0));
+            ([a, b, a, b], [true; 4])
+        }
+        "snip1Rect" => ([0.0, single(), 0.0, 0.0], [false; 4]),
+        "snip2SameRect" => {
+            let (a, b) = (first(16_667.0), second(0.0));
+            ([a, a, b, b], [false; 4])
+        }
+        "snip2DiagRect" => {
+            let (a, b) = (first(0.0), second(16_667.0));
+            ([a, b, a, b], [false; 4])
+        }
+        "snipRoundRect" => (
+            [first(16_667.0), second(16_667.0), 0.0, 0.0],
+            [true, false, false, false],
+        ),
+        _ => return None,
+    };
+
+    let mut points = Vec::new();
+    let quarter = std::f64::consts::FRAC_PI_2;
+    for (corner, (inset, rounded)) in insets.into_iter().zip(rounded).enumerate() {
+        let (x, y) = (sx * inset, sy * inset);
+        let (start, end) = match corner {
+            0 => ([0.0, y], [x, 0.0]),
+            1 => ([1.0 - x, 0.0], [1.0, y]),
+            2 => ([1.0, 1.0 - y], [1.0 - x, 1.0]),
+            _ => ([x, 1.0], [0.0, 1.0 - y]),
+        };
+        push_path_vertex(&mut points, start)?;
+        if rounded && inset > 0.0 {
+            append_ellipse_arc(
+                &mut points,
+                [x, y],
+                (corner as f64 - 2.0) * quarter,
+                quarter,
+            )?;
+        } else {
+            push_path_vertex(&mut points, end)?;
+        }
+    }
+    if same_path_point(points[0], *points.last()?) {
+        points.pop();
+    }
+    Some(points)
 }
 
 fn block_arrow(name: &str, [sx, sy]: [f64; 2], shaft: f64, head: f64) -> Vec<[f64; 2]> {
@@ -1152,7 +1221,15 @@ fn flatten_arc_path(
     } else {
         -(start - stop).rem_euclid(TAU)
     };
-    let (rx, ry) = (rx / width, ry / height);
+    append_ellipse_arc(vertices, [rx / width, ry / height], start, span)
+}
+
+fn append_ellipse_arc(
+    vertices: &mut Vec<[f64; 2]>,
+    [rx, ry]: [f64; 2],
+    start: f64,
+    span: f64,
+) -> Option<()> {
     let offset = |angle: f64| {
         let (sin, cos) = angle.sin_cos();
         [rx * cos, ry * sin]
@@ -1168,7 +1245,7 @@ fn flatten_arc_path(
     }
     for segment in 1..=segments {
         let [dx, dy] = offset(start + span * (segment as f64 / segments as f64));
-        let point = if sweep.abs() == TURN && segment == segments {
+        let point = if span.abs() == std::f64::consts::TAU && segment == segments {
             current
         } else {
             [cx + dx, cy + dy]
