@@ -47,10 +47,115 @@ mod source {
         }
     }
 
+    fn audio_error(error: impl std::fmt::Display) -> MediaError {
+        MediaError::Audio(error.to_string())
+    }
+
+    pub(crate) struct NetworkBranches {
+        parent: gst::Bin,
+        tee: gst::Element,
+        video: bool,
+        gains: Vec<(String, gst::Element)>,
+    }
+
+    impl NetworkBranches {
+        pub fn new(parent: &gst::Bin, tee: gst::Element, video: bool) -> Self {
+            Self {
+                parent: parent.clone(),
+                tee,
+                video,
+                gains: Vec::new(),
+            }
+        }
+
+        pub fn set_routes(&mut self, routes: &[NetworkRoute]) -> Result<(), MediaError> {
+            // Keep muted branches until the clip closes so toggling a destination does not relink it.
+            for (id, volume) in &self.gains {
+                let gain = routes
+                    .iter()
+                    .find(|route| &route.output_id == id)
+                    .map_or(0.0, |route| network_gain(route.gain));
+                volume.set_property("volume", gain);
+            }
+            for route in routes {
+                if !self.gains.iter().any(|(id, _)| *id == route.output_id) {
+                    let volume = self.connect(route)?;
+                    self.gains.push((route.output_id.clone(), volume));
+                }
+            }
+            Ok(())
+        }
+
+        fn connect(&self, route: &NetworkRoute) -> Result<gst::Element, MediaError> {
+            let bin = gst::Bin::new();
+            let queue = gst::ElementFactory::make("queue")
+                .property("max-size-buffers", 2_u32)
+                .build()
+                .map_err(audio_error)?;
+            let volume = gst::ElementFactory::make("volume")
+                .property("volume", network_gain(route.gain))
+                .build()
+                .map_err(audio_error)?;
+            let sink = gst::ElementFactory::make("interaudiosink")
+                .property(
+                    "channel",
+                    super::network_channel(&route.output_id, self.video),
+                )
+                .property("async", false)
+                .build()
+                .map_err(audio_error)?;
+            bin.add_many([&queue, &volume, &sink])
+                .map_err(audio_error)?;
+            if self.video {
+                let convert = gst::ElementFactory::make("audioconvert")
+                    .build()
+                    .map_err(audio_error)?;
+                let resample = gst::ElementFactory::make("audioresample")
+                    .build()
+                    .map_err(audio_error)?;
+                bin.add_many([&convert, &resample]).map_err(audio_error)?;
+                gst::Element::link_many([&queue, &convert, &resample, &volume, &sink])
+                    .map_err(audio_error)?;
+            } else {
+                gst::Element::link_many([&queue, &volume, &sink]).map_err(audio_error)?;
+            }
+            let queue_sink = queue.static_pad("sink").expect("queue sink");
+            let input = gst::GhostPad::with_target(&queue_sink).map_err(audio_error)?;
+            bin.add_pad(&input).map_err(audio_error)?;
+            let output = self
+                .tee
+                .request_pad_simple("src_%u")
+                .ok_or_else(|| MediaError::Audio("could not request a network audio pad".into()))?;
+            // The tee must not push into the new branch before its elements are running.
+            let probe = output.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_, _| {
+                gst::PadProbeReturn::Ok
+            });
+            let attached = (|| {
+                self.parent.add(&bin).map_err(audio_error)?;
+                output.link(&input).map_err(audio_error)?;
+                bin.sync_state_with_parent().map_err(audio_error)
+            })();
+            if attached.is_err() {
+                if output.is_linked() {
+                    let _ = output.unlink(&input);
+                }
+                let _ = bin.set_state(gst::State::Null);
+                let _ = self.parent.remove(&bin);
+            }
+            if let Some(probe) = probe {
+                output.remove_probe(probe);
+            }
+            if attached.is_err() {
+                self.tee.release_request_pad(&output);
+            }
+            attached.map(|()| volume)
+        }
+    }
+
     pub(crate) struct NetworkAudio {
         pipeline: gst::Pipeline,
         pub playback: Arc<Mutex<Playback>>,
-        gains: Vec<(String, gst::Element)>,
+        branches: Mutex<NetworkBranches>,
     }
 
     impl NetworkAudio {
@@ -64,9 +169,18 @@ mod source {
             routes: &[NetworkRoute],
             options: &AudioPlaybackOptions,
         ) -> Result<Self, MediaError> {
-            let error = |message| MediaError::Audio(message);
-            gst::init().map_err(|e| error(e.to_string()))?;
+            let mut initial = Playback::shared(pcm, 1.0);
+            options.apply(&mut initial);
+            Self::from_playback(initial, routes)
+        }
+
+        pub fn from_playback(
+            initial: Playback,
+            routes: &[NetworkRoute],
+        ) -> Result<Self, MediaError> {
+            gst::init().map_err(audio_error)?;
             let pipeline = gst::Pipeline::new();
+            let paused = initial.is_paused();
             let src = AppSrc::builder()
                 .name("audio_source")
                 .is_live(true)
@@ -83,50 +197,21 @@ mod source {
             src.set_property("max-bytes", 15360_u64);
             let tee = gst::ElementFactory::make("tee")
                 .build()
-                .map_err(|e| error(e.to_string()))?;
+                .map_err(audio_error)?;
             pipeline
                 .add_many([src.upcast_ref::<gst::Element>(), &tee])
-                .map_err(|e| error(e.to_string()))?;
-            src.link(&tee).map_err(|e| error(e.to_string()))?;
-            let mut gains = Vec::new();
-            let targets: Vec<_> = if routes.is_empty() {
-                vec![(None, 0.0)]
-            } else {
-                routes
-                    .iter()
-                    .map(|route| (Some(route.output_id.clone()), route.gain))
-                    .collect()
-            };
-            for (id, gain) in targets {
-                let queue = gst::ElementFactory::make("queue")
-                    .property("max-size-buffers", 2_u32)
+                .map_err(audio_error)?;
+            src.link(&tee).map_err(audio_error)?;
+            if routes.is_empty() {
+                let sink = gst::ElementFactory::make("fakesink")
+                    .property("sync", true)
                     .build()
-                    .map_err(|e| error(e.to_string()))?;
-                let volume = gst::ElementFactory::make("volume")
-                    .property("volume", network_gain(gain))
-                    .build()
-                    .map_err(|e| error(e.to_string()))?;
-                let sink = if let Some(id) = &id {
-                    gst::ElementFactory::make("interaudiosink")
-                        .property("channel", super::network_channel(id, false))
-                        .build()
-                } else {
-                    gst::ElementFactory::make("fakesink")
-                        .property("sync", true)
-                        .build()
-                }
-                .map_err(|e| error(e.to_string()))?;
-                pipeline
-                    .add_many([&queue, &volume, &sink])
-                    .map_err(|e| error(e.to_string()))?;
-                gst::Element::link_many([&tee, &queue, &volume, &sink])
-                    .map_err(|e| error(e.to_string()))?;
-                if let Some(id) = id {
-                    gains.push((id, volume));
-                }
+                    .map_err(audio_error)?;
+                pipeline.add(&sink).map_err(audio_error)?;
+                tee.link(&sink).map_err(audio_error)?;
             }
-            let mut initial = Playback::shared(pcm, 1.0);
-            options.apply(&mut initial);
+            let mut branches = NetworkBranches::new(pipeline.upcast_ref(), tee, false);
+            branches.set_routes(routes)?;
             let playback = Arc::new(Mutex::new(initial));
             let state = Arc::clone(&playback);
             let frames = AtomicU64::new(0);
@@ -154,23 +239,24 @@ mod source {
                     .build(),
             );
             pipeline
-                .set_state(gst::State::Playing)
-                .map_err(|e| error(e.to_string()))?;
+                .set_state(if paused {
+                    gst::State::Paused
+                } else {
+                    gst::State::Playing
+                })
+                .map_err(audio_error)?;
             Ok(Self {
                 pipeline,
                 playback,
-                gains,
+                branches: Mutex::new(branches),
             })
         }
 
         pub fn set_routes(&self, routes: &[NetworkRoute]) {
-            for (id, volume) in &self.gains {
-                let gain = routes
-                    .iter()
-                    .find(|route| &route.output_id == id)
-                    .map(|route| route.gain)
-                    .unwrap_or(0.0);
-                volume.set_property("volume", network_gain(gain));
+            if let Ok(mut branches) = self.branches.lock()
+                && let Err(error) = branches.set_routes(routes)
+            {
+                eprintln!("network audio routing: {error}");
             }
         }
 
@@ -194,7 +280,7 @@ mod source {
 }
 
 #[cfg(feature = "gst")]
-pub(crate) use source::NetworkAudio;
+pub(crate) use source::{NetworkAudio, NetworkBranches};
 
 #[cfg(all(test, feature = "gst"))]
 mod tests {
@@ -245,6 +331,39 @@ mod tests {
     }
 
     #[test]
+    fn late_network_feed_keeps_the_paused_playhead() {
+        gst::init().unwrap();
+        let id = format!("late-network-source-{}", std::process::id());
+        let (receiver, sink) = receiver(&id);
+        let mut samples = vec![0.1; 48000];
+        samples.extend(vec![0.6; 48000 * 3]);
+        let mut playback = crate::Playback::new(
+            Pcm {
+                rate: 48000,
+                channels: 1,
+                samples,
+            },
+            1.0,
+        );
+        playback.seek_seconds(1.25);
+        playback.set_paused(true);
+        let source = source::NetworkAudio::from_playback(
+            playback,
+            &[NetworkRoute {
+                output_id: id,
+                gain: 0.5,
+            }],
+        )
+        .unwrap();
+        amplitude(&sink, 0.0);
+        assert_eq!(source.playback.lock().unwrap().position_seconds(), 1.25);
+        source.set_paused(false);
+        amplitude(&sink, 0.3);
+        drop(source);
+        receiver.set_state(gst::State::Null).unwrap();
+    }
+
+    #[test]
     fn pcm_feeds_the_selected_network_bus_and_mute_and_pause_do_not_leak() {
         gst::init().unwrap();
         let id = format!("network-source-\"quoted\"\\-\0{}", std::process::id());
@@ -255,15 +374,13 @@ mod tests {
             channels: 1,
             samples: vec![0.8; 48000 * 3],
         });
-        let source = source::NetworkAudio::new(
-            pcm,
-            &[NetworkRoute {
-                output_id: id.clone(),
-                gain: 0.25,
-            }],
-        )
-        .unwrap();
+        let source = source::NetworkAudio::new(pcm, &[]).unwrap();
         source.playback.lock().unwrap().set_looping(true);
+        amplitude(&sink, 0.0);
+        source.set_routes(&[NetworkRoute {
+            output_id: id.clone(),
+            gain: 0.25,
+        }]);
         amplitude(&sink, 0.2);
         amplitude(&other, 0.0);
         source.set_routes(&[NetworkRoute {
@@ -278,6 +395,18 @@ mod tests {
         assert_eq!(source.playback.lock().unwrap().position_seconds(), position);
         source.set_paused(false);
         amplitude(&sink, 0.4);
+        source.set_routes(&[
+            NetworkRoute {
+                output_id: id.clone(),
+                gain: 0.5,
+            },
+            NetworkRoute {
+                output_id: format!("{id}-other"),
+                gain: 0.25,
+            },
+        ]);
+        amplitude(&sink, 0.4);
+        amplitude(&other, 0.2);
         source.set_routes(&[NetworkRoute {
             output_id: id.clone(),
             gain: f32::NAN,
@@ -285,6 +414,7 @@ mod tests {
         amplitude(&sink, 0.0);
         source.set_routes(&[]);
         amplitude(&sink, 0.0);
+        amplitude(&other, 0.0);
         drop(source);
         pipeline.set_state(gst::State::Null).unwrap();
         other_pipeline.set_state(gst::State::Null).unwrap();

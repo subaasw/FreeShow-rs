@@ -86,7 +86,7 @@ pub fn apply_volume(samples: &[f32], volume: f32) -> Vec<f32> {
     samples.iter().map(|sample| sample * volume).collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Playback {
     pcm: Arc<Pcm>,
     position: f64,
@@ -461,7 +461,7 @@ pub struct AudioOutput {
     // long-running outputs must remain sample synchronized.
     outputs: Vec<(Option<String>, DeviceAudioOutput)>,
     #[cfg(feature = "gst")]
-    network: Option<crate::network::NetworkAudio>,
+    network: Mutex<Option<crate::network::NetworkAudio>>,
 }
 
 impl AudioOutput {
@@ -540,14 +540,14 @@ impl AudioOutput {
         Ok(Self {
             outputs,
             #[cfg(feature = "gst")]
-            network,
+            network: Mutex::new(network),
         })
     }
 
     pub fn start(pcm: Pcm, volume: f32, device_name: Option<&str>) -> Result<Self, MediaError> {
         Ok(Self {
             #[cfg(feature = "gst")]
-            network: None,
+            network: Mutex::new(None),
             outputs: vec![(
                 device_name.map(str::to_string),
                 DeviceAudioOutput::start(
@@ -565,8 +565,20 @@ impl AudioOutput {
 
     pub fn set_network_routes(&self, routes: &[NetworkRoute]) {
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
-            network.set_routes(routes);
+        {
+            let mut network = self.network.lock().unwrap();
+            if let Some(network) = network.as_ref() {
+                network.set_routes(routes);
+            } else if !routes.is_empty()
+                && let Some((_, speaker)) = self.outputs.first()
+                && let Ok(mut playback) = speaker.playback.lock().map(|state| state.clone())
+            {
+                playback.set_routes(&[SpeakerRoute::stereo(None, 1.0)]);
+                match crate::network::NetworkAudio::from_playback(playback, routes) {
+                    Ok(output) => *network = Some(output),
+                    Err(error) => eprintln!("network audio routing: {error}"),
+                }
+            }
         }
         let _ = routes;
     }
@@ -576,7 +588,7 @@ impl AudioOutput {
             return Some(Arc::clone(&output.playback));
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
+        if let Some(network) = self.network.lock().unwrap().as_ref() {
             return Some(Arc::clone(&network.playback));
         }
         None
@@ -598,7 +610,7 @@ impl AudioOutput {
             output.set_volume(volume);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network
+        if let Some(network) = self.network.lock().unwrap().as_ref()
             && let Ok(mut playback) = network.playback.lock()
         {
             playback.set_volume(volume);
@@ -610,7 +622,7 @@ impl AudioOutput {
             output.set_paused(paused);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
+        if let Some(network) = self.network.lock().unwrap().as_ref() {
             network.set_paused(paused);
         }
     }
@@ -620,7 +632,7 @@ impl AudioOutput {
             output.seek_seconds(seconds);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network
+        if let Some(network) = self.network.lock().unwrap().as_ref()
             && let Ok(mut playback) = network.playback.lock()
         {
             playback.seek_seconds(seconds);
@@ -655,7 +667,7 @@ impl AudioOutput {
     pub fn is_finished(&self) -> bool {
         let finished = self.outputs.iter().all(|(_, output)| output.is_finished());
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network {
+        if let Some(network) = self.network.lock().unwrap().as_ref() {
             return finished
                 && network
                     .playback
@@ -671,7 +683,7 @@ impl AudioOutput {
             output.set_looping(looping);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network
+        if let Some(network) = self.network.lock().unwrap().as_ref()
             && let Ok(mut playback) = network.playback.lock()
         {
             playback.set_looping(looping);
@@ -683,7 +695,7 @@ impl AudioOutput {
             output.set_span(from, to);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network
+        if let Some(network) = self.network.lock().unwrap().as_ref()
             && let Ok(mut playback) = network.playback.lock()
         {
             playback.set_span(from, to);
@@ -695,7 +707,7 @@ impl AudioOutput {
             output.set_rate(rate);
         }
         #[cfg(feature = "gst")]
-        if let Some(network) = &self.network
+        if let Some(network) = self.network.lock().unwrap().as_ref()
             && let Ok(mut playback) = network.playback.lock()
         {
             playback.set_rate(rate);
