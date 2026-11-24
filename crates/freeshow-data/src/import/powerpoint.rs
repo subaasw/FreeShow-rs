@@ -550,7 +550,8 @@ impl SlideObject {
                 "lines": []
             })),
             ObjectKind::Text => {
-                style.push_str("text-align:center;font-size:60px;");
+                let font_px = 60.0 * self.style.text.as_ref().map_or(1.0, |text| text.font_scale);
+                style.push_str(&format!("text-align:center;font-size:{font_px}px;"));
                 let (align, lines) = if let Some(text) = self.style.text {
                     let [left, top, right, bottom] = text.insets;
                     style.push_str(&format!(
@@ -1809,7 +1810,9 @@ mod tests {
                     </p:spPr><p:style><a:fillRef idx="1"><a:srgbClr val="FF0000"/></a:fillRef>
                         <a:fontRef idx="major"><a:schemeClr val="accent1"/></a:fontRef>
                     </p:style>
-                    <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100" wrap="none"/><a:lstStyle>
+                    <p:txBody><a:bodyPr anchor="b" lIns="0" tIns="12700" rIns="25400" bIns="38100" wrap="none">
+                        <a:normAutofit fontScale="75000" lnSpcReduction="20%"/>
+                    </a:bodyPr><a:lstStyle>
                         <a:lvl1pPr algn="r" marL="127000" marR="63500"><a:spcBef><a:spcPct val="25000"/></a:spcBef>
                             <a:buClr><a:schemeClr val="accent1"/></a:buClr><a:buSzPct val="75000"/>
                             <a:buFont typeface="Symbol"/><a:buChar char="&#xf0b7;"/>
@@ -1823,7 +1826,7 @@ mod tests {
                             <a:highlight><a:srgbClr val="FFFF00"/></a:highlight>
                         </a:rPr><a:t>accent</a:t></a:r>
                         <a:br/><a:fld id="field"><a:t>Cached field</a:t></a:fld>
-                    </a:p><a:p/><a:p><a:pPr algn="ctr"><a:buNone/></a:pPr><a:r><a:t>Final</a:t></a:r></a:p>
+                    </a:p><a:p/><a:p><a:pPr algn="ctr"><a:lnSpc><a:spcPts val="1000"/></a:lnSpc><a:buNone/></a:pPr><a:r><a:t>Final</a:t></a:r></a:p>
                     </p:txBody></p:sp>
                     <p:sp><p:spPr>
                         <a:xfrm><a:ext cx="4572000" cy="1371600"/></a:xfrm>
@@ -1863,6 +1866,7 @@ mod tests {
         assert!(direct.contains("--pptx-fill-flip-x:1;"));
         assert!(direct.contains("--pptx-text-insets:0 2 4 6;"));
         assert!(direct.contains("white-space:nowrap;"));
+        assert!(direct.contains("font-size:45px;"));
         assert_eq!(items[0]["align"], "align-items:flex-end;");
         assert_eq!(items[0]["lines"][0]["align"], "right");
         assert_eq!(items[0]["lines"][0]["pptxMargins"], json!([20, 10, -10]));
@@ -1876,30 +1880,34 @@ mod tests {
         }
         assert_eq!(
             items[0]["lines"][0]["pptxSpacing"],
-            json!(["150%", "25%", null])
+            json!(["130%", "25%", null])
         );
         assert_eq!(
             items[0]["lines"][1]["pptxSpacing"],
-            json!(["150%", null, "4px"])
+            json!(["130%", null, "4px"])
         );
         assert_eq!(
             items[0]["lines"][0]["text"][0],
             json!({
                 "value": "Caption ",
-                "style": "font-family:Arial;font-size:48px;color:#00AA00;font-weight:bold;font-style:italic;"
+                "style": "font-family:Arial;font-size:36px;color:#00AA00;font-weight:bold;font-style:italic;"
             })
         );
         assert_eq!(
             items[0]["lines"][0]["text"][1],
             json!({
                 "value": "accent",
-                "style": "font-family:Georgia;font-size:36px;color:#FF0000;background-color:#FFFF00;font-weight:normal;font-style:italic;text-decoration:underline line-through;letter-spacing:1px;"
+                "style": "font-family:Georgia;font-size:27px;color:#FF0000;background-color:#FFFF00;font-weight:normal;font-style:italic;text-decoration:underline line-through;letter-spacing:1px;"
             })
         );
         assert_eq!(items[0]["lines"][1]["align"], "right");
         assert_eq!(items[0]["lines"][1]["text"][0]["value"], "Cached field");
         assert_eq!(items[0]["lines"][2]["text"][0]["value"], " ");
         assert_eq!(items[0]["lines"][3]["align"], "center");
+        assert_eq!(
+            items[0]["lines"][3]["pptxSpacing"],
+            json!(["20px", "25%", null])
+        );
         assert_eq!(items[0]["lines"][3]["text"][0]["value"], "Final");
         let themed = items[1]["style"].as_str().unwrap();
         assert!(themed.contains("border-radius:50%;background:radial-gradient(circle at center, #FF0000 0%, #0000FF 100%)"), "{themed}");
@@ -1909,6 +1917,7 @@ mod tests {
         assert!(!transparent.contains("background:"));
         assert!(transparent.contains("--pptx-text-insets:14.4 7.2 14.4 7.2;"));
         assert!(!transparent.contains("white-space:nowrap;"));
+        assert!(transparent.contains("font-size:60px;"));
     }
 
     #[test]

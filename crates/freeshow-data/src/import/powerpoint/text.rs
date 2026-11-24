@@ -13,6 +13,7 @@ pub(super) struct TextBody {
     pub align: String,
     pub insets: [f64; 4],
     pub nowrap: bool,
+    pub font_scale: f64,
     pub lines: Vec<Value>,
 }
 
@@ -20,6 +21,19 @@ impl TextBody {
     pub(super) fn read(shape: Node<'_, '_>, context: &Context, size: &SlideSize) -> Option<Self> {
         let body = child(shape, "txBody")?;
         let properties = child(body, "bodyPr");
+        let autofit = properties.and_then(|node| child(node, "normAutofit"));
+        let autofit_percent = |key| {
+            autofit
+                .and_then(|node| node.attribute(key))
+                .and_then(percentage)
+        };
+        let font_scale = autofit_percent("fontScale")
+            .filter(|value| (1.0..=100.0).contains(value))
+            .unwrap_or(100.0)
+            / 100.0;
+        let line_reduction = autofit_percent("lnSpcReduction")
+            .filter(|value| *value <= 100.0)
+            .unwrap_or(0.0);
         let anchor = properties.and_then(|body| body.attribute("anchor"));
         let align = match anchor {
             Some("b") => "align-items:flex-end;",
@@ -57,10 +71,13 @@ impl TextBody {
             };
             let defaults = properties.map(|node| node.and_then(|node| child(node, "defRPr")));
             let [height, before, after] = ["lnSpc", "spcBef", "spcAft"].map(|key| {
-                properties
-                    .into_iter()
-                    .flatten()
-                    .find_map(|node| spacing(child(node, key)?, px_per_point))
+                properties.into_iter().flatten().find_map(|node| {
+                    spacing(
+                        child(node, key)?,
+                        px_per_point,
+                        if key == "lnSpc" { line_reduction } else { 0.0 },
+                    )
+                })
             });
             let [left, right, indent] = ["marL", "marR", "indent"].map(|key| {
                 let emu = properties
@@ -71,7 +88,7 @@ impl TextBody {
                 size.px_x(f64::from(emu)).round() as i32
             });
             let first = lines.len();
-            let style = |run| run_style(run, defaults, font_ref, context, px_per_point);
+            let style = |run| run_style(run, defaults, font_ref, context, px_per_point, font_scale);
             let mut runs = Vec::new();
             let mut paragraph_has_text = false;
             for run in paragraph.children().filter(Node::is_element) {
@@ -132,6 +149,7 @@ impl TextBody {
             Self {
                 align: align.into(),
                 nowrap: properties.and_then(|node| node.attribute("wrap")) == Some("none"),
+                font_scale,
                 insets: [
                     size.px_x(inset("lIns", 91_440.0)),
                     size.px_y(inset("tIns", 45_720.0)),
@@ -201,7 +219,7 @@ fn bullet(
     json!({"value": value, "style": style})
 }
 
-fn spacing(node: Node<'_, '_>, px_per_point: f64) -> Option<String> {
+fn spacing(node: Node<'_, '_>, px_per_point: f64, reduction: f64) -> Option<String> {
     let value = node.first_element_child()?;
     let number = value.attribute("val")?;
     match value.tag_name().name() {
@@ -209,7 +227,7 @@ fn spacing(node: Node<'_, '_>, px_per_point: f64) -> Option<String> {
             "{}px",
             f64::from(number.parse::<u32>().ok()?) * px_per_point / 100.0
         )),
-        "spcPct" => percentage(number).map(|value| format!("{value}%")),
+        "spcPct" => percentage(number).map(|value| format!("{}%", (value - reduction).max(0.0))),
         _ => None,
     }
 }
@@ -236,6 +254,7 @@ fn run_style(
     font_ref: Option<Node<'_, '_>>,
     context: &Context,
     px_per_point: f64,
+    font_scale: f64,
 ) -> String {
     let layers = [run, defaults[0], defaults[1], defaults[2]];
     let attribute = |key| {
@@ -265,7 +284,7 @@ fn run_style(
         .and_then(|size| size.parse::<u32>().ok())
         .filter(|size| (100..=400_000).contains(size))
     {
-        let px = f64::from(size) * px_per_point / 100.0;
+        let px = f64::from(size) * px_per_point / 100.0 * font_scale;
         css.push_str(&format!("font-size:{px}px;"));
     }
     if let Some(color) = property("solidFill")
