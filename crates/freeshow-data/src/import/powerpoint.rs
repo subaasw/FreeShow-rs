@@ -98,7 +98,14 @@ pub(super) fn import(
     };
     let mut advance_times = Vec::new();
     let mut transitions = Vec::new();
-    for (index, part) in parts.iter().enumerate() {
+    for (
+        index,
+        SlidePart {
+            path: part,
+            section,
+        },
+    ) in parts.iter().enumerate()
+    {
         let xml = read_xml(&mut archive, part)?.ok_or_else(|| invalid("slide part is missing"))?;
         slide_xml_bytes += xml.len();
         if slide_xml_bytes > 64 * 1024 * 1024 {
@@ -169,7 +176,10 @@ pub(super) fn import(
                 .map(|warning| format!("Slide {}: {warning}", index + 1)),
         );
         object_items.push(content.objects);
-        sections.push(Section::plain(format!("Slide {}", index + 1), lines));
+        let group = section
+            .clone()
+            .unwrap_or_else(|| format!("Slide {}", index + 1));
+        sections.push(Section::plain(group, lines));
         fills.push(fill);
         hidden.push(disabled);
         advance_times.push(content.advance_ms);
@@ -392,10 +402,15 @@ impl SlideSize {
     }
 }
 
+struct SlidePart {
+    path: String,
+    section: Option<String>,
+}
+
 fn slide_order(
     archive: &mut Archive<'_>,
     xml: Option<&str>,
-) -> Result<(Vec<String>, SlideSize), DataError> {
+) -> Result<(Vec<SlidePart>, SlideSize), DataError> {
     let part = "ppt/presentation.xml";
     let mut size = SlideSize::from_emu(12_192_000.0, 6_858_000.0);
     let mut ids = Vec::new();
@@ -403,7 +418,9 @@ fn slide_order(
         elements(xml, |name, element| {
             if name == "sldId" {
                 if let Some(id) = relationship_attr(element, "id") {
-                    ids.push(id);
+                    let slide_id =
+                        attribute(element, "id").and_then(|id| id.trim().parse::<u32>().ok());
+                    ids.push((id, slide_id));
                 }
             } else if name == "sldSz"
                 && let (Some(cx), Some(cy)) = (number(element, "cx"), number(element, "cy"))
@@ -413,17 +430,28 @@ fn slide_order(
         })?;
     }
     if !ids.is_empty() {
+        if ids.len() > 2000 {
+            return Err(invalid("expected between 1 and 2000 slides"));
+        }
         let relationships = relationships(archive, part)?;
+        let document = xml
+            .filter(|xml| xml.contains("sectionLst"))
+            .and_then(|xml| roxmltree::Document::parse(xml).ok());
+        let names = document.as_ref().map_or_else(HashMap::new, section_names);
         let order = ids
-            .iter()
-            .map(|id| {
-                relationships
+            .into_iter()
+            .map(|(id, slide_id)| {
+                let path = relationships
                     .iter()
-                    .find(|rel| rel.id == *id && rel.kind == "slide")
+                    .find(|rel| rel.id == id && rel.kind == "slide")
                     .map(|rel| rel.target.clone())
-                    .ok_or_else(|| invalid("slide relationship is missing"))
+                    .ok_or_else(|| invalid("slide relationship is missing"))?;
+                let section = slide_id
+                    .and_then(|id| names.get(&id))
+                    .map(|name| (*name).to_owned());
+                Ok(SlidePart { path, section })
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, DataError>>()?;
         return Ok((order, size));
     }
     let mut order: Vec<_> = archive
@@ -437,7 +465,53 @@ fn slide_order(
             .parse::<u32>()
             .unwrap_or(u32::MAX)
     });
-    Ok((order, size))
+    Ok((
+        order
+            .into_iter()
+            .map(|path| SlidePart {
+                path,
+                section: None,
+            })
+            .collect(),
+        size,
+    ))
+}
+
+fn section_names<'a>(document: &'a roxmltree::Document<'_>) -> HashMap<u32, &'a str> {
+    const EXT: &str = "http://schemas.microsoft.com/office/powerpoint/2010/main";
+    let mut names = HashMap::new();
+    let Some(list) = document
+        .descendants()
+        .find(|node| node.has_tag_name((EXT, "sectionLst")))
+    else {
+        return names;
+    };
+    for section in list
+        .children()
+        .filter(|node| node.has_tag_name((EXT, "section")))
+    {
+        let Some(name) = section
+            .attribute("name")
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && name.len() <= 16 * 1024)
+        else {
+            continue;
+        };
+        let Some(members) = section
+            .children()
+            .find(|node| node.has_tag_name((EXT, "sldIdLst")))
+        else {
+            continue;
+        };
+        let ids = members
+            .children()
+            .filter(|node| node.has_tag_name((EXT, "sldId")))
+            .filter_map(|node| node.attribute("id")?.trim().parse::<u32>().ok());
+        for id in ids {
+            names.entry(id).or_insert(name);
+        }
+    }
+    names
 }
 
 fn slide_text(xml: &str) -> Result<(Vec<String>, bool), DataError> {
@@ -1682,12 +1756,16 @@ mod tests {
     fn custom_shows_and_slide_ranges_keep_order_repeats_and_local_loops() {
         let read = |show_properties: &[u8]| {
             let files = archive(&[
-                ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst>
-                    <p:sldId r:id="a"/><p:sldId r:id="b"/><p:sldId r:id="c"/><p:sldId r:id="d"/>
+                ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p" xmlns:r="r" xmlns:modern="http://schemas.microsoft.com/office/powerpoint/2010/main"><p:sldIdLst>
+                    <p:sldId id="809" r:id="a"/><p:sldId id="258" r:id="b"/><p:sldId id="604" r:id="c"/><p:sldId id="410" r:id="d"/>
                 </p:sldIdLst><p:custShowLst><p:custShow id="7" name="Short"><p:sldLst>
                     <p:sld r:id="c"/><p:sld r:id="a"/><p:sld r:id="c"/><p:sld r:id="b"/>
                 </p:sldLst></p:custShow><p:custShow id="8" name="First slide"><p:sldLst><p:sld r:id="a"/></p:sldLst></p:custShow>
-                </p:custShowLst></p:presentation>"#),
+                </p:custShowLst><p:extLst><p:ext><modern:sectionLst>
+                    <modern:section name="Content &amp; prayer"><modern:sldIdLst><modern:sldId id="604"/><modern:sldId id="410"/><modern:sldId id="999"/></modern:sldIdLst></modern:section>
+                    <modern:section name="Opening"><modern:sldIdLst><modern:sldId id="809"/></modern:sldIdLst></modern:section>
+                    <modern:section name=" "><modern:sldIdLst><modern:sldId id="258"/></modern:sldIdLst></modern:section>
+                </modern:sectionLst></p:ext></p:extLst></p:presentation>"#),
                 ("ppt/_rels/presentation.xml.rels", br#"<Relationships>
                     <Relationship Id="a" Type="o/slide" Target="slides/slide4.xml"/>
                     <Relationship Id="b" Type="o/slide" Target="slides/slide2.xml"/>
@@ -1716,6 +1794,16 @@ mod tests {
             "Short"
         );
         assert_eq!(ids(&custom), ["s3", "s1", "s3", "s2"]);
+        let groups = |show: &ShowFile| {
+            show.ordered_slides()
+                .into_iter()
+                .map(|slide| slide.group.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            groups(&custom),
+            ["Content & prayer", "Opening", "Content & prayer", "Slide 2"]
+        );
         assert_eq!(custom.next_timer_at(1), Some(1.25));
         assert_eq!(
             custom.timed_cue_target_at(0),
@@ -1731,6 +1819,10 @@ mod tests {
         assert_eq!(ids(&custom), ["s1"]);
         assert!(custom.set_active_layout("main"));
         assert_eq!(ids(&custom), ["s1", "s2", "s3", "s4"]);
+        assert_eq!(
+            groups(&custom),
+            ["Opening", "Slide 2", "Content & prayer", "Content & prayer"]
+        );
         assert_eq!(
             custom.timed_cue_target_at(3),
             Some(crate::TimedCueTarget::First)
