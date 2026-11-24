@@ -723,8 +723,9 @@ pub(super) struct ObjectStyle {
 }
 
 type CustomPath = Vec<Vec<[f64; 2]>>;
+type ShadedPaths = (Vec<CustomPath>, Vec<i8>);
 
-fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
+fn preset_paths(properties: Node<'_, '_>) -> Option<ShadedPaths> {
     let geometry = child(properties, "prstGeom")?;
     let adjustment = |name: &str, default| {
         child(geometry, "avLst")
@@ -833,7 +834,8 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
                 arc_angle("adj1", 10_800_000.0),
                 arc_angle("adj2", 0.0),
                 band_width("adj3", 25_000.0),
-            );
+            )
+            .map(|paths| (paths, Vec::new()));
         }
         "pieWedge" => {
             let mut outline = vec![[0.0, 1.0]];
@@ -852,7 +854,7 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             let size @ [sx, sy] = short_side()?;
             let thickness = band_width("adj", if name == "donut" { 25_000.0 } else { 18_750.0 });
             if thickness == 0.0 {
-                return Some(Vec::new());
+                return Some(ShadedPaths::default());
             }
             let mut contours = vec![ellipse_contour([0.5; 2], PI, TAU)?];
             let inner @ [rx, ry] = [0.5 - sx * thickness, 0.5 - sy * thickness];
@@ -874,7 +876,21 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
                     }
                 }
             }
-            return Some(vec![contours]);
+            return Some((vec![contours], Vec::new()));
+        }
+        "cube" | "bevel" | "foldedCorner" | "can" => {
+            return shaded_preset_faces(
+                name,
+                short_side()?,
+                adjustment(
+                    "adj",
+                    match name {
+                        "bevel" => 12_500.0,
+                        "foldedCorner" => 16_667.0,
+                        _ => 25_000.0,
+                    },
+                ),
+            );
         }
         "hexagon" => {
             let [sx, _] = short_side()?;
@@ -963,11 +979,69 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
                 .collect()
         }
     };
-    Some(if outline.len() < 3 {
+    let paths = if outline.len() < 3 {
         Vec::new()
     } else {
         vec![vec![outline]]
-    })
+    };
+    Some((paths, Vec::new()))
+}
+
+fn shaded_preset_faces(name: &str, [sx, sy]: [f64; 2], adjustment: f64) -> Option<ShadedPaths> {
+    let limit = if name == "cube" { 1.0 } else { 0.5 };
+    let inset = (adjustment / 100_000.0).clamp(0.0, limit);
+    let (x, y) = (sx * inset, sy * inset);
+    let (r, b) = (1.0 - x, 1.0 - y);
+    let (faces, shades) = match name {
+        "cube" => (
+            vec![
+                vec![[0.0, y], [r, y], [r, 1.0], [0.0, 1.0]],
+                vec![[r, y], [1.0, 0.0], [1.0, b], [r, 1.0]],
+                vec![[0.0, y], [x, 0.0], [1.0, 0.0], [r, y]],
+            ],
+            vec![0, -20, 20],
+        ),
+        "bevel" => (
+            vec![
+                vec![[x, y], [r, y], [r, b], [x, b]],
+                vec![[0.0, 0.0], [1.0, 0.0], [r, y], [x, y]],
+                vec![[0.0, 1.0], [x, b], [r, b], [1.0, 1.0]],
+                vec![[0.0, 0.0], [x, y], [x, b], [0.0, 1.0]],
+                vec![[1.0, 0.0], [1.0, 1.0], [r, b], [r, y]],
+            ],
+            vec![0, 20, -20, 40, -40],
+        ),
+        "foldedCorner" => (
+            vec![
+                vec![[0.0, 0.0], [1.0, 0.0], [1.0, b], [r, 1.0], [0.0, 1.0]],
+                vec![[r, 1.0], [r + x / 5.0, b + y / 5.0], [1.0, b]],
+            ],
+            vec![0, -20],
+        ),
+        "can" => {
+            use std::f64::consts::PI;
+
+            let y = (sy * adjustment / 200_000.0).clamp(0.0, 0.25);
+            if y == 0.0 {
+                return Some((
+                    vec![vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]]],
+                    Vec::new(),
+                ));
+            }
+            let radii = [0.5, y];
+            let mut side = vec![[0.0, y]];
+            append_ellipse_arc(&mut side, radii, PI, -PI)?;
+            side.push([1.0, 1.0 - y]);
+            append_ellipse_arc(&mut side, radii, 0.0, PI)?;
+            let mut lid = vec![[0.0, y]];
+            append_ellipse_arc(&mut lid, radii, PI, PI)?;
+            append_ellipse_arc(&mut lid, radii, 0.0, PI)?;
+            lid.pop();
+            (vec![side, lid], vec![0, 40])
+        }
+        _ => return None,
+    };
+    Some((faces.into_iter().map(|face| vec![face]).collect(), shades))
 }
 
 fn clockwise_sweep(start: f64, end: f64) -> f64 {
@@ -1190,7 +1264,7 @@ fn prohibition_symbol_has_two_mirrored_cutouts() {
             <prstGeom prst="noSmoking"/></spPr>"#,
     )
     .unwrap();
-    let paths = preset_paths(document.root_element()).unwrap();
+    let (paths, _) = preset_paths(document.root_element()).unwrap();
     let [_, first, second] = paths[0].as_slice() else {
         panic!("expected two cutouts")
     };
@@ -1209,7 +1283,7 @@ fn curved_presets_preserve_the_ray_angle_and_donut_cutout() {
                 <prstGeom prst="{name}"><avLst>{guides}</avLst></prstGeom></spPr>"#
         );
         let document = Document::parse(&xml).unwrap();
-        preset_paths(document.root_element()).unwrap()
+        preset_paths(document.root_element()).unwrap().0
     };
 
     let pie = paths("pie", r#"<gd name="adj1" fmla="val 2700000"/>"#);
@@ -1242,6 +1316,7 @@ fn adjusted_block_presets_use_the_short_side_in_both_orientations() {
         let document = Document::parse(&xml).unwrap();
         preset_paths(document.root_element())
             .unwrap()
+            .0
             .remove(0)
             .remove(0)
     };
@@ -1373,7 +1448,7 @@ fn guide_formula(formula: &str, value: impl Fn(&str) -> Option<f64>) -> Option<f
     result.is_finite().then_some(result)
 }
 
-fn custom_paths(properties: Node<'_, '_>) -> Option<(Vec<CustomPath>, Vec<i8>)> {
+fn custom_paths(properties: Node<'_, '_>) -> Option<ShadedPaths> {
     let geometry = child(properties, "custGeom")?;
     let ext = child(properties, "xfrm").and_then(|xfrm| child(xfrm, "ext"));
     let mut paths = Vec::new();
@@ -1768,13 +1843,10 @@ impl ThemeReader {
             let Some(properties) = child(shape, "spPr") else {
                 continue;
             };
-            let (paths, path_shades) = match custom_paths(properties) {
-                Some((paths, shades)) => (Some(paths), shades),
-                None => (preset_paths(properties), Vec::new()),
-            };
+            let paths = custom_paths(properties).or_else(|| preset_paths(properties));
             let geometry = if paths
                 .as_ref()
-                .is_some_and(|paths| paths.len() == 1 && paths[0].len() == 1)
+                .is_some_and(|(paths, _)| paths.len() == 1 && paths[0].len() == 1)
             {
                 GradientShape::Polygon
             } else if child(properties, "prstGeom").and_then(|geom| geom.attribute("prst"))
@@ -1807,7 +1879,9 @@ impl ThemeReader {
                     .and_then(|index| context.style(index, placeholder.as_ref(), geometry)),
             };
             let fill = match fill {
-                _ if paths.as_ref().is_some_and(Vec::is_empty) => Some(String::new()),
+                _ if paths.as_ref().is_some_and(|(paths, _)| paths.is_empty()) => {
+                    Some(String::new())
+                }
                 Some(ResolvedFill::Color(fill)) => Some(format!("background:{fill};")),
                 Some(ResolvedFill::Gradient { style, .. }) => Some(style),
                 None if direct.is_some() => Some(String::new()),
@@ -1815,12 +1889,13 @@ impl ThemeReader {
             };
             let text = TextBody::read(shape, &context, size);
             if fill.is_some() || text.is_some() {
+                let (paths, path_shades) = paths.unwrap_or_default();
                 styles.insert(
                     shape.range().start as u64,
                     ObjectStyle {
                         fill,
                         text,
-                        paths: paths.unwrap_or_default(),
+                        paths,
                         path_shades,
                     },
                 );
