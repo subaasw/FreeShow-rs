@@ -27,6 +27,7 @@ mod gst_player {
         gain: std::cell::Cell<f64>,
         start: std::cell::Cell<f64>,
         end: std::cell::Cell<f64>,
+        pending_span: std::cell::Cell<bool>,
     }
 
     impl VideoPlayer {
@@ -154,6 +155,7 @@ mod gst_player {
                 gain: std::cell::Cell::new(1.0),
                 start: std::cell::Cell::new(0.0),
                 end: std::cell::Cell::new(0.0),
+                pending_span: std::cell::Cell::new(false),
             })
         }
 
@@ -235,10 +237,27 @@ mod gst_player {
             self.start.set(from);
             self.end
                 .set(if to_seconds > from { to_seconds } else { 0.0 });
-            let _ = self.seek_seconds(from);
+            self.pending_span.set(
+                !self.seek_span_start()
+                    && (from > 0.0 || self.end.get() > 0.0 || self.rate.get() != 1.0),
+            );
         }
 
         pub fn seek_seconds(&self, seconds: f64) -> bool {
+            self.seek(seconds, gst::SeekFlags::KEY_UNIT)
+        }
+
+        fn seek_span_start(&self) -> bool {
+            let start = self.start.get();
+            let flags = if start > 0.0 {
+                gst::SeekFlags::ACCURATE
+            } else {
+                gst::SeekFlags::KEY_UNIT
+            };
+            self.seek(start, flags)
+        }
+
+        fn seek(&self, seconds: f64, flags: gst::SeekFlags) -> bool {
             let from = seconds.max(0.0);
             let nanos = (from * 1_000_000_000.0) as u64;
             let stop = self.end.get();
@@ -253,7 +272,7 @@ mod gst_player {
             self.pipeline
                 .seek(
                     self.rate.get(),
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::SeekFlags::FLUSH | flags,
                     gst::SeekType::Set,
                     gst::ClockTime::from_nseconds(nanos),
                     stop_type,
@@ -293,6 +312,15 @@ mod gst_player {
         }
 
         fn poll_frame(&mut self, wait: gst::ClockTime) -> Option<Raster> {
+            if self.pending_span.get() {
+                // The demuxer may not accept a seek until the first frame has arrived.
+                let first = self.pull(wait)?;
+                self.pending_span.set(false);
+                if !self.seek_span_start() {
+                    self.rewound.set(false);
+                    return Some(first);
+                }
+            }
             if let Some(frame) = self.pull(wait) {
                 self.rewound.set(false);
                 return Some(frame);
@@ -300,7 +328,7 @@ mod gst_player {
             if self.looping.get()
                 && self.sink.is_eos()
                 && !self.rewound.get()
-                && self.seek_seconds(self.start.get())
+                && self.seek_span_start()
             {
                 self.rewound.set(true);
                 return self.pull(wait);
@@ -310,7 +338,7 @@ mod gst_player {
 
         /// The clip has reached the end and is not set to repeat.
         pub fn is_finished(&self) -> bool {
-            !self.looping.get() && self.sink.is_eos()
+            !self.pending_span.get() && !self.looping.get() && self.sink.is_eos()
         }
 
         fn pull(&mut self, wait: gst::ClockTime) -> Option<Raster> {
@@ -968,6 +996,29 @@ mod gst_player {
             assert!(still.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
             assert!(video_thumbnail(&dir.join("missing.mp4"), 56, 40).is_none());
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn trimmed_clip_opens_at_the_requested_in_point() {
+            let dir = std::env::temp_dir().join(format!("freeshow-trim-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let clip = dir.join("clip.mp4");
+            if crate::write_benchmark_video(&clip).is_err() {
+                let _ = std::fs::remove_dir_all(dir);
+                return;
+            }
+            let mut player = VideoPlayer::open_routed(&clip, &[]).unwrap();
+            player.set_looping(false);
+            player.set_span(1.25, 1.85);
+            let frame = player.next_frame_wait(std::time::Duration::from_secs(3));
+            assert!(frame.is_some());
+            let position = player.position_seconds();
+            assert!(
+                (1.2..=1.85).contains(&position),
+                "video started at {position}"
+            );
+            drop(player);
+            std::fs::remove_dir_all(dir).unwrap();
         }
 
         #[test]

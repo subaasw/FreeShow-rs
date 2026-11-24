@@ -179,6 +179,24 @@ impl VideoEnd {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct VideoTransport {
+    from: f64,
+    to: f64,
+    rate: f64,
+}
+
+impl VideoTransport {
+    fn from_media(media: &serde_json::Value) -> Option<Self> {
+        let transport = media.get("videoTransport")?;
+        Some(Self {
+            from: transport["fromTime"].as_f64()?,
+            to: transport["toTime"].as_f64()?,
+            rate: transport["speed"].as_f64()?,
+        })
+    }
+}
+
 pub struct Session {
     pub root: Option<PathBuf>,
     pub icecast: Option<(freeshow_core::IcecastDestination, bool)>,
@@ -276,6 +294,7 @@ pub struct Session {
     background_path: Option<PathBuf>,
     video_end: VideoEnd,
     video_end_fade: Option<bool>,
+    video_transport: Option<VideoTransport>,
     imported_foreground_active: bool,
     pub volume: f32,
     /// The main channel is muted. Playback stays silent until a slide unmutes it.
@@ -516,6 +535,7 @@ impl Session {
             background_path: None,
             video_end: VideoEnd::Hold,
             video_end_fade: None,
+            video_transport: None,
             imported_foreground_active: false,
             volume: 1.0,
             audio_muted: false,
@@ -711,6 +731,7 @@ impl Session {
             background_path: None,
             video_end: VideoEnd::Hold,
             video_end_fade: None,
+            video_transport: None,
             imported_foreground_active: false,
             volume,
             audio_muted,
@@ -1633,6 +1654,7 @@ impl Session {
                 self.background_transition = true;
             }
             MediaKind::Video => {
+                self.remember_video_playback(&path);
                 self.background_path = Some(path.clone());
                 self.background_transition = true;
                 self.pending_play = Some(PendingPlay::Video(path));
@@ -2164,6 +2186,7 @@ impl Session {
             MediaKind::Image => self.show_background_still(&path, hide_slide, retrigger),
             MediaKind::Video if path.is_file() => {
                 let end = VideoEnd::from_media(media);
+                let transport = VideoTransport::from_media(media);
                 let loops = media["loop"] != false;
                 let muted = media["muted"] != false;
                 let ended = self
@@ -2175,8 +2198,9 @@ impl Session {
                     || self.background_path.as_ref() != Some(&path)
                     || self.media_loop != loops
                     || self.media_muted != muted
+                    || self.video_transport != transport
                 {
-                    self.queue_background_video(&path, Some((loops, muted)), hide_slide);
+                    self.queue_background_video(&path, Some((loops, muted)), hide_slide, transport);
                 } else {
                     self.slide_hidden = hide_slide;
                 }
@@ -2540,6 +2564,7 @@ impl Session {
     }
 
     fn remember_video_playback(&mut self, path: &Path) {
+        self.video_transport = None;
         let (rate, kind, volume, from, to) = self
             .root
             .as_deref()
@@ -2611,7 +2636,12 @@ impl Session {
         });
         let flags = entry.map(ShowFile::media_entry_flags);
         let end = entry.map(VideoEnd::from_media).unwrap_or_default();
-        if self.background_path.as_deref() == Some(path) {
+        let transport = entry.and_then(VideoTransport::from_media);
+        let retrigger = entry.is_some_and(|media| media["retrigger"] == true);
+        if !retrigger
+            && self.background_path.as_deref() == Some(path)
+            && self.video_transport == transport
+        {
             self.video_end = end;
             if !self.timeline_playing {
                 self.background_transition = false;
@@ -2641,6 +2671,7 @@ impl Session {
             path,
             flags.map(|(loops, muted, _)| (loops, muted)),
             foreground,
+            transport,
         );
         self.video_end = end;
     }
@@ -2650,10 +2681,17 @@ impl Session {
         path: &Path,
         audio_flags: Option<(bool, bool)>,
         foreground: bool,
+        transport: Option<VideoTransport>,
     ) {
         self.media_finished = None;
         self.remember_background(path);
         self.remember_video_playback(path);
+        self.video_transport = transport;
+        if let Some(transport) = transport {
+            self.video_from = transport.from;
+            self.video_to = transport.to;
+            self.video_rate = transport.rate;
+        }
         if let Some((loops, muted)) = audio_flags {
             self.media_loop = loops;
             self.media_muted = muted;
@@ -8108,14 +8146,16 @@ Second line"
         show.show["origin"] = serde_json::json!("propresenter");
         show.show["media"] = serde_json::json!({
             "still": {"path": still},
-            "clip": {"path": video, "loop": false},
-            "restart": {"path": video, "loop": false, "retrigger": true},
+            "clip": {"path": video, "loop": false, "videoTransport": {"fromTime": 0.25, "toTime": 0.75, "speed":1.5}},
+            "trim": {"path": video, "loop": false, "videoTransport": {"fromTime": 0.5, "toTime": 1.0, "speed":1.25}},
+            "restart": {"path": video, "loop": false, "retrigger": true, "videoTransport": {"fromTime": 0.5, "toTime": 1.0, "speed":1.25}},
             "looping": {"path": video, "loop": true},
         });
         show.show["layouts"]["main"]["timeline"]["actions"] = serde_json::json!([
             {"time": 0, "type": "background", "data": {"id": "still"}},
             {"time": 500, "type": "background", "data": {"id": "clip"}},
             {"time": 600, "type": "background", "data": {"id": "clip"}},
+            {"time": 650, "type": "background", "data": {"id": "trim"}},
             {"time": 700, "type": "background", "data": {"id": "restart"}},
             {"time": 800, "type": "background", "data": {"id": "looping"}},
             {"time": 900, "type": "background", "data": {"id": "still"}},
@@ -8133,11 +8173,23 @@ Second line"
         assert!(!session.tick_timeline(start + Duration::from_millis(499)));
         assert!(session.tick_timeline(start + Duration::from_millis(500)));
         assert!(!session.media_loop);
+        assert_eq!(
+            (session.video_from, session.video_to, session.video_rate),
+            (0.25, 0.75, 1.5)
+        );
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Video(path)), None] if path == video)
         );
         session.tick_timeline(start + Duration::from_millis(600));
         assert!(matches!(session.take_plays(), [None, None]));
+        assert!(session.tick_timeline(start + Duration::from_millis(650)));
+        assert_eq!(
+            (session.video_from, session.video_to, session.video_rate),
+            (0.5, 1.0, 1.25)
+        );
+        assert!(
+            matches!(session.take_plays(), [Some(PendingPlay::Video(path)), None] if path == video)
+        );
         assert!(session.tick_timeline(start + Duration::from_millis(700)));
         assert!(
             matches!(session.take_plays(), [Some(PendingPlay::Video(path)), None] if path == video)
@@ -8145,6 +8197,10 @@ Second line"
         assert!(session.clear_slide_layer());
         assert!(session.tick_timeline(start + Duration::from_millis(900)));
         assert!(session.media_loop);
+        assert_eq!(
+            (session.video_from, session.video_to, session.video_rate),
+            (0.0, 0.0, 1.0)
+        );
         assert!(matches!(session.take_plays(), [None, None]));
         assert_eq!(session.background_path.as_ref(), Some(&still));
         assert_eq!(session.slide_index, Some(0));
