@@ -2483,8 +2483,8 @@ mod tests {
             items[0]["lines"][0]["pptxBullet"],
             json!({"value":"•", "style":"color:#00AA00;--pptx-bullet-scale:75%;"})
         );
-        for index in 1..4 {
-            assert!(items[0]["lines"][index].get("pptxBullet").is_none());
+        for line in &items[0]["lines"].as_array().unwrap()[1..4] {
+            assert!(line.get("pptxBullet").is_none());
         }
         assert_eq!(
             items[0]["lines"][0]["pptxSpacing"],
