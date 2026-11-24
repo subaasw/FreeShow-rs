@@ -944,6 +944,18 @@ fn text_item(text: &wire::Text, style: &mut String) -> Option<Value> {
         _ => "center",
     };
     style.push_str(&format!("align-items:{vertical};"));
+    if let Some(margins) = &text.margins {
+        let insets = [margins.left, margins.top, margins.right, margins.bottom];
+        if insets.iter().all(|edge| edge.is_finite()) && insets != [0.0; 4] {
+            let [left, top, right, bottom] = insets;
+            let _ = write!(style, "--text-insets:{left} {top} {right} {bottom};");
+        }
+    }
+    if let Some(shadow) = &text.shadow
+        && let Some(css) = text_shadow(shadow)
+    {
+        style.push_str(&css);
+    }
     let mut alignment = "";
     let (mut underline, mut strike) = (false, false);
     if let Some(attributes) = &text.attributes {
@@ -968,6 +980,13 @@ fn text_item(text: &wire::Text, style: &mut String) -> Option<Value> {
         }
         if let Some(color) = &attributes.color {
             style.push_str(&format!("color:{};", css_color(color)));
+        }
+        let stroke = attributes.stroke_width.abs();
+        if stroke.is_finite() && stroke > 0.0 {
+            let _ = write!(style, "-webkit-text-stroke-width:{stroke}px;");
+            if let Some(color) = &attributes.stroke_color {
+                let _ = write!(style, "-webkit-text-stroke-color:{};", css_color(color));
+            }
         }
         if let Some(paragraph) = &attributes.paragraph {
             alignment = match paragraph.alignment {
@@ -1008,6 +1027,31 @@ fn text_item(text: &wire::Text, style: &mut String) -> Option<Value> {
             .collect()
     };
     Some(json!({"style":style,"lines":lines}))
+}
+
+fn text_shadow(shadow: &wire::TextShadow) -> Option<String> {
+    if !shadow.enabled
+        || ![shadow.angle, shadow.offset, shadow.radius, shadow.opacity]
+            .iter()
+            .all(|value| value.is_finite())
+        || shadow.opacity <= 0.0
+    {
+        return None;
+    }
+    let (sin, cos) = shadow.angle.rem_euclid(360.0).to_radians().sin_cos();
+    let offset = shadow.offset.clamp(0.0, 32768.0);
+    let radius = shadow.radius.clamp(0.0, 32768.0);
+    let mut color = shadow.color.clone().unwrap_or(wire::Color {
+        alpha: 1.0,
+        ..Default::default()
+    });
+    color.alpha *= shadow.opacity.min(1.0) as f32;
+    Some(format!(
+        "text-shadow:{:.3}px {:.3}px {radius}px {};",
+        offset * cos,
+        -offset * sin,
+        css_color(&color),
+    ))
 }
 
 fn valid_size(size: &wire::Size) -> bool {
@@ -1472,10 +1516,41 @@ mod tests {
         text.rtf = br"{\rtf1\ansi{\fonttbl{\f0 Arial;}{\f1 Times New Roman;}}{\colortbl;\red255\green0\blue0;\red255\green255\blue0;\red0\green255\blue0;}
 \qc\f0\fs48 A {\f1\cf1\cb3\highlight2\b0\i0\ul\strike \ldblquote red\rdblquote\emdash\u-10179?\u-8704?\highlight0 !}\par\ql\ulnone\strike0 Last}"
             .to_vec();
+        text.margins = Some(wire::EdgeInsets {
+            left: 8.0,
+            right: 16.0,
+            top: 24.0,
+            bottom: 32.0,
+        });
+        text.shadow = Some(wire::TextShadow {
+            angle: 315.0,
+            offset: 10.0,
+            radius: 3.0,
+            color: Some(wire::Color {
+                blue: 1.0,
+                alpha: 0.5,
+                ..Default::default()
+            }),
+            opacity: 0.5,
+            enabled: true,
+        });
+        let attrs = text.attributes.as_mut().unwrap();
+        attrs.stroke_width = 3.0;
+        attrs.stroke_color = Some(wire::Color {
+            red: 1.0,
+            alpha: 1.0,
+            ..Default::default()
+        });
         let show = crate::import::import_show("Mixed.pro", &presentation.encode_to_vec()).unwrap();
         let verse = &show.ordered_slides()[1];
         assert_eq!(verse.lines, ["A “red”—😀!", "Last", "Another text box"]);
         let item = &show.show["slides"][&verse.id]["items"][0];
+        let style = item["style"].as_str().unwrap();
+        assert!(style.contains("--text-insets:8 24 16 32;"));
+        assert!(style.contains("text-shadow:7.071px 7.071px 3px #0000ff40;"));
+        assert!(
+            style.contains("-webkit-text-stroke-width:3px;-webkit-text-stroke-color:#ff0000ff;")
+        );
         let rows = &item["lines"];
         assert_eq!(rows[0]["align"], "center");
         assert_eq!(rows[1]["align"], "left");

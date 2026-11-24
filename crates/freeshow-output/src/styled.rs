@@ -52,7 +52,7 @@ pub struct BoxStyle {
     pub backdrop: String,
     rotation_deg: f32,
     pptx_group_matrix: Option<[f32; 4]>,
-    pptx_text_insets: [f32; 4],
+    text_insets: [f32; 4],
     /// CSS gradient from `background`.
     pub gradient: Option<Gradient>,
     pptx_linear_scaled: bool,
@@ -193,7 +193,7 @@ impl Default for BoxStyle {
             backdrop: String::new(),
             rotation_deg: 0.0,
             pptx_group_matrix: None,
-            pptx_text_insets: [0.0; 4],
+            text_insets: [0.0; 4],
             gradient: None,
             pptx_linear_scaled: false,
             pptx_gradient_fixed: false,
@@ -424,9 +424,9 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "--pptx-fill-flip-x" => style.pptx_fill_flip_x = value == "1",
             "--pptx-fill-flip-y" => style.pptx_fill_flip_y = value == "1",
             "--pptx-group-matrix" => style.pptx_group_matrix = parse_four_numbers(value),
-            "--pptx-text-insets" => {
+            "--pptx-text-insets" | "--text-insets" => {
                 if let Some(insets) = parse_four_numbers(value) {
-                    style.pptx_text_insets = insets;
+                    style.text_insets = insets;
                 }
             }
             "--pptx-gradient-tile" => {
@@ -1614,7 +1614,7 @@ fn draw_item_content(
         );
     }
     let clip = bounds;
-    let [left, top, right, bottom] = style.pptx_text_insets;
+    let [left, top, right, bottom] = style.text_insets;
     let horizontal = |edge| scale(edge, slide.output_width, slide.source_width).clamp(-w, w);
     let vertical = |edge| scale(edge, slide.output_height, slide.source_height).clamp(-h, h);
     let (left, top, right, bottom) = (
@@ -5353,7 +5353,7 @@ mod tests {
     }
 
     #[test]
-    fn powerpoint_text_insets_reflow_and_anchor_inside_the_shape() {
+    fn imported_text_insets_reflow_and_anchor_inside_the_shape() {
         let mut slide = shadow_slide("font-size:20px;color:#fff;");
         let item = &mut slide.items[0];
         item.lines[0].runs[0].text = "ONE TWO THREE".into();
@@ -5371,6 +5371,32 @@ mod tests {
         assert_eq!(frame.pixels, render_styled(&reference).pixels);
         assert_eq!(frame.pixel(159, 79).b, 255);
         assert!((25..50).any(|y| (32..124).any(|x| frame.pixel(x, y).r > 200)));
+        slide.items[0].style = slide.items[0]
+            .style
+            .replace("--pptx-text-insets", "--text-insets");
+        assert_eq!(render_styled(&slide).pixels, frame.pixels);
+    }
+
+    #[test]
+    fn box_text_effects_paint_on_rich_runs_without_covering_their_fills() {
+        let mut slide = shadow_slide("font-size:28px;color:#fff;");
+        slide.items[0].style.push_str(
+            "--text-insets:14 8 0 0;-webkit-text-stroke-width:2px;-webkit-text-stroke-color:#f00;text-shadow:18px 14px 0px #00f;",
+        );
+        let frame = render_styled(&slide);
+        let mut seen = [false; 3];
+        for (index, pixel) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
+            for (found, color) in
+                seen.iter_mut()
+                    .zip([[255, 255, 255, 255], [255, 0, 0, 255], [0, 0, 255, 255]])
+            {
+                if *pixel == color {
+                    *found = true;
+                    assert!(index % frame.width as usize >= 14 - 2);
+                }
+            }
+        }
+        assert_eq!(seen, [true; 3]);
     }
 
     #[test]
