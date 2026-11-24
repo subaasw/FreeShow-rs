@@ -853,6 +853,15 @@ impl SlideObject {
                     .collect::<Vec<_>>()
                     .join("|");
                 style.push_str(&format!("--pptx-fill-paths:{paths};"));
+                if self.style.path_shades.iter().any(|&shade| shade != 0) {
+                    let shades = self
+                        .style
+                        .path_shades
+                        .iter()
+                        .map(i8::to_string)
+                        .collect::<Vec<_>>();
+                    style.push_str(&format!("--pptx-path-shades:{};", shades.join(" ")));
+                }
             }
             if let Some(fill) = &self.style.fill {
                 style.push_str(fill);
@@ -2715,7 +2724,7 @@ mod tests {
                         <a:lnTo><a:pt x="75" y="25"/></a:lnTo><a:close/>
                     </a:path>
                     <a:path fill="none"/>
-                    <a:path w="20" h="40">
+                    <a:path w="20" h="40" fill="darkenLess">
                         <a:moveTo><a:pt x="10" y="10"/></a:moveTo>
                         <a:lnTo><a:pt x="15" y="20"/></a:lnTo>
                         <a:lnTo><a:pt x="10" y="30"/></a:lnTo><a:close/>
@@ -2730,6 +2739,7 @@ mod tests {
             .unwrap();
         assert!(style.contains("--pptx-fill-paths:0 0,1 0,1 1,0 1/0.25 0.25,0.25 0.75,0.75 0.75,0.75 0.25|0.5 0.25,0.75 0.5,0.5 0.75;"));
         assert!(style.contains("background:#FF0000;"));
+        assert!(style.contains("--pptx-path-shades:0 -20;"));
     }
 
     #[test]

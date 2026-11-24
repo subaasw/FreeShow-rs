@@ -719,6 +719,7 @@ pub(super) struct ObjectStyle {
     pub fill: Option<String>,
     pub text: Option<TextBody>,
     pub paths: Vec<CustomPath>,
+    pub path_shades: Vec<i8>,
 }
 
 type CustomPath = Vec<Vec<[f64; 2]>>;
@@ -1372,21 +1373,29 @@ fn guide_formula(formula: &str, value: impl Fn(&str) -> Option<f64>) -> Option<f
     result.is_finite().then_some(result)
 }
 
-fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
+fn custom_paths(properties: Node<'_, '_>) -> Option<(Vec<CustomPath>, Vec<i8>)> {
     let geometry = child(properties, "custGeom")?;
     let ext = child(properties, "xfrm").and_then(|xfrm| child(xfrm, "ext"));
     let mut paths = Vec::new();
+    let mut shades = Vec::new();
     let mut vertices = 0;
     let mut guide_budget = 16_384;
     for path in child(geometry, "pathLst")?
         .children()
         .filter(Node::is_element)
     {
-        match path.attribute("fill") {
-            Some("none") => continue,
-            None | Some("norm") if path.has_tag_name("path") => {}
-            _ => return None,
+        if !path.has_tag_name("path") {
+            return None;
         }
+        let shade = match path.attribute("fill") {
+            Some("none") => continue,
+            None | Some("norm") => 0,
+            Some("lighten") => 40,
+            Some("lightenLess") => 20,
+            Some("darken") => -40,
+            Some("darkenLess") => -20,
+            _ => return None,
+        };
         let contours = custom_path(path, geometry, ext, &mut guide_budget)?;
         if contours.is_empty() {
             continue;
@@ -1396,8 +1405,9 @@ fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             return None;
         }
         paths.push(contours);
+        shades.push(shade);
     }
-    Some(paths)
+    Some((paths, shades))
 }
 
 fn custom_path(
@@ -1644,7 +1654,7 @@ fn a_closed_bezier_outline_does_not_count_the_repeated_starting_point() {
         <close/>
     </path></pathLst></custGeom></spPr>"#;
     let document = Document::parse(xml).unwrap();
-    let paths = custom_paths(document.root_element()).unwrap();
+    let (paths, _) = custom_paths(document.root_element()).unwrap();
     let vertices = &paths[0][0];
     assert_eq!(vertices.len(), 128);
     assert_eq!(vertices[0], [0.5, 0.0]);
@@ -1662,7 +1672,7 @@ fn full_turn_arcs_close_without_a_repeated_vertex() {
             </path></pathLst></custGeom></spPr>"#
         );
         let document = Document::parse(&xml).unwrap();
-        let paths = custom_paths(document.root_element()).unwrap();
+        let (paths, _) = custom_paths(document.root_element()).unwrap();
         let vertices = &paths[0][0];
         assert!((60..=128).contains(&vertices.len()));
         assert_eq!(vertices[0], [1.0, 0.5]);
@@ -1679,7 +1689,7 @@ fn full_turn_arcs_close_without_a_repeated_vertex() {
         <close/>
     </path></pathLst></custGeom></spPr>"#;
     let document = Document::parse(xml).unwrap();
-    let paths = custom_paths(document.root_element()).unwrap();
+    let (paths, _) = custom_paths(document.root_element()).unwrap();
     let vertices = &paths[0][0];
     assert_eq!(vertices.len() % 4, 0);
     assert!(!same_path_point(vertices[0], *vertices.last().unwrap()));
@@ -1744,7 +1754,10 @@ impl ThemeReader {
             let Some(properties) = child(shape, "spPr") else {
                 continue;
             };
-            let paths = custom_paths(properties).or_else(|| preset_paths(properties));
+            let (paths, path_shades) = match custom_paths(properties) {
+                Some((paths, shades)) => (Some(paths), shades),
+                None => (preset_paths(properties), Vec::new()),
+            };
             let geometry = if paths
                 .as_ref()
                 .is_some_and(|paths| paths.len() == 1 && paths[0].len() == 1)
@@ -1794,6 +1807,7 @@ impl ThemeReader {
                         fill,
                         text,
                         paths: paths.unwrap_or_default(),
+                        path_shades,
                     },
                 );
             }
