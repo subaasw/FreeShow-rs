@@ -65,6 +65,7 @@ pub struct BoxStyle {
     pptx_radial_ellipse: Option<[f32; 4]>,
     pptx_shape_ellipse: bool,
     pptx_rectangular_focus: Option<[f32; 4]>,
+    pptx_polygon_focus: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -205,6 +206,7 @@ impl Default for BoxStyle {
             pptx_radial_ellipse: None,
             pptx_shape_ellipse: false,
             pptx_rectangular_focus: None,
+            pptx_polygon_focus: None,
         }
     }
 }
@@ -435,6 +437,7 @@ pub fn parse_style(css: &str) -> BoxStyle {
             "--pptx-radial-focus" => style.pptx_radial_focus = parse_radial_focus(value),
             "--pptx-radial-ellipse" => style.pptx_radial_ellipse = parse_radial_ellipse(value),
             "--pptx-shape-ellipse" => style.pptx_shape_ellipse = value == "1",
+            "--pptx-polygon-focus" => style.pptx_polygon_focus = parse_pair(value),
             "--shape-fill-polygon" => {
                 style.fill_polygon = parse_fill_polygon(value).unwrap_or_default()
             }
@@ -4015,6 +4018,22 @@ fn fill_item_background(
                     }
                 })
             });
+        let polygon_focus = style.pptx_polygon_focus.and_then(|point| {
+            if tile.is_some() || gradient_space.is_some() {
+                return None;
+            }
+            let points: Vec<_> = style
+                .fill_polygon
+                .iter()
+                .map(|&[x, y]| {
+                    [
+                        if style.pptx_fill_flip_x { 1.0 - x } else { x },
+                        if style.pptx_fill_flip_y { 1.0 - y } else { y },
+                    ]
+                })
+                .collect();
+            polygon_gradient_edges(&points, point).map(|edges| (point, edges))
+        });
         let mut draw_stop = |px, py| {
             let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
                 (columns[(px - x0) as usize], rows[(py - y0) as usize])
@@ -4044,7 +4063,12 @@ fn fill_item_background(
             let position = match linear {
                 Some((dx, dy)) => offset_x * dx + offset_y * dy + 0.5,
                 None => {
-                    if let Some([left, top, right, bottom]) = rectangular_focus {
+                    if let Some(([fx, fy], edges)) = &polygon_focus {
+                        let (dx, dy) = (local_x / fill_w - fx, local_y / fill_h - fy);
+                        edges
+                            .iter()
+                            .fold(0.0f32, |position, [a, b]| position.max(a * dx + b * dy))
+                    } else if let Some([left, top, right, bottom]) = rectangular_focus {
                         // Each stop lies on the rectangle interpolated between the focus and the box.
                         1.0 - (local_x * left)
                             .min(local_y * top)
@@ -4137,6 +4161,30 @@ fn fill_item_background(
     }
 }
 
+fn polygon_gradient_edges(vertices: &[[f32; 2]], [fx, fy]: [f32; 2]) -> Option<Vec<[f32; 2]>> {
+    let mut edges = Vec::new();
+    for (&[ax, ay], &[bx, by]) in vertices.iter().zip(vertices.iter().cycle().skip(1)) {
+        let (nx, ny) = (by - ay, ax - bx);
+        if nx == 0.0 && ny == 0.0 {
+            continue;
+        }
+        let focus = nx * (fx - ax) + ny * (fy - ay);
+        if focus.abs() < 1e-6 {
+            return None;
+        }
+        let (nx, ny) = (-nx / focus, -ny / focus);
+        // Each edge must bound both the focus and all vertices for the contours to stay nested.
+        if vertices
+            .iter()
+            .any(|&[x, y]| nx * (x - fx) + ny * (y - fy) > 1.0 + 1e-4)
+        {
+            return None;
+        }
+        edges.push([nx, ny]);
+    }
+    (edges.len() >= 3).then_some(edges)
+}
+
 fn parse_fill_polygon(value: &str) -> Option<Vec<[f32; 2]>> {
     let mut vertices = Vec::new();
     for pair in value.split(',') {
@@ -4185,11 +4233,16 @@ fn for_polygon_span(
     }
 }
 
-fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
+fn parse_pair(value: &str) -> Option<[f32; 2]> {
     let mut components = value.split_whitespace();
     let x = components.next()?.parse::<f32>().ok()?;
     let y = components.next()?.parse::<f32>().ok()?;
-    (components.next().is_none() && x * x + y * y < 1.0).then_some([x, y])
+    (components.next().is_none() && x.is_finite() && y.is_finite()).then_some([x, y])
+}
+
+fn parse_radial_focus(value: &str) -> Option<[f32; 2]> {
+    let [x, y] = parse_pair(value)?;
+    (x * x + y * y < 1.0).then_some([x, y])
 }
 
 fn parse_radial_ellipse(value: &str) -> Option<[f32; 4]> {
@@ -4840,6 +4893,32 @@ mod tests {
         ));
         assert_eq!(frame.pixel(337, 320), parse_color("#FF0000").unwrap());
         assert!(frame.pixel(959, 539).b > 250);
+    }
+
+    #[test]
+    fn powerpoint_polygon_gradient_reaches_the_slanted_edge_and_reflects_with_the_shape() {
+        let render = |polygon: &str, extra: &str| {
+            let mut slide = style_slide(&format!(
+                "left:0px;top:0px;width:100px;height:100px;background:radial-gradient(circle at center,#f00 0%,#00f 100%);--shape-fill-polygon:{polygon};--pptx-polygon-focus:0.25 0.25;{extra}"
+            ));
+            slide.output_width = 100;
+            slide.output_height = 100;
+            slide.source_width = 100.0;
+            slide.source_height = 100.0;
+            render_styled(&slide)
+        };
+        let frame = render("0 0,1 0,0 1", "");
+        assert!(frame.pixel(25, 25).r > 245);
+        let halfway = frame.pixel(37, 37);
+        assert!((125..=130).contains(&halfway.r));
+        assert!((125..=130).contains(&halfway.b));
+        assert!(frame.pixel(49, 49).b > 245);
+        assert_eq!(frame.pixel(80, 80), Rgba::BLACK);
+
+        let flipped = render("1 0,0 0,1 1", "--pptx-fill-flip-x:1;");
+        for (x, y) in [(25, 25), (37, 37), (49, 49), (80, 80)] {
+            assert_eq!(flipped.pixel(99 - x, y), frame.pixel(x, y));
+        }
     }
 
     #[test]
