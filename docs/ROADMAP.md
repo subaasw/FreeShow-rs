@@ -118,6 +118,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter RTF typographic punctuation and spacing, including Unicode fallback encoded as control words.
 - [x] ProPresenter 7 RTF highlights and character background colors appear behind their text runs in native output.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
+- [x] ProPresenter RTF raised and lowered runs, including superscript and subscript.
 - [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
 - [x] ProPresenter 7 triangle and rhombus fills follow the shape while text uses the rectangular text box.
 - [x] ProPresenter 7 regular polygons and stars use the stored side or point count and the star's inner radius.
@@ -159,6 +160,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] Nested PowerPoint group transforms, including child offsets, nonuniform scaling, rotation, and flips.
 - [x] PowerPoint gradients that stay aligned to the slide while their shapes rotate.
 - [x] PowerPoint positioned text with mixed run styles, theme fonts and colors, paragraph alignment, and explicit line breaks.
+- [x] PowerPoint positioned text preserves saved character baseline offsets and inherits paragraph defaults.
 - [x] PowerPoint text-box insets for wrapping and alignment inside positioned shapes.
 - [x] PowerPoint text boxes with wrapping disabled keep their explicit line breaks.
 - [x] PowerPoint saved normal autofit font scaling and percentage line-spacing reduction.

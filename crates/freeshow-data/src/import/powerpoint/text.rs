@@ -322,5 +322,11 @@ fn run_style(
         let px = f64::from(spacing.clamp(-4000, 4000)) * px_per_point / 100.0;
         css.push_str(&format!("letter-spacing:{px}px;"));
     }
+    if let Some(baseline) = attribute("baseline")
+        .and_then(super::theme::percentage)
+        .filter(|value| (-1.0..=1.0).contains(value) && *value != 0.0)
+    {
+        css.push_str(&format!("vertical-align:{baseline}em;"));
+    }
     css
 }

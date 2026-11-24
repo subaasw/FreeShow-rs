@@ -38,6 +38,7 @@ pub struct BoxStyle {
     pub strike: bool,
     pub letter_spacing: f32,
     pub word_spacing: f32,
+    baseline_shift: f32,
     pub text_case: TextCase,
     pub stroke_px: f32,
     pub stroke_color: Option<Rgba>,
@@ -182,6 +183,7 @@ impl Default for BoxStyle {
             strike: false,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            baseline_shift: 0.0,
             text_case: TextCase::AsWritten,
             stroke_px: 0.0,
             stroke_color: None,
@@ -1783,6 +1785,7 @@ fn draw_item_content(
             );
         }
         for (run, run_style) in &runs {
+            let baseline = baseline - output_spacing(run_style.baseline_shift, slide);
             let size =
                 scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
             let typeface = text::Typeface {
@@ -2946,8 +2949,9 @@ fn line_layout(
         let size = scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
         let face = typeface(&run_style);
         let top = text::ascent(size, face);
-        ascent = ascent.max(top);
-        below = below.max(text::line_height(size, face) as f32 - top);
+        let shift = output_spacing(run_style.baseline_shift, slide);
+        ascent = ascent.max(top + shift.max(0.0));
+        below = below.max(text::line_height(size, face) as f32 - top - shift.min(0.0));
         font_px = font_px.max(size);
     }
     let natural_height = (ascent + below).ceil() as i32;
@@ -3061,6 +3065,20 @@ fn apply_run_style(style: &mut BoxStyle, css: &str) {
     style.background = parsed.background;
     if css.contains("font-size") {
         style.font_px = parsed.font_px;
+    }
+    match css_value(css, "vertical-align") {
+        Some(kind @ ("super" | "sub")) => {
+            let offset = if kind == "super" { 0.3 } else { -0.25 };
+            style.baseline_shift = style.font_px * offset;
+            style.font_px *= 2.0 / 3.0;
+        }
+        Some(value) => {
+            let shift = spacing_px(value, style.font_px);
+            if shift.is_finite() {
+                style.baseline_shift = shift.clamp(-10000.0, 10000.0);
+            }
+        }
+        None => {}
     }
     if css.split(';').any(|part| {
         part.split_once(':')
@@ -5198,6 +5216,46 @@ mod tests {
                 crop: Crop::default(),
             }],
         }
+    }
+
+    #[test]
+    fn shifted_glyphs_keep_their_position_relative_to_the_line_baseline() {
+        let mut slide = shadow_slide("font-size:40px;color:#ffffff;");
+        let line = &mut slide.items[0].lines[0];
+        line.runs.extend(
+            [
+                "font-size:40px;color:#ff0000;vertical-align:0.3em;",
+                "font-size:40px;color:#00ff00;vertical-align:-10px;",
+                "font-size:40px;color:#0000ff;vertical-align:super;",
+            ]
+            .map(|style| TextRun {
+                text: "A".into(),
+                style: style.into(),
+                place_on: None,
+                paint: true,
+            }),
+        );
+        let frame = render_styled(&slide);
+        let ink_rows = |(r, g, b)| {
+            let contains_ink = |y| {
+                (0..frame.width).any(|x| {
+                    let pixel = frame.pixel(x, y);
+                    (pixel.r, pixel.g, pixel.b) == (r, g, b)
+                })
+            };
+            (
+                (0..frame.height).find(|&y| contains_ink(y)).unwrap(),
+                (0..frame.height).rfind(|&y| contains_ink(y)).unwrap(),
+            )
+        };
+        let normal = ink_rows((255, 255, 255));
+        let raised = ink_rows((255, 0, 0));
+        let lowered = ink_rows((0, 255, 0));
+        let superscript = ink_rows((0, 0, 255));
+        assert_eq!(raised.1 + 12, normal.1);
+        assert_eq!(lowered.1, normal.1 + 10);
+        assert!(superscript.1 < normal.1);
+        assert!(superscript.1 - superscript.0 < normal.1 - normal.0);
     }
 
     #[test]

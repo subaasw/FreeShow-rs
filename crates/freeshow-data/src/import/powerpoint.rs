@@ -2403,6 +2403,29 @@ mod tests {
     }
 
     #[test]
+    fn positioned_text_keeps_raised_and_lowered_baselines() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm></p:spPr>
+                <p:txBody><a:bodyPr/><a:p><a:pPr><a:defRPr baseline="30000"/></a:pPr>
+                    <a:r><a:rPr baseline="0"/><a:t>H</a:t></a:r>
+                    <a:r><a:rPr baseline="-25%"/><a:t>2</a:t></a:r>
+                    <a:r><a:t>O</a:t></a:r>
+                </a:p></p:txBody>
+            </p:sp></p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Baseline.pptx", &files, None).unwrap();
+        let runs = show.show["slides"]["s1"]["items"][0]["lines"][0]["text"]
+            .as_array()
+            .unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0]["style"], "");
+        assert_eq!(runs[1]["style"], "vertical-align:-0.25em;");
+        assert_eq!(runs[2]["style"], "vertical-align:0.3em;");
+    }
+
+    #[test]
     fn positioned_shapes_keep_direct_and_theme_gradients() {
         let files = archive(&[
             (
