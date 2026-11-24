@@ -865,7 +865,7 @@ impl SlideObject {
                 let dash = stroke
                     .dash
                     .iter()
-                    .map(u8::to_string)
+                    .map(f64::to_string)
                     .collect::<Vec<_>>()
                     .join(" ");
                 dash_style = format!(
@@ -2524,7 +2524,10 @@ mod tests {
                 </p:spPr><p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef></p:style></p:cxnSp>
                 <p:sp><p:spPr>
                     <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
-                    <a:prstGeom prst="lineInv"/><a:ln w="200000"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln>
+                    <a:prstGeom prst="lineInv"/><a:ln w="200000"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>
+                        <a:custDash><a:ds d="50000" sp="125%"/><a:ds d="200000" sp="25000"/>
+                        <a:ds d="100%" sp="75000"/><a:ds d="150000" sp="50000"/></a:custDash>
+                    </a:ln>
                 </p:spPr></p:sp>
                 <p:cxnSp><p:spPr>
                     <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
@@ -2565,6 +2568,7 @@ mod tests {
         assert!(dash(1).ends_with("40 1 1 1"));
         assert!(style(2).contains("--pptx-fill-flip-y:1;"));
         assert!(style(2).contains("background:#00FF00;"));
+        assert!(dash(2).ends_with("0 0.5 1.25 2 0.25 1 0.75 1.5 0.5"));
         assert!(!style(3).contains("background:"));
         assert!(!style(3).contains("--pptx-fill-paths:"));
     }

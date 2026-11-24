@@ -171,7 +171,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] PowerPoint compound contours preserve cutouts, and independent paths paint in document order with their saved lightening and darkening.
 - [x] PowerPoint cube, bevel, folded corner, and cylinder presets retain their adjusted faces and separate shades.
 - [x] PowerPoint object rotation, picture flips, and gradient fill reflection.
-- [x] PowerPoint straight connectors and line shapes preserve solid stroke width, color, direction, preset dashes, end caps, and theme line styles.
+- [x] PowerPoint straight connectors and line shapes preserve solid stroke width, color, direction, preset and custom dash patterns, end caps, and theme line styles.
 - [x] Nested PowerPoint group transforms, including child offsets, nonuniform scaling, rotation, and flips.
 - [x] PowerPoint gradients that stay aligned to the slide while their shapes rotate.
 - [x] PowerPoint positioned text with mixed run styles, theme fonts and colors, paragraph alignment, and explicit line breaks.

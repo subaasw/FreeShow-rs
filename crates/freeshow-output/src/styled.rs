@@ -3926,19 +3926,19 @@ fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radii: Radii) -> bool 
 
 #[derive(Clone, Debug, PartialEq)]
 struct LineDash {
-    origin: [f32; 2],
-    scale: [f32; 2],
-    unit: [f32; 2],
-    length: f32,
+    origin: [f64; 2],
+    scale: [f64; 2],
+    unit: [f64; 2],
+    length: f64,
     cap: u8,
-    painted: Vec<[f32; 2]>,
-    period: f32,
+    painted: Vec<[f64; 2]>,
+    period: f64,
 }
 
 impl LineDash {
     fn parse(value: &str) -> Option<Self> {
         let mut fields = value.split_ascii_whitespace();
-        let mut finite = || fields.next()?.parse::<f32>().ok().filter(|n| n.is_finite());
+        let mut finite = || fields.next()?.parse::<f64>().ok().filter(|n| n.is_finite());
         let origin = [finite()?, finite()?];
         let scale = [finite()?, finite()?];
         let unit = [finite()?, finite()?];
@@ -3955,14 +3955,15 @@ impl LineDash {
         let mut painted = Vec::new();
         let mut period = 0.0;
         while let Some(dash) = fields.next() {
-            let dash = dash.parse::<std::num::NonZeroU8>().ok()?;
-            let gap = fields.next()?.parse::<std::num::NonZeroU8>().ok()?;
-            if painted.len() == 3 {
+            let dash = dash.parse::<f64>().ok()?;
+            let gap = fields.next()?.parse::<f64>().ok()?;
+            let end = period + dash;
+            let next = end + gap;
+            if !(end > period && next > end && next.is_finite()) {
                 return None;
             }
-            let end = period + f32::from(dash.get());
             painted.push([period, end]);
-            period = end + f32::from(gap.get());
+            period = next;
         }
         (!painted.is_empty()).then_some(Self {
             origin,
@@ -3975,7 +3976,7 @@ impl LineDash {
         })
     }
 
-    fn contains(&self, [x, y]: [f32; 2]) -> bool {
+    fn contains(&self, [x, y]: [f64; 2]) -> bool {
         let (x, y) = (
             (x - self.origin[0]) * self.scale[0],
             (y - self.origin[1]) * self.scale[1],
@@ -3988,18 +3989,29 @@ impl LineDash {
         [cycle - self.period, cycle, cycle + self.period]
             .into_iter()
             .any(|offset| {
-                self.painted.iter().any(|&[start, end]| {
-                    let (start, end) = ((offset + start).max(0.0), (offset + end).min(self.length));
-                    if start >= end {
-                        return false;
-                    }
-                    let distance = (start - along).max(along - end).max(0.0);
-                    match self.cap {
-                        1 => distance * distance + across * across <= 0.25,
-                        2 => distance <= 0.5,
-                        _ => (start..end).contains(&along),
-                    }
-                })
+                let index = self
+                    .painted
+                    .partition_point(|&[_, end]| end <= clamped - offset);
+                // Only the nearest interval on either side can cover the pixel.
+                [index.checked_sub(1), Some(index)]
+                    .into_iter()
+                    .flatten()
+                    .any(|index| {
+                        let Some(&[start, end]) = self.painted.get(index) else {
+                            return false;
+                        };
+                        let (start, end) =
+                            ((offset + start).max(0.0), (offset + end).min(self.length));
+                        if start >= end {
+                            return false;
+                        }
+                        let distance = (start - along).max(along - end).max(0.0);
+                        match self.cap {
+                            1 => distance * distance + across * across <= 0.25,
+                            2 => distance <= 0.5,
+                            _ => (start..end).contains(&along),
+                        }
+                    })
             })
     }
 }
@@ -4240,7 +4252,7 @@ fn fill_item_background(
         && !style.fill_paths.is_empty()
     {
         let normalized = |pixel, origin, extent, flip| {
-            let v = (pixel as f32 + 0.5 - origin as f32) / extent as f32;
+            let v = (f64::from(pixel) + 0.5 - f64::from(origin)) / f64::from(extent);
             if flip { 1.0 - v } else { v }
         };
         for_shape_span(slide, bounds, style, |py, start, end| {
@@ -5132,6 +5144,32 @@ mod tests {
         assert!(round.contains([0.014, 0.0]));
         assert!(!round.contains([0.014, 0.4]));
         assert!(dash(2).contains([0.014, 0.4]));
+    }
+
+    #[test]
+    fn powerpoint_custom_dashes_repeat_fractional_pairs_in_order() {
+        let pattern = LineDash::parse("0 0 12 1 1 0 12 0 0.5 1.25 2 0.25 1 0.75 1.5 0.5").unwrap();
+        for (along, painted) in [
+            (0.25, true),
+            (1.0, false),
+            (3.0, true),
+            (3.875, false),
+            (4.5, true),
+            (5.25, false),
+            (6.0, true),
+            (7.5, false),
+            (8.0, true),
+            (9.0, false),
+            (11.0, true),
+            (11.625, false),
+            (11.875, true),
+            (12.125, false),
+        ] {
+            assert_eq!(pattern.contains([along / 12.0, 0.0]), painted, "{along}");
+        }
+        for bad in ["0 1", "1 -1", "1", "NaN 1", "1 inf"] {
+            assert!(LineDash::parse(&format!("0 0 12 1 1 0 12 0 {bad}")).is_none());
+        }
     }
 
     #[test]
