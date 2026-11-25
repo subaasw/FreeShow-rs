@@ -82,6 +82,55 @@ fn format_duration(seconds: u32) -> String {
     }
 }
 
+pub(crate) fn media_reference_key(key: &str) -> bool {
+    matches!(key, "path" | "src" | "backgroundPath" | "backgroundImage")
+}
+
+impl crate::ShowFile {
+    /// Local or external paths declared by the media, picture and background fields.
+    pub fn media_references(&self) -> Vec<&str> {
+        fn collect<'a>(
+            value: &'a serde_json::Value,
+            paths: &mut std::collections::BTreeSet<&'a str>,
+        ) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for (key, value) in fields {
+                        if media_reference_key(key)
+                            && let Some(path) = value.as_str()
+                        {
+                            paths.insert(path);
+                        } else {
+                            collect(value, paths);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for value in items {
+                        collect(value, paths);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        collect(&self.show, &mut paths);
+        paths.into_iter().collect()
+    }
+
+    /// Replaces references to this exact asset while preserving the cue and its other settings.
+    pub fn relink_media(&mut self, original: &str, replacement: &str) -> usize {
+        let mut changed = 0;
+        crate::portable::walk_media(&mut self.show, &mut |value| {
+            if value.as_str() == Some(original) {
+                *value = replacement.into();
+                changed += 1;
+            }
+        });
+        changed
+    }
+}
+
 pub fn media_entry_kind(path: &Path) -> MediaEntryKind {
     match path
         .extension()
@@ -283,7 +332,9 @@ fn list_dir(dir: &Path) -> Result<Vec<MediaEntry>, DataError> {
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        entries.push(inspect_file(name, path));
+        if !name.starts_with(".freeshow-copy-") {
+            entries.push(inspect_file(name, path));
+        }
     }
     entries.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
     Ok(entries)

@@ -9,15 +9,24 @@
 mod audio_routing;
 mod export;
 mod import;
+mod portable;
 pub use audio_routing::{AudioRoute, audio_routes, network_audio_routes};
-pub use export::{write_project_package, write_show_pdf};
+pub use export::{
+    write_portable_project, write_portable_template, write_project_package, write_show_pdf,
+};
 mod item_edit;
+mod item_text;
 mod media_library;
 mod scripture;
+mod show_draft;
 mod show_edit;
+pub use show_draft::ShowDraft;
 mod stage_layout;
 
-pub use item_edit::{ItemBox, ItemFilters, ItemTypography, TextShadow, css_px, css_set, css_value};
+pub use item_edit::{
+    ItemBox, ItemFilters, ItemTypography, TextShadow, css_px, css_set, css_value, item_hidden,
+    item_locked,
+};
 pub use media_library::{
     MediaEntry, MediaEntryKind, image_dimensions, media_duration, media_entry_kind,
 };
@@ -1004,6 +1013,30 @@ impl ShowFile {
         }
     }
 
+    /// A one-slide editable show with its own copy of a template's design.
+    pub fn from_template(id: &str, name: &str, template: &Value) -> Option<Self> {
+        let items = template.get("items")?.as_array()?;
+        if items.is_empty() || items.iter().any(|item| !item.is_object()) {
+            return None;
+        }
+        let mut show = Self::blank(id, name);
+        let slide = &mut show.show["slides"]["s1"];
+        slide["items"] = Value::Array(items.clone());
+        if let Some(color) = template
+            .pointer("/settings/backgroundColor")
+            .filter(|value| value.is_string())
+        {
+            slide["settings"]["color"] = color.clone();
+        }
+        if let Some(size) = template
+            .pointer("/settings/resolution")
+            .filter(|value| value.is_object())
+        {
+            slide["settings"]["resolution"] = size.clone();
+        }
+        Some(show)
+    }
+
     /// Appends an empty slide to the active layout and returns its id.
     pub fn add_slide(&mut self) -> Option<String> {
         let id = {
@@ -1063,6 +1096,9 @@ impl ShowFile {
         format: bool,
         split_lines: u32,
     ) -> bool {
+        if self.has_locked_layers() {
+            return false;
+        }
         let layout_id = self
             .show
             .pointer("/settings/activeLayout")
@@ -1248,6 +1284,20 @@ impl ShowFile {
             .unwrap_or_default()
     }
 
+    pub fn has_locked_layers(&self) -> bool {
+        self.show["slides"].as_object().is_some_and(|slides| {
+            slides.values().any(|slide| {
+                slide["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(item_locked))
+            })
+        })
+    }
+
+    pub fn visible_lines_for_slide(&self, id: &str) -> Vec<String> {
+        visible_slide_lines(&self.show["slides"][id])
+    }
+
     /// Plain text of each slide, in the same order FreeShow stores slide objects.
     pub fn slides(&self) -> Vec<SlideView> {
         let Some(slides) = self.show.get("slides").and_then(Value::as_object) else {
@@ -1315,14 +1365,7 @@ impl ShowFile {
         if template_id.is_empty() {
             return false;
         }
-        let has_text_box = template
-            .get("items")
-            .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("type").and_then(Value::as_str).unwrap_or("text") == "text"
-                })
-            });
+        let has_text_box = template_text_item(template).is_some();
         let Some(settings) = self
             .show
             .pointer_mut("/settings")
@@ -1392,6 +1435,31 @@ impl ShowFile {
         duration_ms: u64,
         direction: &str,
     ) -> bool {
+        self.write_slide_transition(index, kind, duration_ms, direction, None)
+    }
+
+    /// Writes a complete override. None restores the output style or library transition.
+    pub fn set_slide_transition(&mut self, index: usize, motion: Option<&TextTransition>) -> bool {
+        match motion {
+            Some(motion) => self.write_slide_transition(
+                index,
+                &motion.kind,
+                motion.duration_ms,
+                &motion.direction,
+                Some(&motion.easing),
+            ),
+            None => self.write_slide_transition(index, "", 0, "", None),
+        }
+    }
+
+    fn write_slide_transition(
+        &mut self,
+        index: usize,
+        kind: &str,
+        duration_ms: u64,
+        direction: &str,
+        easing: Option<&str>,
+    ) -> bool {
         let Some((position, child)) = self.layout_position(index) else {
             return false;
         };
@@ -1403,49 +1471,59 @@ impl ShowFile {
         else {
             return false;
         };
+        let kind = kind.trim();
+        if kind.is_empty() {
+            let node = match &child {
+                None => Some(entry),
+                Some(id) => entry
+                    .get_mut("children")
+                    .and_then(|children| children.get_mut(id))
+                    .and_then(Value::as_object_mut),
+            };
+            if let Some(node) = node {
+                node.remove("transition");
+            }
+            return true;
+        }
         let node = match child {
             None => entry,
-            Some(child_id) => {
+            Some(id) => {
                 let children = entry
                     .entry("children")
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    .or_insert_with(|| serde_json::json!({}));
                 if !children.is_object() {
-                    *children = Value::Object(serde_json::Map::new());
+                    *children = serde_json::json!({});
                 }
-                let Some(slot) = children.as_object_mut().map(|children| {
-                    children
-                        .entry(child_id)
-                        .or_insert_with(|| Value::Object(serde_json::Map::new()))
-                }) else {
-                    return false;
-                };
+                let slot = children
+                    .as_object_mut()
+                    .unwrap()
+                    .entry(id)
+                    .or_insert_with(|| serde_json::json!({}));
                 if !slot.is_object() {
-                    *slot = Value::Object(serde_json::Map::new());
+                    *slot = serde_json::json!({});
                 }
-                let Some(node) = slot.as_object_mut() else {
-                    return false;
-                };
-                node
+                slot.as_object_mut().unwrap()
             }
         };
-        if kind.trim().is_empty() {
-            node.remove("transition");
-        } else if let Some(transition) = node.get_mut("transition")
-            && transition.get("type").and_then(Value::as_str) == Some(kind.trim())
+        let transition = node
+            .entry("transition")
+            .or_insert_with(|| serde_json::json!({}));
+        if !transition.is_object()
+            || (easing.is_none() && transition["type"].as_str() != Some(kind))
         {
-            transition["duration"] = serde_json::json!(duration_ms.min(10_000));
-            if !direction.trim().is_empty() {
-                transition["custom"] = serde_json::json!({ "direction": direction.trim() });
+            *transition = serde_json::json!({});
+        }
+        transition["type"] = kind.into();
+        transition["duration"] = duration_ms.min(10_000).into();
+        if let Some(easing) = easing {
+            transition["easing"] = easing.into();
+        }
+        let direction = direction.trim();
+        if !direction.is_empty() {
+            if !transition["custom"].is_object() {
+                transition["custom"] = serde_json::json!({});
             }
-        } else {
-            let mut value = serde_json::json!({
-                "type": kind.trim(),
-                "duration": duration_ms.min(10_000)
-            });
-            if !direction.trim().is_empty() {
-                value["custom"] = serde_json::json!({ "direction": direction.trim() });
-            }
-            node.insert("transition".to_string(), value);
+            transition["custom"]["direction"] = direction.into();
         }
         true
     }
@@ -2497,6 +2575,7 @@ impl ShowFile {
             .map(|items| {
                 items
                     .iter()
+                    .filter(|item| !item_hidden(item))
                     .map(|item| {
                         item.get("lines")
                             .and_then(Value::as_array)
@@ -2519,9 +2598,10 @@ impl ShowFile {
             .pointer(&format!("/slides/{slide_id}/items"))
             .and_then(Value::as_array)
             .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item.get("clickReveal").and_then(Value::as_bool) == Some(true))
+                items.iter().any(|item| {
+                    !item_hidden(item)
+                        && item.get("clickReveal").and_then(Value::as_bool) == Some(true)
+                })
             })
     }
 
@@ -2536,7 +2616,7 @@ impl ShowFile {
         let mut most = 0usize;
         let mut any = false;
         for item in items {
-            if item.get("lineReveal").and_then(Value::as_bool) != Some(true) {
+            if item_hidden(item) || item.get("lineReveal").and_then(Value::as_bool) != Some(true) {
                 continue;
             }
             any = true;
@@ -2575,13 +2655,23 @@ impl ShowFile {
         clicks_shown: bool,
         page: Option<(usize, usize)>,
     ) -> Vec<Vec<String>> {
-        let Some(items) = self
-            .show
-            .get("slides")
-            .and_then(|slides| slides.get(slide_id))
-            .and_then(|slide| slide.get("items"))
-            .and_then(Value::as_array)
-        else {
+        Self::stage_text_boxes_from_slide(
+            &self.show["slides"][slide_id],
+            current,
+            reveal,
+            clicks_shown,
+            page,
+        )
+    }
+
+    pub fn stage_text_boxes_from_slide(
+        slide: &Value,
+        current: bool,
+        reveal: u32,
+        clicks_shown: bool,
+        page: Option<(usize, usize)>,
+    ) -> Vec<Vec<String>> {
+        let Some(items) = slide.get("items").and_then(Value::as_array) else {
             return Vec::new();
         };
         let mut boxes = Vec::new();
@@ -2605,7 +2695,10 @@ impl ShowFile {
             let click = item.get("clickReveal").and_then(Value::as_bool) == Some(true);
             let line_reveal = item.get("lineReveal").and_then(Value::as_bool) == Some(true);
             boxes.push(Vec::new());
-            if (click && !(current && clicks_shown)) || (line_reveal && !current) {
+            if item_hidden(item)
+                || (click && !(current && clicks_shown))
+                || (line_reveal && !current)
+            {
                 continue;
             }
             let Some(item_lines) = item.get("lines").and_then(Value::as_array) else {
@@ -3650,12 +3743,24 @@ fn line_value(line: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn slide_lines(slide: &Value) -> Vec<String> {
+/// Extracts unstyled text from a stored slide, including a taken slide snapshot.
+pub fn slide_lines(slide: &Value) -> Vec<String> {
+    collect_slide_lines(slide, false)
+}
+
+pub fn visible_slide_lines(slide: &Value) -> Vec<String> {
+    collect_slide_lines(slide, true)
+}
+
+fn collect_slide_lines(slide: &Value, visible_only: bool) -> Vec<String> {
     let Some(items) = slide.get("items").and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut lines = Vec::new();
     for item in items {
+        if visible_only && item_hidden(item) {
+            continue;
+        }
         let Some(item_lines) = item.get("lines").and_then(Value::as_array) else {
             continue;
         };
@@ -4143,6 +4248,19 @@ impl Catalog {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Named entries in display order, with stable IDs when names match.
+    pub fn named_entries(&self) -> Vec<(&str, &str, &Value)> {
+        let Some(entries) = self.document.as_object() else {
+            return Vec::new();
+        };
+        let mut named = entries
+            .iter()
+            .filter_map(|(id, entry)| Some((id.as_str(), entry.get("name")?.as_str()?, entry)))
+            .collect::<Vec<_>>();
+        named.sort_by_key(|(id, name, _)| (*name, *id));
+        named
     }
 
     pub fn id_named(&self, name: &str) -> Option<String> {
@@ -5921,6 +6039,7 @@ impl Library {
             let entry = entry?;
             if entry.file_type()?.is_file()
                 && let Some(name) = entry.file_name().to_str()
+                && !name.starts_with(".freeshow-copy-")
             {
                 names.push(name.to_string());
             }
@@ -6755,18 +6874,17 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), DataError> {
     }
 }
 
+/// The first text box supplies the text style for an applied template.
+pub fn template_text_item(template: &Value) -> Option<&Value> {
+    template.get("items")?.as_array()?.iter().find(|item| {
+        item.is_object() && item.get("type").and_then(Value::as_str).unwrap_or("text") == "text"
+    })
+}
+
 /// Gives every lyric box on `slide` the first text box look of `template`, keeping its words.
 /// Locked slides and non-text items stay as they are. Returns whether anything changed.
 pub fn restyle_with_template(slide: &mut Value, template: &Value) -> bool {
-    let Some(template_item) = template
-        .get("items")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item.get("type").and_then(Value::as_str).unwrap_or("text") == "text")
-        })
-    else {
+    let Some(template_item) = template_text_item(template) else {
         return false;
     };
     if slide.get("locked").and_then(Value::as_bool) == Some(true) {
@@ -6795,13 +6913,22 @@ pub fn restyle_with_template(slide: &mut Value, template: &Value) -> bool {
     };
     let mut changed = false;
     for item in items {
-        if item.get("type").and_then(Value::as_str).unwrap_or("text") != "text" {
+        if item_locked(item) || item.get("type").and_then(Value::as_str).unwrap_or("text") != "text"
+        {
             continue;
         }
+        let hidden = item_hidden(item);
         let Some(object) = item.as_object_mut() else {
             continue;
         };
-        object.insert("style".to_string(), style.clone());
+        let next_style = if hidden {
+            Value::String(item_edit::hide_item_style(
+                style.as_str().unwrap_or_default(),
+            ))
+        } else {
+            style.clone()
+        };
+        object.insert("style".to_string(), next_style);
         object.insert("align".to_string(), align.clone());
         changed = true;
         let Some(lines) = object.get_mut("lines").and_then(Value::as_array_mut) else {
