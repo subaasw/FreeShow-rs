@@ -629,6 +629,7 @@ mod tests {
             show_index: Some(0),
             slide_index: Some(0),
             cleared: false,
+            taken_slide: None,
             project: vec!["Amazing Grace".into()],
             projects: Vec::new(),
             project_id: None,
