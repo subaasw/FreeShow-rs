@@ -171,6 +171,7 @@ mod tests {
             show_index: Some(0),
             slide_index: Some(0),
             cleared: false,
+            taken_slide: None,
             project: Vec::new(),
             projects: Vec::new(),
             project_id: None,

@@ -129,6 +129,9 @@ pub struct ShowSnapshot {
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     pub cleared: bool,
+    /// The published revision of the current slide. Catalog entries remain editable.
+    #[serde(skip)]
+    pub taken_slide: Option<RemoteSlide>,
     pub project: Vec<String>,
     #[serde(default)]
     pub projects: Vec<RemoteProject>,
@@ -218,6 +221,7 @@ impl Default for ShowSnapshot {
             show_index: None,
             slide_index: None,
             cleared: false,
+            taken_slide: None,
             project: Vec::new(),
             projects: Vec::new(),
             project_id: None,
@@ -409,7 +413,9 @@ impl ShowSnapshot {
 
     fn current_slide(&self) -> Option<&RemoteSlide> {
         let index = self.slide_index?;
-        self.current_show()?.slides.get(index)
+        self.taken_slide
+            .as_ref()
+            .or_else(|| self.current_show()?.slides.get(index))
     }
 }
 
@@ -672,6 +678,7 @@ fn step(snapshot: &mut ShowSnapshot, delta: isize) -> Option<Command> {
     }
     snapshot.cleared = false;
     snapshot.scripture_lines.clear();
+    snapshot.taken_slide = None;
     let current = snapshot.slide_index.unwrap_or(0) as isize;
     let target = current + delta;
     if target >= 0 && (target as usize) < len {
@@ -805,6 +812,7 @@ fn select_show(snapshot: &mut ShowSnapshot, id: &str) -> Option<Command> {
     snapshot.show_index = Some(index);
     snapshot.cleared = false;
     snapshot.scripture_lines.clear();
+    snapshot.taken_slide = None;
     snapshot.slide_index = if snapshot.shows[index].slides.is_empty() {
         None
     } else {
@@ -820,6 +828,7 @@ fn set_slide(snapshot: &mut ShowSnapshot, index: usize) -> Option<Command> {
     }
     snapshot.cleared = false;
     snapshot.scripture_lines.clear();
+    snapshot.taken_slide = None;
     snapshot.slide_index = Some(index);
     Some(Command::SetSlide(index))
 }
@@ -1556,15 +1565,18 @@ fn set_plain_text(
         snapshot.shows[index].layouts[at].slides.clone_from(&slides);
     }
     snapshot.shows[index].slides = slides;
-    snapshot.show_index = Some(index);
-    snapshot.slide_index = Some(0);
-    snapshot.cleared = false;
-    snapshot.scripture_lines.clear();
+    if snapshot.taken_slide.is_none() {
+        snapshot.show_index = Some(index);
+        snapshot.slide_index = Some(0);
+        snapshot.cleared = false;
+        snapshot.scripture_lines.clear();
+    }
     commands.push(Command::SetShowText {
         id,
         text: text.to_string(),
     });
-    vec![show_message(snapshot), out_message(snapshot)]
+    let edited_show = json!({ "channel": "SHOW", "data": show_document(&snapshot.shows[index]) });
+    vec![edited_show, out_message(snapshot)]
 }
 
 fn create_show(
@@ -1592,10 +1604,13 @@ fn create_show(
         active_layout: "main".into(),
         slides,
     });
-    snapshot.show_index = Some(snapshot.shows.len() - 1);
-    snapshot.slide_index = Some(0);
-    snapshot.cleared = false;
-    snapshot.scripture_lines.clear();
+    let new_show = snapshot.shows.len() - 1;
+    if snapshot.taken_slide.is_none() {
+        snapshot.show_index = Some(new_show);
+        snapshot.slide_index = Some(0);
+        snapshot.cleared = false;
+        snapshot.scripture_lines.clear();
+    }
     if let Some(project_id) = snapshot.project_id.clone()
         && let Some(project) = snapshot
             .projects
@@ -1621,7 +1636,7 @@ fn create_show(
                 "show": { "id": id, "name": name }
             }
         }),
-        show_message(snapshot),
+        json!({ "channel": "SHOW", "data": show_document(&snapshot.shows[new_show]) }),
         out_message(snapshot),
     ]
 }
@@ -2102,6 +2117,7 @@ fn change_layout(
     };
     snapshot.cleared = false;
     snapshot.scripture_lines.clear();
+    snapshot.taken_slide = None;
     commands.push(Command::ChangeLayout {
         show_id: show_id.to_string(),
         layout_id: layout_id.to_string(),
@@ -2257,6 +2273,7 @@ mod tests {
             show_index: Some(0),
             slide_index: Some(0),
             cleared: false,
+            taken_slide: None,
             project: vec!["Amazing Grace".into()],
             projects: Vec::new(),
             project_id: None,
@@ -3313,6 +3330,27 @@ mod tests {
         assert_eq!(commands, vec![Command::SetShow(1), Command::SetSlide(0)]);
         assert_eq!(replies[0]["data"]["lines"][0], "Hello");
         assert_eq!(replies[0]["data"]["show"]["id"], "other");
+    }
+
+    #[test]
+    fn editing_remotely_keeps_the_taken_lyrics_until_a_take() {
+        let mut snapshot = sample();
+        snapshot.taken_slide = snapshot.current_slide().cloned();
+        let (replies, commands) = handle_message(
+            &mut snapshot,
+            &json!({ "channel": "API:set_plain_text", "data": {
+                "id": "grace", "value": "Edited lyrics"
+            } }),
+        );
+        assert!(matches!(commands.as_slice(), [Command::SetShowText { .. }]));
+        assert_eq!(replies[1]["data"]["lines"][0], "Amazing grace");
+        assert_eq!(snapshot.shows[0].slides[0].lines, ["Edited lyrics"]);
+
+        let (replies, _) = handle_message(
+            &mut snapshot,
+            &json!({ "channel": "API:index_select_slide", "data": { "index": 0 } }),
+        );
+        assert_eq!(replies[0]["data"]["lines"][0], "Edited lyrics");
     }
 
     #[test]
