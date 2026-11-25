@@ -217,6 +217,10 @@ pub const TRANSITION_KINDS: [&str; 11] = [
     "uncover",
 ];
 
+const TRANSITION_EASINGS: [&str; 7] = [
+    "linear", "sine", "cubic", "circ", "back", "elastic", "bounce",
+];
+
 /// The selected slide item as the Inspector shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorForm {
@@ -225,10 +229,6 @@ pub struct InspectorForm {
     pub typography: freeshow_data::ItemTypography,
     pub item_box: freeshow_data::ItemBox,
     pub filters: freeshow_data::ItemFilters,
-    /// The slide's own transition kind, or "default" when the style transition applies.
-    pub slide_transition: String,
-    pub slide_transition_ms: i32,
-    pub slide_transition_direction: String,
 }
 
 /// One stage item row in the Stage editor.
@@ -724,21 +724,14 @@ impl Session {
                 if value.contains('\0') || value.len() > 256 {
                     return Err("remote password is too long or invalid".into());
                 }
-                (
-                    vec!["serverData", "remote", "password"],
-                    json!(value),
-                )
+                (vec!["serverData", "remote", "password"], json!(value))
             }
             "stagePort" => (
                 vec!["ports", "stage"],
                 json!(parse_int(value, 1024, 65535)?),
             ),
-            "textTransition"
-            | "mediaTransition"
-            | "textDuration"
-            | "mediaDuration"
-            | "textDirection"
-            | "mediaDirection" => {
+            "textTransition" | "mediaTransition" | "textDuration" | "mediaDuration"
+            | "textDirection" | "mediaDirection" => {
                 let media = key.starts_with("media");
                 let mut motion = self.library_transition(media);
                 if key.ends_with("Duration") {
@@ -1195,10 +1188,6 @@ impl Session {
                 Some(show.item_box(&slide, self.current_item(show)))
             })
             .unwrap_or_default();
-        let own_transition = self
-            .current_show()
-            .zip(self.slide_index)
-            .and_then(|(show, index)| show.transition_at(index));
         InspectorForm {
             has_item: self.tab == "shows"
                 && self.current_show().is_some()
@@ -1207,18 +1196,106 @@ impl Session {
             typography: self.item_typography(),
             item_box,
             filters: self.item_filters(),
-            slide_transition: own_transition
-                .as_ref()
-                .map_or_else(|| "default".to_string(), |t| t.kind.clone()),
-            slide_transition_ms: own_transition
-                .as_ref()
-                .map_or(500, |t| t.duration_ms.min(10_000) as i32),
-            slide_transition_direction: own_transition
-                .as_ref()
-                .map(|t| t.direction.clone())
-                .filter(|direction| !direction.is_empty())
-                .unwrap_or_else(|| "left_right".into()),
         }
+    }
+
+    /// Copy the selected position's override, or its inherited state, to an inclusive range.
+    pub fn apply_slide_motion_range(&mut self, first: usize, last: usize) -> Result<(), String> {
+        let Some((show, index)) = self.current_show().zip(self.slide_index) else {
+            return Err("Pick a slide first".into());
+        };
+        let count = show.ordered_slides().len();
+        if self.tab != "shows" || index >= count || first == 0 || first > last || last > count {
+            return Err("Enter a valid slide range in the current layout".into());
+        }
+        let motion = show.transition_at(index);
+        self.notice.clear();
+        let saved = self.edit_selected_slide("Apply slide transition to range", |show, _, _| {
+            (first - 1..last).all(|position| show.set_slide_transition(position, motion.as_ref()))
+        });
+        if saved {
+            self.notice = format!("Transition settings applied to slides {first}–{last}");
+            Ok(())
+        } else {
+            Err(if self.notice.is_empty() {
+                "Could not apply the transition to this layout".into()
+            } else {
+                self.notice.clone()
+            })
+        }
+    }
+
+    fn set_slide_motion_field(&mut self, key: &str, value: &str) -> Result<bool, String> {
+        let Some(index) = self.slide_index.filter(|_| self.tab == "shows") else {
+            return Err("Pick a slide first".into());
+        };
+        if key == "slide-transition" && value == "default" {
+            return Ok(
+                self.edit_selected_slide("Use inherited transition", |show, _, _| {
+                    show.set_slide_transition(index, None)
+                }),
+            );
+        }
+        let mut motion = self.selected_slide_motion().0;
+        match key {
+            "slide-transition" if TRANSITION_KINDS.contains(&value) => motion.kind = value.into(),
+            "slide-transition-ms" => motion.duration_ms = parse_int(value, 0, 10_000)? as u64,
+            "slide-transition-direction" if TRANSITION_DIRECTIONS.contains(&value) => {
+                motion.direction = value.into();
+            }
+            "slide-transition-easing" if TRANSITION_EASINGS.contains(&value) => {
+                motion.easing = value.into();
+            }
+            _ => return Err(format!("Unknown transition setting {value:?}")),
+        }
+        Ok(
+            self.edit_selected_slide("Edit slide transition", |show, _, _| {
+                show.set_slide_transition(index, Some(&motion))
+            }),
+        )
+    }
+
+    /// Formats the selected range and commits any pending words in the same undo step.
+    pub fn format_text_selection(
+        &mut self,
+        text: &str,
+        anchor: i32,
+        cursor: i32,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, String> {
+        let (Ok(start), Ok(end)) = (
+            usize::try_from(anchor.min(cursor)),
+            usize::try_from(anchor.max(cursor)),
+        ) else {
+            return Ok(false);
+        };
+        if self.tab != "shows"
+            || !text
+                .get(start..end)
+                .is_some_and(|selected| selected.contains(|ch| ch != '\n'))
+        {
+            return Ok(false);
+        }
+        let value = value.trim();
+        let (key, value) = match key {
+            "weight" if matches!(value, "normal" | "bold") => ("font-weight", value.to_owned()),
+            "size" => ("font-size", format!("{}px", parse_int(value, 12, 400)?)),
+            "color" if value.starts_with('#') && freeshow_output::parse_color(value).is_some() => {
+                ("color", value.to_owned())
+            }
+            "color" => return Err("Enter a text color such as #ffee00".into()),
+            _ => return Ok(false),
+        };
+        Ok(
+            self.edit_selected_slide("Format selected text", |show, slide, index| {
+                let Some(previous) = show.item_text(slide, index) else {
+                    return false;
+                };
+                (previous == text || show.set_item_text(slide, index, text))
+                    && show.format_item_text_range(slide, index, start..end, key, &value)
+            }),
+        )
     }
 
     /// Applies one Inspector field to the selected item and saves the show.
@@ -1342,51 +1419,10 @@ impl Session {
                     show.set_item_filters(slide, item, &filters)
                 })
             }
-            "slide-transition" | "slide-transition-ms" | "slide-transition-direction" => {
-                let Some(index) = self.slide_index else {
-                    return Err("Pick a slide first".to_string());
-                };
-                let form = self.inspector_form();
-                let (kind, duration, direction) = if key == "slide-transition" {
-                    if value != "default" && !TRANSITION_KINDS.contains(&value.as_str()) {
-                        return Err(format!("unknown transition {value:?}"));
-                    }
-                    (
-                        value.clone(),
-                        form.slide_transition_ms as u64,
-                        form.slide_transition_direction,
-                    )
-                } else if key == "slide-transition-direction" {
-                    if !TRANSITION_DIRECTIONS.contains(&value.as_str()) {
-                        return Err(format!(
-                            "direction must be one of {TRANSITION_DIRECTIONS:?}"
-                        ));
-                    }
-                    let kind = if form.slide_transition == "default" {
-                        "slide".to_string()
-                    } else {
-                        form.slide_transition
-                    };
-                    (kind, form.slide_transition_ms as u64, value.clone())
-                } else {
-                    let ms = parse_int(&value, 0, 10_000)?;
-                    // A duration on a slide still using the style transition gives it a fade.
-                    let kind = if form.slide_transition == "default" {
-                        "fade".to_string()
-                    } else {
-                        form.slide_transition
-                    };
-                    (kind, ms as u64, form.slide_transition_direction)
-                };
-                let kind = if kind == "default" {
-                    String::new()
-                } else {
-                    kind
-                };
-                self.edit_current_item(|show, _, _| {
-                    show.set_transition_at_dir(index, &kind, duration, &direction)
-                })
-            }
+            "slide-transition"
+            | "slide-transition-ms"
+            | "slide-transition-direction"
+            | "slide-transition-easing" => self.set_slide_motion_field(key, &value)?,
             "line-height" => {
                 let percent = parse_int(&value, 0, 500)? as i32;
                 self.edit_current_item(|show, slide, item| {
@@ -2114,9 +2150,19 @@ mod tests {
         session.apply_setting("theme", "sea").unwrap();
         assert!(session.apply_setting("remotePort", "80").is_err());
         session.apply_setting("remotePassword", "secret").unwrap();
-        assert_eq!(session.preferences.remote_password.as_deref(), Some("secret"));
+        assert_eq!(
+            session.preferences.remote_password.as_deref(),
+            Some("secret")
+        );
         session.apply_setting("remotePassword", "").unwrap();
-        assert!(session.preferences.remote_password.as_deref().unwrap_or("").is_empty());
+        assert!(
+            session
+                .preferences
+                .remote_password
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+        );
         assert!(session.apply_setting("autosave", "soon").is_err());
         assert!(session.apply_setting("theme", "nope").is_err());
         assert!(session.apply_setting("bogus", "1").is_err());
@@ -2218,11 +2264,13 @@ mod tests {
         assert!(!session.move_item_box(true));
 
         assert!(session.move_item_box(false));
-        assert!(session.live_edited);
+        assert!(session.can_update_live_slide());
         assert_eq!(session.item_position(), (0, 2));
         assert_eq!(session.lyrics(), "Second");
         assert!(!session.move_item_box(false));
         assert_eq!(crate::live::edit_frame(&session).pixel(21, 21), red);
+        assert_eq!(crate::live::audience_frame(&session).pixel(21, 21), green);
+        assert!(session.update_live_slide());
         assert_eq!(crate::live::audience_frame(&session).pixel(21, 21), red);
         assert!(session.move_item_box(true));
         assert_eq!(session.item_position(), (1, 2));
@@ -2359,6 +2407,116 @@ mod tests {
         let crop = &session.current_show().unwrap().show["slides"]["s1"]["items"][0]["cropping"];
         assert_eq!(crop["type"], "ppt");
         assert_eq!(crop["extension"], true);
+    }
+
+    #[test]
+    fn selected_text_formatting_commits_pending_words_and_preserves_other_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-text-selection-{}",
+            freeshow_data::new_id()
+        ));
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert!(session.edit_selected_slide("Set mixed text", |show, slide, index| {
+            show.show["slides"][slide]["items"][index] = serde_json::json!({
+                "style": "font-weight:bold;",
+                "lines": [
+                    {"align":"right","metadata":{"keep":true},"text":[
+                        {"value":"An é","style":"font-style:italic;color:#f00;","external":true},
+                        {"value":"星 here","style":"font-size:64px;"}
+                    ]},
+                    {"align":"left","text":[{"value":"Second line","style":"color:#0f0;"}]}
+                ]
+            });
+            true
+        }));
+        session.select_slide(0);
+        let taken = crate::live::audience_frame(&session);
+        let before = session.current_show().unwrap().slide_items("s1");
+        let edits = session.history.len();
+        let text = "An é星 there\nSecond line";
+        assert!(
+            !session
+                .format_text_selection(text, 3, 3, "size", "80")
+                .unwrap()
+        );
+        assert!(
+            !session
+                .format_text_selection(text, 4, 8, "size", "80")
+                .unwrap()
+        );
+        assert!(
+            session
+                .format_text_selection(text, 3, 8, "size", "zero")
+                .is_err()
+        );
+        assert_eq!(session.history.len(), edits);
+        assert!(
+            session
+                .format_text_selection(text, 8, 3, "size", "80")
+                .unwrap()
+        );
+        assert_eq!(session.history.len(), edits + 1);
+        let show = session.current_show().unwrap();
+        let saved = freeshow_data::ShowFile::load(show.path.as_deref().unwrap()).unwrap();
+        assert_eq!(saved.item_text("s1", 0).as_deref(), Some(text));
+        let after = saved.slide_items("s1");
+        let lines = &after[0]["lines"];
+        assert_eq!(lines[0]["metadata"], before[0]["lines"][0]["metadata"]);
+        assert_eq!(lines[0]["align"], "right");
+        assert_eq!(lines[1], before[0]["lines"][1]);
+        let runs = &lines[0]["text"];
+        let css = |run: usize, key: &str| {
+            freeshow_data::css_value(runs[run]["style"].as_str().unwrap(), key)
+        };
+        for (index, value) in ["An ", "é", "星", " there"].into_iter().enumerate() {
+            assert_eq!(runs[index]["value"], value);
+        }
+        assert_eq!(runs[0]["style"], "font-style:italic;color:#f00;");
+        assert_eq!(runs[1]["external"], true);
+        assert_eq!(css(1, "color").as_deref(), Some("#f00"));
+        assert_eq!(css(1, "font-size").as_deref(), Some("80px"));
+        assert_eq!(css(2, "font-size").as_deref(), Some("80px"));
+        assert_eq!(runs[3]["style"], "font-size:64px;");
+        assert_eq!(crate::live::audience_frame(&session).pixels, taken.pixels);
+        assert!(session.update_live_slide());
+        assert_ne!(crate::live::audience_frame(&session).pixels, taken.pixels);
+        assert!(session.undo());
+        assert_eq!(session.current_show().unwrap().slide_items("s1"), before);
+        assert!(session.redo());
+        assert_eq!(session.current_show().unwrap().slide_items("s1"), after);
+
+        assert!(
+            session
+                .format_text_selection(text, 3, 8, "size", "80")
+                .unwrap()
+        );
+        assert_eq!(session.history.len(), edits + 1);
+        let across = text.find('\n').unwrap();
+        assert!(
+            session
+                .format_text_selection(
+                    text,
+                    across as i32 - 1,
+                    across as i32 + 2,
+                    "weight",
+                    "normal"
+                )
+                .unwrap()
+        );
+        let changed = session.current_show().unwrap().slide_items("s1");
+        assert_eq!(changed[0]["lines"][1]["text"][0]["value"], "S");
+        assert_eq!(
+            changed[0]["lines"][1]["text"][1],
+            serde_json::json!({"value":"econd line","style":"color:#0f0;"})
+        );
+        assert!(session.set_layer_flags(true, true));
+        assert!(
+            !session
+                .format_text_selection(text, 3, 8, "color", "#fff")
+                .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2589,7 +2747,9 @@ mod tests {
         );
         session.apply_setting("textTransition", "none").unwrap();
         session.apply_setting("mediaDuration", "1200").unwrap();
-        session.apply_setting("textDirection", "right_left").unwrap();
+        session
+            .apply_setting("textDirection", "right_left")
+            .unwrap();
         assert!(session.apply_setting("textTransition", "wobble").is_err());
         assert!(session.apply_setting("textDuration", "-5").is_err());
         assert!(session.apply_setting("textDirection", "sideways").is_err());
@@ -2718,12 +2878,17 @@ mod tests {
         let session = Session::open(dir.path().to_path_buf());
         let files = session.stage_media_files();
         assert!(
-            files.iter().any(|(label, path)| {
-                label.contains("cue.png") && path.ends_with("cue.png")
-            }),
+            files
+                .iter()
+                .any(|(label, path)| { label.contains("cue.png") && path.ends_with("cue.png") }),
             "{files:?}"
         );
-        assert!(session.stage_still_files().iter().any(|(label, _)| label.contains("cue.png")));
+        assert!(
+            session
+                .stage_still_files()
+                .iter()
+                .any(|(label, _)| label.contains("cue.png"))
+        );
         assert!(!files.iter().any(|(label, _)| label.contains("notes.txt")));
     }
 

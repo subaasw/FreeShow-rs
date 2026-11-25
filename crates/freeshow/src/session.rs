@@ -18,6 +18,8 @@ use freeshow_media::{MediaKind, cameras, media_kind};
 mod drawer_edit;
 mod library_edit;
 mod panels;
+mod recovery;
+mod slide_layers;
 use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
 };
@@ -26,6 +28,7 @@ pub use panels::{
     AUTOSAVE_CHOICES, STAGE_ADD_KINDS, STAGE_ADD_NAMES, STAGE_DATE_FORMATS, TRANSITION_KINDS,
     setting_label,
 };
+pub use slide_layers::LayerDrag;
 
 /// Network feeds due for a refresh: weather locations and RSS URLs.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -230,6 +233,9 @@ pub struct Session {
     metronome_started: Option<std::time::Instant>,
     pub metronome_beat: u32,
     history: Vec<EditSnapshot>,
+    layer_selection: Option<slide_layers::LayerSelection>,
+    drafts: Vec<recovery::PendingDraft>,
+    timer_save_bases: HashMap<String, serde_json::Value>,
     /// Last library action result, shown in the status bar.
     pub notice: String,
     /// Shows deleted this session, newest last, for Restore.
@@ -261,6 +267,7 @@ pub struct Session {
     pub item_index: usize,
     pub templates: Vec<String>,
     pub template_catalog: Catalog,
+    template_pick: Option<String>,
     pub overlays: Vec<String>,
     pub overlay_catalog: Catalog,
     pub active_overlays: Vec<String>,
@@ -484,6 +491,9 @@ impl Session {
             metronome_started: None,
             metronome_beat: 0,
             history: Vec::new(),
+            layer_selection: None,
+            drafts: Vec::new(),
+            timer_save_bases: HashMap::new(),
             notice: String::new(),
             deleted_shows: Vec::new(),
             redo: Vec::new(),
@@ -511,6 +521,7 @@ impl Session {
             item_index: 0,
             templates: Vec::new(),
             template_catalog: Catalog::empty(),
+            template_pick: None,
             overlays: Vec::new(),
             overlay_catalog: Catalog::empty(),
             active_overlays: Vec::new(),
@@ -606,6 +617,12 @@ impl Session {
         let library = Library::open(&root);
         let preferences = library.preferences();
         let mut warnings = Vec::new();
+        if let Some(notes) = take(library.import_scripture_sources(), &mut warnings) {
+            warnings.extend(notes);
+        }
+        if let Some(notes) = take(library.import_show_sources(), &mut warnings) {
+            warnings.extend(notes);
+        }
         let projects =
             take(library.load_projects(), &mut warnings).unwrap_or_else(ProjectsFile::empty);
         let project_id = library_edit::startup_project(&projects, &root);
@@ -615,12 +632,8 @@ impl Session {
         let overlay_catalog =
             take(library.load_overlays(), &mut warnings).unwrap_or_else(Catalog::empty);
         let overlays = overlay_catalog.names();
-        if let Some(notes) = take(library.import_scripture_sources(), &mut warnings) {
-            warnings.extend(notes);
-        }
-        if let Some(notes) = take(library.import_show_sources(), &mut warnings) {
-            warnings.extend(notes);
-        }
+        let (drafts, draft_warnings) = library.load_show_drafts();
+        warnings.extend(draft_warnings);
         let shows = take(library.list_shows(), &mut warnings).unwrap_or_default();
         let bibles = take(library.list_bibles(), &mut warnings).unwrap_or_default();
         let scripture = scripture_catalog(&bibles);
@@ -682,8 +695,14 @@ impl Session {
             metronome_started: None,
             metronome_beat: 0,
             history: Vec::new(),
+            layer_selection: None,
+            drafts: drafts
+                .into_iter()
+                .map(recovery::PendingDraft::recorded)
+                .collect(),
             notice: String::new(),
             deleted_shows: Vec::new(),
+            timer_save_bases: HashMap::new(),
             redo: Vec::new(),
             focus_mode,
             guide_visible,
@@ -709,6 +728,7 @@ impl Session {
             item_index: 0,
             templates,
             template_catalog,
+            template_pick: None,
             overlays,
             overlay_catalog,
             active_overlays,
@@ -1239,6 +1259,23 @@ impl Session {
             .collect()
     }
 
+    pub fn visible_media_entries(&self) -> impl Iterator<Item = &MediaEntry> {
+        self.drawer_entries()
+            .into_iter()
+            .filter_map(|(index, _)| self.media.get(index))
+    }
+
+    pub fn media_preview_entry(&self, path: &str) -> Option<&MediaEntry> {
+        if self.tab != "media" {
+            return None;
+        }
+        self.visible_media_entries().find(|entry| {
+            entry.path == Path::new(path)
+                && matches!(entry.kind, MediaEntryKind::Image | MediaEntryKind::Video)
+                && entry.path.is_file()
+        })
+    }
+
     /// Which visible drawer rows are on air: showing overlays and the playing audio file.
     pub fn drawer_on(&self) -> Vec<bool> {
         self.drawer_entries()
@@ -1445,6 +1482,7 @@ impl Session {
                     // Opening a show picks no slide; the first Next or a click presents one.
                     if changed {
                         self.slide_index = None;
+                        self.layer_selection = None;
                     }
                     self.project_picked = false;
                     if changed {
@@ -1961,6 +1999,9 @@ impl Session {
             self.timeline_cues = cues;
             return !self.timeline_cues.is_empty() || text.trim().is_empty();
         };
+        let Some(snapshot) = self.edit_snapshot("Edit timeline") else {
+            return false;
+        };
         let Some(show) = self.shows.get_mut(index) else {
             return false;
         };
@@ -2013,8 +2054,9 @@ impl Session {
         } else {
             show.show["timeline"] = timeline;
         }
-        if let Some(path) = show.path.clone() {
-            let _ = show.save(&path);
+        if let Err(error) = self.persist_show_edit(index, snapshot) {
+            self.notice = error;
+            return false;
         }
         self.load_timeline();
         true
@@ -2340,7 +2382,7 @@ impl Session {
     }
 
     /// Writes the open project and its shows as a `.project` zip under `Exports/`.
-    pub fn export_current_project_package(&self) -> Result<PathBuf, String> {
+    pub fn export_current_project_package(&self) -> Result<(PathBuf, Vec<String>), String> {
         let project_id = self
             .project_id
             .as_deref()
@@ -2355,26 +2397,22 @@ impl Session {
             .projects
             .project_body(project_id)
             .ok_or_else(|| "no project is open".to_string())?;
-        let ids: std::collections::HashSet<&str> =
-            project.shows.iter().map(|item| item.id.as_str()).collect();
-        let shows: Vec<_> = self
-            .shows
-            .iter()
-            .filter(|show| ids.contains(show.id.as_str()))
-            .cloned()
-            .collect();
         let path = self
             .exports_dir()?
             .join(format!("{}.project", export_stem(&project.name)));
-        freeshow_data::write_project_package(
+        let root = self
+            .root
+            .as_deref()
+            .ok_or("Choose a library folder first")?;
+        let warnings = freeshow_data::write_portable_project(
             &project,
             &body,
-            &shows,
-            Some(&self.overlay_catalog),
+            &self.shows,
+            &Library::open(root),
             &path,
         )
         .map_err(|err| err.to_string())?;
-        Ok(path)
+        Ok((path, warnings))
     }
 
     /// Writes an audience frame as a PNG under `Exports/`.
@@ -2385,18 +2423,43 @@ impl Session {
         Ok(path)
     }
 
-    fn choose_template(&mut self, index: usize) -> DrawerAction {
-        let Some(name) = self.templates.get(index).cloned() else {
-            return DrawerAction::None;
-        };
-        let Some(id) = self.template_catalog.id_named(&name) else {
-            return DrawerAction::None;
-        };
-        if self.apply_template_id(&id) {
-            DrawerAction::Refresh
-        } else {
-            DrawerAction::None
+    pub fn template_entries(&self) -> Vec<(&str, &str, &serde_json::Value)> {
+        let query = self.search_query.trim().to_lowercase();
+        self.template_catalog
+            .named_entries()
+            .into_iter()
+            .filter(|(_, name, _)| query.is_empty() || name.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    pub fn selected_template(&self) -> Option<(&str, &str, &serde_json::Value)> {
+        if self.tab != "templates" {
+            return None;
         }
+        let key = self.template_pick.as_deref()?;
+        self.template_entries()
+            .into_iter()
+            .find(|(id, _, _)| *id == key)
+    }
+
+    pub fn template_target_show(&self) -> Option<String> {
+        self.current_show().map(ShowFile::name)
+    }
+
+    pub fn browse_template(&mut self, id: &str) -> bool {
+        if self.tab != "templates" || !self.template_entries().iter().any(|(key, _, _)| *key == id)
+        {
+            return false;
+        }
+        self.template_pick = Some(id.into());
+        true
+    }
+
+    fn choose_template(&mut self, index: usize) -> DrawerAction {
+        if let Some((id, _, _)) = self.template_catalog.named_entries().get(index) {
+            self.template_pick = Some((*id).into());
+        }
+        DrawerAction::None
     }
 
     fn apply_template_id(&mut self, id: &str) -> bool {
@@ -2406,12 +2469,7 @@ impl Session {
         let Some(show_id) = self.current_show().map(|show| show.id.clone()) else {
             return false;
         };
-        let mut applied = false;
-        self.edit_show(&show_id, |show| {
-            applied = show.apply_template(id, &template);
-            applied
-        });
-        applied
+        self.edit_show(&show_id, |show| show.apply_template(id, &template))
     }
 
     fn toggle_overlay(&mut self, index: usize) -> DrawerAction {
@@ -2480,27 +2538,23 @@ impl Session {
             .unwrap_or(DrawerAction::None)
     }
 
-    fn edit_show(&mut self, id: &str, edit: impl FnOnce(&mut ShowFile) -> bool) {
+    fn edit_show(&mut self, id: &str, edit: impl FnOnce(&mut ShowFile) -> bool) -> bool {
         let Some(index) = self.shows.iter().position(|show| show.id == id) else {
-            return;
+            return false;
         };
-        let saved = {
-            let Some(show) = self.shows.get_mut(index) else {
-                return;
-            };
-            if !edit(show) {
-                return;
-            }
-            match show.path.clone() {
-                Some(path) => show.save(&path).is_ok(),
-                None => true,
-            }
-        };
-        if saved {
-            self.tab = "shows".to_string();
-            self.show_index = Some(index);
-            self.hold_program();
+        let snapshot = self.show_edit_snapshot(index, "Edit show");
+        if !edit(&mut self.shows[index]) {
+            return false;
         }
+        if let Err(error) = self.persist_show_edit(index, snapshot) {
+            self.notice = error;
+            return false;
+        }
+        self.layer_selection = None;
+        self.tab = "shows".to_string();
+        self.show_index = Some(index);
+        self.hold_program();
+        true
     }
 
     pub fn play_named(&mut self, name: &str) -> bool {
@@ -2529,8 +2583,7 @@ impl Session {
         {
             return self.play_path(path);
         }
-        let path = PathBuf::from(name);
-        if path.is_file() {
+        if let Some(path) = crate::live::resolve_media(self.root.as_deref(), name) {
             return self.play_path(path);
         }
         false
@@ -2978,7 +3031,7 @@ impl Session {
         {
             let _ = show.set_actions_at(slide_index, &run);
         }
-        self.apply_slide_actions_now(false);
+        self.apply_slide_actions_now(false, real.as_deref().filter(|_| holding));
         if holding
             && let (Some(show_index), Some(slide_index), Some(real)) =
                 (show_index, slide_index, real)
@@ -3041,7 +3094,7 @@ impl Session {
         {
             let _ = show.set_actions_at(slide_index, &run);
         }
-        self.apply_slide_actions_now(true);
+        self.apply_slide_actions_now(true, real.as_deref());
         if let (Some(show_index), Some(slide_index), Some(real)) = (show_index, slide_index, real)
             && let Some(show) = self.shows.get_mut(show_index)
         {
@@ -3074,7 +3127,11 @@ impl Session {
         self.run_due_actions()
     }
 
-    fn apply_slide_actions_now(&mut self, continuation: bool) {
+    fn apply_slide_actions_now(
+        &mut self,
+        continuation: bool,
+        original_actions: Option<&[serde_json::Value]>,
+    ) {
         if self.tab == "scripture" {
             return;
         }
@@ -3138,7 +3195,7 @@ impl Session {
         self.start_slide_stream();
         self.apply_camera();
         self.apply_media_toggle();
-        self.apply_template_action();
+        self.apply_template_action(original_actions);
         self.apply_slide_overlays();
         self.apply_cleared_overlays();
         self.apply_action_overlays();
@@ -3152,7 +3209,7 @@ impl Session {
         }
         self.apply_output_style();
         self.apply_transition_change();
-        self.apply_timer_steps();
+        self.apply_timer_steps(original_actions);
         self.apply_mix_steps();
         self.apply_icecast_actions();
         self.apply_variable_actions();
@@ -3485,7 +3542,7 @@ impl Session {
     }
 
     /// A clear action drops this slide's countdown. A set action rewrites every slide's timer.
-    fn apply_timer_steps(&mut self) {
+    fn apply_timer_steps(&mut self, original_actions: Option<&[serde_json::Value]>) {
         let steps = self
             .current_show()
             .and_then(|show| self.slide_index.map(|index| show.timer_steps_at(index)))
@@ -3502,6 +3559,17 @@ impl Session {
                     if let Some(index) = show_index
                         && let Some(show) = self.shows.get_mut(index)
                     {
+                        self.timer_save_bases
+                            .entry(show.id.clone())
+                            .or_insert_with(|| {
+                                let mut original = show.clone();
+                                if let Some((slide, actions)) =
+                                    self.slide_index.zip(original_actions)
+                                {
+                                    original.set_actions_at(slide, actions);
+                                }
+                                original.show
+                            });
                         show.set_next_timers(seconds);
                     }
                 }
@@ -3747,14 +3815,25 @@ impl Session {
     }
 
     /// Copies the named template onto this show's lyric boxes.
-    fn apply_template_action(&mut self) {
+    fn apply_template_action(&mut self, original_actions: Option<&[serde_json::Value]>) {
         let Some(id) = self
             .current_show()
             .and_then(|show| self.slide_index.and_then(|index| show.template_at(index)))
         else {
             return;
         };
-        let _ = self.apply_template_id(&id);
+        // A wait exposes only part of the action list while it runs. Save the
+        // complete list with the template and restore the running slice afterward.
+        let state = self.show_index.zip(self.slide_index).zip(original_actions);
+        if let Some(((show_index, slide_index), original)) = state {
+            let show = &mut self.shows[show_index];
+            let running = show.actions_at(slide_index);
+            show.set_actions_at(slide_index, original);
+            let _ = self.apply_template_id(&id);
+            self.shows[show_index].set_actions_at(slide_index, &running);
+        } else {
+            let _ = self.apply_template_id(&id);
+        }
     }
 
     /// Starts the camera this slide names, and keeps a queued audio file beside it.
@@ -4409,6 +4488,9 @@ impl Session {
                 .current_show()
                 .is_some_and(|show| index < show.ordered_slides().len())
         {
+            if self.slide_index != Some(index) {
+                self.layer_selection = None;
+            }
             self.slide_index = Some(index);
             self.line_index = 0;
         }
@@ -4423,115 +4505,23 @@ impl Session {
 
     /// Writes the selected slide even when another drawer tab is open.
     pub fn replace_slide_text(&mut self, text: &str) -> bool {
-        let snap = self.edit_snapshot("Edit lyrics");
-        let Some(slide_index) = self.slide_index else {
-            return false;
-        };
-        let Some(show_index) = self.show_index else {
-            return false;
-        };
-        let Some(show) = self.shows.get_mut(show_index) else {
-            return false;
-        };
-        let Some(slide_id) = show
-            .ordered_slides()
-            .get(slide_index)
-            .map(|slide| slide.id.clone())
-        else {
-            return false;
-        };
-        let item = self
-            .item_index
-            .min(show.item_count(&slide_id).saturating_sub(1));
-        if !show.set_item_text(&slide_id, item, text) {
-            return false;
-        }
-        let Some(path) = show.path.clone() else {
-            self.commit_edit(snap);
-            return true;
-        };
-        let ok = show.save(&path).is_ok();
-        if ok {
-            self.commit_edit(snap);
-        }
-        ok
+        self.edit_selected_slide("Edit lyrics", |show, slide, item| {
+            show.set_item_text(slide, item, text)
+        })
     }
 
     pub fn save_lyrics(&mut self, text: &str) -> bool {
-        if self.tab != "shows" {
-            return false;
-        }
-        self.replace_slide_text(text)
+        self.tab == "shows" && self.replace_slide_text(text)
     }
 
     pub fn save_group(&mut self, group: &str) -> bool {
-        if self.tab != "shows" {
-            return false;
-        }
-        let snap = self.edit_snapshot("Edit group");
-        let Some(slide_index) = self.slide_index else {
-            return false;
-        };
-        let Some(show_index) = self.show_index else {
-            return false;
-        };
-        let Some(show) = self.shows.get_mut(show_index) else {
-            return false;
-        };
-        let Some(slide_id) = show
-            .ordered_slides()
-            .get(slide_index)
-            .map(|slide| slide.id.clone())
-        else {
-            return false;
-        };
-        if !show.set_group(&slide_id, group) {
-            return false;
-        }
-        let Some(path) = show.path.clone() else {
-            self.commit_edit(snap);
-            return true;
-        };
-        let ok = show.save(&path).is_ok();
-        if ok {
-            self.commit_edit(snap);
-        }
-        ok
+        self.tab == "shows"
+            && self.edit_selected_slide("Edit group", |show, slide, _| show.set_group(slide, group))
     }
 
     pub fn save_notes(&mut self, notes: &str) -> bool {
-        if self.tab != "shows" {
-            return false;
-        }
-        let snap = self.edit_snapshot("Edit notes");
-        let Some(slide_index) = self.slide_index else {
-            return false;
-        };
-        let Some(show_index) = self.show_index else {
-            return false;
-        };
-        let Some(show) = self.shows.get_mut(show_index) else {
-            return false;
-        };
-        let Some(slide_id) = show
-            .ordered_slides()
-            .get(slide_index)
-            .map(|slide| slide.id.clone())
-        else {
-            return false;
-        };
-        if !show.set_notes(&slide_id, notes) {
-            return false;
-        }
-        let Some(path) = show.path.clone() else {
-            self.commit_edit(snap);
-            return true;
-        };
-        let ok = show.save(&path).is_ok();
-        if ok {
-            self.commit_edit(snap);
-        }
-        ok
+        self.tab == "shows"
+            && self.edit_selected_slide("Edit notes", |show, slide, _| show.set_notes(slide, notes))
     }
 
     fn current_item(&self, show: &freeshow_data::ShowFile) -> usize {
@@ -4602,24 +4592,22 @@ impl Session {
         show.item_filters(&slide_id, self.current_item(show))
     }
 
-    fn edit_current_item(
+    fn edit_current_item(&mut self, edit: impl FnOnce(&mut ShowFile, &str, usize) -> bool) -> bool {
+        self.tab == "shows" && self.edit_selected_slide("Edit item", edit)
+    }
+
+    fn edit_selected_slide(
         &mut self,
-        edit: impl FnOnce(&mut freeshow_data::ShowFile, &str, usize) -> bool,
+        label: &str,
+        edit: impl FnOnce(&mut ShowFile, &str, usize) -> bool,
     ) -> bool {
-        if self.tab != "shows" {
-            return false;
-        }
-        let snap = self.edit_snapshot("Edit item");
-        let Some(slide_index) = self.slide_index else {
+        let Some(snapshot) = self.edit_snapshot(label) else {
             return false;
         };
-        let Some(show_index) = self.show_index else {
+        let Some((index, slide_index)) = self.show_index.zip(self.slide_index) else {
             return false;
         };
-        let item_index = self.item_index;
-        let Some(show) = self.shows.get_mut(show_index) else {
-            return false;
-        };
+        let show = &mut self.shows[index];
         let Some(slide_id) = show
             .ordered_slides()
             .get(slide_index)
@@ -4627,79 +4615,20 @@ impl Session {
         else {
             return false;
         };
-        let item = item_index.min(show.item_count(&slide_id).saturating_sub(1));
+        let item = self
+            .item_index
+            .min(show.item_count(&slide_id).saturating_sub(1));
         if !edit(show, &slide_id, item) {
+            show.show = snapshot.show;
             return false;
         }
-        if let Some(path) = &show.path
-            && let Err(error) = show.save(path)
-        {
-            if let Some(snap) = snap {
-                show.show = snap.show;
+        match self.persist_show_edit(index, snapshot) {
+            Ok(()) => true,
+            Err(error) => {
+                self.notice = error;
+                false
             }
-            tracing::error!(%error, "could not save the item edit");
-            return false;
         }
-        self.commit_edit(snap);
-        true
-    }
-
-    pub fn select_item(&mut self, index: usize) -> bool {
-        let Some(show) = self.current_show() else {
-            return false;
-        };
-        let count = self
-            .slide_index
-            .and_then(|slide| {
-                show.ordered_slides()
-                    .get(slide)
-                    .map(|slide| slide.id.clone())
-            })
-            .map(|id| show.item_count(&id))
-            .unwrap_or(0);
-        if count == 0 || index >= count {
-            return false;
-        }
-        self.item_index = index;
-        true
-    }
-
-    /// Front-most slide item under a 1920×1080 point, for click-to-select in the editor.
-    pub fn item_box_at(&self, x: f32, y: f32) -> Option<usize> {
-        let show = self.current_show()?;
-        let slide = show.ordered_slides().get(self.slide_index?)?.id.clone();
-        let count = show.item_count(&slide);
-        (0..count).rev().find(|&index| {
-            let area = show.item_box(&slide, index);
-            x >= area.left as f32
-                && x < (area.left + area.width) as f32
-                && y >= area.top as f32
-                && y < (area.top + area.height) as f32
-        })
-    }
-
-    /// Moves or resizes the selected slide item; `resize` writes width/height, otherwise left/top.
-    pub fn set_item_geometry(&mut self, first: i32, second: i32, resize: bool) -> bool {
-        let (horizontal, vertical, minimum) = if resize {
-            ("width", "height", 1)
-        } else {
-            ("left", "top", -8000)
-        };
-        let first = first.clamp(minimum, 8000);
-        let second = second.clamp(minimum, 8000);
-        self.edit_current_item(|show, slide, item| {
-            show.set_item_box_css(slide, item, horizontal, &format!("{first}px"))
-                && show.set_item_box_css(slide, item, vertical, &format!("{second}px"))
-        })
-    }
-
-    pub fn prev_item(&mut self) -> bool {
-        let index = self.item_index;
-        self.select_item(index.saturating_sub(1))
-    }
-
-    pub fn next_item(&mut self) -> bool {
-        self.select_item(self.item_index + 1)
     }
 
     pub fn add_item_box(&mut self) -> bool {
@@ -4717,11 +4646,7 @@ impl Session {
         self.media
             .iter()
             .filter(|entry| {
-                entry.exists
-                    && matches!(
-                        entry.kind,
-                        MediaEntryKind::Image | MediaEntryKind::Video
-                    )
+                entry.exists && matches!(entry.kind, MediaEntryKind::Image | MediaEntryKind::Video)
             })
             .map(|entry| (entry.label(), entry.path.display().to_string()))
             .collect()
@@ -4759,10 +4684,6 @@ impl Session {
         Ok(())
     }
 
-    pub fn move_item_box(&mut self, forward: bool) -> bool {
-        self.edit_and_select_item(|show, slide, index| show.move_item_box(slide, index, forward))
-    }
-
     fn edit_and_select_item(
         &mut self,
         edit: impl FnOnce(&mut ShowFile, &str, usize) -> Option<usize>,
@@ -4774,18 +4695,9 @@ impl Session {
         });
         if saved && let Some(next) = next {
             self.item_index = next;
+            self.layer_selection = None;
         }
         saved
-    }
-
-    pub fn remove_item_box(&mut self) -> bool {
-        let index = self.item_index;
-        let removed =
-            self.edit_current_item(|show, slide_id, _| show.remove_item_box(slide_id, index));
-        if removed {
-            self.item_index = index.saturating_sub(1);
-        }
-        removed
     }
 
     pub fn set_font_family(&mut self, family: &str) -> bool {
@@ -4810,11 +4722,35 @@ impl Session {
         };
         show.ordered_slides()
             .get(index)
-            .map(|slide| slide.lines.clone())
+            .map(|slide| show.visible_lines_for_slide(&slide.id))
             .unwrap_or_default()
     }
 
     pub fn to_snapshot(&self) -> freeshow_remote::ShowSnapshot {
+        let program = self.program_content.borrow();
+        let mut show_index = self.show_index;
+        let mut slide_index = self.slide_index;
+        let mut taken_slide = None;
+        if !self.blanked
+            && !self.slide_hidden
+            && let Some(crate::live::ProgramContent::Slide {
+                show_id,
+                slide_id,
+                slide,
+                index,
+                ..
+            }) = program.as_ref()
+        {
+            show_index = self.shows.iter().position(|show| &show.id == show_id);
+            slide_index = Some(*index);
+            taken_slide = Some(freeshow_remote::RemoteSlide {
+                id: slide_id.clone(),
+                label: String::new(),
+                lines: freeshow_data::visible_slide_lines(slide),
+                notes: slide["notes"].as_str().unwrap_or_default().to_string(),
+                group: String::new(),
+            });
+        }
         freeshow_remote::ShowSnapshot {
             shows: self
                 .shows
@@ -4826,7 +4762,11 @@ impl Session {
                         .map(|layout| freeshow_remote::RemoteLayout {
                             id: layout.id,
                             name: layout.name,
-                            slides: remote_slides(layout.slides, self.preferences.group_numbers()),
+                            slides: remote_slides(
+                                show,
+                                layout.slides,
+                                self.preferences.group_numbers(),
+                            ),
                         })
                         .collect::<Vec<_>>();
                     let active = show.active_layout();
@@ -4835,7 +4775,11 @@ impl Session {
                         .find(|layout| layout.id == active)
                         .map(|layout| layout.slides.clone())
                         .unwrap_or_else(|| {
-                            remote_slides(show.ordered_slides(), self.preferences.group_numbers())
+                            remote_slides(
+                                show,
+                                show.ordered_slides(),
+                                self.preferences.group_numbers(),
+                            )
                         });
                     freeshow_remote::RemoteShow {
                         id: show.id.clone(),
@@ -4846,9 +4790,10 @@ impl Session {
                     }
                 })
                 .collect(),
-            show_index: self.show_index,
-            slide_index: self.slide_index,
-            cleared: self.blanked,
+            show_index,
+            slide_index,
+            cleared: self.blanked || self.slide_hidden,
+            taken_slide,
             project: self.project_labels(),
             projects: self
                 .projects
@@ -4893,10 +4838,16 @@ impl Session {
                 })
                 .collect(),
             bibles: Arc::clone(&self.scripture),
-            scripture_lines: if self.tab == "scripture" && !self.blanked {
-                self.output_lines()
-            } else {
-                Vec::new()
+            scripture_lines: match program.as_ref() {
+                Some(crate::live::ProgramContent::Scripture(lines))
+                    if !self.blanked && !self.slide_hidden =>
+                {
+                    lines.clone()
+                }
+                _ if self.tab == "scripture" && !self.blanked && !self.program_held => {
+                    self.output_lines()
+                }
+                _ => Vec::new(),
             },
             overlays: overlay_views(&self.overlay_catalog),
             active_overlays: self.active_overlays.clone(),
@@ -5077,10 +5028,10 @@ impl Session {
                 self.pending_play = Some(PendingPlay::ToggleMedia);
             }
             freeshow_remote::Command::RearrangeGroups { show_id, from, to } => {
-                self.edit_show(&show_id, |show| show.reorder_groups(from, to));
+                let _ = self.edit_show(&show_id, |show| show.reorder_groups(from, to));
             }
             freeshow_remote::Command::AddGroup { show_id, group_id } => {
-                self.edit_show(&show_id, |show| show.duplicate_slide(&group_id).is_some());
+                let _ = self.edit_show(&show_id, |show| show.duplicate_slide(&group_id).is_some());
             }
             freeshow_remote::Command::PresentVerse { reference, text } => {
                 self.tab = "scripture".to_string();
@@ -5129,7 +5080,7 @@ impl Session {
                 }
             }
             freeshow_remote::Command::ChangeLayout { show_id, layout_id } => {
-                self.edit_show(&show_id, |show| show.set_active_layout(&layout_id));
+                let _ = self.edit_show(&show_id, |show| show.set_active_layout(&layout_id));
                 if self
                     .shows
                     .iter()
@@ -5222,19 +5173,26 @@ impl Session {
     }
 
     pub fn create_show(&mut self) -> bool {
-        let Some(root) = self.root.clone() else {
-            return false;
-        };
         let name = unique_name("Untitled", self.shows.iter().map(ShowFile::name).collect());
-        let id = new_id();
-        let mut show = ShowFile::blank(&id, &name);
-        let path = Library::open(&root)
-            .shows_dir()
-            .join(format!("{}.show", library_edit::show_file_name(&name)));
-        if show.save(&path).is_err() {
-            return false;
+        self.create_library_show(ShowFile::blank(&new_id(), &name))
+            .is_ok()
+    }
+
+    fn create_library_show(&mut self, mut show: ShowFile) -> Result<(), String> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or("Choose a library folder first")?;
+        let directory = Library::open(root).shows_dir();
+        let stem = library_edit::show_file_name(&show.name());
+        let mut path = directory.join(format!("{stem}.show"));
+        if path.try_exists().map_err(|err| err.to_string())? {
+            path = directory.join(format!("{stem} ({}).show", show.id));
         }
+        show.save(&path)
+            .map_err(|err| format!("Could not save the new show: {err}"))?;
         show.path = Some(path);
+        let id = show.id.clone();
         let pos = self
             .shows
             .iter()
@@ -5243,10 +5201,11 @@ impl Session {
         self.shows.insert(pos, show);
         self.tab = "shows".to_string();
         self.hold_program();
-        // The insert shifted the list, so the open show's index no longer names it.
-        self.show_index = None;
-        self.select_drawer(pos);
-        // A new show opens into editing on its first slide.
+        self.show_index = Some(pos);
+        self.layer_selection = None;
+        self.item_index = 0;
+        self.project_picked = false;
+        self.load_timeline();
         self.slide_index = self.first_slide();
         if let Some(project_id) = self.project_id.clone()
             && self.projects.append_show(&project_id, &id)
@@ -5256,7 +5215,7 @@ impl Session {
                 self.project_item = len.saturating_sub(1);
             }
         }
-        true
+        Ok(())
     }
 
     pub fn create_show_with(&mut self, id: &str, name: &str, text: &str) -> bool {
@@ -5309,61 +5268,54 @@ impl Session {
         let Some(index) = self.shows.iter().position(|show| show.id == id) else {
             return false;
         };
+        if self.shows[index].has_locked_layers() {
+            self.notice = "Unlock the show’s layers before replacing its text".into();
+            return false;
+        }
+        let snapshot = self.show_edit_snapshot(index, "Edit show text");
+        if !self.shows[index].replace_lyrics_with_split(
+            text,
+            self.preferences.format_new_show(),
+            self.preferences.split_lines(),
+        ) {
+            return false;
+        }
+        if let Err(error) = self.persist_show_edit(index, snapshot) {
+            self.notice = error;
+            return false;
+        }
+        self.layer_selection = None;
         self.tab = "shows".to_string();
         self.hold_program();
         self.slide_hidden = false;
         self.show_index = Some(index);
-        let saved = {
-            let Some(show) = self.shows.get_mut(index) else {
-                return false;
-            };
-            if !show.replace_lyrics_with_split(
-                text,
-                self.preferences.format_new_show(),
-                self.preferences.split_lines(),
-            ) {
-                return false;
-            }
-            match show.path.clone() {
-                Some(path) => show.save(&path).is_ok(),
-                None => true,
-            }
-        };
-        if saved {
-            self.slide_index = Some(0);
-        }
-        saved
+        self.slide_index = Some(0);
+        true
     }
 
     pub fn add_slide(&mut self) -> bool {
         if self.tab != "shows" {
             return false;
         }
-        let snap = self.edit_snapshot("Add slide");
-        let Some(show_index) = self.show_index else {
+        let Some(index) = self.show_index else {
             return false;
         };
-        let (saved, index) = {
-            let Some(show) = self.shows.get_mut(show_index) else {
-                return false;
-            };
-            if show.add_slide().is_none() {
-                return false;
-            }
-            let index = show.ordered_slides().len().saturating_sub(1);
-            let saved = match show.path.clone() {
-                Some(path) => show.save(&path).is_ok(),
-                None => true,
-            };
-            (saved, index)
+        let Some(snapshot) = self.edit_snapshot("Add slide") else {
+            return false;
         };
-        if saved {
-            self.slide_index = Some(index);
-            self.hold_program();
-            self.slide_hidden = false;
-            self.commit_edit(snap);
+        let show = &mut self.shows[index];
+        if show.add_slide().is_none() {
+            return false;
         }
-        saved
+        let slide = show.ordered_slides().len().saturating_sub(1);
+        if let Err(error) = self.persist_show_edit(index, snapshot) {
+            self.notice = error;
+            return false;
+        }
+        self.slide_index = Some(slide);
+        self.hold_program();
+        self.slide_hidden = false;
+        true
     }
 
     pub fn create_project(&mut self) -> bool {
@@ -5456,6 +5408,14 @@ impl Session {
         } else {
             tracing::error!("could not reload shows after ChurchApps import");
         }
+        if let Ok(catalog) = library.load_templates() {
+            self.templates = catalog.names();
+            self.template_catalog = catalog;
+        }
+        if let Ok(catalog) = library.load_overlays() {
+            self.overlays = catalog.names();
+            self.overlay_catalog = catalog;
+        }
         if let Ok(projects) = library.load_projects() {
             let active_item = self.current_project().and_then(|project| {
                 project
@@ -5493,22 +5453,32 @@ impl Session {
         }
     }
 
-    /// Writes shows and the project file when their bytes differ. Unchanged files are left alone.
-    pub fn autosave(&self) -> usize {
+    /// Persists pending timer edits and the project file.
+    pub fn autosave(&mut self) -> usize {
         let mut wrote = 0;
         for show in &self.shows {
+            let Some(base) = self.timer_save_bases.get(&show.id) else {
+                continue;
+            };
             let Some(path) = &show.path else {
                 continue;
             };
-            let Ok(json) = show.to_json() else {
+            if self.has_pending_show_draft(path) {
+                continue;
+            }
+            let Ok(saved) = ShowFile::load(path) else {
                 continue;
             };
-            if std::fs::read(path).ok().as_deref() == Some(json.as_bytes()) {
+            if saved.id != show.id {
                 continue;
             }
-            if show.save(path).is_ok() {
+            if saved.show != show.show {
+                if saved.show != *base || show.save(path).is_err() {
+                    continue;
+                }
                 wrote += 1;
             }
+            self.timer_save_bases.remove(&show.id);
         }
         let Some(root) = &self.root else {
             return wrote;
@@ -5696,16 +5666,21 @@ impl Session {
                 .unwrap_or_else(|| self.library_motion(true));
             return (motion, true);
         }
-        let from_slide = if self.tab == "shows" {
-            self.current_show()
-                .and_then(|show| self.slide_index.and_then(|index| show.transition_at(index)))
-        } else {
-            None
-        };
-        let motion = from_slide
-            .or_else(|| self.style_motion("text"))
-            .unwrap_or_else(|| self.library_motion(false));
-        (motion, false)
+        (self.selected_slide_motion().0, false)
+    }
+
+    /// The text transition and its source, shared by Take and the editor.
+    pub fn selected_slide_motion(&self) -> (freeshow_data::TextTransition, &'static str) {
+        if self.tab == "shows"
+            && let Some((show, index)) = self.current_show().zip(self.slide_index)
+            && let Some(motion) = show.transition_at(index)
+        {
+            return (motion, "This slide");
+        }
+        if let Some(motion) = self.style_motion("text") {
+            return (motion, "Output style");
+        }
+        (self.library_motion(false), "Library default")
     }
 
     fn style_motion(&self, kind: &str) -> Option<freeshow_data::TextTransition> {
@@ -6356,9 +6331,13 @@ fn dated_project_name(existing: Vec<String>) -> String {
 }
 
 fn remote_slides(
-    slides: Vec<freeshow_data::SlideView>,
+    show: &ShowFile,
+    mut slides: Vec<freeshow_data::SlideView>,
     group_numbers: bool,
 ) -> Vec<freeshow_remote::RemoteSlide> {
+    for slide in &mut slides {
+        slide.lines = show.visible_lines_for_slide(&slide.id);
+    }
     let labels = slide_rows_for(&slides, group_numbers);
     slides
         .into_iter()
@@ -6491,33 +6470,42 @@ fn overlay_views(catalog: &Catalog) -> Vec<freeshow_remote::RemoteOverlay> {
 
 #[derive(Debug, Clone)]
 struct EditSnapshot {
+    selection: Option<slide_layers::LayerSelection>,
     label: String,
     show_id: String,
     show: serde_json::Value,
-    show_index: usize,
     slide_index: Option<usize>,
     item_index: usize,
 }
 
 impl Session {
     fn edit_snapshot(&self, label: &str) -> Option<EditSnapshot> {
-        let show_index = self.show_index?;
-        let show = self.shows.get(show_index)?;
-        Some(EditSnapshot {
+        let index = self.show_index.filter(|&index| index < self.shows.len())?;
+        Some(self.show_edit_snapshot(index, label))
+    }
+
+    fn show_edit_snapshot(&self, index: usize, label: &str) -> EditSnapshot {
+        let show = &self.shows[index];
+        let selected = self.show_index == Some(index);
+        EditSnapshot {
+            selection: selected.then(|| self.layer_selection.clone()).flatten(),
             label: label.to_string(),
             show_id: show.id.clone(),
             show: show.show.clone(),
-            show_index,
-            slide_index: self.slide_index,
-            item_index: self.item_index,
-        })
+            slide_index: if selected {
+                self.slide_index
+            } else {
+                show.first_enabled_slide()
+            },
+            item_index: if selected { self.item_index } else { 0 },
+        }
     }
 
     fn commit_edit(&mut self, snap: Option<EditSnapshot>) {
         let Some(snap) = snap else {
             return;
         };
-        self.note_live_edit(&snap.show_id);
+        self.hold_edited_program(&snap.show_id);
         self.history.push(snap);
         self.redo.clear();
         if self.history.len() > 40 {
@@ -6525,55 +6513,155 @@ impl Session {
         }
     }
 
-    /// Marks the output for a repaint when the edited show is the one on air.
-    fn note_live_edit(&mut self, show_id: &str) {
+    fn hold_edited_program(&mut self, show_id: &str) {
         let on_air = matches!(
             self.program_content.borrow().as_ref(),
             Some(crate::live::ProgramContent::Slide { show_id: live, .. }) if live == show_id
         );
-        if on_air && !self.blanked {
-            self.live_edited = true;
+        if on_air {
+            self.hold_program();
         }
     }
 
-    fn restore_snapshot(&mut self, snap: EditSnapshot) -> bool {
-        let Some(index) = self
-            .shows
-            .iter()
-            .position(|show| show.id == snap.show_id)
-            .or(Some(snap.show_index).filter(|index| *index < self.shows.len()))
+    fn selected_live_slide(&self) -> Option<&serde_json::Value> {
+        if self.blanked || self.slide_hidden || self.tab != "shows" || self.preferences.out_locked()
+        {
+            return None;
+        }
+        let show = self.current_show()?;
+        let index = self.slide_index?;
+        let slides = show.ordered_slides();
+        let slide_id = &slides.get(index)?.id;
+        match self.program_content.borrow().as_ref() {
+            Some(crate::live::ProgramContent::Slide {
+                show_id,
+                slide_id: live_id,
+                index: live_index,
+                ..
+            }) if show_id == &show.id && live_id == slide_id && *live_index == index => {
+                show.show.get("slides")?.get(slide_id)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn can_update_live_slide(&self) -> bool {
+        self.selected_live_slide().is_some_and(|selected| {
+            matches!(
+                self.program_content.borrow().as_ref(),
+                Some(crate::live::ProgramContent::Slide { slide, .. }) if slide.as_ref() != selected
+            )
+        })
+    }
+
+    pub fn update_live_slide(&mut self) -> bool {
+        if !self.can_update_live_slide() {
+            return false;
+        }
+        let Some(replacement) = self.selected_live_slide().cloned() else {
+            return false;
+        };
+        let Some(crate::live::ProgramContent::Slide { slide, .. }) = self.program_content.get_mut()
         else {
             return false;
         };
-        self.shows[index].show = snap.show;
-        self.note_live_edit(&snap.show_id);
-        self.show_index = Some(index);
-        self.slide_index = snap.slide_index;
-        self.item_index = snap.item_index;
-        if let Some(path) = self.shows[index].path.clone() {
-            let _ = self.shows[index].save(&path);
-        }
+        *slide = std::rc::Rc::new(replacement);
+        self.hold_program();
+        self.live_edited = true;
         true
     }
 
-    pub fn undo(&mut self) -> bool {
-        let Some(previous) = self.history.pop() else {
+    fn restore_snapshot(&mut self, snap: &EditSnapshot) -> Result<EditSnapshot, String> {
+        let index = self
+            .shows
+            .iter()
+            .position(|show| show.id == snap.show_id)
+            .ok_or_else(|| "The edited show is no longer in the library".to_string())?;
+        self.check_pending_show_draft(index)?;
+        let show = &self.shows[index];
+        let restored = ShowFile {
+            id: show.id.clone(),
+            show: snap.show.clone(),
+            path: show.path.clone(),
+        };
+        if let Some(path) = &restored.path {
+            let saved = ShowFile::load(path).map_err(|err| err.to_string())?;
+            let base = self.timer_save_bases.get(&show.id).unwrap_or(&show.show);
+            if saved.id != show.id || &saved.show != base {
+                return Err("The saved show changed on disk".into());
+            }
+            restored.save(path).map_err(|err| err.to_string())?;
+        }
+
+        let same_show = self.show_index == Some(index);
+        let current = std::mem::replace(&mut self.shows[index], restored);
+        self.timer_save_bases.remove(&current.id);
+        let inverse = EditSnapshot {
+            selection: same_show.then(|| self.layer_selection.clone()).flatten(),
+            label: snap.label.clone(),
+            show_id: current.id,
+            show: current.show,
+            slide_index: if same_show {
+                self.slide_index
+            } else {
+                snap.slide_index
+            },
+            item_index: if same_show {
+                self.item_index
+            } else {
+                snap.item_index
+            },
+        };
+        self.hold_edited_program(&snap.show_id);
+        self.hold_program();
+        self.tab = "shows".to_string();
+        self.show_index = Some(index);
+        self.slide_index = snap.slide_index;
+        self.item_index = snap.item_index;
+        self.layer_selection.clone_from(&snap.selection);
+        Ok(inverse)
+    }
+
+    fn replay_edit(&mut self, undo: bool) -> bool {
+        let source = if undo {
+            &mut self.history
+        } else {
+            &mut self.redo
+        };
+        let Some(snapshot) = source.pop() else {
             return false;
         };
-        if let Some(current) = self.edit_snapshot(&previous.label) {
-            self.redo.push(current);
+        match self.restore_snapshot(&snapshot) {
+            Ok(inverse) => {
+                let destination = if undo {
+                    &mut self.redo
+                } else {
+                    &mut self.history
+                };
+                destination.push(inverse);
+                self.notice.clear();
+                true
+            }
+            Err(error) => {
+                let source = if undo {
+                    &mut self.history
+                } else {
+                    &mut self.redo
+                };
+                source.push(snapshot);
+                let operation = if undo { "Undo" } else { "Redo" };
+                self.notice = format!("{operation} failed: {error}");
+                false
+            }
         }
-        self.restore_snapshot(previous)
+    }
+
+    pub fn undo(&mut self) -> bool {
+        self.replay_edit(true)
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else {
-            return false;
-        };
-        if let Some(current) = self.edit_snapshot(&next.label) {
-            self.history.push(current);
-        }
-        self.restore_snapshot(next)
+        self.replay_edit(false)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -7834,6 +7922,55 @@ mod tests {
     }
 
     #[test]
+    fn undo_and_redo_target_the_edited_show_and_preserve_history_on_write_failure() {
+        let root = std::env::temp_dir().join(format!("freeshow-cross-show-undo-{}", new_id()));
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show_with("a", "Alpha", "First"));
+        assert!(session.create_show_with("b", "Bravo", "Other show"));
+        let first = session
+            .shows
+            .iter()
+            .position(|show| show.id == "a")
+            .unwrap();
+        let second = session
+            .shows
+            .iter()
+            .position(|show| show.id == "b")
+            .unwrap();
+        let first_path = session.shows[first].path.clone().unwrap();
+        let second_path = session.shows[second].path.clone().unwrap();
+        session.select_drawer(first);
+        session.select_slide_for_edit(0);
+        assert!(session.save_lyrics("Second"));
+        let edited = session.shows[first].show.clone();
+        let other = session.shows[second].show.clone();
+        session.select_drawer(second);
+
+        let blocked = root.join("blocked");
+        std::fs::write(&blocked, "a file cannot be a parent directory").unwrap();
+        session.shows[first].path = Some(blocked.join("Alpha.show"));
+        assert!(!session.undo());
+        assert!(session.notice.contains("Undo failed"));
+        assert_eq!(session.show_index, Some(second));
+        assert_eq!(session.shows[first].show, edited);
+        assert_eq!(ShowFile::load(&first_path).unwrap().show, edited);
+        assert!(session.can_undo());
+        assert!(!session.can_redo());
+
+        session.shows[first].path = Some(first_path.clone());
+        session.shows.swap(first, second);
+        session.show_index = Some(first);
+        assert!(session.undo());
+        assert_eq!(session.lyrics(), "First");
+        session.select_drawer(first);
+        assert!(session.redo());
+        assert_eq!(session.lyrics(), "Second");
+        assert_eq!(ShowFile::load(&first_path).unwrap().show, edited);
+        assert_eq!(ShowFile::load(&second_path).unwrap().show, other);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn clear_layers_one_at_a_time_and_mark_the_live_slide() {
         let root =
             std::env::temp_dir().join(format!("freeshow-rust-clear-layers-{}", std::process::id()));
@@ -8833,7 +8970,8 @@ Second line"
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("pdf"));
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("%PDF-1.4"));
-        let package = session.export_current_project_package().unwrap();
+        let (package, warnings) = session.export_current_project_package().unwrap();
+        assert!(warnings.is_empty());
         assert!(package.extension().and_then(|ext| ext.to_str()) == Some("project"));
         let bytes = std::fs::read(&package).unwrap();
         assert!(bytes.starts_with(b"PK"));
@@ -8845,6 +8983,62 @@ Second line"
         );
         assert!(std::fs::read(&shot).unwrap().starts_with(b"\x89PNG"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_package_import_plays_its_bundled_picture_offline() {
+        let source = std::env::temp_dir().join(format!("freeshow-package-source-{}", new_id()));
+        let incoming = std::env::temp_dir().join(format!("freeshow-package-incoming-{}", new_id()));
+        let mut session = Session::open(source.clone());
+        assert!(session.create_project());
+        assert!(session.create_show());
+
+        let relative = "Media/Backdrop.png";
+        let image = freeshow_output::Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![255, 80, 20, 255],
+        };
+        std::fs::create_dir_all(source.join("Media")).unwrap();
+        std::fs::write(source.join(relative), image.encode_png().unwrap()).unwrap();
+        assert!(
+            session.edit_selected_slide("Attach a picture", |show, _, _| {
+                show.show["media"]["b"] = serde_json::json!({"path": relative});
+                show.show["layouts"]["main"]["slides"][0]["background"] = "b".into();
+                true
+            })
+        );
+        let (package, warnings) = session.export_current_project_package().unwrap();
+        assert!(warnings.is_empty());
+        std::fs::create_dir_all(incoming.join("Imports")).unwrap();
+        std::fs::copy(package, incoming.join("Imports/Share.project")).unwrap();
+        std::fs::remove_dir_all(&source).unwrap();
+
+        let mut reopened = Session::open(incoming.clone());
+        assert!(reopened.warnings.is_empty(), "{:?}", reopened.warnings);
+        assert_eq!(
+            reopened
+                .media
+                .iter()
+                .filter(|entry| entry.path.starts_with(incoming.join("Media")))
+                .count(),
+            1
+        );
+        let project = reopened.projects.projects().into_iter().next().unwrap();
+        reopened.project_id = Some(project.id);
+        assert!(reopened.open_project_item(0, Some(0)));
+        let frame = crate::live::audience_frame(&reopened);
+        assert_eq!(
+            frame.pixel(frame.width / 2, frame.height / 2),
+            image.pixel(0, 0)
+        );
+        assert!(
+            reopened
+                .background_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(incoming.join("Media")))
+        );
+        std::fs::remove_dir_all(incoming).unwrap();
     }
 
     #[test]
@@ -8876,10 +9070,8 @@ Second line"
 
     #[test]
     fn edit_preview_hit_test_and_geometry_follow_the_selected_box() {
-        let root = std::env::temp_dir().join(format!(
-            "freeshow-rust-edit-hit-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("freeshow-rust-edit-hit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
@@ -8895,10 +9087,18 @@ Second line"
         assert_eq!(session.item_box_at(80.0, 200.0), Some(0));
         assert_eq!(session.item_box_at(5.0, 5.0), None);
         assert!(session.select_item(0));
-        assert!(session.set_item_geometry(40, 50, false));
+        let area = session.inspector_form().item_box;
+        let drag = session.begin_layer_drag().unwrap();
+        assert!(session.finish_layer_move(drag, 40 - area.left, 50 - area.top));
         let area = session.inspector_form().item_box;
         assert_eq!((area.left, area.top), (40, 50));
-        assert!(session.set_item_geometry(300, 180, true));
+        let drag = session.begin_layer_drag().unwrap();
+        assert!(session.finish_layer_resize(
+            drag,
+            300.0 - area.width as f32,
+            180.0 - area.height as f32,
+            false,
+        ));
         let area = session.inspector_form().item_box;
         assert_eq!((area.width, area.height), (300, 180));
         let _ = std::fs::remove_dir_all(&root);
@@ -8986,16 +9186,16 @@ Second line"
         );
         session.inspector_set("slide-transition", "spin").unwrap();
         session.inspector_set("slide-transition-ms", "900").unwrap();
-        let form = session.inspector_form();
+        let (motion, source) = session.selected_slide_motion();
         assert_eq!(
-            (form.slide_transition.as_str(), form.slide_transition_ms),
-            ("spin", 900)
+            (motion.kind.as_str(), motion.duration_ms, source),
+            ("spin", 900, "This slide")
         );
         assert!(session.inspector_set("slide-transition", "warp").is_err());
         session
             .inspector_set("slide-transition", "default")
             .unwrap();
-        assert_eq!(session.inspector_form().slide_transition, "default");
+        assert_eq!(session.selected_slide_motion().1, "Library default");
         assert_eq!(session.inspector_form().filters.blur, 3);
         let item = session.current_show().unwrap().show["slides"]["s1"]["items"][1].clone();
         assert_eq!(item["filter"], "blur(3px) grayscale(1) opacity(0.6)");
@@ -9359,7 +9559,7 @@ Second line"
             }));
             assert_eq!(session.audio_loop_override, Some(true));
         }
-        session.apply_slide_actions_now(true);
+        session.apply_slide_actions_now(true, None);
         assert!(!session.audio_change_pending());
         session.select_slide(1);
         assert!(
@@ -10460,6 +10660,8 @@ Second line"
                         "triggers": ["set_template"],
                         "actionValues": { "set_template": { "id": "bold" } }
                     },
+                    { "triggers": ["toggle_playing_media"] },
+                    { "triggers": ["wait"], "actionValues": { "wait": { "number": 5 } } },
                     { "triggers": ["toggle_playing_media"] }
                 ]
             });
@@ -10470,6 +10672,7 @@ Second line"
                     "actionValues": { "set_template": { "id": "missing" } }
                 }]
             });
+            show.save(show.path.as_deref().unwrap()).unwrap();
         }
         assert!(session.present_show_id(&show_id));
         assert_eq!(session.active_overlays, vec!["logo".to_string()]);
@@ -10485,6 +10688,9 @@ Second line"
             session.pending_play,
             Some(PendingPlay::ToggleMedia)
         ));
+        let saved = ShowFile::load(session.shows[show_index].path.as_deref().unwrap()).unwrap();
+        assert_eq!(saved.actions_at(0).len(), 6);
+        assert!(session.show_draft_status().is_empty());
         let _ = session.take_plays();
         session.select_slide(1);
         assert_eq!(
@@ -11182,6 +11388,7 @@ Second line"
         assert!(!background);
         assert_eq!(motion.kind, "scale");
         assert_eq!(motion.easing, "back");
+        assert_eq!(session.selected_slide_motion(), (motion, "Output style"));
         let index = session.show_index.unwrap();
         session.shows[index].show["layouts"]["main"]["slides"][0]["transition"] =
             serde_json::json!({"type":"none","duration":0});
@@ -11193,6 +11400,91 @@ Second line"
         assert_eq!(motion.kind, "spin");
         assert_eq!(motion.duration_ms, 1100);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transition_audition_and_range_edits_leave_the_program_on_air() {
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-transition-audition-{}",
+            freeshow_data::new_id()
+        ));
+        let mut session = Session::open(root.clone());
+        assert!(session.create_show());
+        assert!(session.edit_selected_slide("Set fixture", |show, _, _| {
+            assert!(show.replace_lyrics_with_split("Red\n\nDisabled\n\nBlue\n\nAgain", false, 0));
+            let slides = show.ordered_slides();
+            for (index, color) in ["#ff0000", "#00ff00", "#0000ff"].into_iter().enumerate() {
+                show.show["slides"][&slides[index].id]["settings"]["color"] = color.into();
+            }
+            let positions = &mut show.show["layouts"]["main"]["slides"];
+            positions[1]["disabled"] = true.into();
+            positions[2]["transition"] = serde_json::json!({
+                "type": "wipe", "duration": 780, "easing": "back",
+                "custom": {"direction": "bottom_top", "pluginData": {"keep": true}}
+            });
+            positions[3]["id"] = slides[0].id.as_str().into();
+            true
+        }));
+        session.select_slide(0);
+        let on_air = crate::live::audience_frame(&session);
+        session.select_slide_for_edit(2);
+        session.background_transition = true;
+
+        session
+            .inspector_set("slide-transition-easing", "linear")
+            .unwrap();
+        let audition = crate::live::TransitionAudition::prepare(&session).unwrap();
+        assert_eq!((audition.from_slide, audition.to_slide), (Some(0), 2));
+        assert_eq!(audition.source, "This slide");
+        assert_eq!(audition.duration().as_millis(), 780);
+        assert_eq!(audition.motion.direction, "bottom_top");
+        assert_eq!(audition.motion.easing, "linear");
+        assert_eq!(
+            audition.frame(0.0).pixel(5, 5),
+            freeshow_output::parse_color("#ff0000").unwrap()
+        );
+        assert_eq!(
+            audition.frame(1.0).pixel(5, 5),
+            freeshow_output::parse_color("#0000ff").unwrap()
+        );
+        assert_ne!(audition.frame(0.5).pixels, audition.frame(1.0).pixels);
+        assert!(session.background_transition);
+
+        let history = session.history.len();
+        assert!(session.apply_slide_motion_range(2, 5).is_err());
+        assert_eq!(session.history.len(), history);
+        session.apply_slide_motion_range(2, 4).unwrap();
+        assert_eq!(session.history.len(), history + 1);
+        let show = session.current_show().unwrap();
+        let persisted = ShowFile::load(show.path.as_deref().unwrap()).unwrap();
+        assert!(persisted.transition_at(0).is_none());
+        for index in 1..4 {
+            assert_eq!(
+                persisted.transition_at(index),
+                Some(audition.motion.clone())
+            );
+        }
+        assert_eq!(
+            persisted.show["layouts"]["main"]["slides"][2]["transition"]["custom"]["pluginData"]["keep"],
+            true
+        );
+        assert!(session.undo());
+        assert!(session.current_show().unwrap().transition_at(3).is_none());
+        assert!(session.redo());
+        session
+            .inspector_set("slide-transition", "default")
+            .unwrap();
+        assert_eq!(session.selected_slide_motion().1, "Library default");
+        session.apply_slide_motion_range(1, 4).unwrap();
+        assert!((0..4).all(|index| {
+            session
+                .current_show()
+                .unwrap()
+                .transition_at(index)
+                .is_none()
+        }));
+        assert_eq!(crate::live::audience_frame(&session), on_air);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -11386,7 +11678,11 @@ Second line"
         let mut session = Session::open(root.clone());
         assert!(session.create_show());
         let path = session.shows[0].path.clone().unwrap();
-        session.shows[0].show["name"] = serde_json::json!("Changed");
+        let show = &mut session.shows[0];
+        session
+            .timer_save_bases
+            .insert(show.id.clone(), show.show.clone());
+        show.show["name"] = serde_json::json!("Changed");
         let backups = root.join("Backups");
         let before = std::fs::read_dir(&backups)
             .map(|dir| dir.count())

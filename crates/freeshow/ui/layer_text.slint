@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { OperatorStyle } from "widgets.slint";
+
+export component LayerTextEditor inherits VerticalLayout {
+    in-out property <string> text <=> editor.text;
+    in property <bool> read-only;
+    in property <color> ink;
+    in property <color> panel;
+    in property <color> accent;
+    callback edited(string);
+    callback format-text(string, int, int, string, string) -> bool;
+
+    // TextInput reports UTF-8 offsets and collapses the visual selection on focus loss.
+    // Retain its last range while an operator is using a formatting control.
+    private property <int> anchor: editor.anchor-position-byte-offset;
+    private property <int> cursor: editor.cursor-position-byte-offset;
+    private property <int> held-anchor;
+    private property <int> held-cursor;
+    private property <bool> can-format: !root.read-only && (editor.has-focus
+        ? root.anchor != root.cursor : root.held-anchor != root.held-cursor);
+
+    function remember-selection() {
+        if (editor.has-focus) {
+            root.held-anchor = root.anchor;
+            root.held-cursor = root.cursor;
+        }
+    }
+
+    changed anchor => { root.remember-selection(); }
+    changed cursor => { root.remember-selection(); }
+
+    public function reset-selection() {
+        editor.set-selection-offsets(0, 0);
+        root.held-anchor = 0;
+        root.held-cursor = 0;
+        size-input.text = "";
+        color-input.text = "";
+    }
+
+    function apply(key: string, value: string) -> bool {
+        if (!root.can-format) { return false; }
+        let start = editor.has-focus ? root.anchor : root.held-anchor;
+        let end = editor.has-focus ? root.cursor : root.held-cursor;
+        if (root.format-text(root.text, start, end, key, value)) {
+            editor.focus();
+            editor.set-selection-offsets(start, end);
+            return true;
+        }
+        return false;
+    }
+
+    spacing: OperatorStyle.space-sm;
+    Rectangle {
+        min-height: 140px;
+        vertical-stretch: 1;
+        border-radius: OperatorStyle.chrome-radius;
+        background: root.panel;
+        border-width: 1px;
+        border-color: editor.has-focus ? root.accent : root.ink.with-alpha(0.25);
+
+        ContextMenuArea {
+            Menu {
+                MenuItem { title: "Cut"; enabled: !root.read-only; activated => { editor.cut(); } }
+                MenuItem { title: "Copy"; activated => { editor.copy(); } }
+                MenuItem { title: "Paste"; enabled: !root.read-only; activated => { editor.paste(); } }
+                MenuItem { title: "Select All"; activated => { editor.select-all(); } }
+            }
+            scroll := ScrollView {
+                x: 8px;
+                y: 8px;
+                width: parent.width - 16px;
+                height: parent.height - 16px;
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, editor.preferred-height);
+                horizontal-scrollbar-policy: always-off;
+
+                editor := TextInput {
+                    accessible-label: "Slide layer text";
+                    accessible-action-set-value(value) => {
+                        if (!root.read-only) {
+                            self.text = value;
+                            root.edited(value);
+                        }
+                    }
+                    accessible-action-set-selection-offsets(anchor, cursor) => {
+                        self.focus();
+                        self.set-selection-offsets(anchor, cursor);
+                    }
+                    color: root.ink;
+                    selection-background-color: root.accent.with-alpha(0.55);
+                    selection-foreground-color: root.ink;
+                    read-only: root.read-only;
+                    single-line: false;
+                    wrap: word-wrap;
+                    width: max(0px, parent.width - 12px);
+                    page-height: scroll.visible-height;
+                    edited => { root.edited(self.text); }
+                    cursor-position-changed(position) => {
+                        let bottom = position.y + self.font-metrics.ascent - self.font-metrics.descent;
+                        if (position.y + scroll.content-y < 0px) {
+                            scroll.content-y = min(0px, -position.y);
+                        } else if (bottom + scroll.content-y > scroll.visible-height) {
+                            scroll.content-y = max(scroll.visible-height - self.height, scroll.visible-height - bottom);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: OperatorStyle.space-sm;
+        Text {
+            text: "Selected text";
+            color: root.ink;
+            opacity: root.can-format ? 1 : 0.6;
+            vertical-alignment: center;
+        }
+        Button {
+            text: "Bold";
+            accessible-label: "Make selected text bold";
+            enabled: root.can-format;
+            clicked => { root.apply("weight", "bold"); }
+        }
+        Button {
+            text: "Regular";
+            accessible-label: "Make selected text regular";
+            enabled: root.can-format;
+            clicked => { root.apply("weight", "normal"); }
+        }
+        size-input := LineEdit {
+            preferred-width: 72px;
+            placeholder-text: "Size (px)";
+            accessible-label: "Selected text size in pixels";
+            enabled: root.can-format;
+            accepted => { if (root.apply("size", self.text)) { self.text = ""; } }
+        }
+        color-input := LineEdit {
+            preferred-width: 94px;
+            placeholder-text: "Color hex";
+            accessible-label: "Selected text color";
+            enabled: root.can-format;
+            accepted => { if (root.apply("color", self.text)) { self.text = ""; } }
+        }
+    }
+}

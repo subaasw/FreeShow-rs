@@ -10,6 +10,25 @@ use freeshow_data::{Library, ProjectEntry, ProjectsFile, ShowFile};
 
 use super::{Session, scripture_catalog, unique_name};
 use freeshow_data::new_id;
+use freeshow_media::{MediaKind, media_kind};
+
+#[derive(Debug)]
+pub struct MissingMedia {
+    pub key: String,
+    pub label: String,
+    pub reference: String,
+    kind: MediaKind,
+    project: bool,
+}
+
+fn missing_local_media(root: Option<&std::path::Path>, reference: &str) -> Option<MediaKind> {
+    if reference.is_empty() || reference.contains("://") || reference.starts_with("data:") {
+        return None;
+    }
+    let kind = media_kind(std::path::Path::new(reference));
+    (kind != MediaKind::Other && crate::live::resolve_media(root, reference).is_none())
+        .then_some(kind)
+}
 
 /// A show file name FreeShow and every desktop OS accept: path separators and
 /// reserved characters become spaces, and leading dots are dropped.
@@ -117,8 +136,155 @@ impl Session {
     /// Brings files dropped on the window into the library: pictures and videos
     /// to `Media/`, audio to `Audio/`, Bibles to `Bibles/`, and anything else is
     /// imported as songs or presentations through `Imports/`.
+    /// A file can be missing from a show's cues or from a standalone project row.
+    pub fn missing_media(&self) -> Vec<MissingMedia> {
+        let mut rows = Vec::new();
+        let root = self.root.as_deref();
+        let row = |id: &str, reference: &str, name: &str, project: bool| {
+            let kind = missing_local_media(root, reference)?;
+            let location = if project { "Project" } else { "Show" };
+            let file = reference.rsplit(['/', '\\']).next().unwrap_or(reference);
+            Some(MissingMedia {
+                key: serde_json::json!([location, id, reference]).to_string(),
+                label: format!("{file} · {location} “{name}”"),
+                reference: reference.into(),
+                kind,
+                project,
+            })
+        };
+        if let Some(show) = self.current_show() {
+            let name = show.name();
+            rows.extend(
+                show.media_references()
+                    .iter()
+                    .filter_map(|path| row(&show.id, path, &name, false)),
+            );
+        }
+        if let Some(project) = self.current_project() {
+            let mut seen = std::collections::BTreeSet::new();
+            rows.extend(
+                project
+                    .shows
+                    .iter()
+                    .filter(|entry| matches!(entry.kind.as_str(), "image" | "video" | "audio"))
+                    .filter(|entry| seen.insert(entry.id.as_str()))
+                    .filter_map(|entry| row(&project.id, &entry.id, &project.name, true)),
+            );
+        }
+        rows
+    }
+
+    pub fn relink_missing_media(&mut self, key: &str, replacement: &str) -> Result<String, String> {
+        let entry = self
+            .missing_media()
+            .into_iter()
+            .find(|entry| entry.key == key)
+            .ok_or("Select a file that is still missing")?;
+        let root = self
+            .root
+            .as_deref()
+            .ok_or("Choose a library folder first")?;
+        let replacement = crate::live::resolve_media(Some(root), replacement.trim())
+            .ok_or("The replacement file could not be found")?;
+        if media_kind(&replacement) != entry.kind {
+            return Err(
+                "Choose the same kind of file as the missing picture, video or audio".into(),
+            );
+        }
+        if replacement
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .len()
+            == 0
+        {
+            return Err("The replacement file is empty".into());
+        }
+        if !entry.project {
+            let show = self
+                .current_show()
+                .ok_or("Open the show that uses this file")?;
+            if let Some(path) = show.path.as_deref()
+                && self.has_pending_show_draft(path)
+            {
+                return Err("Resolve the show's recovery draft before relinking media".into());
+            }
+        }
+        let library = Library::open(root);
+        let directory = if entry.kind == MediaKind::Audio {
+            library.audio_dir()
+        } else {
+            library.media_dir()
+        };
+        let saved = copy_into(&replacement, &directory)
+            .map_err(|error| format!("Could not copy the replacement into the library: {error}"))?;
+        let path = std::path::absolute(&saved).map_err(|error| error.to_string())?;
+        let stored = path
+            .to_str()
+            .ok_or("The replacement path cannot be saved as UTF-8")?;
+        if entry.project {
+            let id = self
+                .project_id
+                .as_deref()
+                .ok_or("Open the project that uses this file")?;
+            let mut body = self
+                .projects
+                .project_body(id)
+                .ok_or("Open the project that uses this file")?;
+            let mut count = 0;
+            if let Some(rows) = body["shows"].as_array_mut() {
+                for row in rows {
+                    if row["id"].as_str() == Some(&entry.reference)
+                        && matches!(row["type"].as_str(), Some("image" | "video" | "audio"))
+                    {
+                        row["id"] = stored.into();
+                        count += 1;
+                    }
+                }
+            }
+            if count == 0 {
+                return Err("The missing media is no longer in this project".into());
+            }
+            let mut projects = self.projects.clone();
+            if !projects.put_project(id, body) {
+                return Err("Could not update the current project".into());
+            }
+            projects
+                .save(&library.projects_path())
+                .map_err(|error| format!("Could not save the relinked project: {error}"))?;
+            self.projects = projects;
+        } else {
+            let snapshot = self
+                .edit_snapshot("Relink media")
+                .ok_or("Open the show that uses this file")?;
+            let index = self.show_index.ok_or("Open the show that uses this file")?;
+            if self.shows[index].relink_media(&entry.reference, stored) == 0 {
+                return Err("The missing media is no longer in this show".into());
+            }
+            self.persist_show_edit(index, snapshot)?;
+            if !self.timeline_playing {
+                self.load_timeline();
+            }
+        }
+        self.reload_local_media(&library);
+        Ok(format!(
+            "Relinked to {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ))
+    }
+
+    fn reload_local_media(&mut self, library: &Library) {
+        if let Ok(mut entries) = library.list_media_entries() {
+            for camera in freeshow_media::cameras() {
+                entries.push(freeshow_data::MediaEntry::camera(&camera));
+            }
+            self.media = entries;
+        }
+        if let Ok(list) = library.list_media_files(&library.audio_dir()) {
+            self.audio = list;
+        }
+    }
+
     pub fn import_files(&mut self, paths: &[std::path::PathBuf]) -> Result<String, String> {
-        use freeshow_media::{MediaKind, media_kind};
         let root = self.root.clone().ok_or("choose a library folder first")?;
         let library = Library::open(&root);
         let (mut songs, mut media, mut audio, mut bibles, mut skipped) = (0, 0, 0, 0, 0);
@@ -144,12 +310,14 @@ impl Session {
                 MediaKind::Other => (library.imports_dir(), &mut songs),
             };
             match copy_into(path, &dir) {
-                Ok(()) => *counter += 1,
+                Ok(_) => *counter += 1,
                 Err(err) => copy_errors.push(format!("could not copy {}: {err}", path.display())),
             }
         }
         let mut notes = Vec::new();
         let before = self.shows.len();
+        let before_projects = self.projects.projects().len();
+        let before_templates = self.templates.len();
         if songs > 0 {
             notes = library
                 .import_show_sources()
@@ -165,18 +333,8 @@ impl Session {
                 self.bibles = list;
             }
         }
-        if media > 0
-            && let Ok(mut entries) = library.list_media_entries()
-        {
-            for camera in freeshow_media::cameras() {
-                entries.push(freeshow_data::MediaEntry::camera(&camera));
-            }
-            self.media = entries;
-        }
-        if audio > 0
-            && let Ok(list) = library.list_media_files(&library.audio_dir())
-        {
-            self.audio = list;
+        if media > 0 || audio > 0 || songs > 0 {
+            self.reload_local_media(&library);
         }
         for note in &notes {
             tracing::warn!("import: {note}");
@@ -185,9 +343,30 @@ impl Session {
             tracing::warn!("import: {error}");
         }
         let shows = self.shows.len().saturating_sub(before);
+        let projects = self
+            .projects
+            .projects()
+            .len()
+            .saturating_sub(before_projects);
+        let templates = self.templates.len().saturating_sub(before_templates);
         let mut parts = Vec::new();
-        if songs > 0 {
-            parts.push(format!("{shows} show{}", if shows == 1 { "" } else { "s" }));
+        for (count, singular) in [
+            (shows, "show"),
+            (projects, "project"),
+            (templates, "template"),
+        ] {
+            if count > 0 {
+                parts.push(format!(
+                    "{count} {singular}{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+        }
+        if songs > 0 && parts.is_empty() {
+            if let Some(error) = notes.first() {
+                return Err(error.clone());
+            }
+            parts.push("0 new shows, projects or templates".into());
         }
         if media > 0 {
             parts.push(format!(
@@ -218,9 +397,6 @@ impl Session {
             });
         }
         let mut message = format!("Imported {}", parts.join(", "));
-        if songs > 0 && shows == 0 {
-            message = format!("{message} (no new shows; a show with that name may exist already)");
-        }
         if !notes.is_empty() {
             message.push_str(&format!(" · {} warning(s) in the log", notes.len()));
         }
@@ -268,11 +444,11 @@ impl Session {
                 Ok(ProjectPick::Opened)
             }
             "image" | "video" => {
-                let wanted = std::path::Path::new(&item.id);
+                let wanted = crate::live::resolve_media(self.root.as_deref(), &item.id);
                 let real = self
                     .media
                     .iter()
-                    .position(|entry| entry.path == wanted || entry.name == item.id)
+                    .position(|entry| wanted.as_ref() == Some(&entry.path) || entry.name == item.id)
                     .ok_or_else(missing)?;
                 self.tab = "media".to_string();
                 let index = self.visible_drawer_index(Some(real)).ok_or_else(missing)?;
@@ -357,6 +533,7 @@ impl Session {
             "duplicate-show" => self.duplicate_show(),
             "delete-show" => self.delete_show(),
             "restore-show" => self.restore_deleted_show(),
+            "retry-draft" | "copy-draft" | "discard-draft" => self.resolve_show_draft(action),
             "show-text" => self.save_show_text(arg),
             "duplicate-slide" => self.edit_slides("Duplicate slide", |show, index| {
                 show.duplicate_slide_at(index)
@@ -371,8 +548,11 @@ impl Session {
             "slide-down" => {
                 self.edit_slides("Move slide", |show, index| show.move_slide_at(index, 1))
             }
-            "slide-to-overlay" => self.save_slide_as("overlay"),
-            "slide-to-template" => self.save_slide_as("template"),
+            "slide-to-overlay" => self.save_slide_as("overlay", ""),
+            "slide-to-template" => self.save_slide_as("template", arg),
+            "template-new-show" => self.use_template_as_new(arg),
+            "template-apply-style" => self.apply_browsed_template(arg),
+            "template-export" => self.export_browsed_template(arg),
             "open-project" => self.open_project(arg),
             "rename-project" => self.rename_project(arg),
             "delete-project" => self.delete_current_project(),
@@ -394,8 +574,70 @@ impl Session {
         })
     }
 
+    fn export_browsed_template(&self, id: &str) -> Result<String, String> {
+        let Some((_, name, template)) = self.selected_template().filter(|(key, _, _)| *key == id)
+        else {
+            return Err("Select a template first".into());
+        };
+        let root = self
+            .root
+            .as_deref()
+            .ok_or("Choose a library folder first")?;
+        let path = self
+            .exports_dir()?
+            .join(format!("{} - Template.project", super::export_stem(name)));
+        let warnings =
+            freeshow_data::write_portable_template(id, template, &Library::open(root), &path)
+                .map_err(|err| err.to_string())?;
+        if warnings.is_empty() {
+            Ok(format!("Exported template to {}", path.display()))
+        } else {
+            Ok(format!(
+                "Exported template with {} media dependencies: {}",
+                warnings.len(),
+                warnings.join(" · ")
+            ))
+        }
+    }
+
+    fn use_template_as_new(&mut self, id: &str) -> Result<String, String> {
+        let Some((_, name, template)) = self.selected_template().filter(|(key, _, _)| *key == id)
+        else {
+            return Err("Select a template first".into());
+        };
+        let name = unique_name(name, self.shows.iter().map(ShowFile::name).collect());
+        let show = ShowFile::from_template(&new_id(), &name, template)
+            .ok_or_else(|| format!("“{name}” has no usable layers"))?;
+        self.create_library_show(show)?;
+        self.set_search("");
+        Ok(format!("Opened a new show from the template as “{name}”"))
+    }
+
+    fn apply_browsed_template(&mut self, id: &str) -> Result<String, String> {
+        let Some((_, name, template)) = self.selected_template().filter(|(key, _, _)| *key == id)
+        else {
+            return Err("Select a template first".into());
+        };
+        if freeshow_data::template_text_item(template).is_none() {
+            return Err("This template has no text style. Use as New to copy its layout.".into());
+        }
+        let name = name.to_owned();
+        let target = self
+            .template_target_show()
+            .ok_or("Open a show to apply the style")?;
+        self.notice.clear();
+        if self.apply_template_id(id) {
+            self.set_search("");
+            Ok(format!("Applied “{name}” to “{target}”"))
+        } else if self.notice.is_empty() {
+            Err("Could not apply the template style".into())
+        } else {
+            Err(self.notice.clone())
+        }
+    }
+
     /// Saves the selected slide's boxes as a new overlay or template in the library.
-    fn save_slide_as(&mut self, kind: &str) -> Result<String, String> {
+    fn save_slide_as(&mut self, kind: &str, requested_name: &str) -> Result<String, String> {
         let index = self.selected_show()?;
         let show = &self.shows[index];
         let slides = show.ordered_slides();
@@ -424,21 +666,37 @@ impl Session {
                 library.templates_path(),
             )
         };
-        let name = unique_name(base.trim(), catalog.names());
+        let base = if requested_name.trim().is_empty() {
+            base.trim()
+        } else {
+            requested_name.trim()
+        };
+        let name = unique_name(base, catalog.names());
         let mut entry =
             serde_json::json!({ "name": name, "color": null, "category": null, "items": items });
         if kind == "template" {
+            let design = &show.show["slides"][&slide.id]["settings"];
             entry["settings"] = serde_json::json!({});
+            if let Some(color) = design.get("color").filter(|value| value.is_string()) {
+                entry["settings"]["backgroundColor"] = color.clone();
+            }
+            if let Some(size) = design.get("resolution").filter(|value| value.is_object()) {
+                entry["settings"]["resolution"] = size.clone();
+            }
         }
-        catalog.insert(&new_id(), entry);
-        catalog
+        let id = new_id();
+        let mut saved = catalog.clone();
+        saved.insert(&id, entry);
+        saved
             .save(&path)
             .map_err(|err| format!("could not save the {kind}: {err}"))?;
-        let names = catalog.names();
+        let names = saved.names();
+        *catalog = saved;
         if kind == "overlay" {
             self.overlays = names;
         } else {
             self.templates = names;
+            self.template_pick = Some(id);
         }
         Ok(format!("Saved {kind} \u{201c}{name}\u{201d}"))
     }
@@ -481,7 +739,7 @@ impl Session {
     }
 
     /// Inserts a show in name order, selects it, and returns its index.
-    fn insert_sorted(&mut self, show: ShowFile) -> usize {
+    pub(super) fn insert_sorted(&mut self, show: ShowFile) -> usize {
         let name = show.name().to_lowercase();
         let pos = self
             .shows
@@ -513,6 +771,7 @@ impl Session {
 
     fn rename_show(&mut self, name: &str) -> Result<String, String> {
         let index = self.selected_show()?;
+        self.check_pending_show_draft(index)?;
         let name = name.trim();
         if name.is_empty() {
             return Err("a show name cannot be empty".into());
@@ -542,6 +801,7 @@ impl Session {
             let _ = std::fs::remove_file(old);
         }
         show.path = Some(path);
+        self.timer_save_bases.remove(&show.id);
         let slide = self.slide_index;
         self.insert_sorted(show);
         self.slide_index = slide;
@@ -571,6 +831,7 @@ impl Session {
 
     fn delete_show(&mut self) -> Result<String, String> {
         let index = self.selected_show()?;
+        self.check_pending_show_draft(index)?;
         let name = self.shows[index].name();
         if let Some(path) = self.shows[index].path.clone()
             && path.exists()
@@ -579,6 +840,7 @@ impl Session {
                 .map_err(|err| format!("could not delete {}: {err}", path.display()))?;
         }
         let show = self.shows.remove(index);
+        self.timer_save_bases.remove(&show.id);
         self.history.retain(|snap| snap.show_id != show.id);
         self.redo.retain(|snap| snap.show_id != show.id);
         self.deleted_shows.push(show);
@@ -605,28 +867,23 @@ impl Session {
         Ok(format!("Restored “{name}”"))
     }
 
-    fn save_current_show(&mut self, index: usize) -> Result<(), String> {
-        let show = &self.shows[index];
-        match &show.path {
-            Some(path) => show
-                .save(path)
-                .map_err(|err| format!("could not save {}: {err}", path.display())),
-            None => Ok(()),
-        }
-    }
-
     fn save_show_text(&mut self, text: &str) -> Result<String, String> {
         let index = self.selected_show()?;
         if self.shows[index].lyrics_text() == text.trim_end() {
             return Ok(String::new());
         }
-        let snap = self.edit_snapshot("Edit show text");
+        if self.shows[index].has_locked_layers() {
+            return Err("Unlock the show’s layers before replacing its text".into());
+        }
+        let snap = self
+            .edit_snapshot("Edit show text")
+            .ok_or("select a show first")?;
         let split = self.preferences.split_lines();
         if !self.shows[index].set_lyrics_text(text, split) {
             return Err("could not update the show text".into());
         }
-        self.save_current_show(index)?;
-        self.commit_edit(snap);
+        self.persist_show_edit(index, snap)?;
+        self.layer_selection = None;
         let count = self.shows[index].ordered_slides().len();
         let last = count.saturating_sub(1);
         self.slide_index = Some(self.slide_index.unwrap_or(0).min(last));
@@ -644,7 +901,7 @@ impl Session {
     ) -> Result<String, String> {
         let index = self.selected_show()?;
         let slide = self.slide_index.ok_or("select a slide first")?;
-        let snap = self.edit_snapshot(label);
+        let snap = self.edit_snapshot(label).ok_or("select a show first")?;
         let Some(next) = edit(&mut self.shows[index], slide) else {
             return Err(match label {
                 "Delete slide" => "a show keeps at least one slide".into(),
@@ -652,8 +909,8 @@ impl Session {
                 _ => format!("{label} failed"),
             });
         };
-        self.save_current_show(index)?;
-        self.commit_edit(snap);
+        self.persist_show_edit(index, snap)?;
+        self.layer_selection = None;
         self.slide_index = Some(next);
         self.item_index = 0;
         Ok(String::new())
@@ -716,7 +973,26 @@ impl Session {
 }
 
 /// Copies `path` into `dir`, keeping an existing file with the same name and contents.
-fn copy_into(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<()> {
+fn same_file_contents(left: &std::path::Path, right: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::{BufRead, BufReader};
+    let mut left = BufReader::new(std::fs::File::open(left)?);
+    let mut right = BufReader::new(std::fs::File::open(right)?);
+    loop {
+        let a = left.fill_buf()?;
+        let b = right.fill_buf()?;
+        let size = a.len().min(b.len());
+        if size == 0 {
+            return Ok(a.is_empty() && b.is_empty());
+        }
+        if a[..size] != b[..size] {
+            return Ok(false);
+        }
+        left.consume(size);
+        right.consume(size);
+    }
+}
+
+fn copy_into(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
     let mut target = dir.join(name);
@@ -724,9 +1000,9 @@ fn copy_into(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<(
     let mut number = 2;
     while target.exists() {
         if std::fs::metadata(&target).is_ok_and(|meta| meta.len() == size)
-            && std::fs::read(&target)? == std::fs::read(path)?
+            && same_file_contents(&target, path)?
         {
-            return Ok(());
+            return Ok(target);
         }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
         let ext = path
@@ -737,7 +1013,32 @@ fn copy_into(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<(
         target = dir.join(format!("{stem} {number}{ext}"));
         number += 1;
     }
-    std::fs::copy(path, &target).map(|_| ())
+    let mut source = std::fs::File::open(path)?;
+    let candidate = dir.join(format!(".freeshow-copy-{}.part", new_id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)?;
+        std::io::copy(&mut source, &mut file)?;
+        file.sync_all()?;
+        drop(file);
+        // The normal importer has one writer. Guard the destination if another process has added it.
+        let reservation = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)?;
+        drop(reservation);
+        if let Err(error) = std::fs::rename(&candidate, &target) {
+            let _ = std::fs::remove_file(&target);
+            return Err(error);
+        }
+        Ok(target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(candidate);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -946,6 +1247,268 @@ mod tests {
         let id = reloaded.overlay_catalog.id_named("Welcome").unwrap();
         let text = reloaded.overlay_catalog.get(&id).unwrap().to_string();
         assert!(text.contains("Welcome home"), "{text}");
+    }
+
+    #[test]
+    fn templates_browse_by_id_apply_style_with_undo_and_make_independent_shows() {
+        let (dir, mut session) = library("template-gallery");
+        std::fs::create_dir_all(dir.0.join("Media")).unwrap();
+        let picture = freeshow_output::Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![230, 140, 45, 255],
+        };
+        std::fs::write(
+            dir.0.join("Media/Poster.png"),
+            picture.encode_png().unwrap(),
+        )
+        .unwrap();
+        assert!(session.create_show());
+        session.library_action("rename-show", "Original").unwrap();
+        assert!(session.save_lyrics("Template example"));
+        assert!(session.edit_selected_slide("Design poster", |show, slide, _| {
+            let slide = &mut show.show["slides"][slide];
+            slide["settings"]["color"] = serde_json::json!("#203040");
+            slide["settings"]["resolution"] = serde_json::json!({"width": 1000, "height": 1000});
+            slide["items"][0]["style"] = serde_json::json!("width:500px;height:200px;left:100px;top:80px;");
+            slide["items"].as_array_mut().unwrap().push(serde_json::json!({
+                "type": "media", "src": "Media/Poster.png", "style": "width:300px;height:200px;left:200px;top:400px;",
+                "custom": {"keep":true}
+            }));
+            true
+        }));
+        session.select_slide(0);
+        let on_air = crate::live::audience_frame(&session);
+        session
+            .library_action("slide-to-template", "Welcome poster")
+            .unwrap();
+        let library = Library::open(&dir.0);
+        let on_disk = freeshow_data::Catalog::load(&library.templates_path()).unwrap();
+        let id = on_disk.id_named("Welcome poster").unwrap();
+        let original_template = on_disk.get(&id).unwrap();
+        assert_eq!(original_template["settings"]["backgroundColor"], "#203040");
+
+        let gallery_image = crate::live::catalog_thumbnail(&session, original_template, 128, 72);
+        assert_eq!((gallery_image.width, gallery_image.height), (72, 72));
+        assert_eq!(gallery_image.pixel(25, 36), picture.pixel(0, 0));
+        session.template_catalog.insert(
+            "same-name",
+            serde_json::json!({
+                "name": "Welcome poster", "items": [{"type": "text", "style": "left:5px;"}]
+            }),
+        );
+        session.switch_tab("templates");
+        assert_eq!(session.template_entries().len(), 2);
+        assert!(session.browse_template("same-name"));
+        assert_eq!(session.selected_template().unwrap().0, "same-name");
+        assert_eq!(session.current_show().unwrap().name(), "Original");
+        assert!(session.browse_template(&id));
+        session.set_search("no match");
+        assert!(session.selected_template().is_none());
+        assert!(session.library_action("template-new-show", &id).is_err());
+        session.set_search("poster");
+        assert_eq!(session.selected_template().unwrap().0, id);
+        assert!(session.library_action("template-new-show", &id).is_ok());
+        assert_eq!(session.show_name(), "Welcome poster");
+        assert!(session.search_query.is_empty());
+        let created = session.current_show().unwrap();
+        let persisted = ShowFile::load(created.path.as_deref().unwrap()).unwrap();
+        let slide = &persisted.show["slides"]["s1"];
+        assert_eq!(slide["settings"]["resolution"]["width"], 1000);
+        assert_eq!(slide["settings"]["color"], "#203040");
+        assert_eq!(slide["items"], original_template["items"]);
+        assert!(session.save_lyrics("Independent new copy"));
+        assert_eq!(session.template_catalog.get(&id), Some(original_template));
+
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Keep my actual words"));
+        let before = session.current_show().unwrap().show.clone();
+        let history = session.history.len();
+        session.switch_tab("templates");
+        assert!(session.browse_template(&id));
+        session.library_action("template-apply-style", &id).unwrap();
+        assert_eq!(session.history.len(), history + 1);
+        assert_eq!(session.lyrics(), "Keep my actual words");
+        assert_eq!(
+            session.current_show().unwrap().show["slides"]["s1"]["items"][0]["style"],
+            original_template["items"][0]["style"]
+        );
+        assert!(session.undo());
+        assert_eq!(session.current_show().unwrap().show, before);
+        assert_eq!(crate::live::audience_frame(&session), on_air);
+    }
+
+    #[test]
+    fn a_relinked_offline_video_reopens_and_previews_without_changing_the_program() {
+        let (dir, mut session) = library("relink-video");
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Keep the live cue"));
+        let missing = dir.0.join("Lost/Story.mp4");
+        let replacement = dir.0.join("Replacement.mp4");
+        std::fs::write(
+            &replacement,
+            include_bytes!("../../../freeshow-data/tests/fixtures/lesson-clip.mp4"),
+        )
+        .unwrap();
+        assert!(
+            session.edit_selected_slide("Add a video cue", |show, _, _| {
+                show.show["media"]["clip"] = serde_json::json!({
+                    "path": missing,
+                    "loop": false,
+                    "muted": false,
+                });
+                show.show["layouts"]["main"]["slides"][0]["background"] = "clip".into();
+                true
+            })
+        );
+        session.select_slide(0);
+        let on_air = crate::live::audience_frame(&session);
+        let before = session.current_show().unwrap().show.clone();
+        let key = session.missing_media().into_iter().next().unwrap().key;
+        let folder = dir.0.join("Media");
+        std::fs::write(&folder, "blocked media directory").unwrap();
+        assert!(
+            session
+                .relink_missing_media(&key, replacement.to_str().unwrap())
+                .is_err()
+        );
+        assert_eq!(session.current_show().unwrap().show, before);
+        std::fs::remove_file(&folder).unwrap();
+
+        session.switch_tab("media");
+        session
+            .relink_missing_media(&key, replacement.to_str().unwrap())
+            .unwrap();
+        assert_eq!(session.last_edit_label(), Some("Relink media"));
+        assert!(session.missing_media().is_empty());
+        assert_eq!(crate::live::audience_frame(&session), on_air);
+        let copied = folder.join("Replacement.mp4");
+        let chosen = session
+            .media_preview_entry(copied.to_str().unwrap())
+            .unwrap();
+        let mut player = crate::open_muted_media_preview(&chosen.path).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let first = loop {
+            if let Some(frame) = player.try_next_frame() {
+                break frame;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "The local preview did not decode"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        };
+        assert!(first.width > 0);
+        drop(player);
+        std::fs::remove_file(replacement).unwrap();
+
+        assert!(session.undo());
+        assert_eq!(session.current_show().unwrap().show, before);
+        assert!(session.redo());
+        let mut reopened = Session::open(dir.0.clone());
+        assert!(reopened.present_show_id(&session.current_show().unwrap().id));
+        let Some(crate::session::PendingPlay::Video(path)) =
+            reopened.take_plays().into_iter().flatten().next()
+        else {
+            panic!("The relinked cue must queue the copied video");
+        };
+        assert_eq!(path, copied);
+        assert!(!reopened.media_loop && !reopened.media_muted);
+    }
+
+    #[test]
+    fn relinking_a_project_picture_preserves_existing_files_and_cue_order() {
+        let (dir, mut session) = library("relink-project");
+        assert!(session.create_project());
+        assert!(session.create_show());
+        let id = session.project_id.clone().unwrap();
+        let mut body = session.projects.project_body(&id).unwrap();
+        body["shows"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id":"Lost/Picture.png",
+                "type":"image",
+                "name":"Project cue"
+            }));
+        assert!(session.projects.put_project(&id, body));
+        assert!(session.save_projects());
+        let media = dir.0.join("Media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("Picture.png"), b"existing file").unwrap();
+        let source = dir.0.join("Picture.png");
+        let image = include_bytes!("../../../freeshow-data/tests/fixtures/lesson-cover.png");
+        std::fs::write(&source, image).unwrap();
+
+        let key = session
+            .missing_media()
+            .into_iter()
+            .find(|entry| entry.project)
+            .unwrap()
+            .key;
+        assert!(
+            session
+                .relink_missing_media(&key, source.to_str().unwrap())
+                .is_ok()
+        );
+        assert_eq!(
+            std::fs::read(media.join("Picture.png")).unwrap(),
+            b"existing file"
+        );
+        let project = session.current_project().unwrap();
+        assert_eq!(project.shows[0].kind, "show");
+        assert_eq!(project.shows[1].label, "Project cue");
+        assert_eq!(std::fs::read(&project.shows[1].id).unwrap(), image);
+        assert!(matches!(
+            session.pick_project_item(1),
+            Ok(ProjectPick::Drawer { tab: "media", .. })
+        ));
+        assert!(session.missing_media().is_empty());
+    }
+
+    #[test]
+    fn exported_template_appears_in_an_open_receiving_library_after_drop() {
+        let (source, mut session) = library("share-template");
+        let (_destination, mut receiver) = library("receive-template");
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Reusable wording"));
+        session
+            .library_action("slide-to-template", "Welcome")
+            .unwrap();
+        session.switch_tab("templates");
+        let id = session.template_catalog.id_named("Welcome").unwrap();
+        assert!(session.browse_template(&id));
+        session.library_action("template-export", &id).unwrap();
+        let manifest = receiver
+            .import_files(&[source.0.join("Exports/Welcome - Template.project")])
+            .unwrap();
+        assert_eq!(manifest, "Imported 1 template");
+        assert!(receiver.projects.projects().is_empty());
+        assert_eq!(receiver.templates, ["Welcome"]);
+        receiver.switch_tab("templates");
+        assert!(receiver.browse_template(&id));
+        receiver.library_action("template-new-show", &id).unwrap();
+        assert_eq!(receiver.lyrics(), "Reusable wording");
+    }
+
+    #[test]
+    fn a_failed_template_save_leaves_the_gallery_unchanged() {
+        let (dir, mut session) = library("template-save-failure");
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Still in the show"));
+        let library = Library::open(&dir.0);
+        let path = library.templates_path();
+        let config = path.parent().unwrap();
+        std::fs::rename(config, dir.0.join("original-config")).unwrap();
+        std::fs::write(config, "The config path is blocked by a file").unwrap();
+        assert!(
+            session
+                .library_action("slide-to-template", "Blocked")
+                .is_err()
+        );
+        assert!(session.templates.is_empty());
+        assert!(session.template_catalog.named_entries().is_empty());
+        assert_eq!(session.lyrics(), "Still in the show");
     }
 
     #[test]
