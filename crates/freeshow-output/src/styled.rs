@@ -1372,6 +1372,127 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     );
 }
 
+/// Item coordinates in the slide's source space, before output scaling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemGeometry {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    matrix: [f32; 4],
+}
+
+pub fn item_geometry(style: &str) -> ItemGeometry {
+    let style = parse_style(style);
+    let matrix = style.source_transform();
+    ItemGeometry {
+        left: style.left,
+        top: style.top,
+        width: style.width.max(1.0),
+        height: style.height.max(1.0),
+        matrix: if invertible(matrix) {
+            matrix
+        } else {
+            [1.0, 0.0, 0.0, 1.0]
+        },
+    }
+}
+
+impl BoxStyle {
+    fn source_transform(&self) -> [f32; 4] {
+        let (sin, cos) = self.rotation_deg.to_radians().sin_cos();
+        let [a, b, c, d] = self.pptx_group_matrix.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+        [
+            a * cos + c * sin,
+            b * cos + d * sin,
+            c * cos - a * sin,
+            d * cos - b * sin,
+        ]
+    }
+}
+
+fn invertible([a, b, c, d]: [f32; 4]) -> bool {
+    let determinant = a * d - b * c;
+    determinant.is_finite() && determinant != 0.0
+}
+
+impl ItemGeometry {
+    fn transform(self, x: f32, y: f32) -> [f32; 2] {
+        let [a, b, c, d] = self.matrix;
+        [a * x + c * y, b * x + d * y]
+    }
+
+    fn inverse(self, x: f32, y: f32) -> [f32; 2] {
+        let [a, b, c, d] = self.matrix;
+        let determinant = a * d - b * c;
+        [
+            (d * x - c * y) / determinant,
+            (-b * x + a * y) / determinant,
+        ]
+    }
+
+    pub fn corners(self) -> [[f32; 2]; 4] {
+        let half_w = self.width / 2.0;
+        let half_h = self.height / 2.0;
+        [
+            (-half_w, -half_h),
+            (half_w, -half_h),
+            (half_w, half_h),
+            (-half_w, half_h),
+        ]
+        .map(|(x, y)| {
+            let [dx, dy] = self.transform(x, y);
+            [self.left + half_w + dx, self.top + half_h + dy]
+        })
+    }
+
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        let half_w = self.width / 2.0;
+        let half_h = self.height / 2.0;
+        let [x, y] = self.inverse(x - self.left - half_w, y - self.top - half_h);
+        x >= -half_w && x < half_w && y >= -half_h && y < half_h
+    }
+
+    /// Moves the local bottom-right corner, keeping the opposite corner fixed in source space.
+    pub fn resized(self, dx: f32, dy: f32, uniform: bool) -> Self {
+        let [dx, dy] = self.inverse(dx, dy);
+        if !dx.is_finite() || !dy.is_finite() {
+            return self;
+        }
+        let max_width = self.width.max(8000.0);
+        let max_height = self.height.max(8000.0);
+        let (width, height) = if uniform {
+            let ratio_x = dx / self.width;
+            let ratio_y = dy / self.height;
+            let delta = if ratio_x.abs() >= ratio_y.abs() {
+                ratio_x
+            } else {
+                ratio_y
+            };
+            let scale = (1.0 + delta).clamp(
+                1.0 / self.width.min(self.height),
+                (max_width / self.width).min(max_height / self.height),
+            );
+            (self.width * scale, self.height * scale)
+        } else {
+            (
+                (self.width + dx).clamp(1.0, max_width),
+                (self.height + dy).clamp(1.0, max_height),
+            )
+        };
+        let half_dw = (width - self.width) / 2.0;
+        let half_dh = (height - self.height) / 2.0;
+        let [center_x, center_y] = self.transform(half_dw, half_dh);
+        Self {
+            left: self.left + center_x - half_dw,
+            top: self.top + center_y - half_dh,
+            width,
+            height,
+            ..self
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct GradientSpace {
     matrix: [f32; 4],
@@ -1401,14 +1522,8 @@ fn draw_transformed_item(
     if !ratio.is_finite() || ratio <= 0.0 {
         return false;
     }
-    let (sin, cos) = style.rotation_deg.to_radians().sin_cos();
-    let [a, b, c, d] = style.pptx_group_matrix.unwrap_or([1.0, 0.0, 0.0, 1.0]);
-    let (a, b, c, d) = (
-        a * cos + c * sin,
-        (b * cos + d * sin) / ratio,
-        (c * cos - a * sin) * ratio,
-        d * cos - b * sin,
-    );
+    let [a, b, c, d] = style.source_transform();
+    let (b, c) = (b / ratio, c * ratio);
     let determinant = a * d - b * c;
     if !determinant.is_finite() || determinant == 0.0 {
         return false;
@@ -4561,7 +4676,13 @@ fn scale(value: f32, output: u32, source: f32) -> i32 {
 }
 
 fn px(value: &str) -> Option<f32> {
-    value.trim().trim_end_matches("px").trim().parse().ok()
+    value
+        .trim()
+        .trim_end_matches("px")
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 fn parse_align(value: &str) -> Align {
@@ -4615,6 +4736,29 @@ fn alpha_byte(number: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transformed_resize_keeps_the_opposite_corner_fixed() {
+        let area = item_geometry(
+            "left:100px;top:200px;width:80px;height:40px;transform:rotate(90deg);--pptx-group-matrix:2 0 1 1;",
+        );
+        let [anchor, _, handle, _] = area.corners();
+        let resized = area.resized(40.0, 12.0, false);
+        assert!((resized.width - 92.0).abs() < 0.001);
+        assert!((resized.height - 26.0).abs() < 0.001);
+        let [new_anchor, _, new_handle, _] = resized.corners();
+        for axis in 0..2 {
+            assert!((new_anchor[axis] - anchor[axis]).abs() < 0.001);
+            assert!((new_handle[axis] - handle[axis] - [40.0, 12.0][axis]).abs() < 0.001);
+        }
+        let scaled = area.resized(40.0, 12.0, true);
+        assert!((scaled.width / scaled.height - 2.0).abs() < 0.001);
+        for (actual, expected) in scaled.corners()[0].into_iter().zip(anchor) {
+            assert!((actual - expected).abs() < 0.001);
+        }
+        assert!(area.contains(140.0, 220.0));
+        assert!(!area.contains(250.0, 230.0));
+    }
 
     #[test]
     fn solid_ellipse_preserves_background_in_corners_and_obeys_bounds() {
