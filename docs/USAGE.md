@@ -23,13 +23,61 @@ cargo run -p freeshow -- --show ~/Documents/FreeShow/Shows/Some\ Song.show
 
 Open a show from the drawer or the project list. Its slides appear as thumbnails and stay in view while you browse media, audio or other drawer tabs. Clicking a slide puts it on the output, as in FreeShow; the arrow keys, Page Up/Down (presentation clickers) and Space step through it, from the operator, output or stage window. The live slide carries a LIVE tag and the panel beside the slides shows the real output picture. Under it, **Clear all** (or Esc) blanks everything, and **Slide**, **Background**, **Overlays** and **Audio** clear one layer each.
 
-**Edit** switches the show to editing (the button reads **Done** while editing): clicking a slide then only selects it, the preview shows the slide being edited, and **Go** puts it on the output. While presenting, **Prev** / **Next** step slides; **Duplicate** / **Delete** only show in edit mode. **Undo** / **Redo** sit in the edit header. **New show** opens straight into editing, and **Show text** edits the whole song as plain text. Stage notes for the selected slide edit beside the group name. Inspector and stage style fields save when you leave the box or press Enter. Click a colour swatch to open RGBA sliders and presets (or type hex beside it). The same picker is on theme colours, style backgrounds, and stage item colours. Inspector sections collapse (Box / Outline / Filters / Layout start closed) so Text and Position stay on screen while presenting. Settings ? General and the slide inspector set transition direction for slide, wipe, push, cover, and uncover. The header screen menu lists connected displays by name (**Auto** keeps the previous second-monitor default).
+**Edit** switches the show to editing (the button reads **Done** while editing): clicking a slide then only selects it, the preview shows the slide being edited, and **Go** puts it on the output. While presenting, **Prev** / **Next** step slides; **Duplicate** / **Delete** only show in edit mode. **Undo** / **Redo** sit in the edit header. **New show** opens straight into editing, and **Show text** edits the whole song as plain text. Stage notes for the selected slide edit beside the group name. Inspector and stage style fields save when you leave the box or press Enter. Click a colour swatch to open RGBA sliders and presets (or type hex beside it). The same picker is on theme colours, style backgrounds, and stage item colours. Inspector sections collapse (Box / Outline / Filters / Layout start closed) so Text and Position stay on screen while presenting. Settings → General sets the default slide and media transitions. The header screen menu lists connected displays by name (**Auto** keeps the previous second-monitor default).
 
-To place a picture on a slide, choose a still image from the Media library picker in **Edit** and click **Add picture**. The new box opens in the inspector, where you can change its position, size, fit, crop, or flips. Keep the source file in place so the slide can display it. In **Edit**, click a box in the preview to select it, drag to move it, or drag the lower-right handle to resize.
+Edits to the slide on air appear in the editor first. Select that same slide and click **Update Live** to publish the saved visual changes and stage notes without restarting its audio, video, or timer. **Go** takes the selected cue through its normal playback path. **Undo** and **Redo** reopen the show they affect, even after you browse to another show. If a write fails, the status bar reports the error and the same undo or redo remains available to retry.
 
-On slides with several boxes, use **Move backward** or **Move forward** to change which box appears on top where they overlap. Box numbers follow the saved order, including when a stage layout is set to display a specific box number.
+FreeShow records a recovery draft before saving a show edit in the library. If a save fails or the app closes during the write, use the recovery bar to **Retry save**, **Save as copy**, or **Discard**. If the original show changed on disk, **Save as copy** keeps both versions and opens the recovered copy in the editor. **Discard** reloads the saved version when it is available. If the recovery folder itself is unwritable, the bar says **Draft in memory**. Save it before closing the app. Text still being typed before the save begins and a drag that has yet to finish are outside this recovery window.
+
+To place a picture on a slide, choose a still image from the Media library picker in **Edit** and click **Add picture**. The new box opens in the inspector, where you can change its position, size, fit, crop, or flips. Keep the source file in place so the slide can display it. In **Edit**, click a box on the canvas to select it and drag to move it. Drag the square handle to resize a single visible, unlocked layer. The handle follows the layer’s rotation and the opposite corner stays in place. Hold **Shift** when you start the resize to keep the layer’s proportions.
+
+Above the canvas, use **+** and **−** to zoom between 100% and 400% of the fitted slide. At higher zoom, turn on **Pan** and drag the canvas or use the arrow keys while it has focus. Turn off **Pan** to resume editing. **Fit** centers the whole slide and restores the default zoom. These controls affect the editor view only.
+
+The **Layers** list shows boxes from front to back. Click a layer or use arrow keys while the list has focus to select it. Turn on **Add to selection** to collect a set from the list. You can also hold **Command** on macOS or **Ctrl** on Windows and Linux while clicking boxes on the canvas to add them. Use **Exclude current layer** to remove the active box from the selection, or use **Keep current only** to return to one layer. The inspector controls the active layer.
+
+Drag a selected box to move the selection together. **Duplicate**, **Remove**, and the stacking buttons also work on the selection. **Align to slide** aligns one layer to the canvas. For a selection, **Align selection** uses its enclosing box, and **Distribute** makes the gaps even between three or more layers. Box numbers follow the saved order, including when a stage layout displays a specific box number.
+
+Select related layers and click **Group layers** to save them as a group. Selecting a group member normally selects the whole group. Drag or nudge it to move the members together, use **Align group to slide** to keep their spacing, or duplicate it as a separate group. Use **Keep current only** to edit one member or **Select group** to select them together again. **Ungroup layers** removes the grouping and keeps the layers in place. Saved groups also carry over when a slide is used as a template.
+
+To resize a saved group, drag the square handle on its outer outline. The opposite corner stays fixed as the layer boxes and text sizes scale proportionally. A locked member disables the group handle. Hidden members still scale with the group, and the handle appears when at least one member is visible. One **Undo** restores the layout. Use **Update Live** to apply the edited slide to the audience while it is on air.
+
+When you edit text in a layer, unchanged text around the edit keeps its existing fonts, colors, and other formatting. Highlight words in the slide text field, then use **Selected text** to make them **Bold** or **Regular**. To resize or recolor the selection, enter a size from 12 to 400 px or a hex color such as `#ffee00` and press Enter. Check the result on the Edit canvas and use **Undo** to reverse the format. The Inspector’s typography controls apply to the whole text layer.
+
+Use **Lock** to protect the selected layers from text, style, geometry, stacking, and removal edits in the native editor. **Unlock** restores editing. **Hide** keeps the layer and its contents in the list so you can choose **Show** later. Hidden layers are omitted from preview, audience, stage, and remote output. Once a slide is on air, use **Update Live** or take it again to publish the visibility change.
+
+With **Snap** on, move a selection near an edge or center line of the slide or another layer to see an alignment guide. A drag saves once when you release it. **Escape** cancels a drag. With the canvas focused, arrow keys nudge the selection by one source pixel and **Shift** increases the step to ten. Numeric position and size fields remain available in the inspector. Use **Tab** and **Shift+Tab** to move focus, and **Enter** or **Space** to activate a focused button.
+
+In **Edit → Transition**, choose the effect, duration, and easing for the selected slide. Direction is available for Slide, Push, Wipe, Cover, and Uncover. **Inherited** follows the active output style or the library default. The inspector shows which one supplies the current effect. Changing a control creates a slide override.
+
+Click **Preview transition** to play the effect in a separate window. It uses stills from the previous enabled slide and the selected slide, starting on black if there is no previous slide. Use **Replay** or drag the progress slider to revisit a moment. Press **Escape** to close the preview. The preview leaves the audience, stage, remote controls, and audio on the current cue.
+
+Use **Apply to range…** to copy the selected slide’s transition to an inclusive range in the current layout. The first slide is number 1. Select **Inherited** and use **Reset range** to remove the range’s overrides. **Undo** reverses the whole range edit in one step.
+
+During a live transition, **Go** starts the next slide from the latest picture sent to the output. **Clear all**, **Slide**, and **Background** take effect immediately and discard queued pictures from before the clear.
 
 In the slide inspector, **Radius** accepts pixels or percentages. Enter up to four values per axis in top-left, top-right, bottom-right, bottom-left order. Use `/` between the horizontal and vertical values to make elliptical corners, as in `40% 0 0 / 20px 0 0`.
+
+### Templates
+
+Open **Templates** and select a card to preview its design. Search filters the cards by name. **Use as New** creates an editable show with a copy of the template’s text, layers, background, and slide size. The new show opens in Edit and is added to the selected project if one is open. Its changes stay with the new show.
+
+**Apply Style** uses the first template text box to restyle the unlocked text boxes in the open show while keeping their words. It applies across the show and can be reversed with one **Undo**.
+
+To reuse a slide, pick it in **Edit**, choose **Save as template**, enter a name, and save. Its layers and design appear in Templates. Picture layers keep their original media references in the library.
+
+### Preview and relink media
+
+In **Media**, turn on **Preview muted** and choose a picture or local video. It opens in a separate preview window. Videos can be paused or replayed, and the audience and audio outputs stay on the current cue.
+
+Use **Find missing media** to check the open show and current project. Select the missing reference, then drop one replacement file or paste its path and click **Relink**. FreeShow copies the replacement into the library and preserves the cue’s settings. A show relink can be undone in one step. Take the cue again when you want the audience to see the replacement.
+
+### Share a project or template
+
+Use **Functions → Export package** for the open project, or select a card in **Templates** and choose **Export template**. Both write a `.project` archive under the library’s `Exports/` folder. The project package includes the selected shows, referenced designs, and supported local media that FreeShow can find. The template package contains the selected editable design and its media. The status bar reports missing, external, or protected media.
+
+On the receiving computer, drop the archive onto the operator window or place it in the library’s `Imports/` folder. Projects appear in the project list, and shared templates appear in **Templates**. If a received ID or media name conflicts with existing material, import keeps the existing copy and updates the incoming references. Identical media in the archive shares one file. Imports publish the project after its files and design entries are saved.
+
+Archives use FreeShow’s documented `data.json` and `files` layout for project media. Template-only archives use an additional field for the Rust app’s template gallery. The limit is 768 MiB unpacked, including at most 16 MiB of project metadata.
 
 Drop songs, pictures, video, audio, or Bibles onto the operator window to import them into the open library. When a file cannot be copied, the status bar reports the failure and the rest of the batch continues.
 

@@ -87,7 +87,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | --- | --- | ---: | --- |
 | Load shows, projects, templates, overlays, events, synced settings | done | 2.5 | Existing FreeShow libraries open |
 | Load `.fsb` Bibles | done | 1 | Scripture tab and search |
-| Save lyric edits and project order | done | 2 | Writes the same files Electron uses |
+| Save lyric edits and project order | done | 2 | Writes the same files Electron uses. Undo and redo resolve the original show by ID and preserve history if a write fails. |
 | Export text of the open show | done | 0.8 | `Exports/` in the text-importer shape |
 | Access-control `profiles` | done | 0.7 | Password profiles lock the session until `login_profile`; listed in the settings pane |
 | Alert-update chrome | done | 0.5 | A background check at startup (when `alertUpdates` is on) puts the newer release in the status bar and a header "Get update" button |
@@ -97,6 +97,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
 | Shows, media, audio, overlays, templates, scripture, calendar, functions tabs | done | 2 | Each tab lists library entries |
+| Template gallery | done | 0 | Preview and filter named templates, open a new editable show, apply text style with one undo, or save a named template from Edit |
 | Calendar auto-start of a due show | done | 0.6 | Including older type `show` events |
 | Apply template onto the open song | done | 0.6 | Keeps lyrics |
 | Scripture search on `.fsb` | done | 0.6 |  |
@@ -114,7 +115,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Group numbering and box typography/move | done | 1.5 | 40px nudges in 1920×1080 space and editable stacking order |
 | Project New and Go/random/wait actions | done | 1.5 | Wait cancels when leaving the slide |
 | Timeline editor cues on the show | done | 1.5 | Zoom plus show-timeline actions |
-| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, underline, strikethrough, color, align, X/Y/W/H, solid and gradient fills, per-corner radii in pixels or percentages with separate horizontal and vertical values, text and box shadows, line height, letter spacing, picture fit, flips, and crop edges, item and backdrop filters, and slide transitions, grouped into collapsible Text/Position/Picture/Box/Outline & Shadow/Filters/Layout/Transition sections (Box/Outline/Filters/Layout start collapsed). Colour fields use a swatch that opens RGBA sliders plus presets (hex still editable). Style fields save on blur or Enter. The edit preview outlines the selected box and supports click-to-select, drag-move, and corner resize. The slide editor can insert Media library pictures as editable boxes |
+| Every Electron inspector control | partial | 1 | Inspector controls for font, size, bold, italic, underline, strikethrough, color, align, X/Y/W/H, solid and gradient fills, per-corner radii in pixels or percentages with separate horizontal and vertical values, text and box shadows, line height, letter spacing, picture fit, flips, and crop edges, item and backdrop filters, and slide transitions with effective inheritance, easing, editor-only audition, and range apply or reset, grouped into collapsible Text/Position/Picture/Box/Outline & Shadow/Filters/Layout/Transition sections (Box/Outline/Filters/Layout start collapsed). Colour fields use a swatch that opens RGBA sliders plus presets (hex still editable). Style fields save on blur or Enter. The Edit canvas supports zoom, pan, transformed outlines, click-to-select, drag-move, and corner resize with optional aspect-ratio lock. The slide editor can insert Media library pictures as editable boxes. Layers provides multi-select, group movement and nudging, duplication, reordering, alignment, distribution, snapping guides, lock, and visibility controls. Update Live publishes changes to the taken slide and its notes without retriggering the cue. |
 
 ### Audience compositor
 
@@ -212,7 +213,7 @@ Status words for every feature: **done**, **partial**, **not-yet**. A feature is
 | Feature | Status | Weight | Notes |
 | --- | --- | ---: | --- |
 | Linux/Windows/macOS unsigned or ad-hoc installers in CI | done | 0.8 | `.github/workflows/{release,gate,package-linux,package-windows,package-macos}.yml` (tag-only, see `docs/RELEASING.md`); packaged AppRun/exe/app run `--check-perf`. All three native jobs passed for `e075bea`. [Release run](https://github.com/subaasw/FreeShow-rs/actions/runs/45023447856) |
-| Crash-safe autosave | done | 0.5 | Library autosave setting is honored |
+| Crash-safe autosave | done | 0.5 | Library autosave setting is honored. Show edits have a recovery journal with retry, copy, and discard after an interrupted write. |
 | `--check-perf` and `--check-library` budgets | done | 0.4 | Also `--check-service` for a Sunday import/present/REST/Companion/stage path; CI runs `--check-perf` on each packaged runner |
 | Apple Developer ID signing and notarization | not-yet | 0.3 | Needs Apple credentials; CI stays unsigned/ad-hoc |
 
