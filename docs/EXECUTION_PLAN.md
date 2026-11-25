@@ -77,6 +77,8 @@ L1 and D1 can proceed in separate changes once B0 captures their shared fixtures
 
 ## 3. First merge sequence
 
+The first implementation adds a taken-slide snapshot for audience, stage, and remote output, and makes undo/redo writes transactional. Regression tests cover the main edit and retry cases. The installed-app rehearsal remains open. Completed show edits now use a recovery journal and can be retried, copied, or discarded.
+
 ### L1. Keep the live cue stable
 
 - [ ] Map every path that takes, repaints, hides, or clears content. `ProgramContent::Slide` currently keeps IDs and reveal state. The held-slide painter and stage notes look those IDs up against mutable library data. `main.rs` also explicitly republishes edited live slides. Cover both direct repaint and later timer/video refresh in the regression.
@@ -98,28 +100,46 @@ L1 and D1 can proceed in separate changes once B0 captures their shared fixtures
 ### D2. Make recovery visible and testable
 
 - [ ] Track a saved revision and a dirty revision per document. If a write becomes asynchronous, use a single writer per destination and associate completion with its committed revision. Save failures keep the dirty indicator and actionable retry.
-- [ ] Check external modification before replacing a file. Offer review, reload, or save a copy when the base revision changed. Use the existing backup and library locations for recovery. Record what can be recovered from an in-progress text edit and an uncommitted gesture.
-- [ ] Inject a failure before commit, force-quit with a recoverable draft, then reopen. Verify original content, recovery, and behavior after choosing to discard. Repeat against a deliberately newer external edit.
+- [x] Compare the saved file with the draft’s base before writing. Save as Copy opens an independent show for review, and Discard reloads the saved version when available. Recovery files live in `Backups/Drafts`. Recovery starts when a committed edit begins saving. Uncommitted typing and dragging can still be lost.
+- [x] Automated checks inject a write failure, reopen with the journal present, and verify retry, copy, discard, and protection for a newer external edit.
+- [ ] Force-quit during an actual installed-app save and repeat the recovery walkthrough on the platform matrix.
 
 ## 4. Decisions with acceptance cases
 
 ### Editing and accessibility
 
+Layers now supports additive selection, group movement and nudging, duplication, stacking changes, alignment, and distribution. Snap guides use the selection’s enclosing bounds and the slide or another layer’s edges and centers. A canvas drag saves once on release and checks that its original show, slide, and layer order still match. Lock and Hide now save with the slide and work across selections. Hidden layers stay available in the Layers list, while a taken slide keeps its published visibility until Update Live or another Take.
+
+The Edit canvas now fits the slide’s authored aspect ratio and supports 100–400% zoom with bounded pan. Selection, snap guides, and resize handles follow the layer transform. A transformed resize holds the opposite corner in place, and Shift at drag start preserves proportions.
+
+The installed-app display matrix remains open. Rehearse with an overlapping slide with a rotated picture and a slide with a custom aspect ratio. Verify selection, resize, one-step undo, and live output isolation at Fit and at 150% or higher, including on a scaled display.
+
 Use the current Slint theme, spacing, and existing panels. Keep the center canvas dominant in Edit, with a single contextual toolbar and clear access to the layer list and inspector. For E1, prove a slide with overlapping text, picture, and shape can be edited by keyboard, by direct pointer manipulation, and by numeric fields. Hit testing and handles must agree at zoom-to-fit, crop/rotation, letterboxed viewports, and scaled displays. Focus returns to the edited item after a dialog closes. Test text shortcuts separately from live shortcuts.
 
-For E2, prototype grouping and rich text persistence against one legacy fixture before exposing the feature. Compare app and reference output after load, edit, save, and reopen. Record where FreeShow-native fields can be reused and where format metadata needs a graceful compatibility path. A volunteer should be able to compose, duplicate, align, and revise a graphic, run it live, and put it back into a template.
+E2 now saves groups that can be moved, aligned as a unit, resized proportionally from the canvas, duplicated, and reopened from templates. Resizing scales layer boxes and text sizes around the visible selection outline's opposite corner. The Rust editor stores membership on ordinary FreeShow layers, and the compositor keeps their existing order. The slide text editor preserves run styles around an edit and keeps paragraph metadata on retained lines. Regression fixtures cover mixed typography, a rotated layer, retained picture crop, save and reopen, one-step Undo, template reuse, and isolation from the live slide. Fixed pixel decoration such as shadows and borders keeps its authored values.
+
+The slide text field now applies weight, size, and color to a selected range. This uses the same transactional save and Undo as other slide edits. The regression covers a backward Unicode selection across mixed runs, pending words, a paragraph break, and a collapsed selection. The Edit canvas shows the result while the field remains a plain text input.
+
+1. Save an announcement with mixed text styles, rotated text, and a cropped picture. Reopen it in the Rust editor, reuse it as a template, and compare both results with the installed reference app for supported styles.
+2. On a scaled display, resize and undo the group at Fit and 150%. Use a second display to verify that the audience keeps the taken version until **Update Live**.
 
 ### Motion and cue semantics
 
-T1 and T2 can land independently after L1. T1 reads the effective transition and previews adjacent frames locally. A chosen preset, its modifiers, and reset to inherited should round-trip through the same data path as imported settings. T2 owns playback timing. Track the last frame published to the sink and verify the fallback when the previous visible frame cannot be observed. Use elapsed time and cancel stale work using the owning cue identity. Compare local, network, video, and stage behavior for the same source and timestamps.
+T1 now displays the effective transition from the slide, output style, or library. The inspector edits the effect, duration, direction, and easing using the FreeShow layout format. Range apply or reset is one undoable edit. The still-frame audition uses the same motion renderer and runs in a separate preview window with replay and scrubbing.
+
+T2 now starts interrupted fades from the latest frame submitted to the output. This is also the fallback when a window is hidden or has yet to paint. A newer Take or Clear revokes the previous transition. Video and network frames update the incoming side of an active slide transition. Video Takes record their cue before decoding. The opening fade starts on the first decoded frame and advances through gaps in decoding using the held frame. The audience and operator preview share each submitted frame, and the stage clock updates the stage transition without overwriting it.
+
+The automated rehearsal covers rapid Takes, Clear, video fade sampling, and stale frame uploads. The installed-app rehearsal still needs to compare physical, network, and stage outputs through the same still-to-video and video-to-still cues, including Clear mid-transition.
 
 For T3, mock the sequence Take → parallel entrance → manually triggered second build → automatic exit before defining extra controls. The first Next consumes a pending manual build, and a later Next advances the cue. Confirm how Previous restarts or steps back, how a direct Take resets builds, and how an existing slide timer interacts with manual builds. Document and test these rules before exposing the build editor. Transition audio and background media must have one owner and one start per intended cue.
 
 ### Portable files and offline video
 
-P2 begins with a compatibility experiment using one exported fixture and reference FreeShow. The archive must inventory each declared asset and report absent, external, or nonredistributable dependencies. Test two files with the same basename and different bytes, two identical files, and two projects sharing a show ID. Verify cross-platform path resolution, remapping, and rollback after failure partway through import. Gate wider rollout on that fixture working through both export and normal import UI.
+P1 now separates template preview, Use as New, Apply Style, and named Save as Template. Use as New copies the design into an editable one-slide show. Apply Style keeps the open show’s words and uses the normal undo and recovery path. Template previews use saved slide proportions. Media continues to resolve within the current library.
 
-For A1, make the Media drawer useful offline first. Test import and relink with an authorized local clip, and evaluate direct authorized downloads separately with explicit start, progress, cancellation, and retry. A downloadable YouTube workflow remains a research item with a documented authorization and integration decision before it enters the queue. See the [media plan](IMPLEMENTATION_PLAN.md#4-media-output-and-integrations).
+P2 now writes local project media using the published `data.json` and `files` layout. The Rust gallery can also export and import an editable template on its own. Missing, external, and protected media appear in the export notice and archive. Import also handles the hashed asset names used by the installed FreeShow 1.6.7 code. The import tests cover duplicate contents, basename collisions, shared show IDs, conflicting catalogs, Windows paths, and rollback after an injected project save failure. The installed reference FreeShow check and a cross-platform import rehearsal remain open. [FreeShow project format](https://freeshow.app/docs/format-project)
+
+A1 now previews local pictures and video off air and with no audio routes. The Media drawer finds and relinks missing files in the open show or current project. The replacement is stored locally and show edits use undo and recovery. Cross-platform operator rehearsal and direct authorized download progress, cancellation, and retry remain open. A downloadable YouTube workflow remains a research item with a documented authorization and integration decision before it enters the queue. See the [media plan](IMPLEMENTATION_PLAN.md#4-media-output-and-integrations).
 
 ## 5. Candidate sequence and sign-off
 
