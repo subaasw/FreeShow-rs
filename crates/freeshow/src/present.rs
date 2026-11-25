@@ -44,7 +44,7 @@ type ApplyFrame = Rc<dyn Fn(slint::Image)>;
 pub type FrameTarget = (Frame, Box<dyn Fn(slint::Image)>);
 
 struct PendingFrame {
-    frame: Frame,
+    frame: Rc<Frame>,
     apply: ApplyFrame,
 }
 
@@ -55,21 +55,55 @@ pub struct FrameSlot {
     pending: Rc<RefCell<Vec<PendingFrame>>>,
     apply: ApplyFrame,
     redraw: Rc<dyn Fn()>,
+    last: RefCell<Rc<Frame>>,
     /// Software renderer: frames become images right away.
     direct: Option<ApplyFrame>,
 }
 
 impl FrameSlot {
+    #[cfg(test)]
+    pub fn buffered_for_test(frame: Frame) -> Self {
+        Self {
+            pending: Rc::default(),
+            apply: Rc::new(|_| {}),
+            redraw: Rc::new(|| {}),
+            last: RefCell::new(Rc::new(frame)),
+            direct: None,
+        }
+    }
+
+    /// Most recent frame submitted to this sink. A closed or delayed window
+    /// may not have painted it yet, so the submitted frame is the fallback.
+    pub fn last_frame(&self) -> Rc<Frame> {
+        Rc::clone(&self.last.borrow())
+    }
+
     pub fn publish(&self, frame: Frame) {
+        self.publish_shared(Rc::new(frame));
+    }
+
+    pub fn publish_shared(&self, frame: Rc<Frame>) {
+        *self.last.borrow_mut() = Rc::clone(&frame);
         if let Some(apply) = &self.direct {
             apply(frame_image(&frame));
             return;
         }
-        self.pending.borrow_mut().push(PendingFrame {
-            frame,
-            apply: Rc::clone(&self.apply),
-        });
+        queue_latest(&mut self.pending.borrow_mut(), &self.apply, frame);
         (self.redraw)();
+    }
+}
+
+fn queue_latest(pending: &mut Vec<PendingFrame>, apply: &ApplyFrame, frame: Rc<Frame>) {
+    if let Some(queued) = pending
+        .iter_mut()
+        .find(|queued| Rc::ptr_eq(&queued.apply, apply))
+    {
+        queued.frame = frame;
+    } else {
+        pending.push(PendingFrame {
+            frame,
+            apply: Rc::clone(apply),
+        });
     }
 }
 
@@ -110,6 +144,7 @@ pub fn attach_frames(
                     pending: Rc::new(RefCell::new(Vec::new())),
                     apply: Rc::clone(&apply),
                     redraw: Rc::clone(&redraw),
+                    last: RefCell::new(Rc::new(initial)),
                     direct: Some(apply),
                 }
             })
@@ -119,11 +154,9 @@ pub fn attach_frames(
     let mut applies = Vec::with_capacity(frames.len());
     for (frame, apply) in frames {
         let apply: ApplyFrame = Rc::from(apply);
-        pending.borrow_mut().push(PendingFrame {
-            frame,
-            apply: Rc::clone(&apply),
-        });
-        applies.push(apply);
+        let frame = Rc::new(frame);
+        queue_latest(&mut pending.borrow_mut(), &apply, Rc::clone(&frame));
+        applies.push((apply, frame));
     }
     let pending_for_render = Rc::clone(&pending);
     window
@@ -183,11 +216,33 @@ pub fn attach_frames(
         .map_err(|err| slint::PlatformError::from(err.to_string()))?;
     Ok(applies
         .into_iter()
-        .map(|apply| FrameSlot {
+        .map(|(apply, frame)| FrameSlot {
             pending: Rc::clone(&pending),
             apply,
             redraw: Rc::clone(&redraw),
+            last: RefCell::new(frame),
             direct: None,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freeshow_output::clear_frame;
+
+    #[test]
+    fn superseded_uploads_drop_without_touching_the_other_window_slot() {
+        let first = FrameSlot::buffered_for_test(clear_frame(1, 1));
+        let mut second = FrameSlot::buffered_for_test(clear_frame(1, 1));
+        second.pending = Rc::clone(&first.pending);
+        first.publish(clear_frame(2, 1));
+        second.publish(clear_frame(3, 1));
+        first.publish(clear_frame(4, 1));
+        assert_eq!(first.last_frame().width, 4);
+        let queued = first.pending.borrow();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].frame.width, 4);
+        assert_eq!(queued[1].frame.width, 3);
+    }
 }

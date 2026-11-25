@@ -16,7 +16,7 @@ mod streamdeck;
 mod theme;
 mod update;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
@@ -33,7 +33,10 @@ use freeshow_pco::PlanSource;
 use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
 use freeshow_timecode::TimecodeSource;
-use live::{OpeningFade, audience_frame, edit_frame, motion_frame, stage_frame};
+use live::{
+    OpeningFade, TransitionAudition, audience_frame, cleared_audience_frame, edit_frame,
+    motion_frame, stage_frame,
+};
 use present::{FrameSlot, FrameTarget, attach_frame, attach_frames};
 use session::{DrawerAction, PendingPlay, Session};
 use slint::winit_030::WinitWindowAccessor;
@@ -223,12 +226,101 @@ fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
     slint::ModelRc::new(slint::VecModel::from(values))
 }
 
-fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
-    let rows = if session.tab == "media" {
+fn commit_pending_layer_text(ui: &ControlWindow, session: &mut Session) -> bool {
+    let lyrics = ui.get_lyrics();
+    session.lyrics() == lyrics.as_str() || session.save_lyrics(lyrics.as_str())
+}
+
+fn layer_outline([[x1, y1], [x2, y2], [x3, y3], [x4, y4]]: [[f32; 2]; 4]) -> LayerOutline {
+    LayerOutline {
+        x1,
+        y1,
+        x2,
+        y2,
+        x3,
+        y3,
+        x4,
+        y4,
+    }
+}
+
+fn refresh_layer_rows(ui: &ControlWindow, session: &Session) {
+    use slint::Model;
+    use slint::language::StandardListViewItem;
+
+    let selected = session.layer_indices();
+    let mut names = session.layer_labels();
+    ui.set_layer_selection_count(selected.len() as i32);
+    let (active_locked, active_hidden) = session.active_layer_flags();
+    ui.set_show_has_locked_layers(session.show_has_locked_layers());
+    ui.set_active_layer_locked(active_locked);
+    ui.set_active_layer_hidden(active_hidden);
+    let (has_locks, all_locked, all_hidden) = session.selected_layer_flags();
+    ui.set_selection_has_locks(has_locks);
+    ui.set_selection_locked(all_locked);
+    ui.set_selection_hidden(all_hidden);
+    let (can_group, can_ungroup, can_select_group, single_group) = session.layer_group_controls();
+    ui.set_can_group_layers(can_group);
+    ui.set_can_ungroup_layers(can_ungroup);
+    ui.set_can_select_layer_group(can_select_group);
+    ui.set_selection_is_group(single_group);
+    ui.set_can_move_layers_forward(session.can_move_layers(true));
+    ui.set_can_move_layers_backward(session.can_move_layers(false));
+    let (width, height) = session.edit_source_size();
+    ui.set_edit_source_width(width);
+    ui.set_edit_source_height(height);
+    ui.set_active_outline(
         session
-            .media
+            .active_layer_outline(single_group)
+            .map(layer_outline)
+            .unwrap_or_default(),
+    );
+    let outlines = session
+        .layer_outlines()
+        .into_iter()
+        .map(|geometry| layer_outline(geometry.corners()))
+        .collect::<Vec<_>>();
+    ui.set_layer_outlines(slint::ModelRc::new(slint::VecModel::from(outlines)));
+    if selected.len() > 1 {
+        for index in selected {
+            let row = names.len() - 1 - index;
+            names[row].push_str(" · selected");
+        }
+    }
+    let previous = ui.get_layer_rows();
+    if previous.row_count() == names.len()
+        && previous
             .iter()
+            .zip(&names)
+            .all(|(row, name)| row.text.as_str() == name)
+    {
+        return;
+    }
+    let rows = names
+        .into_iter()
+        .map(|name| StandardListViewItem::from(name.as_str()))
+        .collect::<Vec<_>>();
+    ui.set_layer_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+}
+
+fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
+    let rows = if session.tab == "templates" {
+        session
+            .template_entries()
+            .into_iter()
+            .map(|(id, name, entry)| DrawerRowData {
+                key: id.into(),
+                name: name.into(),
+                thumb: catalog_thumb(session, entry, 128, 72),
+                show_thumb: true,
+                on: false,
+            })
+            .collect::<Vec<_>>()
+    } else if session.tab == "media" {
+        session
+            .visible_media_entries()
             .map(|entry| DrawerRowData {
+                key: entry.path.to_string_lossy().into_owned().into(),
                 name: entry.label().into(),
                 thumb: media_thumb(entry),
                 show_thumb: true,
@@ -238,7 +330,6 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
     } else {
         let catalog = match session.tab.as_str() {
             "overlays" => Some(&session.overlay_catalog),
-            "templates" => Some(&session.template_catalog),
             _ => None,
         };
         session
@@ -252,9 +343,10 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
                         .and_then(|id| catalog.get(&id).cloned())
                 });
                 DrawerRowData {
+                    key: "".into(),
                     thumb: entry
                         .as_ref()
-                        .map(|entry| catalog_thumb(session, entry))
+                        .map(|entry| catalog_thumb(session, entry, 128, 72))
                         .unwrap_or_default(),
                     show_thumb: catalog.is_some(),
                     name: name.into(),
@@ -267,16 +359,21 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
 }
 
 /// Overlay and template thumbnails, kept until their saved look changes.
-fn catalog_thumb(session: &Session, entry: &serde_json::Value) -> slint::Image {
+fn catalog_thumb(
+    session: &Session,
+    entry: &serde_json::Value,
+    width: u32,
+    height: u32,
+) -> slint::Image {
     thread_local! {
         static CATALOG_THUMBS: RefCell<std::collections::HashMap<String, slint::Image>> =
             RefCell::new(std::collections::HashMap::new());
     }
-    let key = entry.to_string();
+    let key = format!("{:?}:{width}x{height}:{entry}", session.root);
     if let Some(image) = CATALOG_THUMBS.with(|thumbs| thumbs.borrow().get(&key).cloned()) {
         return image;
     }
-    let image = present::frame_image(&live::catalog_thumbnail(session, entry, 128, 72));
+    let image = present::frame_image(&live::catalog_thumbnail(session, entry, width, height));
     CATALOG_THUMBS.with(|thumbs| {
         let mut thumbs = thumbs.borrow_mut();
         if thumbs.len() > 256 {
@@ -285,6 +382,63 @@ fn catalog_thumb(session: &Session, entry: &serde_json::Value) -> slint::Image {
         thumbs.insert(key, image.clone());
     });
     image
+}
+
+fn refresh_missing_media(ui: &ControlWindow, session: &Session) {
+    use slint::Model;
+    let rows = session.missing_media();
+    let labels = rows
+        .iter()
+        .map(|row| row.label.as_str())
+        .collect::<Vec<_>>();
+    let paths = rows
+        .iter()
+        .map(|row| row.reference.as_str())
+        .collect::<Vec<_>>();
+    let keys = rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>();
+    for (previous, current, write) in [
+        (
+            ui.get_missing_media_labels(),
+            labels,
+            ControlWindow::set_missing_media_labels as fn(&ControlWindow, _),
+        ),
+        (
+            ui.get_missing_media_paths(),
+            paths,
+            ControlWindow::set_missing_media_paths,
+        ),
+        (
+            ui.get_missing_media_keys(),
+            keys,
+            ControlWindow::set_missing_media_keys,
+        ),
+    ] {
+        if previous.row_count() != current.len()
+            || !previous
+                .iter()
+                .zip(&current)
+                .all(|(old, value)| old.as_str() == *value)
+        {
+            let values = current
+                .into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>();
+            write(ui, slint::ModelRc::new(slint::VecModel::from(values)));
+        }
+    }
+}
+
+fn refresh_template_pick(ui: &ControlWindow, session: &Session) {
+    if let Some((id, name, entry)) = session.selected_template() {
+        ui.set_selected_template(id.into());
+        ui.set_template_title(name.into());
+        ui.set_template_preview(catalog_thumb(session, entry, 320, 180));
+        ui.set_template_target(session.template_target_show().unwrap_or_default().into());
+        ui.set_template_has_style(freeshow_data::template_text_item(entry).is_some());
+    } else {
+        ui.set_selected_template("".into());
+        ui.set_template_preview(slint::Image::default());
+    }
 }
 
 const THUMB_WIDTH: u32 = 56;
@@ -538,6 +692,10 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         ui.set_panel_title(label.into());
     }
     ui.set_drawer_rows(drawer_rows(session));
+    refresh_template_pick(ui, session);
+    if session.tab == "media" && ui.get_media_relink_open() {
+        refresh_missing_media(ui, session);
+    }
     ui.set_slide_cards(slide_cards(session));
     ui.set_slides_columns(session.slides_list_columns() as i32);
     ui.set_live_slide(session.live_slide_index().map_or(-1, |index| index as i32));
@@ -546,16 +704,28 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_project_kinds(strings(&session.project_kinds()));
     ui.set_live_project(session.live_project_item().map_or(-1, |item| item as i32));
     ui.set_project_title(session.project_title().into());
+    let layer_text_target = if ui.get_editing() {
+        session.layer_text_target()
+    } else {
+        String::new()
+    };
+    if ui.get_layer_text_target().as_str() != layer_text_target {
+        ui.set_layer_text_target(layer_text_target.into());
+    }
     let lyrics = session.lyrics();
     if ui.get_lyrics().as_str() != lyrics {
         ui.set_spelling(spelling_note(session, &lyrics).into());
         ui.set_lyrics(lyrics.into());
+        ui.invoke_reset_layer_text_selection();
     }
     ui.set_group(session.group().into());
     ui.set_notes(session.notes().into());
     let (item_index, item_count) = session.item_position();
     ui.set_item_index(item_index as i32);
     ui.set_item_count(item_count as i32);
+    if ui.get_editing() {
+        refresh_layer_rows(ui, session);
+    }
     ui.set_picture_choices(strings(
         &session
             .slide_pictures()
@@ -565,6 +735,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_show_name(session.show_name().into());
     ui.set_notice(sentence_case(&session.notice).into());
     ui.set_can_restore(session.can_restore_show());
+    ui.set_draft_status(session.show_draft_status().into());
     ui.set_project_choices(strings(&session.project_choices()));
     ui.set_project_choice(session.project_choice_index());
     // Do not rewrite the show text under the operator's cursor while they type.
@@ -587,6 +758,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_chrome_status(session.chrome_status().into());
     ui.set_can_undo(session.can_undo());
     ui.set_can_redo(session.can_redo());
+    ui.set_can_update_live_slide(session.can_update_live_slide());
     ui.set_focus_mode(session.focus_mode);
     ui.set_guide_visible(session.guide_visible);
     ui.set_guide_text(session.guide_text().into());
@@ -720,6 +892,11 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
     ui.set_autosave_choices(strings(&session::AUTOSAVE_CHOICES.map(str::to_string)));
     let inspector = session.inspector_form();
+    let (motion, motion_source) = if ui.get_editing() && inspector.has_item {
+        session.selected_slide_motion()
+    } else {
+        (freeshow_data::TextTransition::default(), "Library default")
+    };
     let has_picture = inspector.item_box.crop.is_some();
     let [crop_left, crop_right, crop_top, crop_bottom] =
         inspector.item_box.crop.unwrap_or_default();
@@ -767,9 +944,11 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         hue_rotate: inspector.filters.hue_rotate,
         opacity: inspector.filters.opacity,
         blend: inspector.filters.blend.into(),
-        slide_transition: inspector.slide_transition.into(),
-        slide_transition_ms: inspector.slide_transition_ms,
-        slide_transition_direction: inspector.slide_transition_direction.into(),
+        slide_transition: motion.kind.into(),
+        slide_transition_ms: motion.duration_ms.min(10_000) as i32,
+        slide_transition_direction: motion.direction.into(),
+        slide_transition_easing: motion.easing.into(),
+        slide_transition_source: motion_source.into(),
         valign: inspector.item_box.valign.into(),
         rotation: inspector.item_box.rotation,
         text_case: inspector.typography.text_case.into(),
@@ -904,9 +1083,11 @@ fn publish(slot: &FrameSlot, frame: Frame) {
     slot.publish(frame);
 }
 
-fn publish_audience(slot: &FrameSlot, frame: Frame) {
+fn publish_audience(output: &FrameSlot, preview: &FrameSlot, frame: Frame) {
+    let frame = Rc::new(frame);
     submit_network(NetworkPicture::Audience, &frame);
-    slot.publish(frame);
+    output.publish_shared(Rc::clone(&frame));
+    preview.publish_shared(frame);
 }
 
 fn publish_stage(slot: &FrameSlot, frame: Frame) {
@@ -1139,42 +1320,403 @@ fn open_network_receive(
     })
 }
 
+struct FadeFrames {
+    from: Rc<Frame>,
+    to: Rc<Frame>,
+}
+
+#[derive(Default)]
+struct LiveTransition {
+    timer: slint::Timer,
+    revision: Cell<u64>,
+    frames: RefCell<Option<FadeFrames>>,
+}
+
+impl LiveTransition {
+    fn stop(&self) {
+        self.timer.stop();
+        self.revision.set(self.revision.get().wrapping_add(1));
+        self.frames.borrow_mut().take();
+    }
+
+    fn running(&self) -> bool {
+        self.timer.running()
+    }
+
+    /// A moving background or stage clock supplies the current incoming picture.
+    fn update_target(&self, frame: Frame) -> Option<Frame> {
+        if let Some(frames) = self.frames.borrow_mut().as_mut() {
+            frames.to = Rc::new(frame);
+            None
+        } else {
+            Some(frame)
+        }
+    }
+}
+
 fn fade_into(
-    timer: Rc<slint::Timer>,
-    slots: Vec<Rc<FrameSlot>>,
-    from: Frame,
+    transition: &Rc<LiveTransition>,
+    output: &Rc<FrameSlot>,
+    preview: Option<&Rc<FrameSlot>>,
     to: Frame,
     picture: NetworkPicture,
     motion: freeshow_data::TextTransition,
 ) {
-    if motion.kind == "none" {
-        timer.stop();
-        let frame = to;
+    transition.stop();
+    let from = output.last_frame();
+    let output = Rc::clone(output);
+    let preview = preview.cloned();
+    let publish = move |frame: Rc<Frame>| {
         submit_network(picture, &frame);
-        for slot in &slots {
-            slot.publish(frame.clone());
+        if let Some(preview) = &preview {
+            preview.publish_shared(Rc::clone(&frame));
         }
+        output.publish_shared(frame);
+    };
+    let to = Rc::new(to);
+    if motion.kind == "none" || motion.duration_ms == 0 || !live::same_frame_size(&from, &to) {
+        publish(to);
         return;
     }
     // Progress follows the clock, so a slow machine drops frames instead of stretching the fade.
-    let duration = std::time::Duration::from_millis(motion.duration_ms.clamp(1, 10_000));
+    let duration = std::time::Duration::from_millis(motion.duration_ms.min(10_000));
     let started = std::time::Instant::now();
-    let timer_cb = Rc::clone(&timer);
-    timer.start(
+    let revision = transition.revision.get();
+    *transition.frames.borrow_mut() = Some(FadeFrames { from, to });
+    let transition_weak = Rc::downgrade(transition);
+    transition.timer.start(
         slint::TimerMode::Repeated,
-        std::time::Duration::from_millis(40),
+        std::time::Duration::from_millis(33),
         move || {
-            let progress = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
-            let frame = motion_frame(&from, &to, &motion, progress);
-            submit_network(picture, &frame);
-            for slot in &slots {
-                slot.publish(frame.clone());
+            let Some(transition) = transition_weak.upgrade() else {
+                return;
+            };
+            if transition.revision.get() != revision {
+                return;
             }
-            if progress >= 1.0 {
-                timer_cb.stop();
+            let Some((from, to)) = transition
+                .frames
+                .borrow()
+                .as_ref()
+                .map(|frames| (Rc::clone(&frames.from), Rc::clone(&frames.to)))
+            else {
+                return;
+            };
+            let elapsed = started.elapsed();
+            if elapsed >= duration || !live::same_frame_size(&from, &to) {
+                transition.timer.stop();
+                transition.frames.borrow_mut().take();
+                publish(to);
+            } else {
+                let progress = elapsed.as_secs_f32() / duration.as_secs_f32();
+                publish(Rc::new(motion_frame(&from, &to, &motion, progress)));
             }
         },
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemotePictureChange {
+    Keep,
+    Update,
+    Take,
+    Clear,
+}
+
+impl RemotePictureChange {
+    fn after(self, command: &freeshow_remote::Command, output_locked: bool) -> Self {
+        use freeshow_remote::Command;
+        match command {
+            Command::Clear | Command::ClearSlide | Command::ClearBackground if !output_locked => {
+                Self::Clear
+            }
+            Command::SetShow(_)
+            | Command::SetSlide(_)
+            | Command::OpenProjectItem { .. }
+            | Command::PresentVerse { .. }
+            | Command::ChangeLayout { .. } => Self::Take,
+            Command::ShowOverlay { .. } | Command::ClearOverlay { .. } | Command::ClearOverlays
+                if self == Self::Keep =>
+            {
+                Self::Update
+            }
+            _ => self,
+        }
+    }
+}
+
+fn open_muted_media_preview(
+    path: &std::path::Path,
+) -> Result<VideoPlayer, freeshow_media::MediaError> {
+    // No speaker or network routes exist on this player, even during startup.
+    let player = VideoPlayer::open_with_network(path, &[], &[])?;
+    player.set_muted(true);
+    player.set_looping(false);
+    Ok(player)
+}
+
+fn wire_media_preview(control: &ControlWindow, session: Rc<RefCell<Session>>) {
+    let window: RefCell<Option<MediaPreviewWindow>> = RefCell::default();
+    let timer = Rc::new(slint::Timer::default());
+    let player: Rc<RefCell<Option<VideoPlayer>>> = Rc::default();
+    let operator = control.as_weak();
+    control.on_preview_media(move |path| {
+        let Some(entry) = session.borrow().media_preview_entry(&path).cloned() else {
+            if let Some(ui) = operator.upgrade() {
+                ui.set_notice("Select an available local picture or video to preview.".into());
+            }
+            return;
+        };
+        timer.stop();
+        player.borrow_mut().take();
+        let mut window = window.borrow_mut();
+        if window.is_none() {
+            let preview = match MediaPreviewWindow::new() {
+                Ok(preview) => preview,
+                Err(error) => {
+                    if let Some(ui) = operator.upgrade() {
+                        ui.set_notice(format!("Could not open the media preview: {error}").into());
+                    }
+                    return;
+                }
+            };
+            let close_timer = Rc::clone(&timer);
+            let close_player = Rc::clone(&player);
+            preview.window().on_close_requested(move || {
+                close_timer.stop();
+                close_player.borrow_mut().take();
+                slint::CloseRequestResponse::HideWindow
+            });
+            let close_window = preview.as_weak();
+            let close_timer = Rc::clone(&timer);
+            let close_player = Rc::clone(&player);
+            preview.on_dismiss(move || {
+                close_timer.stop();
+                close_player.borrow_mut().take();
+                if let Some(preview) = close_window.upgrade() {
+                    let _ = preview.hide();
+                }
+            });
+            let pause_player = Rc::clone(&player);
+            preview.on_pause(move |paused| {
+                if let Some(video) = pause_player.borrow().as_ref() {
+                    video.set_paused(paused);
+                }
+            });
+            let replay_window = preview.as_weak();
+            let replay_player = Rc::clone(&player);
+            preview.on_replay(move || {
+                if let Some(video) = replay_player.borrow().as_ref() {
+                    let _ = video.seek_seconds(0.0);
+                    video.set_paused(false);
+                    if let Some(preview) = replay_window.upgrade() {
+                        preview.set_paused(false);
+                        preview.set_ended(false);
+                    }
+                }
+            });
+            *window = Some(preview);
+        }
+        let Some(preview) = window.as_ref() else {
+            return;
+        };
+        preview.set_caption(entry.name.as_str().into());
+        preview.set_frame(slint::Image::default());
+        preview.set_is_video(false);
+        preview.set_paused(false);
+        preview.set_ended(false);
+        preview.set_message("Loading preview…".into());
+        if let Err(error) = preview.show() {
+            if let Some(ui) = operator.upgrade() {
+                ui.set_notice(format!("Could not show the media preview: {error}").into());
+            }
+            return;
+        }
+        if entry.kind == MediaEntryKind::Image {
+            if let Some(image) = std::fs::read(&entry.path)
+                .ok()
+                .and_then(|bytes| decode_image(&bytes))
+            {
+                preview.set_frame(slint_image(&image));
+                preview.set_message("".into());
+            } else {
+                preview.set_message("Could not open this picture.".into());
+            }
+            return;
+        }
+        let video = match open_muted_media_preview(&entry.path) {
+            Ok(video) => video,
+            Err(error) => {
+                preview.set_message(format!("Could not open this video: {error}").into());
+                return;
+            }
+        };
+        *player.borrow_mut() = Some(video);
+        preview.set_is_video(true);
+        let tick_player = Rc::clone(&player);
+        let tick_window = preview.as_weak();
+        let tick_timer = Rc::downgrade(&timer);
+        let started = std::time::Instant::now();
+        let mut has_frame = false;
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(33),
+            move || {
+                let Some(preview) = tick_window.upgrade() else {
+                    if let Some(timer) = tick_timer.upgrade() {
+                        timer.stop();
+                    }
+                    return;
+                };
+                let mut player = tick_player.borrow_mut();
+                let Some(video) = player.as_mut() else { return };
+                if let Some(error) = video.take_error() {
+                    preview.set_message(format!("Video preview failed: {error}").into());
+                    preview.set_is_video(false);
+                    player.take();
+                    if let Some(timer) = tick_timer.upgrade() {
+                        timer.stop();
+                    }
+                    return;
+                }
+                if let Some(frame) = video.try_next_frame() {
+                    has_frame = true;
+                    preview.set_frame(slint_image(&frame));
+                    preview.set_message("".into());
+                }
+                let ended = video.is_finished();
+                if !has_frame && (ended || started.elapsed() > std::time::Duration::from_secs(6)) {
+                    preview.set_message("No video frame could be decoded.".into());
+                    preview.set_is_video(false);
+                    player.take();
+                    if let Some(timer) = tick_timer.upgrade() {
+                        timer.stop();
+                    }
+                    return;
+                }
+                preview.set_ended(ended);
+            },
+        );
+    });
+}
+
+fn play_transition_audition(
+    window: &TransitionPreviewWindow,
+    timer: &Rc<slint::Timer>,
+    audition: Rc<TransitionAudition>,
+) {
+    timer.stop();
+    let duration = audition.duration();
+    window.set_can_scrub(!duration.is_zero());
+    window.set_progress(if duration.is_zero() { 1.0 } else { 0.0 });
+    window.set_frame(present::frame_image(&audition.frame(0.0)));
+    if duration.is_zero() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let weak_window = window.as_weak();
+    let weak_timer = Rc::downgrade(timer);
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(33),
+        move || {
+            let progress = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+            let window = weak_window.upgrade();
+            if let Some(window) = &window {
+                window.set_progress(progress);
+                window.set_frame(present::frame_image(&audition.frame(progress)));
+            }
+            if (progress >= 1.0 || window.is_none())
+                && let Some(timer) = weak_timer.upgrade()
+            {
+                timer.stop();
+            }
+        },
+    );
+}
+
+fn wire_transition_audition(control: &ControlWindow, session: Rc<RefCell<Session>>) {
+    let timer = Rc::new(slint::Timer::default());
+    let prepared: Rc<RefCell<Option<Rc<TransitionAudition>>>> = Rc::default();
+    let window: RefCell<Option<TransitionPreviewWindow>> = RefCell::default();
+    let control_weak = control.as_weak();
+    control.on_preview_transition(move || {
+        let Some(audition) = TransitionAudition::prepare(&session.borrow()).map(Rc::new) else {
+            return;
+        };
+        let mut window_slot = window.borrow_mut();
+        if window_slot.is_none() {
+            let preview = match TransitionPreviewWindow::new() {
+                Ok(window) => window,
+                Err(error) => {
+                    if let Some(control) = control_weak.upgrade() {
+                        control.set_notice(
+                            format!("Could not open transition preview: {error}").into(),
+                        );
+                    }
+                    return;
+                }
+            };
+            let close_timer = Rc::clone(&timer);
+            preview.window().on_close_requested(move || {
+                close_timer.stop();
+                slint::CloseRequestResponse::HideWindow
+            });
+            let close_timer = Rc::clone(&timer);
+            let close_window = preview.as_weak();
+            preview.on_dismiss(move || {
+                close_timer.stop();
+                if let Some(window) = close_window.upgrade() {
+                    let _ = window.hide();
+                }
+            });
+            let replay_window = preview.as_weak();
+            let replay_timer = Rc::clone(&timer);
+            let replay_prepared = Rc::clone(&prepared);
+            preview.on_replay(move || {
+                if let Some(window) = replay_window.upgrade()
+                    && let Some(audition) = replay_prepared.borrow().clone()
+                {
+                    play_transition_audition(&window, &replay_timer, audition);
+                }
+            });
+            let seek_window = preview.as_weak();
+            let seek_timer = Rc::clone(&timer);
+            let seek_prepared = Rc::clone(&prepared);
+            preview.on_seek(move |progress| {
+                seek_timer.stop();
+                if let Some(window) = seek_window.upgrade()
+                    && let Some(audition) = seek_prepared.borrow().as_ref()
+                {
+                    window.set_frame(present::frame_image(&audition.frame(progress)));
+                }
+            });
+            *window_slot = Some(preview);
+        }
+        let window = window_slot.as_ref().unwrap();
+        let from = audition.from_slide.map_or_else(
+            || "Black".to_string(),
+            |index| format!("Slide {}", index + 1),
+        );
+        window.set_description(
+            format!(
+                "{from} → Slide {}  ·  {}",
+                audition.to_slide + 1,
+                audition.source,
+            )
+            .into(),
+        );
+        *prepared.borrow_mut() = Some(Rc::clone(&audition));
+        match window.show() {
+            Ok(()) => play_transition_audition(window, &timer, audition),
+            Err(error) => {
+                if let Some(control) = control_weak.upgrade() {
+                    control
+                        .set_notice(format!("Could not show transition preview: {error}").into());
+                }
+            }
+        }
+    });
 }
 
 fn sample_audio(session: &RefCell<Session>, audio: &RefCell<Option<AudioOutput>>) {
@@ -1217,6 +1759,8 @@ struct LivePlayback {
     audio: Rc<RefCell<Option<AudioOutput>>>,
     video: Rc<RefCell<Option<VideoPlayer>>>,
     timer: Rc<slint::Timer>,
+    output_fade: Rc<LiveTransition>,
+    stage_fade: Rc<LiveTransition>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1227,8 +1771,6 @@ fn start_pending(
     output_slot: &Rc<FrameSlot>,
     preview_slot: &Rc<FrameSlot>,
     stage_slot: &Rc<FrameSlot>,
-    last_output: &Rc<RefCell<Frame>>,
-    last_stage: &Rc<RefCell<Frame>>,
 ) {
     match pending {
         Some(PendingPlay::Audio(path)) => {
@@ -1285,37 +1827,37 @@ fn start_pending(
                     };
                     player.set_span(from, to);
                     follow_video(
-                        Rc::clone(&playback.timer),
-                        Rc::clone(&playback.video),
+                        playback,
                         player,
                         Some(ended),
                         Rc::clone(session),
                         Rc::clone(output_slot),
                         Rc::clone(preview_slot),
                         Rc::clone(stage_slot),
-                        Rc::clone(last_output),
-                        Rc::clone(last_stage),
                     );
                 }
-                Err(err) => tracing::error!("could not play video: {err}"),
+                Err(err) => {
+                    tracing::error!("could not play video: {err}");
+                    picture_open_failed(playback, session);
+                }
             }
         }
         Some(PendingPlay::Camera(name)) => {
             stop_video(&playback.timer, &playback.video);
             match VideoPlayer::open_camera(&name) {
                 Ok(player) => follow_video(
-                    Rc::clone(&playback.timer),
-                    Rc::clone(&playback.video),
+                    playback,
                     player,
                     None,
                     Rc::clone(session),
                     Rc::clone(output_slot),
                     Rc::clone(preview_slot),
                     Rc::clone(stage_slot),
-                    Rc::clone(last_output),
-                    Rc::clone(last_stage),
                 ),
-                Err(err) => tracing::error!("could not open camera: {err}"),
+                Err(err) => {
+                    tracing::error!("could not open camera: {err}");
+                    picture_open_failed(playback, session);
+                }
             }
         }
         Some(PendingPlay::StopAudio) => {
@@ -1373,8 +1915,6 @@ fn start_plays(
     output_slot: &Rc<FrameSlot>,
     preview_slot: &Rc<FrameSlot>,
     stage_slot: &Rc<FrameSlot>,
-    last_output: &Rc<RefCell<Frame>>,
-    last_stage: &Rc<RefCell<Frame>>,
 ) {
     for play in plays {
         start_pending(
@@ -1384,8 +1924,6 @@ fn start_plays(
             output_slot,
             preview_slot,
             stage_slot,
-            last_output,
-            last_stage,
         );
     }
     if let Some(output) = playback.audio.borrow().as_ref() {
@@ -1406,34 +1944,41 @@ fn picture_fades_in(pending: &Option<PendingPlay>, session: &Session) -> bool {
         )
 }
 
+fn picture_open_failed(playback: &LivePlayback, session: &RefCell<Session>) {
+    playback.output_fade.stop();
+    playback.stage_fade.stop();
+    session.borrow_mut().refresh_output = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn follow_video(
-    timer: Rc<slint::Timer>,
-    player: Rc<RefCell<Option<VideoPlayer>>>,
+    playback: &LivePlayback,
     opened: VideoPlayer,
     ended: Option<PathBuf>,
     session: Rc<RefCell<Session>>,
     output_slot: Rc<FrameSlot>,
     preview_slot: Rc<FrameSlot>,
     stage_slot: Rc<FrameSlot>,
-    last_output: Rc<RefCell<Frame>>,
-    last_stage: Rc<RefCell<Frame>>,
 ) {
-    *player.borrow_mut() = Some(opened);
-    let opening = {
+    *playback.video.borrow_mut() = Some(opened);
+    let output_fade = Rc::clone(&playback.output_fade);
+    let stage_fade = Rc::clone(&playback.stage_fade);
+    output_fade.stop();
+    stage_fade.stop();
+    let revision = output_fade.revision.get();
+    let mut opening = {
         let mut current = session.borrow_mut();
+        live::capture_program_content(&current);
         if current.background_transition {
             let (motion, _) = current.output_motion();
-            Some(OpeningFade::new(last_output.borrow().clone(), motion))
+            Some(OpeningFade::new(output_slot.last_frame(), motion))
         } else {
             None
         }
     };
-    let opening = Rc::new(RefCell::new(opening));
-    let started = std::time::Instant::now();
-    let player_tick = Rc::clone(&player);
-    let opening_tick = Rc::clone(&opening);
-    timer.start(
+    let mut first_frame_at = None;
+    let player_tick = Rc::clone(&playback.video);
+    playback.timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(33),
         move || {
@@ -1445,62 +1990,64 @@ fn follow_video(
                 .borrow_mut()
                 .as_mut()
                 .and_then(|player| player.next_frame());
-            let Some(raster) = raster else {
-                let mut session = session.borrow_mut();
-                if let Some((time, duration)) = timing {
-                    session.video_time = time;
-                    session.video_duration = duration;
-                }
-                let finished = player_tick
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|player| player.is_finished());
-                if finished && let Some(path) = ended.as_deref() {
-                    let _ = session.finish_media(&path.to_string_lossy(), false);
-                }
-                return;
-            };
+            if output_fade.revision.get() != revision {
+                opening = None;
+            }
             let (audience, stage) = {
                 let mut session = session.borrow_mut();
                 if let Some((time, duration)) = timing {
                     session.video_time = time;
                     session.video_duration = duration;
                 }
-                session.replace_underlay(Some(raster));
+                if let Some(raster) = raster {
+                    session.replace_underlay(Some(raster));
+                } else {
+                    let finished = player_tick
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|player| player.is_finished());
+                    if finished
+                        && let Some(path) = ended.as_deref()
+                        && session.finish_media(&path.to_string_lossy(), false)
+                    {
+                        opening = None;
+                        return;
+                    }
+                    if opening.is_none() || first_frame_at.is_none() {
+                        return;
+                    }
+                    // Keep sampling the opening fade against the held decoded frame.
+                    // A paused source or a gap in decoding cannot stall the fade clock.
+                }
                 (audience_frame(&session), stage_frame(&session))
             };
-            let shown = {
-                let mut fade = opening_tick.borrow_mut();
-                if let Some(current) = fade.as_ref() {
-                    match current.frame(&audience, started.elapsed().as_millis()) {
-                        Some(blended) => blended,
-                        None => {
-                            *fade = None;
-                            audience.clone()
-                        }
-                    }
+            if let Some(audience) = output_fade.update_target(audience) {
+                let started = first_frame_at.get_or_insert_with(std::time::Instant::now);
+                let shown = if let Some(frame) = opening
+                    .as_ref()
+                    .and_then(|fade| fade.frame(&audience, started.elapsed().as_millis()))
+                {
+                    frame
                 } else {
-                    audience.clone()
-                }
-            };
-            *last_output.borrow_mut() = audience;
-            *last_stage.borrow_mut() = stage.clone();
-            publish_audience(&output_slot, shown.clone());
-            publish(&preview_slot, shown);
-            publish_stage(&stage_slot, stage);
+                    opening = None;
+                    audience
+                };
+                publish_audience(&output_slot, &preview_slot, shown);
+            }
+            if let Some(stage) = stage_fade.update_target(stage) {
+                publish_stage(&stage_slot, stage);
+            }
         },
     );
 }
 
 #[allow(clippy::too_many_arguments)]
 fn send_frames(
-    output_fade: &Rc<slint::Timer>,
-    stage_fade: &Rc<slint::Timer>,
+    output_fade: &Rc<LiveTransition>,
+    stage_fade: &Rc<LiveTransition>,
     output_slot: &Rc<FrameSlot>,
     preview_slot: &Rc<FrameSlot>,
     stage_slot: &Rc<FrameSlot>,
-    last_output: &Rc<RefCell<Frame>>,
-    last_stage: &Rc<RefCell<Frame>>,
     audience: Frame,
     stage: Frame,
     motion: freeshow_data::TextTransition,
@@ -1511,18 +2058,14 @@ fn send_frames(
     seconds: Option<f64>,
     playback: &LivePlayback,
 ) {
-    let from_output = last_output.borrow().clone();
-    *last_output.borrow_mut() = audience.clone();
     fade_into(
-        Rc::clone(output_fade),
-        vec![Rc::clone(output_slot), Rc::clone(preview_slot)],
-        from_output,
+        output_fade,
+        output_slot,
+        Some(preview_slot),
         audience,
         NetworkPicture::Audience,
         motion.clone(),
     );
-    let from_stage = last_stage.borrow().clone();
-    *last_stage.borrow_mut() = stage.clone();
     let stage_motion = if background {
         freeshow_data::TextTransition {
             kind: "none".into(),
@@ -1533,9 +2076,9 @@ fn send_frames(
         motion
     };
     fade_into(
-        Rc::clone(stage_fade),
-        vec![Rc::clone(stage_slot)],
-        from_stage,
+        stage_fade,
+        stage_slot,
+        None,
         stage,
         NetworkPicture::Stage,
         stage_motion,
@@ -1549,8 +2092,6 @@ fn send_frames(
             output_slot,
             preview_slot,
             stage_slot,
-            last_output,
-            last_stage,
             ui,
             seconds,
             playback,
@@ -1562,13 +2103,11 @@ fn send_frames(
 fn schedule_next_slide(
     timer: &Rc<slint::Timer>,
     session: &Rc<RefCell<Session>>,
-    output_fade: &Rc<slint::Timer>,
-    stage_fade: &Rc<slint::Timer>,
+    output_fade: &Rc<LiveTransition>,
+    stage_fade: &Rc<LiveTransition>,
     output_slot: &Rc<FrameSlot>,
     preview_slot: &Rc<FrameSlot>,
     stage_slot: &Rc<FrameSlot>,
-    last_output: &Rc<RefCell<Frame>>,
-    last_stage: &Rc<RefCell<Frame>>,
     ui: slint::Weak<ControlWindow>,
     seconds: Option<f64>,
     playback: &LivePlayback,
@@ -1585,8 +2124,6 @@ fn schedule_next_slide(
     let output_slot = Rc::clone(output_slot);
     let preview_slot = Rc::clone(preview_slot);
     let stage_slot = Rc::clone(stage_slot);
-    let last_output = Rc::clone(last_output);
-    let last_stage = Rc::clone(last_stage);
     let playback = playback.clone();
     timer.start(
         slint::TimerMode::SingleShot,
@@ -1606,8 +2143,6 @@ fn schedule_next_slide(
                     &output_slot,
                     &preview_slot,
                     &stage_slot,
-                    &last_output,
-                    &last_stage,
                 );
                 if let Some(ui) = ui.upgrade() {
                     refresh(&ui, &session.borrow());
@@ -1627,8 +2162,6 @@ fn schedule_next_slide(
                 &output_slot,
                 &preview_slot,
                 &stage_slot,
-                &last_output,
-                &last_stage,
                 audience,
                 stage,
                 motion,
@@ -1646,8 +2179,6 @@ fn schedule_next_slide(
                 &output_slot,
                 &preview_slot,
                 &stage_slot,
-                &last_output,
-                &last_stage,
             );
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
@@ -2144,19 +2675,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let edit_slot = Rc::new(control_slots.next().expect("edit slot"));
     let output_slot = Rc::new(output_slot);
     let stage_slot = Rc::new(stage_slot);
-    let output_fade = Rc::new(slint::Timer::default());
-    let stage_fade = Rc::new(slint::Timer::default());
+    let output_fade = Rc::new(LiveTransition::default());
+    let stage_fade = Rc::new(LiveTransition::default());
     let next_slide = Rc::new(slint::Timer::default());
-    let last_output = Rc::new(RefCell::new(clear_frame(output_width, output_height)));
-    let last_stage = Rc::new(RefCell::new(clear_frame(stage_width, stage_height)));
     {
         // Even an empty output starts in the style's background colour.
         let audience = audience_frame(&session);
         let stage = stage_frame(&session);
-        *last_output.borrow_mut() = audience.clone();
-        *last_stage.borrow_mut() = stage.clone();
-        publish_audience(&output_slot, audience.clone());
-        publish(&preview_slot, audience);
+
+        publish_audience(&output_slot, &preview_slot, audience);
         publish_stage(&stage_slot, stage);
     }
     if settings.show_output || session.preferences.auto_output() {
@@ -2226,6 +2753,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let input = Rc::clone(&input);
             let video_timer = Rc::clone(&video_timer);
             let video_player = Rc::clone(&video_player);
+            let output_fade = Rc::clone(&output_fade);
+            let stage_fade = Rc::clone(&stage_fade);
             let ui = control.as_weak();
             Rc::new(move |source: freeshow_ndi::NetworkSource| {
                 let Some(ui) = ui.upgrade() else { return };
@@ -2239,6 +2768,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 };
                 if current.begin_network_background() {
+                    output_fade.stop();
+                    stage_fade.stop();
                     stop_video(&video_timer, &video_player);
                     ui.set_network_status(format!("Waiting for {}", new_input.label).into());
                     *input.borrow_mut() = Some(new_input);
@@ -2281,8 +2812,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let output_slot = Rc::clone(&output_slot);
         let preview_slot = Rc::clone(&preview_slot);
         let stage_slot = Rc::clone(&stage_slot);
-        let last_output = Rc::clone(&last_output);
-        let last_stage = Rc::clone(&last_stage);
         network_timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(33),
@@ -2309,9 +2838,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_network_status("Network input stopped".into());
                     return;
                 }
-                if output_fade.running() || stage_fade.running() {
-                    return;
-                }
                 let Some(input) = input.as_mut() else { return };
                 let Some((width, height, rgba)) = input.receiver.next_frame() else {
                     return;
@@ -2325,13 +2851,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_network_status(format!("Live · {}", input.label).into());
                         input.on_air = true;
                     }
-                    let audience = audience_frame(&current);
-                    let stage = stage_frame(&current);
-                    *last_output.borrow_mut() = audience.clone();
-                    *last_stage.borrow_mut() = stage.clone();
-                    publish_audience(&output_slot, audience.clone());
-                    publish(&preview_slot, audience);
-                    publish_stage(&stage_slot, stage);
+                    if let Some(audience) = output_fade.update_target(audience_frame(&current)) {
+                        publish_audience(&output_slot, &preview_slot, audience);
+                    }
+                    if let Some(stage) = stage_fade.update_target(stage_frame(&current)) {
+                        publish_stage(&stage_slot, stage);
+                    }
                 }
             },
         );
@@ -2547,12 +3072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .upgrade()
                         .map(|output| monitor_choices(output.window()))
                         .unwrap_or_default();
-                    apply_chrome(
-                        &ui,
-                        &current,
-                        settings.borrow().output_screen,
-                        &monitors,
-                    );
+                    apply_chrome(&ui, &current, settings.borrow().output_screen, &monitors);
                     refresh(&ui, &current);
                     publish(&edit_slot, edit_frame(&current));
                 }
@@ -2594,6 +3114,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             result.is_ok()
         });
     }
+    wire_media_preview(&control, Rc::clone(&session));
+    {
+        let ui = control.as_weak();
+        let scan_session = Rc::clone(&session);
+        control.on_scan_missing_media(move || {
+            if let Some(ui) = ui.upgrade() {
+                refresh_missing_media(&ui, &scan_session.borrow());
+            }
+        });
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_relink_media(move |key, path| {
+            let mut current = session.borrow_mut();
+            let result = current.relink_missing_media(&key, &path);
+            let success = result.is_ok();
+            current.notice = match result {
+                Ok(message) | Err(message) => message,
+            };
+            if let Some(ui) = ui.upgrade() {
+                if success {
+                    ui.set_media_replacement("".into());
+                }
+                refresh(&ui, &current);
+            }
+        });
+    }
+    wire_transition_audition(&control, Rc::clone(&session));
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_apply_transition_range(move |first, last| {
+            let mut current = session.borrow_mut();
+            if let Err(error) = current.apply_slide_motion_range(first as usize, last as usize) {
+                current.notice = error;
+            }
+            if let Some(ui) = ui.upgrade() {
+                refresh(&ui, &current);
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_format_layer_text(move |text, anchor, cursor, key, value| {
+            let Some(ui) = ui.upgrade() else {
+                return false;
+            };
+            let mut current = session.borrow_mut();
+            match current.format_text_selection(&text, anchor, cursor, &key, &value) {
+                Ok(true) => {
+                    refresh(&ui, &current);
+                    publish(&edit_slot, edit_frame(&current));
+                    true
+                }
+                Ok(false) => {
+                    ui.set_notice(current.notice.clone().into());
+                    ui.set_draft_status(current.show_draft_status().into());
+                    false
+                }
+                Err(error) => {
+                    ui.set_notice(error.into());
+                    false
+                }
+            }
+        });
+    }
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
@@ -2616,6 +3203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let stage_session = Rc::clone(&session);
         let stage_slot = Rc::clone(&stage_slot);
+        let stage_fade = Rc::clone(&stage_fade);
         let after_stage_edit = move |result: Result<String, String>| {
             let Some(ui) = ui.upgrade() else {
                 return;
@@ -2624,7 +3212,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match result {
                 Ok(message) => {
                     ui.set_stage_status(message.into());
-                    publish_stage(&stage_slot, stage_frame(&current));
+                    if let Some(frame) = stage_fade.update_target(stage_frame(&current)) {
+                        publish_stage(&stage_slot, frame);
+                    }
                 }
                 Err(err) => {
                     tracing::warn!("stage editor: {err}");
@@ -2890,9 +3480,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chord.push_str("Shift+");
             }
             chord.push_str(&freeshow_data::normalize_chord(&text));
-            if session.borrow_mut().perform_shortcut(&chord)
-                && let Some(ui) = ui.upgrade()
-            {
+            let handled = session.borrow_mut().perform_shortcut(&chord);
+            if let Some(ui) = ui.upgrade() {
+                if !handled {
+                    ui.set_notice(session.borrow().notice.clone().into());
+                    return;
+                }
                 refresh(&ui, &session.borrow());
                 // Next/Previous in edit mode moves the editor to the slide that went live.
                 if ui.get_edit_mode() {
@@ -2917,8 +3510,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let edit_slot = Rc::clone(&edit_slot);
         let output_fade = Rc::clone(&output_fade);
         let stage_fade = Rc::clone(&stage_fade);
-        let last_output = Rc::clone(&last_output);
-        let last_stage = Rc::clone(&last_stage);
         let next_slide = Rc::clone(&next_slide);
         let audio_out = Rc::clone(&audio_out);
         let video_player = Rc::clone(&video_player);
@@ -2933,9 +3524,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 audio: Rc::clone(&audio_out),
                 video: Rc::clone(&video_player),
                 timer: Rc::clone(&video_timer),
+                output_fade: Rc::clone(&output_fade),
+                stage_fade: Rc::clone(&stage_fade),
             };
-            let index = session.borrow().drawer_real_index(index.max(0) as usize);
+            let index = index.max(0) as usize;
             if session.borrow().tab == "functions" {
+                let index = session.borrow().drawer_real_index(index);
                 let mut current = session.borrow_mut();
                 match index {
                     0 => {
@@ -2945,15 +3539,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = current.take_plays();
                         stop_video(&video_timer, &video_player);
                         *audio_out.borrow_mut() = None;
-                        let blank = audience_frame(&current);
+                        let blank = cleared_audience_frame(&current);
                         next_slide.stop();
                         output_fade.stop();
                         stage_fade.stop();
-                        *last_output.borrow_mut() = blank.clone();
-                        publish_audience(&output_slot, blank.clone());
-                        publish(&preview_slot, blank);
+
+                        publish_audience(&output_slot, &preview_slot, blank);
                         let stage = stage_frame(&current);
-                        *last_stage.borrow_mut() = stage.clone();
+
                         publish_stage(&stage_slot, stage);
                     }
                     1 => {
@@ -2971,8 +3564,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &output_slot,
                                 &preview_slot,
                                 &stage_slot,
-                                &last_output,
-                                &last_stage,
                             );
                             if let Some(ui) = ui.upgrade() {
                                 refresh(&ui, &session.borrow());
@@ -2997,8 +3588,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &output_slot,
                             &preview_slot,
                             &stage_slot,
-                            &last_output,
-                            &last_stage,
                             audience,
                             stage,
                             motion,
@@ -3016,8 +3605,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &output_slot,
                             &preview_slot,
                             &stage_slot,
-                            &last_output,
-                            &last_stage,
                         );
                         if let Some(ui) = ui.upgrade() {
                             refresh(&ui, &session.borrow());
@@ -3039,8 +3626,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &output_slot,
                                 &preview_slot,
                                 &stage_slot,
-                                &last_output,
-                                &last_stage,
                             );
                             if let Some(ui) = ui.upgrade() {
                                 refresh(&ui, &session.borrow());
@@ -3065,8 +3650,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &output_slot,
                             &preview_slot,
                             &stage_slot,
-                            &last_output,
-                            &last_stage,
                             audience,
                             stage,
                             motion,
@@ -3084,8 +3667,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &output_slot,
                             &preview_slot,
                             &stage_slot,
-                            &last_output,
-                            &last_stage,
                         );
                         if let Some(ui) = ui.upgrade() {
                             refresh(&ui, &session.borrow());
@@ -3094,9 +3675,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     3 => {
                         current.toggle_timer();
-                        let stage = stage_frame(&current);
-                        *last_stage.borrow_mut() = stage.clone();
-                        publish_stage(&stage_slot, stage);
+                        if let Some(stage) = stage_fade.update_target(stage_frame(&current)) {
+                            publish_stage(&stage_slot, stage);
+                        }
                     }
                     4 => {
                         let Some(root) = current.root.clone() else {
@@ -3113,7 +3694,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             output_height,
                         );
                         if current.recording {
-                            let frame = last_output.borrow();
+                            let frame = output_slot.last_frame();
                             freeshow_record::ServiceCapture.submit(
                                 &frame.pixels,
                                 frame.width,
@@ -3231,10 +3812,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(err) => tracing::warn!("show PDF was not exported: {err}"),
                     },
                     16 => match current.export_current_project_package() {
-                        Ok(path) => {
-                            tracing::info!("exported project package to {}", path.display())
+                        Ok((path, warnings)) => {
+                            current.notice = if warnings.is_empty() {
+                                format!("Exported project to {}", path.display())
+                            } else {
+                                format!(
+                                    "Exported project with {} media dependencies: {}",
+                                    warnings.len(),
+                                    warnings.join(" · ")
+                                )
+                            };
+                            tracing::info!("exported project package to {}", path.display());
                         }
-                        Err(err) => tracing::warn!("project package was not exported: {err}"),
+                        Err(err) => current.notice = format!("Could not export project: {err}"),
                     },
                     17 => {
                         let frame = audience_frame(&current);
@@ -3395,37 +3985,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             player.set_span(from, to);
                             follow_video(
-                                Rc::clone(&video_timer),
-                                Rc::clone(&video_player),
+                                &playback,
                                 player,
                                 Some(path.clone()),
                                 Rc::clone(&session),
                                 Rc::clone(&output_slot),
                                 Rc::clone(&preview_slot),
                                 Rc::clone(&stage_slot),
-                                Rc::clone(&last_output),
-                                Rc::clone(&last_stage),
                             );
                         }
-                        Err(err) => tracing::error!("could not play video: {err}"),
+                        Err(err) => {
+                            tracing::error!("could not play video: {err}");
+                            picture_open_failed(&playback, &session);
+                        }
                     }
                 }
                 DrawerAction::PlayCamera(name) => {
                     stop_video(&video_timer, &video_player);
                     match VideoPlayer::open_camera(&name) {
                         Ok(player) => follow_video(
-                            Rc::clone(&video_timer),
-                            Rc::clone(&video_player),
+                            &playback,
                             player,
                             None,
                             Rc::clone(&session),
                             Rc::clone(&output_slot),
                             Rc::clone(&preview_slot),
                             Rc::clone(&stage_slot),
-                            Rc::clone(&last_output),
-                            Rc::clone(&last_stage),
                         ),
-                        Err(err) => tracing::error!("could not open camera: {err}"),
+                        Err(err) => {
+                            tracing::error!("could not open camera: {err}");
+                            picture_open_failed(&playback, &session);
+                        }
                     }
                 }
                 kind @ (DrawerAction::Present | DrawerAction::Refresh) => {
@@ -3447,8 +4037,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &output_slot,
                         &preview_slot,
                         &stage_slot,
-                        &last_output,
-                        &last_stage,
                         audience,
                         stage,
                         motion,
@@ -3506,9 +4094,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             if ui.get_edit_mode() {
-                if session.borrow_mut().pick_first_slide() {
-                    refresh(&ui, &session.borrow());
-                }
+                session.borrow_mut().pick_first_slide();
+                refresh(&ui, &session.borrow());
                 publish(&edit_slot, edit_frame(&session.borrow()));
             }
         });
@@ -3609,24 +4196,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
-        control.on_prev_item(move || {
-            session.borrow_mut().prev_item();
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&edit_slot, edit_frame(&session.borrow()));
-            }
-        });
-    }
-    {
-        let ui = control.as_weak();
-        let session = Rc::clone(&session);
-        let edit_slot = Rc::clone(&edit_slot);
         control.on_undo_edit(move || {
-            if session.borrow_mut().undo()
-                && let Some(ui) = ui.upgrade()
-            {
-                refresh(&ui, &session.borrow());
-                publish(&edit_slot, edit_frame(&session.borrow()));
+            let changed = session.borrow_mut().undo();
+            if let Some(ui) = ui.upgrade() {
+                if changed {
+                    refresh(&ui, &session.borrow());
+                    publish(&edit_slot, edit_frame(&session.borrow()));
+                } else {
+                    ui.set_notice(session.borrow().notice.clone().into());
+                }
             }
         });
     }
@@ -3635,23 +4213,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_redo_edit(move || {
-            if session.borrow_mut().redo()
-                && let Some(ui) = ui.upgrade()
-            {
-                refresh(&ui, &session.borrow());
-                publish(&edit_slot, edit_frame(&session.borrow()));
+            let changed = session.borrow_mut().redo();
+            if let Some(ui) = ui.upgrade() {
+                if changed {
+                    refresh(&ui, &session.borrow());
+                    publish(&edit_slot, edit_frame(&session.borrow()));
+                } else {
+                    ui.set_notice(session.borrow().notice.clone().into());
+                }
             }
         });
     }
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let edit_slot = Rc::clone(&edit_slot);
-        control.on_next_item(move || {
-            session.borrow_mut().next_item();
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&edit_slot, edit_frame(&session.borrow()));
+        let live_pump = Rc::clone(&live_pump);
+        control.on_update_live_slide(move || {
+            if session.borrow_mut().update_live_slide() {
+                if let Some(ui) = ui.upgrade() {
+                    refresh(&ui, &session.borrow());
+                }
+                pump_live(&live_pump);
             }
         });
     }
@@ -3667,10 +4249,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
+        control.on_select_edit_box(move |index, mode| {
+            let Some(ui) = ui.upgrade() else {
+                return false;
+            };
+            let Ok(index) = usize::try_from(index) else {
+                return false;
+            };
+            let mut session = session.borrow_mut();
+            let (_, count) = session.item_position();
+            if index >= count {
+                return false;
+            }
+            if !commit_pending_layer_text(&ui, &mut session) {
+                refresh(&ui, &session);
+                return false;
+            }
+            let selected = match mode.as_str() {
+                "add" => session.extend_layer_selection(index),
+                "canvas" => session.pick_canvas_layer(index),
+                "group" => session.select_layer_group(index),
+                _ => session.select_item(index),
+            };
+            refresh(&ui, &session);
+            selected
+        });
+    }
+    {
+        let drag: Rc<RefCell<Option<session::LayerDrag>>> = Rc::default();
+        let start = Rc::clone(&drag);
+        let snap = Rc::clone(&drag);
+        control.on_snap_layer_move(move |dx, dy, tolerance_x, tolerance_y| {
+            let (dx, dy, guide_x, guide_y) =
+                snap.borrow().as_ref().map_or((dx, dy, -1, -1), |drag| {
+                    drag.snap(dx, dy, tolerance_x, tolerance_y)
+                });
+            LayerMovePreview {
+                dx,
+                dy,
+                guide_x,
+                guide_y,
+            }
+        });
+        let resize = Rc::clone(&drag);
+        control.on_resize_layer_preview(move |dx, dy, uniform| {
+            resize
+                .borrow()
+                .as_ref()
+                .map(|drag| layer_outline(drag.resize_preview(dx, dy, uniform)))
+                .unwrap_or_default()
+        });
+        let cancel = Rc::clone(&drag);
+        let start_session = Rc::clone(&session);
+        control.on_begin_edit_geometry(move || {
+            let target = start_session.borrow().begin_layer_drag();
+            let valid = target.is_some();
+            *start.borrow_mut() = target;
+            valid
+        });
+        control.on_cancel_edit_geometry(move || {
+            cancel.borrow_mut().take();
+        });
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
-        control.on_select_edit_box(move |index| {
-            if index >= 0 {
-                session.borrow_mut().select_item(index as usize);
+        control.on_finish_edit_geometry(move |dx, dy, resize, uniform| {
+            let target = drag.borrow_mut().take();
+            let Some(target) = target else { return };
+            if resize {
+                session
+                    .borrow_mut()
+                    .finish_layer_resize(target, dx, dy, uniform);
+            } else {
+                session
+                    .borrow_mut()
+                    .finish_layer_move(target, dx as i32, dy as i32);
             }
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session.borrow());
@@ -3682,16 +4335,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
-        control.on_edit_geometry(move |first, second, resize| {
-            if !session
-                .borrow_mut()
-                .set_item_geometry(first, second, resize)
-            {
-                tracing::error!("could not save item geometry");
+        control.on_duplicate_layer(move || {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            let mut session = session.borrow_mut();
+            if commit_pending_layer_text(&ui, &mut session) {
+                session.duplicate_layer();
             }
+            refresh(&ui, &session);
+            publish(&edit_slot, edit_frame(&session));
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_set_layer_grouping(move |group| {
+            let Some(ui) = ui.upgrade() else { return };
+            let mut session = session.borrow_mut();
+            if commit_pending_layer_text(&ui, &mut session) {
+                session.set_layer_grouping(group);
+            }
+            refresh(&ui, &session);
+            publish(&edit_slot, edit_frame(&session));
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_align_layer(move |alignment| {
             if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&edit_slot, edit_frame(&session.borrow()));
+                let mut session = session.borrow_mut();
+                if commit_pending_layer_text(&ui, &mut session) {
+                    session.align_layer(alignment);
+                }
+                refresh(&ui, &session);
+                publish(&edit_slot, edit_frame(&session));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        control.on_exclude_primary_layer(move || {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            let mut session = session.borrow_mut();
+            if commit_pending_layer_text(&ui, &mut session) {
+                session.exclude_primary_layer();
+            }
+            refresh(&ui, &session);
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_set_layer_flags(move |lock, value| {
+            if let Some(ui) = ui.upgrade() {
+                let mut session = session.borrow_mut();
+                if commit_pending_layer_text(&ui, &mut session) {
+                    session.set_layer_flags(lock, value);
+                }
+                refresh(&ui, &session);
+                publish(&edit_slot, edit_frame(&session));
+            }
+        });
+    }
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let edit_slot = Rc::clone(&edit_slot);
+        control.on_nudge_layers(move |dx, dy| {
+            if let Some(ui) = ui.upgrade() {
+                let mut session = session.borrow_mut();
+                if commit_pending_layer_text(&ui, &mut session) {
+                    session.translate_layers(dx, dy);
+                }
+                refresh(&ui, &session);
+                publish(&edit_slot, edit_frame(&session));
             }
         });
     }
@@ -3734,17 +4459,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let mut session = session.borrow_mut();
-            let lyrics = ui.get_lyrics();
-            if session.lyrics() != lyrics.as_str() && !session.save_lyrics(lyrics.as_str()) {
-                session.notice = "Could not save the slide text".into();
+            if !commit_pending_layer_text(&ui, &mut session) {
                 ui.set_notice(session.notice.clone().into());
+                ui.set_draft_status(session.show_draft_status().into());
                 return;
             }
-            session.notice = if session.move_item_box(forward) {
-                String::new()
-            } else {
-                "Could not move the slide box".into()
-            };
+            session.notice.clear();
+            if !session.move_item_box(forward) && session.notice.is_empty() {
+                session.notice = "Could not move the slide box".into();
+            }
             refresh(&ui, &session);
             publish(&edit_slot, edit_frame(&session));
         });
@@ -3765,68 +4488,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
-        let ui = control.as_weak();
         let session = Rc::clone(&session);
-        let output_slot = Rc::clone(&output_slot);
-        let stage_slot = Rc::clone(&stage_slot);
-        let preview_slot = Rc::clone(&preview_slot);
-        let output_fade = Rc::clone(&output_fade);
-        let stage_fade = Rc::clone(&stage_fade);
-        let last_output = Rc::clone(&last_output);
-        let last_stage = Rc::clone(&last_stage);
-        let next_slide = Rc::clone(&next_slide);
-        let audio_out = Rc::clone(&audio_out);
-        let video_player = Rc::clone(&video_player);
-        let video_timer = Rc::clone(&video_timer);
+        let live_pump = Rc::clone(&live_pump);
         control.on_go_slide(move |text| {
-            let playback = LivePlayback {
-                audio: Rc::clone(&audio_out),
-                video: Rc::clone(&video_player),
-                timer: Rc::clone(&video_timer),
-            };
-            let session_rc = Rc::clone(&session);
-            let mut session = session.borrow_mut();
-            if session.tab == "shows" {
-                // Go with no slide picked presents the first one, as Next does.
-                if session.slide_index.is_none() {
-                    session.slide_index = session.first_slide();
+            {
+                let mut current = session.borrow_mut();
+                if current.tab == "shows" {
+                    current.save_lyrics(text.as_str());
                 }
-                session.save_lyrics(text.as_str());
-                // Run the slide's own background and cues, as a click would.
-                if let Some(index) = session.slide_index {
-                    session.select_slide(index);
+                if current.preferences.out_locked() {
+                    return;
                 }
+                if current.tab == "shows"
+                    && let Some(index) = current.slide_index.or_else(|| current.first_slide())
+                {
+                    // Route Go through the same media and timer handoff as a slide click.
+                    current.select_slide(index);
+                } else {
+                    current.go_live();
+                }
+                current.refresh_output = true;
             }
-            session.go_live();
-            let audience = audience_frame(&session);
-            let stage = stage_frame(&session);
-            let (motion, background) = session.output_motion();
-            let seconds = if background {
-                None
-            } else {
-                session.next_timer_seconds()
-            };
-            send_frames(
-                &output_fade,
-                &stage_fade,
-                &output_slot,
-                &preview_slot,
-                &stage_slot,
-                &last_output,
-                &last_stage,
-                audience,
-                stage,
-                motion,
-                background,
-                &next_slide,
-                &session_rc,
-                ui.clone(),
-                seconds,
-                &playback,
-            );
-            if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session);
-            }
+            pump_live(&live_pump);
         });
     }
 
@@ -4047,7 +4730,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if rtmp_started {
-        let frame = last_output.borrow();
+        let frame = output_slot.last_frame();
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
     }
     let remote_session = Rc::clone(&session);
@@ -4057,8 +4740,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let remote_stage = Rc::clone(&stage_slot);
     let remote_output_fade = Rc::clone(&output_fade);
     let remote_stage_fade = Rc::clone(&stage_fade);
-    let remote_last_output = Rc::clone(&last_output);
-    let remote_last_stage = Rc::clone(&last_stage);
     let remote_next_slide = Rc::clone(&next_slide);
     let remote_audio = Rc::clone(&audio_out);
     let remote_video = Rc::clone(&video_player);
@@ -4067,6 +4748,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio: Rc::clone(&remote_audio),
         video: Rc::clone(&remote_video),
         timer: Rc::clone(&remote_video_timer),
+        output_fade: Rc::clone(&remote_output_fade),
+        stage_fade: Rc::clone(&remote_stage_fade),
     };
     let import_snapshot = Arc::clone(&snapshot);
     let remote_timer = slint::Timer::default();
@@ -4098,21 +4781,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && !remote_output_fade.running()
                 && std::mem::take(&mut remote_session.borrow_mut().live_edited);
             if live_edited {
-                // An edit to what is on air shows up right away, without a transition.
+                // Explicit live slide updates and output settings repaint without triggering a cue.
                 let (audience, stage) = {
                     let session = remote_session.borrow();
                     (audience_frame(&session), stage_frame(&session))
                 };
-                *remote_last_output.borrow_mut() = audience.clone();
-                submit_network(NetworkPicture::Audience, &audience);
-                publish_audience(&remote_output, audience.clone());
-                publish(&remote_preview, audience);
-                *remote_last_stage.borrow_mut() = stage.clone();
-                publish_stage(&remote_stage, stage);
+
+                remote_output_fade.stop();
+                publish_audience(&remote_output, &remote_preview, audience);
+                if let Some(stage) = remote_stage_fade.update_target(stage) {
+                    publish_stage(&remote_stage, stage);
+                }
             }
             if started || moved {
                 remote_session.borrow_mut().refresh_output = false;
-                if moved {
+                {
                     remote_next_slide.stop();
                     let plays = remote_session.borrow_mut().take_plays();
                     let fades = picture_fades_in(&plays[0], &remote_session.borrow());
@@ -4126,8 +4809,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &remote_output,
                         &remote_preview,
                         &remote_stage,
-                        &remote_last_output,
-                        &remote_last_stage,
                     );
                     if fades {
                         if let Some(ui) = remote_ui.upgrade() {
@@ -4158,8 +4839,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &remote_output,
                     &remote_preview,
                     &remote_stage,
-                    &remote_last_output,
-                    &remote_last_stage,
                     audience,
                     stage,
                     motion,
@@ -4176,30 +4855,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             return;
         }
-        let clear = matches!(batch.last(), Some(freeshow_remote::Command::Clear));
+        use freeshow_remote::Command;
         sample_audio(&remote_session, &remote_audio);
-        let output_refresh = std::mem::take(&mut remote_session.borrow_mut().refresh_output);
-        let (audience, stage, timed_move) = {
+        let (change, clear_all, clear_background, cancel_next, frames, plays) = {
             let mut session = remote_session.borrow_mut();
+            let mut change = RemotePictureChange::Keep;
+            let mut clear_all = false;
+            let mut clear_background = false;
+            let mut cancel_next = false;
             for command in batch {
+                let locked = session.preferences.out_locked();
+                if !locked {
+                    clear_all |= matches!(command, Command::Clear);
+                    clear_background |= matches!(command, Command::ClearBackground);
+                    cancel_next |= matches!(command, Command::Clear | Command::ClearSlide);
+                }
+                change = change.after(&command, locked);
                 session.apply_remote(command);
             }
-            let timed_move = session.run_due_cue_completion(std::time::Instant::now());
-            let audience = audience_frame(&session);
-            let stage = stage_frame(&session);
+            let completed = session.run_due_cue_completion(std::time::Instant::now());
+            let repaint = std::mem::take(&mut session.refresh_output);
+            if completed
+                || (change != RemotePictureChange::Clear
+                    && (repaint || session.background_transition))
+            {
+                change = RemotePictureChange::Take;
+            }
+            let frames = (change != RemotePictureChange::Keep).then(|| {
+                let audience = if change == RemotePictureChange::Clear {
+                    cleared_audience_frame(&session)
+                } else {
+                    audience_frame(&session)
+                };
+                (audience, stage_frame(&session))
+            });
+            let plays = session.take_plays();
             if let Ok(mut stored) = snapshot.lock() {
                 *stored = session.to_snapshot();
             }
-            (audience, stage, timed_move)
+            (
+                change,
+                clear_all,
+                clear_background,
+                cancel_next,
+                frames,
+                plays,
+            )
         };
-        let plays = remote_session.borrow_mut().take_plays();
         let fades = picture_fades_in(&plays[0], &remote_session.borrow());
-        if timed_move || output_refresh {
+        if cancel_next || fades {
             remote_next_slide.stop();
-            if !fades && remote_session.borrow().background_transition {
-                stop_video(&remote_video_timer, &remote_video);
-            }
         }
+        if clear_all
+            || clear_background
+            || (!fades && remote_session.borrow().background_transition)
+        {
+            stop_video(&remote_video_timer, &remote_video);
+        }
+        if clear_all {
+            *remote_audio.borrow_mut() = None;
+        }
+        let frames = if change == RemotePictureChange::Clear {
+            remote_output_fade.stop();
+            remote_stage_fade.stop();
+            if let Some((audience, stage)) = frames {
+                publish_audience(&remote_output, &remote_preview, audience);
+                publish_stage(&remote_stage, stage);
+            }
+            // Clear Background may leave an unrelated media flag queued in this batch.
+            if !fades {
+                let _ = remote_session.borrow_mut().output_motion();
+            }
+            None
+        } else {
+            frames
+        };
         start_plays(
             plays,
             &remote_session,
@@ -4207,23 +4937,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &remote_output,
             &remote_preview,
             &remote_stage,
-            &remote_last_output,
-            &remote_last_stage,
         );
-        if fades {
-            remote_next_slide.stop();
-        }
-        if clear && remote_session.borrow().blanked {
-            remote_next_slide.stop();
-            // A fade still running would paint the old slide back over the blank.
-            remote_output_fade.stop();
-            remote_stage_fade.stop();
-            *remote_last_output.borrow_mut() = audience.clone();
-            publish(&remote_output, audience.clone());
-            publish(&remote_preview, audience);
-            *remote_last_stage.borrow_mut() = stage.clone();
-            publish(&remote_stage, stage);
-        } else if !fades {
+        if let Some((audience, stage)) = frames.filter(|_| !fades) {
+            if change == RemotePictureChange::Update {
+                if let Some(audience) = remote_output_fade.update_target(audience) {
+                    remote_output_fade.stop();
+                    publish_audience(&remote_output, &remote_preview, audience);
+                }
+                if let Some(stage) = remote_stage_fade.update_target(stage) {
+                    publish_stage(&remote_stage, stage);
+                }
+                if let Some(ui) = remote_ui.upgrade() {
+                    refresh(&ui, &remote_session.borrow());
+                }
+                return;
+            }
             let (motion, background) = remote_session.borrow_mut().output_motion();
             let seconds = if background {
                 None
@@ -4236,8 +4964,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &remote_output,
                 &remote_preview,
                 &remote_stage,
-                &remote_last_output,
-                &remote_last_stage,
                 audience,
                 stage,
                 motion,
@@ -4262,19 +4988,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let clock_session = Rc::clone(&session);
     let clock_stage = Rc::clone(&stage_slot);
-    let clock_last = Rc::clone(&last_stage);
     let clock_output = Rc::clone(&output_slot);
     let clock_preview = Rc::clone(&preview_slot);
-    let clock_last_output = Rc::clone(&last_output);
     let clock_audio = Rc::clone(&audio_out);
     let clock_video = Rc::clone(&video_player);
     let clock_video_timer = Rc::clone(&video_timer);
+    let clock_output_fade = Rc::clone(&output_fade);
+    let clock_stage_fade = Rc::clone(&stage_fade);
     let clock_timer = slint::Timer::default();
     let autosave_session = Rc::clone(&session);
     let autosave_timer = slint::Timer::default();
     if let Some(period) = session.borrow().preferences.autosave_interval() {
         autosave_timer.start(slint::TimerMode::Repeated, period, move || {
-            let wrote = autosave_session.borrow().autosave();
+            let wrote = autosave_session.borrow_mut().autosave();
             if wrote > 0 {
                 tracing::info!("autosave wrote {wrote} files");
             }
@@ -4371,9 +5097,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if session.borrow().lyrics() == text.as_str() {
                         return;
                     }
-                    if !session.borrow_mut().save_lyrics(text.as_str()) {
-                        session.borrow_mut().notice = "Could not save the slide text".into();
-                    }
+                    session.borrow_mut().save_lyrics(text.as_str());
                     refresh(&ui, &session.borrow());
                     publish(&edit_slot, edit_frame(&session.borrow()));
                 },
@@ -4406,26 +5130,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let library_done = Rc::clone(&library_done);
+        let browse_session = Rc::clone(&session);
+        let browse_ui = ui.clone();
+        control.on_choose_template(move |id| {
+            let mut current = browse_session.borrow_mut();
+            if current.browse_template(&id)
+                && let Some(ui) = browse_ui.upgrade()
+            {
+                refresh_template_pick(&ui, &current);
+            }
+        });
         control.on_library_action(move |action, arg| {
-            let _ = session
-                .borrow_mut()
-                .library_action(action.as_str(), arg.as_str());
-            if let Some(ui) = ui.upgrade() {
-                if action == "delete-show" || action == "restore-show" {
-                    ui.set_text_mode(false);
+            let Some(ui) = ui.upgrade() else { return };
+            let result = {
+                let mut current = session.borrow_mut();
+                let capture_slide =
+                    matches!(action.as_str(), "slide-to-template" | "slide-to-overlay");
+                if capture_slide && !commit_pending_layer_text(&ui, &mut current) {
+                    let error = "Could not save the current slide text".to_string();
+                    if current.notice.is_empty() {
+                        current.notice = error.clone();
+                    }
+                    Err(error)
+                } else {
+                    current.library_action(action.as_str(), arg.as_str())
                 }
-                library_done(&ui);
-                if matches!(
+            };
+            if result.is_ok()
+                && matches!(
                     action.as_str(),
-                    "new-drawer-entry"
-                        | "save-event"
-                        | "delete-event"
-                        | "save-player"
-                        | "delete-player"
-                        | "save-rss"
-                ) {
-                    fill_drawer_form(&ui, &session.borrow());
-                }
+                    "template-new-show" | "template-apply-style"
+                )
+            {
+                ui.set_search_query("".into());
+                ui.set_text_mode(false);
+                ui.set_edit_mode(true);
+            }
+            if result.is_ok() && action == "slide-to-template" {
+                ui.set_template_save_open(false);
+            }
+            if action == "delete-show" || action == "restore-show" {
+                ui.set_text_mode(false);
+            }
+            library_done(&ui);
+            if matches!(
+                action.as_str(),
+                "new-drawer-entry"
+                    | "save-event"
+                    | "delete-event"
+                    | "save-player"
+                    | "delete-player"
+                    | "save-rss"
+            ) {
+                fill_drawer_form(&ui, &session.borrow());
             }
         });
     }
@@ -4460,6 +5217,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::time::Duration::from_millis(150),
                 move || {
                     let paths = std::mem::take(&mut *dropped.borrow_mut());
+                    if let Some(ui) = ui.upgrade()
+                        && ui.get_active_tab() == "media"
+                        && ui.get_media_relink_open()
+                        && slint::Model::row_count(&ui.get_missing_media_keys()) > 0
+                    {
+                        if let [path] = paths.as_slice() {
+                            ui.set_media_replacement(path.to_string_lossy().into_owned().into());
+                        } else {
+                            ui.set_notice("Drop one replacement file at a time.".into());
+                        }
+                        return;
+                    }
                     let result = session.borrow_mut().import_files(&paths);
                     let message = match result {
                         Ok(message) => message,
@@ -4603,7 +5372,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = clock_ui.upgrade() {
                 show_now_playing(&ui, &clock_session.borrow());
             }
-            let ran = clock_session.borrow_mut().run_due_actions();
+            let (ran, cleared) = {
+                let mut current = clock_session.borrow_mut();
+                let visible_before = !current.slide_hidden && !current.blanked;
+                let ran = current.run_due_actions();
+                (
+                    ran,
+                    visible_before && (current.slide_hidden || current.blanked),
+                )
+            };
             {
                 let current = clock_session.borrow();
                 let destination = current
@@ -4630,8 +5407,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     audio: Rc::clone(&clock_audio),
                     video: Rc::clone(&clock_video),
                     timer: Rc::clone(&clock_video_timer),
+                    output_fade: Rc::clone(&clock_output_fade),
+                    stage_fade: Rc::clone(&clock_stage_fade),
                 };
                 let fades = picture_fades_in(&plays[0], &clock_session.borrow());
+                let cleared = cleared
+                    || plays
+                        .iter()
+                        .any(|play| matches!(play, Some(PendingPlay::StopVideo)));
+                if cleared {
+                    clock_output_fade.stop();
+                    clock_stage_fade.stop();
+                }
                 start_plays(
                     plays,
                     &clock_session,
@@ -4639,14 +5426,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &clock_output,
                     &clock_preview,
                     &clock_stage,
-                    &clock_last_output,
-                    &clock_last,
                 );
                 if !fades {
-                    let audience = audience_frame(&clock_session.borrow());
-                    *clock_last_output.borrow_mut() = audience.clone();
-                    publish_audience(&clock_output, audience.clone());
-                    publish(&clock_preview, audience);
+                    let current = clock_session.borrow();
+                    let audience = if cleared {
+                        cleared_audience_frame(&current)
+                    } else {
+                        audience_frame(&current)
+                    };
+                    if let Some(audience) = clock_output_fade.update_target(audience) {
+                        publish_audience(&clock_output, &clock_preview, audience);
+                    }
                 }
             }
             // Stage clocks and timers count whole seconds, so the foldback is redrawn once a
@@ -4659,11 +5449,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 last_stage_second = second;
                 let frame = stage_frame(&clock_session.borrow());
-                if let Some(request) = request {
-                    request.publish(&frame);
+                if let Some(frame) = clock_stage_fade.update_target(frame) {
+                    publish_stage(&clock_stage, frame);
                 }
-                *clock_last.borrow_mut() = frame.clone();
-                publish(&clock_stage, frame);
+                if let Some(request) = request {
+                    request.publish(&clock_stage.last_frame());
+                }
             }
         },
     );
@@ -4727,6 +5518,116 @@ fn spawn_feed_worker() -> (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rapid_take_uses_the_submitted_picture_and_clear_cancels_both_transitions() {
+        struct TimerPlatform;
+        impl slint::platform::Platform for TimerPlatform {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+                unreachable!("this test only drives the timer")
+            }
+        }
+        slint::platform::set_platform(Box::new(TimerPlatform)).unwrap();
+        let frame = |r, g, b| Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![r, g, b, 255],
+        };
+        let red = frame(255, 0, 0);
+        let audience = Rc::new(FrameSlot::buffered_for_test(red.clone()));
+        let preview = Rc::new(FrameSlot::buffered_for_test(red.clone()));
+        let stage = Rc::new(FrameSlot::buffered_for_test(red));
+        let audience_fade = Rc::new(LiveTransition::default());
+        let stage_fade = Rc::new(LiveTransition::default());
+        let motion = freeshow_data::TextTransition {
+            duration_ms: 2000,
+            easing: "linear".into(),
+            ..Default::default()
+        };
+        fade_into(
+            &audience_fade,
+            &audience,
+            Some(&preview),
+            frame(0, 255, 0),
+            NetworkPicture::Audience,
+            motion.clone(),
+        );
+        fade_into(
+            &audience_fade,
+            &audience,
+            Some(&preview),
+            frame(0, 0, 255),
+            NetworkPicture::Audience,
+            motion.clone(),
+        );
+        fade_into(
+            &stage_fade,
+            &stage,
+            None,
+            frame(0, 0, 255),
+            NetworkPicture::Stage,
+            motion,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(55));
+        slint::platform::update_timers_and_animations();
+        let sample = audience.last_frame().pixel(0, 0);
+        assert!(sample.r > 0 && sample.b > 0);
+        assert_eq!(
+            sample.g, 0,
+            "the unshown first Take was never used as a starting frame"
+        );
+        assert!(Rc::ptr_eq(&audience.last_frame(), &preview.last_frame()));
+        assert!(stage.last_frame().pixel(0, 0).b > 0);
+
+        // A decoded video frame changes the destination without restarting the clock.
+        let revision = audience_fade.revision.get();
+        assert!(audience_fade.update_target(frame(0, 255, 0)).is_none());
+        assert_eq!(audience_fade.revision.get(), revision);
+        std::thread::sleep(std::time::Duration::from_millis(42));
+        slint::platform::update_timers_and_animations();
+        assert!(audience.last_frame().pixel(0, 0).g > 0);
+
+        audience_fade.stop();
+        stage_fade.stop();
+        let blank = clear_frame(1, 1);
+        publish_audience(&audience, &preview, blank.clone());
+        publish_stage(&stage, blank.clone());
+        std::thread::sleep(std::time::Duration::from_millis(38));
+        slint::platform::update_timers_and_animations();
+        assert_eq!(*audience.last_frame(), blank);
+        assert_eq!(*stage.last_frame(), blank);
+        assert!(!audience_fade.running() && !stage_fade.running());
+        fade_into(
+            &audience_fade,
+            &audience,
+            Some(&preview),
+            clear_frame(2, 1),
+            NetworkPicture::Audience,
+            freeshow_data::TextTransition::default(),
+        );
+        assert_eq!(audience.last_frame().width, 2);
+        assert!(!audience_fade.running());
+    }
+
+    #[test]
+    fn transport_commands_preserve_the_last_picture_action_in_a_batch() {
+        use RemotePictureChange::{Clear, Keep, Take, Update};
+        use freeshow_remote::Command;
+        let volume = Command::SetVolume { thousandths: 600 };
+        assert_eq!(Keep.after(&volume, false), Keep);
+        assert_eq!(
+            Keep.after(&Command::Clear, false).after(&volume, false),
+            Clear
+        );
+        assert_eq!(Clear.after(&Command::SetSlide(1), false), Take);
+        assert_eq!(Take.after(&Command::ClearSlide, true), Take);
+        assert_eq!(Take.after(&Command::ClearSlide, false), Clear);
+        let overlay = Command::ShowOverlay { id: "clock".into() };
+        assert_eq!(Keep.after(&overlay, false), Update);
+        assert_eq!(Take.after(&overlay, false), Take);
+    }
 
     #[test]
     fn accent_text_stays_readable() {

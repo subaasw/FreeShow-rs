@@ -2,6 +2,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::session::Session;
 use freeshow_data::ShowFile;
@@ -42,23 +43,92 @@ pub fn motion_frame(
     }
 }
 
+/// A snapshot of two editor stills for rehearsing the selected text transition.
+pub struct TransitionAudition {
+    pub from_slide: Option<usize>,
+    pub to_slide: usize,
+    pub motion: freeshow_data::TextTransition,
+    pub source: &'static str,
+    from: Frame,
+    to: Frame,
+}
+
+impl TransitionAudition {
+    pub fn prepare(session: &Session) -> Option<Self> {
+        if session.tab != "shows" {
+            return None;
+        }
+        let show = session
+            .show_index
+            .and_then(|index| session.shows.get(index))?;
+        let to_slide = session.slide_index?;
+        show.ordered_slides().get(to_slide)?;
+        let from_slide = show.step_enabled(to_slide, -1);
+        let max_edge = session.output_width.max(session.output_height).max(1);
+        let width = (u64::from(session.output_width) * 576 / u64::from(max_edge)).max(1) as u32;
+        let height = (u64::from(session.output_height) * 576 / u64::from(max_edge)).max(1) as u32;
+        let (motion, source) = session.selected_slide_motion();
+        let render = |index| slide_thumbnail(session, show, index, width, height);
+        Some(Self {
+            from_slide,
+            to_slide,
+            motion,
+            source,
+            from: from_slide.map_or_else(|| clear_frame(width, height), render),
+            to: render(to_slide),
+        })
+    }
+
+    pub fn duration(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(if self.motion.kind == "none" {
+            0
+        } else {
+            self.motion.duration_ms.min(10_000)
+        })
+    }
+
+    pub fn frame(&self, progress: f32) -> Frame {
+        if self.duration().is_zero() || progress >= 1.0 {
+            self.to.clone()
+        } else if progress <= 0.0 {
+            self.from.clone()
+        } else {
+            motion_frame(&self.from, &self.to, &self.motion, progress)
+        }
+    }
+}
+
+pub fn same_frame_size(a: &Frame, b: &Frame) -> bool {
+    a.width == b.width && a.height == b.height
+}
+
 /// The previous picture, held while the first video frame fades in.
 pub struct OpeningFade {
-    from: Frame,
+    from: Rc<Frame>,
     motion: freeshow_data::TextTransition,
 }
 
 impl OpeningFade {
-    pub fn new(from: Frame, motion: freeshow_data::TextTransition) -> Self {
-        Self { from, motion }
+    pub fn new(from: impl Into<Rc<Frame>>, motion: freeshow_data::TextTransition) -> Self {
+        Self {
+            from: from.into(),
+            motion,
+        }
     }
 
     /// The blended frame, or nothing once the transition has finished.
     pub fn frame(&self, to: &Frame, elapsed_ms: u128) -> Option<Frame> {
-        if self.motion.kind == "none" || elapsed_ms >= u128::from(self.motion.duration_ms) {
+        let duration = self.motion.duration_ms.min(10_000);
+        if self.motion.kind == "none"
+            || elapsed_ms >= u128::from(duration)
+            || !same_frame_size(&self.from, to)
+        {
             return None;
         }
-        let t = elapsed_ms as f32 / self.motion.duration_ms.max(1) as f32;
+        if elapsed_ms == 0 {
+            return Some((*self.from).clone());
+        }
+        let t = elapsed_ms as f32 / duration as f32;
         Some(motion_frame(&self.from, to, &self.motion, t))
     }
 }
@@ -70,6 +140,7 @@ pub(crate) enum ProgramContent {
     Slide {
         show_id: String,
         slide_id: String,
+        slide: Rc<serde_json::Value>,
         /// Position in the show's layout, so the slide list can mark what is live.
         index: usize,
         reveal: u32,
@@ -111,11 +182,13 @@ pub fn catalog_thumbnail(
         .as_str()
         .and_then(freeshow_output::parse_color)
         .unwrap_or(Rgba::BLACK);
+    let (source_width, source_height) = slide_source_size(entry);
+    let scale = (width as f32 / source_width).min(height as f32 / source_height);
     render_styled(&StyledSlide {
-        output_width: width,
-        output_height: height,
-        source_width: SOURCE_WIDTH,
-        source_height: SOURCE_HEIGHT,
+        output_width: (source_width * scale).round().max(1.0) as u32,
+        output_height: (source_height * scale).round().max(1.0) as u32,
+        source_width,
+        source_height,
         background,
         items: catalog_items(session, entry),
     })
@@ -129,6 +202,7 @@ fn catalog_items(session: &Session, entry: &serde_json::Value) -> Vec<StyledItem
         .map(|items| {
             items
                 .iter()
+                .filter(|item| !freeshow_data::item_hidden(item))
                 .map(|item| styled_item(item, session.root.as_deref(), None, None, &variables))
                 .collect()
         })
@@ -161,6 +235,20 @@ pub fn edit_frame(session: &Session) -> Frame {
 }
 
 pub fn audience_frame(session: &Session) -> Frame {
+    let delay = if session.blanked {
+        0
+    } else {
+        session.preferences.output_delay_ms()
+    };
+    delayed_audience_frame(compose_audience(session), delay)
+}
+
+/// An explicit Clear must discard pictures queued before the operator pressed it.
+pub fn cleared_audience_frame(session: &Session) -> Frame {
+    delayed_audience_frame(compose_audience(session), 0)
+}
+
+fn compose_audience(session: &Session) -> Frame {
     let mut frame = if !session.blanked {
         if let Some(image) = &session.underlay {
             placed_image(
@@ -187,7 +275,7 @@ pub fn audience_frame(session: &Session) -> Frame {
     paint_interaction(&mut frame, session);
     paint_drawing(&mut frame, session);
     paint_effects(&mut frame, session);
-    delayed_audience_frame(frame, session.preferences.output_delay_ms())
+    frame
 }
 
 /// An empty audience picture in the active output style's background colour.
@@ -205,110 +293,72 @@ fn style_blank(session: &Session) -> Frame {
     }
 }
 
-fn paint_program_content(frame: &mut Frame, session: &Session) {
+/// Record the on-air cue before a slow source can defer its first frame.
+pub(crate) fn capture_program_content(session: &Session) {
     let mut program = session.program_content.borrow_mut();
     if session.blanked || session.slide_hidden {
         *program = None;
         return;
     }
-    let (width, height) = (session.output_width, session.output_height);
     if session.program_held {
-        // The operator is browsing: repaint what is live, with any edits made to it since.
-        match program.clone() {
-            Some(ProgramContent::Scripture(lines)) => {
-                composite_styled(frame, &lines_slide_at(&lines, true, width, height));
-            }
-            Some(ProgramContent::Slide {
-                show_id,
-                slide_id,
-                reveal,
-                clicks,
-                page,
-                ..
-            }) => {
-                let live = session
-                    .shows
-                    .iter()
-                    .find(|show| show.id == show_id)
-                    .and_then(|show| show.show.get("slides")?.get(&slide_id));
-                if let Some(slide) = live {
-                    composite_styled(
-                        frame,
-                        &styled_slide(
-                            &output_look(session, slide),
-                            session.root.as_deref(),
-                            true,
-                            Some(reveal),
-                            clicks,
-                            page,
-                            &session_variables(session),
-                            width,
-                            height,
-                        ),
-                    );
-                } else {
-                    *program = None;
-                }
-            }
-            None => {}
-        }
         return;
     }
     if session.tab == "scripture" {
-        let lines = session.output_lines();
-        composite_styled(frame, &lines_slide_at(&lines, true, width, height));
-        *program = Some(ProgramContent::Scripture(lines));
+        *program = Some(ProgramContent::Scripture(session.output_lines()));
         return;
     }
     let selected = session
         .show_index
         .and_then(|slot| session.shows.get(slot))
         .and_then(|show| {
-            let slide_id = show.ordered_slides().get(session.slide_index?)?.id.clone();
+            let index = session.slide_index?;
+            let slide_id = show.ordered_slides().get(index)?.id.clone();
             let slide = show.show.get("slides")?.get(&slide_id)?;
-            Some((show, slide_id, slide))
+            Some((show, index, slide_id, slide))
         });
-    let Some((show, slide_id, slide)) = selected else {
+    let Some((show, index, slide_id, slide)) = selected else {
         *program = None;
         return;
     };
-    let shown = if action_only(slide) {
-        match program.as_ref() {
-            Some(ProgramContent::Scripture(lines)) => {
-                composite_styled(frame, &lines_slide_at(lines, true, width, height));
-                return;
-            }
-            Some(ProgramContent::Slide {
-                show_id, slide_id, ..
-            }) => session
-                .shows
-                .iter()
-                .find(|show| &show.id == show_id)
-                .and_then(|show| show.show.get("slides")?.get(slide_id)),
-            None => None,
-        }
-    } else {
-        *program = Some(ProgramContent::Slide {
-            show_id: show.id.clone(),
-            slide_id,
-            index: session.slide_index.unwrap_or_default(),
-            reveal: session.reveal_count,
-            clicks: session.click_revealed,
-            page: session.style_page(),
-        });
-        Some(slide)
-    };
-    if let (
-        Some(slide),
+    if action_only(slide) {
+        return;
+    }
+    let snapshot = match program.as_ref() {
         Some(ProgramContent::Slide {
+            show_id,
+            slide_id: live_id,
+            slide: live_slide,
+            ..
+        }) if show_id == &show.id && live_id == &slide_id && live_slide.as_ref() == slide => {
+            Rc::clone(live_slide)
+        }
+        _ => Rc::new(slide.clone()),
+    };
+    *program = Some(ProgramContent::Slide {
+        show_id: show.id.clone(),
+        slide_id,
+        slide: snapshot,
+        index,
+        reveal: session.reveal_count,
+        clicks: session.click_revealed,
+        page: session.style_page(),
+    });
+}
+
+fn paint_program_content(frame: &mut Frame, session: &Session) {
+    capture_program_content(session);
+    let (width, height) = (session.output_width, session.output_height);
+    match session.program_content.borrow().as_ref() {
+        Some(ProgramContent::Scripture(lines)) => {
+            composite_styled(frame, &lines_slide_at(lines, true, width, height));
+        }
+        Some(ProgramContent::Slide {
+            slide,
             reveal,
             clicks,
             page,
             ..
-        }),
-    ) = (shown, program.as_ref())
-    {
-        composite_styled(
+        }) => composite_styled(
             frame,
             &styled_slide(
                 &output_look(session, slide),
@@ -321,7 +371,8 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
                 width,
                 height,
             ),
-        );
+        ),
+        None => {}
     }
 }
 
@@ -601,7 +652,10 @@ pub fn stage_frame(session: &Session) -> Frame {
                     .enumerate()
                     .map(|(slide_index, slide)| {
                         let current = current_index == Some(slide_index);
-                        if current && action_only(&show.show["slides"][&slide.id]) {
+                        if current
+                            && (held_slide.is_some()
+                                || action_only(&show.show["slides"][&slide.id]))
+                        {
                             program_stage_slide(session, &variables)
                         } else {
                             stage_slide(
@@ -710,25 +764,16 @@ fn program_stage_slide(
     match session.program_content.borrow().as_ref() {
         Some(ProgramContent::Scripture(lines)) => stage_slide(vec![lines.clone()], "", variables),
         Some(ProgramContent::Slide {
-            show_id,
-            slide_id,
+            slide,
             reveal,
             clicks,
             page,
             ..
-        }) => {
-            if let Some(show) = session.shows.iter().find(|show| &show.id == show_id) {
-                let notes = show.show["slides"][slide_id]["notes"]
-                    .as_str()
-                    .unwrap_or_default();
-                return stage_slide(
-                    show.stage_text_boxes_for_slide(slide_id, true, *reveal, *clicks, *page),
-                    notes,
-                    variables,
-                );
-            }
-            stage_slide(Vec::new(), "", variables)
-        }
+        }) => stage_slide(
+            ShowFile::stage_text_boxes_from_slide(slide, true, *reveal, *clicks, *page),
+            slide["notes"].as_str().unwrap_or_default(),
+            variables,
+        ),
         None => stage_slide(Vec::new(), "", variables),
     }
 }
@@ -866,14 +911,7 @@ fn styled_slide(
         } else {
             Rgba::BLACK
         });
-    let source_width = slide
-        .pointer("/settings/resolution/width")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(f64::from(SOURCE_WIDTH)) as f32;
-    let source_height = slide
-        .pointer("/settings/resolution/height")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(f64::from(SOURCE_HEIGHT)) as f32;
+    let (source_width, source_height) = slide_source_size(slide);
     let items = slide
         .get("items")
         .and_then(|value| value.as_array())
@@ -881,8 +919,10 @@ fn styled_slide(
             items
                 .iter()
                 .filter(|item| {
-                    clicks_shown
-                        || item.get("clickReveal").and_then(|value| value.as_bool()) != Some(true)
+                    !freeshow_data::item_hidden(item)
+                        && (clicks_shown
+                            || item.get("clickReveal").and_then(|value| value.as_bool())
+                                != Some(true))
                 })
                 .map(|item| styled_item(item, root, reveal, page, variables))
                 .collect()
@@ -896,6 +936,20 @@ fn styled_slide(
         background,
         items,
     }
+}
+
+pub(crate) fn slide_source_size(slide: &serde_json::Value) -> (f32, f32) {
+    let dimension = |key, fallback| {
+        slide["settings"]["resolution"][key]
+            .as_f64()
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite() && *value >= 1.0)
+            .unwrap_or(fallback)
+    };
+    (
+        dimension("width", SOURCE_WIDTH),
+        dimension("height", SOURCE_HEIGHT),
+    )
 }
 
 fn styled_item(
@@ -1842,6 +1896,44 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_video_cue_can_publish_its_identity_before_its_first_frame() {
+        let mut session = Session::empty();
+        let mut show = ShowFile::blank("s", "Show");
+        assert!(show.replace_lyrics_with_split("Before\n\nVideo", false, 0));
+        session.shows.push(show);
+        session.show_index = Some(0);
+        session.select_slide(0);
+        capture_program_content(&session);
+        session.select_slide(1);
+        capture_program_content(&session);
+        session.select_slide_for_edit(0);
+
+        let program = session.program_content.borrow();
+        assert!(matches!(
+            program.as_ref(),
+            Some(ProgramContent::Slide { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn clear_flushes_delayed_audience_frames() {
+        let mut session = Session::empty();
+        session.output_width = 1;
+        session.output_height = 1;
+        session.preferences.special = serde_json::json!({"outputDelayMs": 100});
+        session.replace_underlay(Some(Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        }));
+        audience_frame(&session);
+        OUTPUT_DELAY.with(|buffer| assert_eq!(buffer.borrow().frames.len(), 1));
+        assert!(session.clear_all_layers());
+        assert_eq!(audience_frame(&session).pixels, vec![0, 0, 0, 255]);
+        OUTPUT_DELAY.with(|buffer| assert!(buffer.borrow().frames.is_empty()));
+    }
+
+    #[test]
     fn the_first_video_frame_fades_in_from_the_previous_picture() {
         let from = Frame {
             width: 1,
@@ -1863,7 +1955,9 @@ mod tests {
         let opening = fade.frame(&to, 0).expect("the fade is still running");
         assert!(opening.pixel(0, 0).r > 200);
         assert!(opening.pixel(0, 0).b < 40);
+        assert!(fade.frame(&to, 200).unwrap().pixel(0, 0).b > 40);
         assert!(fade.frame(&to, 400).is_none());
+        assert!(fade.frame(&clear_frame(2, 1), 0).is_none());
     }
 
     #[test]
@@ -2424,7 +2518,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_the_live_slide_marks_the_output_for_a_repaint() {
+    fn editing_a_taken_slide_requires_an_explicit_live_update() {
         let root =
             std::env::temp_dir().join(format!("freeshow-rust-live-edit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2435,23 +2529,53 @@ mod tests {
             session.shows.iter().position(|show| show.id == id).unwrap()
         };
         session.tab = "shows".into();
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == freeshow_data::StageItemKind::Slide && item.offset == 0);
         session.select_drawer(position(&session, "a"));
+        session.select_slide_for_edit(0);
+        assert!(session.save_notes("Original stage note"));
         session.select_slide(0);
         let before = audience_frame(&session);
+        let before_stage = stage_frame(&session);
         session.select_slide_for_edit(0);
         assert!(session.save_lyrics("Alpha, now much longer"));
-        assert!(session.live_edited);
-        assert_ne!(
-            audience_frame(&session).pixels,
-            before.pixels,
-            "the edit is on the output"
+        assert!(session.save_notes("Updated stage note"));
+        assert!(session.can_update_live_slide());
+        assert!(!session.live_edited);
+        assert_ne!(edit_frame(&session).pixels, before.pixels);
+        assert_eq!(audience_frame(&session).pixels, before.pixels);
+        assert_eq!(stage_frame(&session).pixels, before_stage.pixels);
+        assert_eq!(
+            program_stage_slide(&session, &[]).notes,
+            "Original stage note"
         );
 
-        session.live_edited = false;
         session.select_drawer(position(&session, "b"));
+        assert!(!session.update_live_slide());
+        assert_eq!(audience_frame(&session).pixels, before.pixels);
+        let snapshot = session.to_snapshot();
+        assert_eq!(snapshot.slide_lines(), vec!["Alpha"]);
+        assert_eq!(snapshot.notes(), "Original stage note");
+        assert_eq!(snapshot.show_index, Some(position(&session, "a")));
+        assert_eq!(
+            snapshot.shows[position(&session, "a")].slides[0].lines,
+            vec!["Alpha, now much longer"]
+        );
+        session.select_drawer(position(&session, "a"));
         session.select_slide_for_edit(0);
-        assert!(session.save_lyrics("Gamma two"));
-        assert!(!session.live_edited, "another show changed");
+        assert!(session.update_live_slide());
+        assert!(session.live_edited);
+        assert!(!session.can_update_live_slide());
+        assert_ne!(audience_frame(&session).pixels, before.pixels);
+        assert_ne!(stage_frame(&session).pixels, before_stage.pixels);
+        assert_eq!(
+            program_stage_slide(&session, &[]).notes,
+            "Updated stage note"
+        );
+        assert!(session.clear_all_layers());
+        assert!(!session.update_live_slide());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

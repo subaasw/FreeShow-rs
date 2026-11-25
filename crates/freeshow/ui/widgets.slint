@@ -21,6 +21,23 @@ export global OperatorStyle {
     in-out property <length> panel-pad: 12px;
 }
 
+component ActivationKeyScope inherits FocusScope {
+    callback activated();
+    key-pressed(event) => {
+        if ((event.text == Key.Space || event.text == Key.Return) && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift) {
+            return accept;
+        }
+        return reject;
+    }
+    key-released(event) => {
+        if ((event.text == Key.Space || event.text == Key.Return) && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift) {
+            root.activated();
+            return accept;
+        }
+        return reject;
+    }
+}
+
 export component RailButton inherits Rectangle {
     in property <string> label;
     in property <bool> active;
@@ -29,6 +46,11 @@ export component RailButton inherits Rectangle {
     in property <color> text-color;
     in property <color> accent-text;
     callback clicked();
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    border-color: root.text-color;
+    border-width: key-focus.has-focus ? 1px : 0px;
     min-height: OperatorStyle.rail-btn;
     preferred-height: OperatorStyle.rail-btn;
     max-height: OperatorStyle.rail-btn;
@@ -49,9 +71,10 @@ export component RailButton inherits Rectangle {
         wrap: word-wrap;
         width: parent.width - 8px;
     }
-    key-focus := FocusScope {
+    key-focus := ActivationKeyScope {
         width: 100%;
         height: 100%;
+        activated => { root.clicked(); }
     }
     pointer := TouchArea {
         width: 100%;
@@ -69,6 +92,11 @@ export component BoxButton inherits Rectangle {
     in property <color> text-color;
     in property <color> accent-text;
     callback clicked();
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    border-color: root.text-color;
+    border-width: key-focus.has-focus ? 1px : 0px;
     horizontal-stretch: 1;
     height: OperatorStyle.field-height;
     border-radius: OperatorStyle.chrome-radius;
@@ -86,9 +114,10 @@ export component BoxButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    key-focus := FocusScope {
+    key-focus := ActivationKeyScope {
         width: 100%;
         height: 100%;
+        activated => { root.clicked(); }
     }
     pointer := TouchArea {
         width: 100%;
@@ -106,6 +135,11 @@ export component HeaderButton inherits Rectangle {
     in property <color> text-color;
     in property <color> accent-text;
     callback clicked();
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    border-color: root.text-color;
+    border-width: key-focus.has-focus ? 1px : 0px;
     min-width: max(56px, label-text.preferred-width + 12px);
     preferred-width: max(88px, label-text.preferred-width + 20px);
     max-width: max(88px, label-text.preferred-width + 20px);
@@ -125,9 +159,10 @@ export component HeaderButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    key-focus := FocusScope {
+    key-focus := ActivationKeyScope {
         width: 100%;
         height: 100%;
+        activated => { root.clicked(); }
     }
     pointer := TouchArea {
         width: 100%;
@@ -159,6 +194,11 @@ export component ListRow inherits Rectangle {
     in property <bool> draggable: false;
     out property <bool> dragging: false;
     callback clicked();
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    border-color: root.text-color;
+    border-width: key-focus.has-focus ? 1px : 0px;
     callback drag-moved(length);
     callback dropped(length);
     height: root.show-thumb ? 48px : 36px;
@@ -202,9 +242,10 @@ export component ListRow inherits Rectangle {
         width: 100%;
         background: root.group-color;
     }
-    key-focus := FocusScope {
+    key-focus := ActivationKeyScope {
         width: 100%;
         height: 100%;
+        activated => { root.clicked(); }
     }
     pointer := TouchArea {
         width: 100%;
@@ -240,6 +281,9 @@ export component ListRow inherits Rectangle {
 export component HotkeyScope inherits FocusScope {
     callback hotkey(string, bool, bool, bool);
     key-pressed(event) => {
+            if ((event.text == Key.Tab || event.text == Key.Backtab) && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta) {
+                return reject;
+            }
             if (event.text == Key.F11) {
                 root.hotkey("F11", event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
             } else if (event.text == Key.F1) {
@@ -285,10 +329,14 @@ export component SlideCard inherits Rectangle {
     in property <color> group-color: #00000000;
     in property <color> group-text: #f0f0ff;
     callback clicked();
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.live ? "Live" : root.active ? "Selected" : "";
+    accessible-action-default => { root.clicked(); }
     border-radius: OperatorStyle.chrome-radius;
     background: root.live ? root.accent : (root.active ? (root.has-thumb ? #ffffffb0 : #ffffff28) : (pointer.has-hover ? OperatorStyle.hover : #00000030));
-    border-width: root.active && !root.live && !root.has-thumb ? 1px : 0px;
-    border-color: root.accent;
+    border-width: key-focus.has-focus || (root.active && !root.live && !root.has-thumb) ? 1px : 0px;
+    border-color: key-focus.has-focus ? root.text-color : root.accent;
     if root.has-thumb: Rectangle {
         x: 3px;
         y: 3px;
@@ -357,7 +405,15 @@ export component SlideCard inherits Rectangle {
             vertical-alignment: center;
         }
     }
+    key-focus := ActivationKeyScope {
+        width: 100%;
+        height: 100%;
+        activated => { root.clicked(); }
+    }
     pointer := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => {
+            key-focus.focus();
+            root.clicked();
+        }
     }
 }

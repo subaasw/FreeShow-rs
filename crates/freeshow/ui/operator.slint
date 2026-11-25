@@ -1,15 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Operator, output and stage windows. Compiled by build.rs (slint-build).
 
-import { Button, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, Slider, StandardListView, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow, HotkeyScope, SlideCard } from "widgets.slint";
 import { ComboIndex, ColorFmt, ValueEdit, SettingsPanel, SettingsData, ThemeColorRow, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
 
+import { SlideCanvas, LayerOutline, LayerMovePreview } from "slide_canvas.slint";
+import { LayerTextEditor } from "layer_text.slint";
+
+export { LayerOutline, LayerMovePreview }
 export { ComboIndex, ColorFmt, OperatorStyle, SettingsData, ThemeColorRow, InspectorData, StageRowData }
+
+component EditorLayerList inherits StandardListView {
+    in property <int> selected-row: -1;
+    private property <bool> syncing-selection;
+    callback layer-chosen(int);
+    public function sync-selection() {
+        self.syncing-selection = true;
+        self.set-current-item(self.selected-row);
+        self.syncing-selection = false;
+    }
+    init => { root.sync-selection(); }
+    changed selected-row => { root.sync-selection(); }
+    changed model => { root.sync-selection(); }
+    current-item-changed(row) => {
+        if (!root.syncing-selection) { root.layer-chosen(row); }
+    }
+}
 
 struct DrawerTab { id: string, label: string, short: string }
 
 export struct DrawerRowData {
+    key: string,
     name: string,
     thumb: image,
     show-thumb: bool,
@@ -47,6 +69,33 @@ export component ControlWindow inherits Window {
     in-out property <string> panel-title: "Shows";
     in property <string> data-path: "Data folder not set";
     in-out property <[DrawerRowData]> drawer-rows;
+    in property <string> selected-template;
+    in property <string> template-title;
+    in property <string> template-target;
+    in property <image> template-preview;
+    in property <bool> template-has-style;
+    in-out property <bool> template-save-open;
+    private property <string> template-save-name;
+    callback choose-template(string);
+    in-out property <bool> media-relink-open;
+    in-out property <string> media-replacement;
+    in property <[string]> missing-media-labels;
+    in property <[string]> missing-media-keys;
+    in property <[string]> missing-media-paths;
+    private property <bool> media-preview-mode;
+    callback scan-missing-media();
+    callback relink-media(string, string);
+    callback preview-media(string);
+    changed active-tab => {
+        if (root.active-tab != "media") {
+            root.media-relink-open = false;
+            root.media-replacement = "";
+            root.media-preview-mode = false;
+        }
+    }
+    changed editing => { if (!root.editing) { root.template-save-open = false; } }
+    changed show-name => { root.template-save-open = false; }
+    changed selected-slide => { root.template-save-open = false; }
     in property <[string]> network-sources;
     in property <bool> network-searching;
     in property <bool> network-scanned;
@@ -103,6 +152,8 @@ export component ControlWindow inherits Window {
     in property <bool> can-redo: false;
     callback undo-edit();
     callback redo-edit();
+    in property <bool> can-update-live-slide: false;
+    callback update-live-slide();
     in-out property <bool> output-open: false;
     in-out property <bool> stage-open: false;
     in-out property <string> search-query: "";
@@ -128,8 +179,14 @@ export component ControlWindow inherits Window {
     callback get-update();
     in-out property <string> spelling: "";
     callback lyrics-edited(string);
+    callback format-layer-text(string, int, int, string, string) -> bool;
+    in property <string> layer-text-target;
+    changed layer-text-target => { layer-text-editor.reset-selection(); }
+    public function reset-layer-text-selection() { layer-text-editor.reset-selection(); }
     in property <InspectorData> inspector-data;
     callback inspector-set(string, string);
+    callback preview-transition();
+    callback apply-transition-range(int, int);
     in-out property <bool> show-stage-editor: false;
     // The stage layout drawn small in the stage editor, refreshed after each edit.
     in property <image> stage-preview;
@@ -191,16 +248,44 @@ export component ControlWindow inherits Window {
     in property <int> item-index;
     in property <int> item-count;
     in property <[string]> picture-choices;
-    callback prev-item();
-    callback next-item();
+    in property <[StandardListViewItem]> layer-rows;
+    in property <[LayerOutline]> layer-outlines;
+    in property <LayerOutline> active-outline;
+    in property <float> edit-source-width: 1920;
+    in property <float> edit-source-height: 1080;
+    in property <int> layer-selection-count: 1;
+    in property <bool> show-has-locked-layers;
+    in property <bool> active-layer-locked;
+    in property <bool> active-layer-hidden;
+    in property <bool> selection-has-locks;
+    in property <bool> selection-locked;
+    in property <bool> selection-hidden;
+    callback set-layer-flags(bool, bool);
+    in property <bool> can-group-layers;
+    in property <bool> can-ungroup-layers;
+    in property <bool> can-select-layer-group;
+    in property <bool> selection-is-group;
+    callback set-layer-grouping(bool);
+    in property <bool> can-move-layers-forward;
+    in property <bool> can-move-layers-backward;
+    property <bool> snap-layers: true;
+    pure callback snap-layer-move(int, int, int, int) -> LayerMovePreview;
+    property <bool> add-to-layer-selection;
+    callback exclude-primary-layer();
+    callback nudge-layers(int, int);
+    callback duplicate-layer();
+    callback align-layer(int);
     callback add-item();
     callback add-picture(int);
     callback move-item(bool);
     callback remove-item();
     // Click/drag on the edit preview: hit-test and move/resize the selected box.
     callback edit-box-at(float, float) -> int;
-    callback select-edit-box(int);
-    callback edit-geometry(int, int, bool);
+    callback select-edit-box(int, string) -> bool;
+    callback begin-edit-geometry() -> bool;
+    callback cancel-edit-geometry();
+    callback finish-edit-geometry(float, float, bool, bool);
+    pure callback resize-layer-preview(float, float, bool) -> LayerOutline;
     callback go-slide(string);
     callback move-project(int);
     // Moves the project item at the first index to the second, from a drag in the list.
@@ -221,6 +306,9 @@ export component ControlWindow inherits Window {
     callback clear-output(string);
     callback audio-control(string);
     out property <bool> text-focused: show-editor.has-focus;
+    in property <string> draft-status;
+    property <bool> confirm-discard-draft: false;
+    changed draft-status => { root.confirm-discard-draft = false; }
     in property <string> notice;
     in property <bool> can-restore;
     in property <[string]> project-choices;
@@ -430,6 +518,13 @@ export component ControlWindow inherits Window {
                             accent-text: root.text-color;
                             clicked => { root.hotkey("PageDown", false, false, false); }
                         }
+                        if root.editing && root.can-update-live-slide: HeaderButton {
+                            label: "Update Live";
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            accent-text: root.accent-text;
+                            clicked => { root.update-live-slide(); }
+                        }
                         if root.editing: HeaderButton {
                             label: "Undo";
                             accent: root.can-undo ? root.primary-lighter : root.primary-darker;
@@ -552,13 +647,35 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Down"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-down", ""); } }
                             BoxButton { label: "Delete"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("delete-slide", ""); } }
                         }
-                        if root.editing: HorizontalLayout {
+                        if root.editing && !root.text-mode: HorizontalLayout {
                             padding-left: 4px;
                             padding-right: 4px;
                             padding-bottom: 4px;
                             spacing: 4px;
                             BoxButton { label: "Save as overlay"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-to-overlay", ""); } }
-                            BoxButton { label: "Save as template"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.library-action("slide-to-template", ""); } }
+                            BoxButton {
+                                label: "Save as template";
+                                accent: root.primary-lighter;
+                                text-color: root.text-color;
+                                accent-text: root.text-color;
+                                clicked => {
+                                    root.template-save-name = root.show-name;
+                                    root.template-save-open = true;
+                                }
+                            }
+                        }
+                        if root.editing && !root.text-mode && root.template-save-open: HorizontalLayout {
+                            padding: 4px;
+                            spacing: 4px;
+                            LineEdit {
+                                accessible-label: "Template name";
+                                init => { self.focus(); }
+                                placeholder-text: "Template name";
+                                text <=> root.template-save-name;
+                                accepted(name) => { root.library-action("slide-to-template", name); }
+                            }
+                            Button { text: "Save template"; clicked => { root.library-action("slide-to-template", root.template-save-name); } }
+                            Button { text: "Cancel"; clicked => { root.template-save-open = false; } }
                         }
                     }
                     editor-scroll := ScrollView {
@@ -573,107 +690,37 @@ export component ControlWindow inherits Window {
                         spacing: 8px;
                         alignment: start;
                         Text {
-                            text: !root.editing ? "Live output" : root.live-slide == root.selected-slide ? "Editing the live slide. The output changes as you type." : "Editing this slide. The audience sees it after you press Go.";
+                            text: !root.editing ? "Live output" : root.live-slide >= 0 && root.live-slide == root.selected-slide ? "Changes stay in Edit until you choose Update Live or Go." : "Press Go to send this slide to the audience.";
                             color: root.text-color;
                             opacity: 0.7;
                             font-size: 12px * OperatorStyle.font-scale;
                             wrap: word-wrap;
                         }
-                        Rectangle {
-                            height: root.editing ? 220px : max(120px, min((editor-scroll.width - 40px) * 9 / 16, editor-scroll.height - 110px));
-                            background: black;
-                            // Letterbox like the stage editor so clicks map to 1920×1080.
-                            edit-frame := Rectangle {
-                                property <image> frame: root.editing ? root.edit-preview : root.preview;
-                                property <float> aspect: self.frame.width > 0 && self.frame.height > 0 ? self.frame.width / self.frame.height : 1920.0 / 1080.0;
-                                property <length> unit-x: self.width / 1920;
-                                property <length> unit-y: self.height / 1080;
-                                width: min(parent.width, parent.height * self.aspect);
-                                height: self.width / self.aspect;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                clip: true;
-                                Image {
-                                    source: edit-frame.frame;
-                                    width: 100%;
-                                    height: 100%;
-                                    image-fit: fill;
-                                }
-                                if root.editing: Rectangle {
-                                    width: 100%;
-                                    height: 100%;
-                                    if root.inspector-data.has-item: Rectangle {
-                                        x: edit-drag.preview-x * edit-frame.unit-x;
-                                        y: edit-drag.preview-y * edit-frame.unit-y;
-                                        width: edit-drag.preview-width * edit-frame.unit-x;
-                                        height: edit-drag.preview-height * edit-frame.unit-y;
-                                        border-width: 2px;
-                                        border-color: root.accent;
-                                        Rectangle {
-                                            width: edit-drag.handle-size;
-                                            height: self.width;
-                                            x: parent.width - self.width;
-                                            y: parent.height - self.height;
-                                            background: root.accent;
-                                        }
-                                    }
-                                    edit-drag := TouchArea {
-                                        width: 100%;
-                                        height: 100%;
-                                        property <length> box-x: root.inspector-data.x * edit-frame.unit-x;
-                                        property <length> box-y: root.inspector-data.y * edit-frame.unit-y;
-                                        property <length> box-width: root.inspector-data.w * edit-frame.unit-x;
-                                        property <length> box-height: root.inspector-data.h * edit-frame.unit-y;
-                                        property <length> right: self.box-x + self.box-width;
-                                        property <length> bottom: self.box-y + self.box-height;
-                                        property <bool> resizing;
-                                        property <bool> holding;
-                                        property <int> hit-index: -1;
-                                        property <length> handle-size: min(10px, min(self.box-width, self.box-height) * 0.45);
-                                        property <bool> over-box: self.mouse-x >= self.box-x && self.mouse-x < self.right && self.mouse-y >= self.box-y && self.mouse-y < self.bottom;
-                                        property <bool> over-handle: self.over-box && self.mouse-x >= self.right - self.handle-size && self.mouse-y >= self.bottom - self.handle-size;
-                                        property <length> dx: self.mouse-x - self.pressed-x;
-                                        property <length> dy: self.mouse-y - self.pressed-y;
-                                        property <bool> moved-far: abs(self.dx) > 3px || abs(self.dy) > 3px;
-                                        property <int> slide-dx: round(self.dx / max(0.001px, edit-frame.unit-x));
-                                        property <int> slide-dy: round(self.dy / max(0.001px, edit-frame.unit-y));
-                                        property <int> drop-x: clamp(root.inspector-data.x + self.slide-dx, -8000, 8000);
-                                        property <int> drop-y: clamp(root.inspector-data.y + self.slide-dy, -8000, 8000);
-                                        property <int> drop-width: clamp(root.inspector-data.w + self.slide-dx, 1, 8000);
-                                        property <int> drop-height: clamp(root.inspector-data.h + self.slide-dy, 1, 8000);
-                                        property <bool> preview-drag: self.pressed && self.holding && self.moved-far;
-                                        property <int> preview-x: self.preview-drag && !self.resizing ? self.drop-x : root.inspector-data.x;
-                                        property <int> preview-y: self.preview-drag && !self.resizing ? self.drop-y : root.inspector-data.y;
-                                        property <int> preview-width: self.preview-drag && self.resizing ? self.drop-width : root.inspector-data.w;
-                                        property <int> preview-height: self.preview-drag && self.resizing ? self.drop-height : root.inspector-data.h;
-                                        mouse-cursor: (self.pressed ? self.resizing : self.over-handle) ? MouseCursor.se-resize : self.pressed && self.holding ? MouseCursor.grabbing : self.over-box ? MouseCursor.grab : MouseCursor.default;
-                                        pointer-event(event) => {
-                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                                self.resizing = self.over-handle;
-                                                if (self.resizing) {
-                                                    self.holding = true;
-                                                } else {
-                                                    self.hit-index = root.edit-box-at(
-                                                        self.mouse-x / max(0.001px, edit-frame.unit-x),
-                                                        self.mouse-y / max(0.001px, edit-frame.unit-y)
-                                                    );
-                                                    root.select-edit-box(self.hit-index);
-                                                    self.holding = self.hit-index >= 0;
-                                                }
-                                            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left && self.holding && self.moved-far) {
-                                                if (self.resizing) {
-                                                    root.edit-geometry(self.drop-width, self.drop-height, true);
-                                                } else {
-                                                    root.edit-geometry(self.drop-x, self.drop-y, false);
-                                                }
-                                                self.holding = false;
-                                            } else if (event.kind == PointerEventKind.up) {
-                                                self.holding = false;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        SlideCanvas {
+                            frame: root.editing ? root.edit-preview : root.preview;
+                            editing: root.editing;
+                            viewport-height: root.editing ? clamp(editor-scroll.height * 0.5, 220px, 500px)
+                                : max(120px, min((editor-scroll.width - 40px) * 9 / 16, editor-scroll.height - 110px));
+                            source-width: root.edit-source-width;
+                            source-height: root.edit-source-height;
+                            accent: root.accent;
+                            text-color: root.text-color;
+                            active-outline: root.active-outline;
+                            layer-outlines: root.layer-outlines;
+                            show-selection: root.inspector-data.has-item
+                                && !(root.selection-is-group ? root.selection-hidden : root.active-layer-hidden);
+                            can-resize: self.show-selection && !root.selection-has-locks
+                                && (root.layer-selection-count <= 1 || root.selection-is-group);
+                            item-index: root.item-index;
+                            snap: root.snap-layers;
+                            pick(x, y) => { root.edit-box-at(x, y) }
+                            select-layer(index, mode) => { root.select-edit-box(index, mode) }
+                            begin-drag => { root.begin-edit-geometry() }
+                            cancel-drag => { root.cancel-edit-geometry(); }
+                            finish-drag(dx, dy, resize, uniform) => { root.finish-edit-geometry(dx, dy, resize, uniform); }
+                            nudge(dx, dy) => { root.nudge-layers(dx, dy); }
+                            snap-move(dx, dy, tx, ty) => { root.snap-layer-move(dx, dy, tx, ty) }
+                            resize-preview(dx, dy, uniform) => { root.resize-layer-preview(dx, dy, uniform) }
                         }
                         HorizontalLayout {
                             spacing: 6px;
@@ -693,53 +740,148 @@ export component ControlWindow inherits Window {
                             placeholder-text: "Stage notes for this slide";
                             accepted(value) => { root.save-notes(value); }
                         }
-                        if root.editing && !root.text-mode: TextEdit {
+                        layer-text-editor := LayerTextEditor {
+                            visible: root.editing && !root.text-mode;
+                            max-height: self.visible ? 100000px : 0px;
                             text <=> root.lyrics;
-                            min-height: 140px;
-                            vertical-stretch: 1;
-                            wrap: word-wrap;
+                            read-only: root.active-layer-locked || !root.inspector-data.has-item;
+                            ink: root.text-color;
+                            panel: root.primary-darker;
+                            accent: root.accent;
+                            changed visible => { if (!self.visible) { self.reset-selection(); } }
                             edited(text) => { root.lyrics-edited(text); }
+                            format-text(text, anchor, cursor, key, value) => {
+                                root.format-layer-text(text, anchor, cursor, key, value)
+                            }
                         }
                         show-editor := TextEdit {
                             visible: root.editing && root.text-mode;
                             max-height: root.editing && root.text-mode ? 100000px : 0px;
                             text <=> root.show-text;
+                            read-only: root.show-has-locked-layers;
                             min-height: root.editing && root.text-mode ? 260px : 0px;
                             vertical-stretch: root.editing && root.text-mode ? 1 : 0;
                             wrap: word-wrap;
                             edited(text) => { root.show-text-edited(text); }
                         }
                         if root.editing && root.text-mode: Text {
-                            text: "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
+                            text: root.show-has-locked-layers ? "Unlock the show’s layers before editing its text." : "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
                             color: root.text-color;
                             opacity: 0.7;
                             font-size: 12px * OperatorStyle.font-scale;
                             wrap: word-wrap;
                         }
-                        if root.editing && !root.text-mode: HorizontalLayout {
+                        if root.editing && !root.text-mode: VerticalLayout {
                             spacing: 6px;
                             Text {
-                                text: "Box \{root.item-index + 1} of \{max(1, root.item-count)}";
+                                text: "Layers";
                                 color: root.text-color;
-                                font-size: 12px * OperatorStyle.font-scale;
-                                vertical-alignment: center;
+                                font-size: 13px * OperatorStyle.font-scale;
+                                font-weight: 600;
                             }
-                            BoxButton { label: "Prev box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.prev-item(); } }
-                            BoxButton { label: "Next box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.next-item(); } }
-                            BoxButton { label: "Add box"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.add-item(); } }
-                            BoxButton { label: "Remove"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.remove-item(); } }
-                        }
-                        if root.editing && !root.text-mode && root.item-count > 1: HorizontalLayout {
-                            spacing: 6px;
-                            Button {
-                                text: "Move backward";
-                                enabled: root.item-index > 0;
-                                clicked => { root.move-item(false); }
+                            if root.item-count > 0: EditorLayerList {
+                                height: clamp(root.item-count * 32px, 40px, 136px);
+                                accessible-label: "Slide layers, front to back";
+                                model: root.layer-rows;
+                                selected-row: root.item-count - root.item-index - 1;
+                                layer-chosen(row) => {
+                                    if (!root.select-edit-box(root.item-count - row - 1, root.add-to-layer-selection ? "add" : "group")) {
+                                        self.current-item = self.selected-row;
+                                    }
+                                }
                             }
-                            Button {
-                                text: "Move forward";
-                                enabled: root.item-index < root.item-count - 1;
-                                clicked => { root.move-item(true); }
+                            if root.item-count > 0: HorizontalLayout {
+                                spacing: 6px;
+                                CheckBox {
+                                    text: "Snap";
+                                    accessible-label: "Snap to slide and layer guides";
+                                    checked <=> root.snap-layers;
+                                }
+                                if root.item-count > 1: CheckBox {
+                                    text: "Add to selection";
+                                    checked <=> root.add-to-layer-selection;
+                                    toggled => {
+                                        if (!self.checked && !root.select-edit-box(root.item-index, "group")) {
+                                            root.add-to-layer-selection = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if root.layer-selection-count > 1: HorizontalLayout {
+                                spacing: 6px;
+                                Button {
+                                    text: "Exclude current layer";
+                                    clicked => { root.exclude-primary-layer(); }
+                                }
+                                Button {
+                                    text: "Keep current only";
+                                    clicked => {
+                                        if (root.select-edit-box(root.item-index, "single")) {
+                                            root.add-to-layer-selection = false;
+                                        }
+                                    }
+                                }
+                            }
+                            if root.item-count > 1: HorizontalLayout {
+                                spacing: 6px;
+                                Button {
+                                    text: "Group layers";
+                                    enabled: root.can-group-layers;
+                                    clicked => { root.set-layer-grouping(true); }
+                                }
+                                Button {
+                                    text: "Ungroup layers";
+                                    enabled: root.can-ungroup-layers;
+                                    clicked => { root.set-layer-grouping(false); }
+                                }
+                                if root.can-select-layer-group: Button {
+                                    text: "Select group";
+                                    clicked => { root.select-edit-box(root.item-index, "group"); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Button { text: "Add text"; clicked => { root.add-item(); } }
+                                Button { text: "Duplicate"; enabled: root.item-count > 0; clicked => { root.duplicate-layer(); } }
+                                Button { text: "Remove"; enabled: !root.selection-has-locks && root.item-count > root.layer-selection-count; clicked => { root.remove-item(); } }
+                            }
+                            if root.item-count > 0: HorizontalLayout {
+                                spacing: 6px;
+                                Button {
+                                    text: root.selection-locked ? "Unlock" : "Lock";
+                                    clicked => { root.set-layer-flags(true, !root.selection-locked); }
+                                }
+                                Button {
+                                    text: root.selection-hidden ? "Show" : "Hide";
+                                    accessible-label: root.selection-hidden ? "Show selected layers" : "Hide selected layers";
+                                    clicked => { root.set-layer-flags(false, !root.selection-hidden); }
+                                }
+                            }
+                            if root.item-count > 0: HorizontalLayout {
+                                spacing: 6px;
+                                Button {
+                                    text: "Move backward";
+                                    enabled: root.can-move-layers-backward;
+                                    clicked => { root.move-item(false); }
+                                }
+                                Button {
+                                    text: "Move forward";
+                                    enabled: root.can-move-layers-forward;
+                                    clicked => { root.move-item(true); }
+                                }
+                            }
+                            if root.item-count > 0: HorizontalLayout {
+                                spacing: 6px;
+                                alignment := ComboBox {
+                                    model: ["Left", "Center horizontally", "Right", "Top", "Center vertically", "Bottom", "Distribute horizontally", "Distribute vertically"];
+                                    accessible-label: "Arrange layers";
+                                }
+                                Button {
+                                    text: alignment.current-index >= 6 ? "Distribute" : root.selection-is-group ? "Align group to slide" : root.layer-selection-count > 1 ? "Align selection" : "Align to slide";
+                                    enabled: !root.selection-has-locks && alignment.current-index >= 0
+                                        && (alignment.current-index < 6 || (!root.selection-is-group && root.layer-selection-count >= 3));
+                                    clicked => { root.align-layer(alignment.current-index); }
+                                }
                             }
                         }
                         if root.editing && !root.text-mode && root.inspector-data.has-item && root.picture-choices.length > 0: HorizontalLayout {
@@ -756,8 +898,12 @@ export component ControlWindow inherits Window {
                         }
                         if root.editing && !root.text-mode: InspectorPanel {
                             data: root.inspector-data;
+                            item-locked: root.active-layer-locked;
                             text-color: root.text-color;
                             panel: root.primary-darker;
+                            transition-slide-count: root.slide-cards.length;
+                            preview-transition => { root.preview-transition(); }
+                            apply-transition-range(first, last) => { root.apply-transition-range(first, last); }
                             set(key, value) => { root.inspector-set(key, value); }
                         }
                         if root.editing && root.spelling != "": Text {
@@ -1200,6 +1346,65 @@ export component ControlWindow inherits Window {
                 padding: 6px;
                 spacing: 6px;
                 HorizontalLayout {
+                    spacing: 8px;
+                    CheckBox {
+                        text: "Preview muted";
+                        checked <=> root.media-preview-mode;
+                    }
+                    Button {
+                        text: root.media-relink-open ? "Close relink" : "Find missing media";
+                        clicked => {
+                            root.media-relink-open = !root.media-relink-open;
+                            if (root.media-relink-open) {
+                                root.scan-missing-media();
+                            } else {
+                                root.media-replacement = "";
+                            }
+                        }
+                    }
+                    if root.media-preview-mode: Text {
+                        text: "Choose a picture or video to preview it off air.";
+                        color: root.text-color;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if root.media-relink-open && root.missing-media-labels.length == 0: Text {
+                    text: "No missing local media in the open show or project.";
+                    color: root.text-color;
+                    wrap: word-wrap;
+                }
+                if root.media-relink-open && root.missing-media-labels.length > 0: VerticalLayout {
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        missing := ComboBox {
+                            model: root.missing-media-labels;
+                            accessible-label: "Missing file from the show or project";
+                            horizontal-stretch: 1;
+                        }
+                        LineEdit {
+                            text <=> root.media-replacement;
+                            placeholder-text: "Drop a replacement file here or paste its path";
+                            accessible-label: "Replacement file path";
+                            horizontal-stretch: 2;
+                        }
+                        Button {
+                            text: "Relink";
+                            enabled: root.media-replacement != "" && missing.current-index >= 0
+                                && missing.current-index < root.missing-media-keys.length;
+                            clicked => { root.relink-media(root.missing-media-keys[missing.current-index], root.media-replacement); }
+                        }
+                    }
+                    if missing.current-index >= 0 && missing.current-index < root.missing-media-paths.length: Text {
+                        text: "Missing: " + root.missing-media-paths[missing.current-index];
+                        color: root.text-color;
+                        wrap: word-wrap;
+                        font-size: 12px * OperatorStyle.font-scale;
+                    }
+                }
+                HorizontalLayout {
                     spacing: 6px;
                     Button {
                         text: root.network-searching ? "Finding sources…" : "Find network sources";
@@ -1244,6 +1449,62 @@ export component ControlWindow inherits Window {
                 }
             }
         }
+        if !root.focus-mode && root.active-tab == "templates" && root.drawer-rows.length > 0: template-details := Rectangle {
+            height: root.selected-template == "" ? 32px : 100px;
+            background: root.primary-darker;
+            if root.selected-template == "": VerticalLayout {
+                padding: 8px;
+                Text {
+                    text: "Choose a template to preview";
+                    color: root.text-color;
+                    opacity: 0.8;
+                }
+            }
+            if root.selected-template != "": HorizontalLayout {
+                padding: 8px;
+                spacing: 12px;
+                Rectangle {
+                    width: 144px;
+                    height: 81px;
+                    border-radius: OperatorStyle.chrome-radius;
+                    background: #111117;
+                    template-art := Image { source: root.template-preview; width: 100%; height: 100%; image-fit: contain; }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    alignment: center;
+                    Text {
+                        text: root.template-title;
+                        color: root.text-color;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.template-target == "" ? "Open a show to apply the style."
+                            : root.template-has-style ? "Apply Style keeps the words in “" + root.template-target + "”."
+                            : "This template has a layout you can use as a new show.";
+                        color: root.text-color;
+                        opacity: 0.8;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Button { text: "Use as New"; clicked => { root.library-action("template-new-show", root.selected-template); } }
+                        Button {
+                            text: "Apply Style";
+                            enabled: root.template-target != "" && root.template-has-style;
+                            clicked => { root.library-action("template-apply-style", root.selected-template); }
+                        }
+                        Button {
+                            text: "Export template";
+                            clicked => { root.library-action("template-export", root.selected-template); }
+                        }
+                    }
+                }
+            }
+        }
         if !root.focus-mode: Rectangle {
             // The library keeps a usable strip on short windows instead of the rail squeezing it;
             // a fixed floor, because reading the window height here loops the layout.
@@ -1264,7 +1525,7 @@ export component ControlWindow inherits Window {
                     : root.active-tab == "audio" ? "Drag audio files onto this window to add them."
                     : root.active-tab == "scripture" ? "Drag a Bible file (.fsb or USFM) onto this window to add it."
                     : root.active-tab == "overlays" ? "No overlays yet. Open a show, click Edit, pick a slide and press Save as overlay. Click an overlay here to show or hide it over the output."
-                    : root.active-tab == "templates" ? "No templates yet. Open a show, click Edit, pick a styled slide and press Save as template. Click a template here to restyle the open show."
+                    : root.active-tab == "templates" ? "No templates yet. Open a show in Edit and use Save as template on a slide you want to reuse."
                     : root.active-tab == "calendar" ? "No events yet. Type a name, date and time above and press Add. Leave the time blank for an all-day event, or pick a show to start it automatically at that time."
                     : root.active-tab == "player" ? "No player videos yet. Paste a YouTube or Vimeo link, a stream address or a video file path above and press Add."
                     : root.active-tab == "rss" ? "No headlines yet. Add a feed address above and press Save feeds; headlines appear here a moment later."
@@ -1295,15 +1556,67 @@ export component ControlWindow inherits Window {
                     thumb: item.thumb;
                     show-thumb: item.show-thumb;
                     on: item.on;
-                    active: root.selected-drawer == index;
+                    active: root.active-tab == "templates" ? item.key == root.selected-template : root.selected-drawer == index;
                     accent: root.accent;
                     text-color: root.text-color;
                     accent-text: root.accent-text;
                     clicked => {
+                        if (root.active-tab == "templates") {
+                            root.choose-template(item.key);
+                            return;
+                        }
+                        if (root.active-tab == "media" && root.media-preview-mode) {
+                            root.preview-media(item.key);
+                            return;
+                        }
                         window-keys.focus();
                         root.choose-drawer(index);
                         if root.active-tab == "calendar" || root.active-tab == "player" {
                             root.sync-drawer-form();
+                        }
+                    }
+                }
+            }
+        }
+        if root.draft-status != "": Rectangle {
+            height: OperatorStyle.status-height;
+            background: root.primary-lighter;
+            HorizontalLayout {
+                padding-left: OperatorStyle.space;
+                padding-right: OperatorStyle.space;
+                spacing: OperatorStyle.space;
+                Text {
+                    text: root.draft-status;
+                    color: root.text-color;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                HeaderButton {
+                    label: "Retry save";
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.library-action("retry-draft", ""); }
+                }
+                HeaderButton {
+                    label: "Save as copy";
+                    accent: root.primary-darker;
+                    text-color: root.text-color;
+                    accent-text: root.text-color;
+                    clicked => { root.library-action("copy-draft", ""); }
+                }
+                HeaderButton {
+                    label: root.confirm-discard-draft ? "Confirm discard" : "Discard";
+                    accent: root.confirm-discard-draft ? #c0392b : root.primary-darker;
+                    text-color: root.text-color;
+                    accent-text: root.text-color;
+                    clicked => {
+                        if (root.confirm-discard-draft) {
+                            root.confirm-discard-draft = false;
+                            root.library-action("discard-draft", "");
+                        } else {
+                            root.confirm-discard-draft = true;
                         }
                     }
                 }
@@ -1414,6 +1727,126 @@ export component ControlWindow inherits Window {
             box-at(x, y) => { return root.stage-box-at(x, y); }
             remove(id) => { root.stage-remove(id); }
             close => { root.show-stage-editor = false; window-keys.focus(); }
+        }
+    }
+}
+
+export component MediaPreviewWindow inherits Window {
+    title: "FreeShow · Muted media preview";
+    icon: @image-url("../../../assets/freeshow.png");
+    min-width: 320px;
+    min-height: 240px;
+    preferred-width: 640px;
+    preferred-height: 440px;
+    background: Palette.background;
+    in property <image> frame;
+    in property <string> caption;
+    in property <string> message;
+    in property <bool> is-video;
+    in property <bool> ended;
+    in-out property <bool> paused;
+    callback pause(bool);
+    callback replay();
+    callback dismiss();
+    forward-focus: keys;
+
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismiss();
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            Text { text: root.caption; color: Palette.foreground; wrap: word-wrap; }
+            Rectangle {
+                min-height: 96px;
+                vertical-stretch: 1;
+                background: black;
+                Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
+                if root.message != "": Text {
+                    text: root.message;
+                    x: 12px;
+                    width: parent.width - 24px;
+                    color: #ffffff;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    height: parent.height;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                if root.is-video: Button {
+                    text: root.paused ? "Resume" : "Pause";
+                    enabled: !root.ended;
+                    clicked => { root.paused = !root.paused; root.pause(root.paused); }
+                }
+                if root.is-video: Button { text: "Replay"; clicked => { root.replay(); } }
+                Button { text: "Close"; clicked => { root.dismiss(); } }
+            }
+        }
+    }
+}
+
+export component TransitionPreviewWindow inherits Window {
+    title: "FreeShow · Transition preview";
+    icon: @image-url("../../../assets/freeshow.png");
+    min-width: 320px;
+    min-height: 240px;
+    preferred-width: 640px;
+    preferred-height: 440px;
+    background: Palette.background;
+    in property <image> frame;
+    in property <string> description;
+    in-out property <float> progress;
+    in property <bool> can-scrub;
+    callback replay();
+    callback seek(float);
+    callback dismiss();
+    forward-focus: keys;
+
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismiss();
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            Text { text: root.description; color: Palette.foreground; wrap: word-wrap; }
+            Rectangle {
+                min-height: 96px;
+                vertical-stretch: 1;
+                background: black;
+                Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: "Replay"; clicked => { root.replay(); } }
+                Slider {
+                    accessible-label: "Transition preview progress";
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: 1;
+                    step: 0.01;
+                    enabled: root.can-scrub;
+                    value <=> root.progress;
+                    changed(value) => { root.seek(value); }
+                }
+                Button { text: "Close"; clicked => { root.dismiss(); } }
+            }
         }
     }
 }

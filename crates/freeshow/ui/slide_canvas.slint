@@ -1,0 +1,275 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+import { Button, CheckBox } from "std-widgets.slint";
+import { OperatorStyle } from "widgets.slint";
+
+export struct LayerOutline {
+    x1: float, y1: float,
+    x2: float, y2: float,
+    x3: float, y3: float,
+    x4: float, y4: float,
+}
+
+export struct LayerMovePreview {
+    dx: int,
+    dy: int,
+    guide-x: int,
+    guide-y: int,
+}
+
+component OutlinePath inherits Path {
+    in property <LayerOutline> points;
+    in property <length> unit;
+    in property <float> dx;
+    in property <float> dy;
+    x: 0;
+    y: 0;
+    width: 100%;
+    height: 100%;
+    viewbox-width: self.width / 1px;
+    viewbox-height: self.height / 1px;
+    MoveTo { x: (root.points.x1 + root.dx) * (root.unit / 1px); y: (root.points.y1 + root.dy) * (root.unit / 1px); }
+    LineTo { x: (root.points.x2 + root.dx) * (root.unit / 1px); y: (root.points.y2 + root.dy) * (root.unit / 1px); }
+    LineTo { x: (root.points.x3 + root.dx) * (root.unit / 1px); y: (root.points.y3 + root.dy) * (root.unit / 1px); }
+    LineTo { x: (root.points.x4 + root.dx) * (root.unit / 1px); y: (root.points.y4 + root.dy) * (root.unit / 1px); }
+    Close {}
+}
+
+export component SlideCanvas inherits VerticalLayout {
+    in property <image> frame;
+    in property <bool> editing;
+    in property <length> viewport-height;
+    in property <float> source-width: 1920;
+    in property <float> source-height: 1080;
+    in property <color> accent;
+    in property <color> text-color;
+    in property <LayerOutline> active-outline;
+    in property <[LayerOutline]> layer-outlines;
+    in property <bool> show-selection;
+    in property <bool> can-resize;
+    in property <int> item-index;
+    in property <bool> snap;
+    callback pick(float, float) -> int;
+    callback select-layer(int, string) -> bool;
+    callback begin-drag() -> bool;
+    callback cancel-drag();
+    callback finish-drag(float, float, bool, bool);
+    callback nudge(int, int);
+    pure callback snap-move(int, int, int, int) -> LayerMovePreview;
+    pure callback resize-preview(float, float, bool) -> LayerOutline;
+
+    private property <int> zoom: 100;
+    private property <bool> pan-mode;
+    private property <length> pan-x;
+    private property <length> pan-y;
+    private property <bool> panning;
+    private property <bool> holding;
+    private property <bool> resizing;
+    private property <bool> uniform;
+    private property <length> start-x;
+    private property <length> start-y;
+    private property <length> drag-x: edit-drag.mouse-x - root.start-x;
+    private property <length> drag-y: edit-drag.mouse-y - root.start-y;
+    private property <bool> moved: abs(root.drag-x) > 3px || abs(root.drag-y) > 3px;
+    private property <length> pan-limit-x: max(0px, (edit-frame.width - viewport.width) / 2);
+    private property <length> pan-limit-y: max(0px, (edit-frame.height - viewport.height) / 2);
+    private property <length> source-unit: max(0.001px, edit-frame.width / root.source-width);
+    private property <float> source-dx: root.drag-x / root.source-unit;
+    private property <float> source-dy: root.drag-y / root.source-unit;
+    private property <bool> moving-layer: root.holding && root.moved && !root.resizing;
+    private property <LayerMovePreview> move-preview: root.moving-layer && root.snap
+        ? root.snap-move(round(root.source-dx), round(root.source-dy),
+            round(6px / root.source-unit), round(6px / root.source-unit))
+        : { dx: round(root.source-dx), dy: round(root.source-dy), guide-x: -1, guide-y: -1 };
+    private property <float> move-x: root.moving-layer ? root.move-preview.dx : 0;
+    private property <float> move-y: root.moving-layer ? root.move-preview.dy : 0;
+    private property <LayerOutline> outline: root.holding && root.resizing && root.moved
+        ? root.resize-preview(root.source-dx, root.source-dy, root.uniform) : root.active-outline;
+    private property <length> handle-x: (root.outline.x3 + root.move-x) * root.source-unit;
+    private property <length> handle-y: (root.outline.y3 + root.move-y) * root.source-unit;
+
+    function set-pan(x: length, y: length) {
+        root.pan-x = clamp(x, -root.pan-limit-x, root.pan-limit-x);
+        root.pan-y = clamp(y, -root.pan-limit-y, root.pan-limit-y);
+    }
+
+    function cancel-gesture() {
+        if (root.holding) { root.cancel-drag(); }
+        root.holding = false;
+        root.panning = false;
+    }
+
+    changed zoom => {
+        if (root.zoom == 100) { root.pan-mode = false; }
+        root.set-pan(root.pan-x, root.pan-y);
+    }
+    changed pan-limit-x => { root.set-pan(root.pan-x, root.pan-y); }
+    changed pan-limit-y => { root.set-pan(root.pan-x, root.pan-y); }
+    changed editing => {
+        if (!root.editing) { root.cancel-gesture(); }
+    }
+
+    spacing: 6px;
+    if root.editing: HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        Button { text: "−"; accessible-label: "Zoom out"; enabled: root.zoom > 100; clicked => { root.zoom -= 25; } }
+        Button {
+            text: "Fit";
+            accessible-label: "Fit slide to editor";
+            clicked => {
+                root.pan-mode = false;
+                root.zoom = 100;
+                root.set-pan(0px, 0px);
+            }
+        }
+        Button { text: "+"; accessible-label: "Zoom in"; enabled: root.zoom < 400; clicked => { root.zoom += 25; } }
+        Text {
+            text: "\{root.zoom}%";
+            color: root.text-color;
+            font-size: 12px * OperatorStyle.font-scale;
+            vertical-alignment: center;
+            min-width: 40px;
+        }
+        CheckBox {
+            text: "Pan";
+            enabled: root.zoom > 100;
+            checked: root.pan-mode && root.zoom > 100;
+            toggled => { root.pan-mode = self.checked; }
+        }
+    }
+
+    viewport := Rectangle {
+        height: root.viewport-height;
+        background: black;
+        clip: true;
+
+        edit-frame := Rectangle {
+            property <float> aspect: root.editing ? root.source-width / root.source-height
+                : root.frame.width > 0 && root.frame.height > 0 ? root.frame.width / root.frame.height : 1920.0 / 1080.0;
+            width: min(parent.width, parent.height * self.aspect) * (root.editing ? root.zoom / 100.0 : 1.0);
+            height: self.width / self.aspect;
+            clip: true;
+            x: (parent.width - self.width) / 2 + (root.editing
+                ? clamp(root.pan-x + (root.panning ? root.drag-x : 0px), -root.pan-limit-x, root.pan-limit-x) : 0px);
+            y: (parent.height - self.height) / 2 + (root.editing
+                ? clamp(root.pan-y + (root.panning ? root.drag-y : 0px), -root.pan-limit-y, root.pan-limit-y) : 0px);
+            Image { source: root.frame; width: 100%; height: 100%; image-fit: fill; }
+            if root.editing && root.moving-layer && root.move-preview.guide-x >= 0: Rectangle {
+                x: root.move-preview.guide-x * root.source-unit;
+                y: 0;
+                height: 100%;
+                width: 1px;
+                background: root.accent;
+            }
+            if root.editing && root.moving-layer && root.move-preview.guide-y >= 0: Rectangle {
+                x: 0;
+                y: root.move-preview.guide-y * root.source-unit;
+                width: 100%;
+                height: 1px;
+                background: root.accent;
+            }
+            for outline in root.layer-outlines: OutlinePath {
+                visible: root.editing && !(root.holding && root.resizing && root.moved);
+                points: outline;
+                unit: root.source-unit;
+                dx: root.move-x;
+                dy: root.move-y;
+                stroke: root.accent;
+                stroke-width: 1px;
+            }
+            if root.editing && root.show-selection: OutlinePath {
+                points: root.outline;
+                unit: root.source-unit;
+                dx: root.move-x;
+                dy: root.move-y;
+                stroke: root.accent;
+                stroke-width: 2px;
+            }
+            if root.editing && root.can-resize: Rectangle {
+                x: root.handle-x - self.width / 2;
+                y: root.handle-y - self.height / 2;
+                width: 10px;
+                height: 10px;
+                background: root.accent;
+            }
+        }
+
+        canvas-focus := FocusScope {
+            width: 100%;
+            height: 100%;
+            enabled: root.editing;
+            key-pressed(event) => {
+                if (event.text == Key.Escape && (root.holding || root.panning)) {
+                    root.cancel-gesture();
+                    return accept;
+                }
+                if (!(event.modifiers.alt || event.modifiers.control || event.modifiers.meta)
+                    && (event.text == Key.LeftArrow || event.text == Key.RightArrow
+                        || event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                    if (!(root.holding || root.panning)) {
+                        let dx = event.text == Key.LeftArrow ? -1 : event.text == Key.RightArrow ? 1 : 0;
+                        let dy = event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1 : 0;
+                        if (root.pan-mode && root.zoom > 100) {
+                            root.set-pan(root.pan-x + dx * 24px, root.pan-y + dy * 24px);
+                        } else {
+                            let step = event.modifiers.shift ? 10 : 1;
+                            root.nudge(dx * step, dy * step);
+                        }
+                    }
+                    return accept;
+                }
+                return reject;
+            }
+            edit-drag := TouchArea {
+                width: 100%;
+                height: 100%;
+                enabled: root.editing;
+                property <length> page-x: self.mouse-x - edit-frame.x;
+                property <length> page-y: self.mouse-y - edit-frame.y;
+                property <bool> over-page: self.page-x >= 0px && self.page-x < edit-frame.width
+                    && self.page-y >= 0px && self.page-y < edit-frame.height;
+                property <bool> over-handle: root.can-resize && self.over-page && abs(self.page-x - root.handle-x) <= 7px
+                    && abs(self.page-y - root.handle-y) <= 7px;
+                mouse-cursor: root.panning || (root.holding && !root.resizing) ? MouseCursor.grabbing
+                    : root.pan-mode && root.zoom > 100 ? MouseCursor.grab
+                    : (root.resizing && root.holding) || self.over-handle ? MouseCursor.se-resize : MouseCursor.default;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.cancel) { root.cancel-gesture(); }
+                    if (event.button != PointerEventButton.left) { return; }
+                    if (event.kind == PointerEventKind.down) {
+                        canvas-focus.focus();
+                        root.start-x = self.mouse-x;
+                        root.start-y = self.mouse-y;
+                        if (root.pan-mode && root.zoom > 100) {
+                            root.panning = true;
+                            return;
+                        }
+                        let adding = event.modifiers.control || event.modifiers.meta;
+                        root.resizing = self.over-handle && !adding;
+                        root.uniform = event.modifiers.shift;
+                        let index = root.resizing ? root.item-index : self.over-page
+                            ? root.pick(self.page-x / root.source-unit, self.page-y / root.source-unit) : -1;
+                        root.holding = index >= 0 && root.select-layer(index, adding ? "add" : "canvas")
+                            && !adding && root.begin-drag();
+                    } else if (event.kind == PointerEventKind.up) {
+                        if (root.panning) {
+                            root.set-pan(root.pan-x + root.drag-x, root.pan-y + root.drag-y);
+                            root.panning = false;
+                        } else if (root.holding) {
+                            let dx = root.resizing ? root.source-dx : root.move-preview.dx;
+                            let dy = root.resizing ? root.source-dy : root.move-preview.dy;
+                            let moved = root.moved;
+                            root.holding = false;
+                            if (moved) {
+                                root.finish-drag(dx, dy, root.resizing, root.uniform);
+                            } else {
+                                root.cancel-drag();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

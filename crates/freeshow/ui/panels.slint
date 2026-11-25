@@ -113,6 +113,8 @@ export struct InspectorData {
     slide-transition: string,
     slide-transition-ms: int,
     slide-transition-direction: string,
+    slide-transition-easing: string,
+    slide-transition-source: string,
     valign: string,
     rotation: int,
     text-case: string,
@@ -1166,8 +1168,28 @@ export component SettingsPanel inherits Rectangle {
 
 export component InspectorPanel inherits VerticalLayout {
     in property <InspectorData> data;
+    in property <bool> item-locked;
+    private property <bool> item-editable: root.data.has-item && !root.item-locked;
     in property <color> text-color;
     in property <color> panel: #2a2a32;
+    in property <int> transition-slide-count;
+    callback preview-transition();
+    callback apply-transition-range(int, int);
+    private property <bool> show-transition-range;
+    private property <[string]> effect-keys: ["default", "none", "fade", "blur", "scale", "slide", "spin", "push", "fade_through_black", "wipe", "cover", "uncover"];
+    private property <[string]> effect-labels: ["Inherited", "Cut", "Fade", "Blur", "Scale", "Slide", "Spin", "Push", "Fade through black", "Wipe", "Cover", "Uncover"];
+    private property <[string]> direction-keys: ["left_right", "right_left", "top_bottom", "bottom_top", "up_left", "up_right", "down_left", "down_right"];
+    private property <[string]> direction-labels: ["Left to right", "Right to left", "Top to bottom", "Bottom to top", "Up left", "Up right", "Down left", "Down right"];
+    private property <[string]> easing-keys: ["linear", "sine", "cubic", "circ", "back", "elastic", "bounce"];
+    private property <[string]> easing-labels: ["Linear", "Smooth", "Cubic", "Circular", "Overshoot", "Elastic", "Bounce"];
+    private property <bool> has-direction: root.choice-index(["slide", "push", "wipe", "cover", "uncover"], root.data.slide-transition) >= 0;
+    private property <int> effective-effect: root.choice-index(root.effect-keys, root.data.slide-transition);
+    private property <bool> inherited: root.data.slide-transition-source != "This slide";
+    pure function choice-index(model: [string], value: string) -> int {
+        let index = ComboIndex.find(model, value);
+        return index >= 0 && index < model.length && model[index] == value ? index : -1;
+    }
+
     callback set(string, string);
     // Rare mid-service sections start collapsed so Text/Position stay on screen.
     property <bool> open-text: true;
@@ -1187,14 +1209,14 @@ export component InspectorPanel inherits VerticalLayout {
             spacing: OperatorStyle.space-sm;
             ValueEdit {
                 horizontal-stretch: 2;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.family;
                 placeholder-text: "Font family";
                 accepted(value) => { root.set("font-family", value); }
             }
             ValueSpin {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 minimum: 12;
                 maximum: 400;
                 shown: root.data.font-px;
@@ -1205,20 +1227,20 @@ export component InspectorPanel inherits VerticalLayout {
             spacing: OperatorStyle.space-sm;
             ValueCheck {
                 text: "Bold";
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.bold;
                 toggled => { root.set("bold", Fmt.flag(self.checked)); }
             }
             ValueCheck {
                 text: "Italic";
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.italic;
                 toggled => { root.set("italic", Fmt.flag(self.checked)); }
             }
             FieldLabel { text: "Align"; text-color: root.text-color; min-width: 40px; }
             ValueCombo {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 model: ["left", "center", "right", "justify"];
                 value: root.data.align == "" ? "center" : root.data.align;
                 selected(value) => { root.set("align", value); }
@@ -1228,13 +1250,13 @@ export component InspectorPanel inherits VerticalLayout {
             spacing: OperatorStyle.space-sm;
             ValueCheck {
                 text: "Underline";
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.underline;
                 toggled => { root.set("underline", Fmt.flag(self.checked)); }
             }
             ValueCheck {
                 text: "Strikethrough";
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.strike;
                 toggled => { root.set("line-through", Fmt.flag(self.checked)); }
             }
@@ -1246,7 +1268,7 @@ export component InspectorPanel inherits VerticalLayout {
                 hex: root.data.color;
                 text-color: root.text-color;
                 panel: root.panel;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 placeholder: "#FFFFFF";
                 set(value) => { root.set("color", value); }
             }
@@ -1258,7 +1280,7 @@ export component InspectorPanel inherits VerticalLayout {
                 hex: root.data.background;
                 text-color: root.text-color;
                 panel: root.panel;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 allow-none: true;
                 placeholder: "none";
                 set(value) => { root.set("background-color", value); }
@@ -1272,16 +1294,16 @@ export component InspectorPanel inherits VerticalLayout {
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "X"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.x; edited(value) => { root.set("left", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: -8000; maximum: 8000; shown: root.data.x; edited(value) => { root.set("left", value); } }
             FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -8000; maximum: 8000; shown: root.data.y; edited(value) => { root.set("top", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: -8000; maximum: 8000; shown: root.data.y; edited(value) => { root.set("top", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Width"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.w; edited(value) => { root.set("width", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 1; maximum: 8000; shown: root.data.w; edited(value) => { root.set("width", value); } }
             FieldLabel { text: "Height"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 1; maximum: 8000; shown: root.data.h; edited(value) => { root.set("height", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 1; maximum: 8000; shown: root.data.h; edited(value) => { root.set("height", value); } }
         }
     }
 
@@ -1339,7 +1361,7 @@ export component InspectorPanel inherits VerticalLayout {
             FieldLabel { text: "Box shadow"; text-color: root.text-color; }
             ValueEdit {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.box-shadow;
                 placeholder-text: "0 4px 12px #0008";
                 accepted(value) => { root.set("box-shadow", value); }
@@ -1350,7 +1372,7 @@ export component InspectorPanel inherits VerticalLayout {
             FieldLabel { text: "Backdrop filter"; text-color: root.text-color; }
             ValueEdit {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.backdrop-filter;
                 placeholder-text: "blur(8px)";
                 accepted(value) => { root.set("backdrop-filter", value); }
@@ -1361,18 +1383,18 @@ export component InspectorPanel inherits VerticalLayout {
             FieldLabel { text: "Radius"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
             ValueEdit {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 shown: root.data.radius;
                 placeholder-text: "0";
                 accepted(value) => { root.set("border-radius", value); }
             }
             FieldLabel { text: "Line %"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.line-height; edited(value) => { root.set("line-height", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 500; step-size: 5; shown: root.data.line-height; edited(value) => { root.set("line-height", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Spacing"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -300; maximum: 100; shown: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: -300; maximum: 100; shown: root.data.letter-spacing; edited(value) => { root.set("letter-spacing", value); } }
             Rectangle { horizontal-stretch: 1; }
         }
     }
@@ -1383,12 +1405,12 @@ export component InspectorPanel inherits VerticalLayout {
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Outline"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; shown: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 100; shown: root.data.outline-width; edited(value) => { root.set("outline-width", value); } }
             ColorField {
                 hex: root.data.outline-color;
                 text-color: root.text-color;
                 panel: root.panel;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 placeholder: "#000000";
                 set(value) => { root.set("outline-color", value); }
             }
@@ -1396,12 +1418,12 @@ export component InspectorPanel inherits VerticalLayout {
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Shadow"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; shown: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 500; shown: root.data.shadow-blur; edited(value) => { root.set("shadow-blur", value); } }
             ColorField {
                 hex: root.data.shadow-color;
                 text-color: root.text-color;
                 panel: root.panel;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 placeholder: "#000000";
                 set(value) => { root.set("shadow-color", value); }
             }
@@ -1409,9 +1431,9 @@ export component InspectorPanel inherits VerticalLayout {
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Shadow X"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: -1000; maximum: 1000; shown: root.data.shadow-x; edited(value) => { root.set("shadow-x", value); } }
             FieldLabel { text: "Y"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: -1000; maximum: 1000; shown: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: -1000; maximum: 1000; shown: root.data.shadow-y; edited(value) => { root.set("shadow-y", value); } }
         }
     }
 
@@ -1421,39 +1443,39 @@ export component InspectorPanel inherits VerticalLayout {
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Blur"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.blur; edited(value) => { root.set("blur", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 100; step-size: 1; shown: root.data.blur; edited(value) => { root.set("blur", value); } }
             FieldLabel { text: "Gray %"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 1; shown: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 100; step-size: 1; shown: root.data.grayscale; edited(value) => { root.set("grayscale", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Bright %"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.brightness; edited(value) => { root.set("brightness", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 500; step-size: 5; shown: root.data.brightness; edited(value) => { root.set("brightness", value); } }
             FieldLabel { text: "Contr %"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.contrast; edited(value) => { root.set("contrast", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 500; step-size: 5; shown: root.data.contrast; edited(value) => { root.set("contrast", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Satur %"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 500; step-size: 5; shown: root.data.saturate; edited(value) => { root.set("saturate", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 500; step-size: 5; shown: root.data.saturate; edited(value) => { root.set("saturate", value); } }
             FieldLabel { text: "Hue °"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 360; step-size: 5; shown: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 360; step-size: 5; shown: root.data.hue-rotate; edited(value) => { root.set("hue-rotate", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Sepia %"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.sepia; edited(value) => { root.set("sepia", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 100; step-size: 5; shown: root.data.sepia; edited(value) => { root.set("sepia", value); } }
             FieldLabel { text: "Invert %"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.invert; edited(value) => { root.set("invert", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 100; step-size: 5; shown: root.data.invert; edited(value) => { root.set("invert", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Opacity"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 100; step-size: 5; shown: root.data.opacity; edited(value) => { root.set("opacity", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 100; step-size: 5; shown: root.data.opacity; edited(value) => { root.set("opacity", value); } }
             FieldLabel { text: "Blend"; text-color: root.text-color; min-width: 32px; }
             ValueCombo {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 model: ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference", "exclusion", "color-dodge"];
                 value: root.data.blend == "" ? "normal" : root.data.blend;
                 selected(value) => { root.set("blend", value); }
@@ -1469,20 +1491,20 @@ export component InspectorPanel inherits VerticalLayout {
             FieldLabel { text: "Vertical"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
             ValueCombo {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 model: ["top", "center", "bottom"];
                 value: root.data.valign;
                 selected(value) => { root.set("valign", value); }
             }
             FieldLabel { text: "Turn °"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 359; step-size: 15; shown: root.data.rotation; edited(value) => { root.set("rotation", value); } }
+            ValueSpin { horizontal-stretch: 1; enabled: root.item-editable; minimum: 0; maximum: 359; step-size: 15; shown: root.data.rotation; edited(value) => { root.set("rotation", value); } }
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Case"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
             ValueCombo {
                 horizontal-stretch: 1;
-                enabled: root.data.has-item;
+                enabled: root.item-editable;
                 model: ["none", "uppercase", "lowercase", "capitalize"];
                 value: root.data.text-case == "" ? "none" : root.data.text-case;
                 selected(value) => { root.set("text-case", value); }
@@ -1496,26 +1518,100 @@ export component InspectorPanel inherits VerticalLayout {
         spacing: OperatorStyle.space-sm;
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
-            FieldLabel { text: "Slide in"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            FieldLabel { text: "Effect"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
             ValueCombo {
+                accessible-label: "Slide transition effect";
                 horizontal-stretch: 1;
                 enabled: root.data.has-item;
-                model: ["default", "none", "fade", "blur", "scale", "slide", "spin", "push", "fade_through_black", "wipe", "cover", "uncover"];
-                value: root.data.slide-transition;
-                selected(value) => { root.set("slide-transition", value); }
+                model: root.effect-labels;
+                value: root.inherited ? root.effect-labels[0]
+                    : root.effective-effect >= 0 ? root.effect-labels[root.effective-effect] : root.data.slide-transition;
+                selected(_) => { root.set("slide-transition", root.effect-keys[self.current-index]); }
             }
-            FieldLabel { text: "ms"; text-color: root.text-color; min-width: 32px; }
-            ValueSpin { horizontal-stretch: 1; enabled: root.data.has-item; minimum: 0; maximum: 10000; step-size: 100; shown: root.data.slide-transition-ms; edited(value) => { root.set("slide-transition-ms", value); } }
+        }
+        if root.data.has-item: Text {
+            color: root.text-color;
+            opacity: 0.8;
+            wrap: word-wrap;
+            text: root.inherited || root.effective-effect < 0
+                ? "\{root.data.slide-transition-source} · \{root.effective-effect >= 0 ? root.effect-labels[root.effective-effect] : root.data.slide-transition}"
+                : root.data.slide-transition-source;
         }
         HorizontalLayout {
             spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Duration"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin {
+                accessible-label: "Transition duration in milliseconds";
+                horizontal-stretch: 1;
+                enabled: root.data.has-item && root.data.slide-transition != "none";
+                minimum: 0;
+                maximum: 10000;
+                step-size: 100;
+                shown: root.data.slide-transition == "none" ? 0 : root.data.slide-transition-ms;
+                edited(value) => { root.set("slide-transition-ms", value); }
+            }
+            FieldLabel { text: "ms"; text-color: root.text-color; min-width: 25px; }
+        }
+        if root.has-direction: HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
             FieldLabel { text: "Direction"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
             ValueCombo {
+                accessible-label: "Transition direction";
                 horizontal-stretch: 1;
-                enabled: root.data.has-item && root.data.slide-transition != "default" && root.data.slide-transition != "none" && root.data.slide-transition != "fade" && root.data.slide-transition != "blur" && root.data.slide-transition != "scale" && root.data.slide-transition != "spin" && root.data.slide-transition != "fade_through_black";
-                model: ["left_right", "right_left", "top_bottom", "bottom_top", "up_left", "up_right", "down_left", "down_right"];
-                value: root.data.slide-transition-direction == "" ? "left_right" : root.data.slide-transition-direction;
-                selected(value) => { root.set("slide-transition-direction", value); }
+                enabled: root.data.has-item;
+                model: root.direction-labels;
+                property <int> direction-index: root.choice-index(root.direction-keys, root.data.slide-transition-direction);
+                value: self.direction-index >= 0 ? root.direction-labels[self.direction-index] : root.data.slide-transition-direction;
+                selected(_) => { root.set("slide-transition-direction", root.direction-keys[self.current-index]); }
+            }
+        }
+        if root.data.slide-transition != "none": HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Easing"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueCombo {
+                accessible-label: "Transition easing";
+                horizontal-stretch: 1;
+                enabled: root.data.has-item;
+                model: root.easing-labels;
+                property <int> easing-index: root.choice-index(root.easing-keys, root.data.slide-transition-easing);
+                value: self.easing-index >= 0 ? root.easing-labels[self.easing-index] : root.data.slide-transition-easing;
+                selected(_) => { root.set("slide-transition-easing", root.easing-keys[self.current-index]); }
+            }
+        }
+        HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            Button { text: "Preview transition"; enabled: root.data.has-item; clicked => { root.preview-transition(); } }
+            Button {
+                text: root.show-transition-range ? "Close range" : "Apply to range…";
+                enabled: root.data.has-item && root.transition-slide-count > 1;
+                clicked => { root.show-transition-range = !root.show-transition-range; }
+            }
+        }
+        if root.show-transition-range && root.data.has-item && root.transition-slide-count > 1: VerticalLayout {
+            spacing: OperatorStyle.space-sm;
+            Text {
+                color: root.text-color;
+                opacity: 0.8;
+                wrap: word-wrap;
+                text: root.inherited ? "Restore inherited transitions on the chosen slides."
+                    : "Copy this slide’s transition to the chosen slides.";
+            }
+            HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                first-slide := ValueSpin { accessible-label: "First slide in transition range"; minimum: 1; maximum: root.transition-slide-count; shown: 1; }
+                FieldLabel { text: "to"; text-color: root.text-color; }
+                last-slide := ValueSpin {
+                    accessible-label: "Last slide in transition range";
+                    minimum: first-slide.value;
+                    maximum: root.transition-slide-count;
+                    shown: root.transition-slide-count;
+                }
+                Button {
+                    text: root.inherited ? "Reset range" : "Apply range";
+                    enabled: first-slide.value >= 1 && last-slide.value >= first-slide.value
+                        && last-slide.value <= root.transition-slide-count;
+                    clicked => { root.apply-transition-range(first-slide.value, last-slide.value); }
+                }
             }
         }
     }
