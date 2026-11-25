@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use zip::ZipArchive;
 
 use super::{Section, file_stem_str, show_file};
-use crate::{Catalog, DataError, ProjectsFile, ShowFile};
+use crate::{DataError, ShowFile};
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
 
@@ -85,14 +85,34 @@ pub fn import_shows(
 
 pub fn is_project_package(file_name: &str, bytes: &[u8]) -> bool {
     let ext = extension(file_name);
-    if looks_like_zip(bytes) && matches!(ext.as_str(), "project" | "zip" | "shows") {
-        return zip_entries(bytes).ok().is_some_and(|files| {
-            files
-                .iter()
-                .any(|(name, data)| project_value(data).is_some() || name.ends_with(".project"))
-        });
+    if looks_like_zip(bytes) {
+        return match ext.as_str() {
+            "project" | "shows" => true,
+            "zip" => {
+                let Ok(mut zip) = ZipArchive::new(Cursor::new(bytes)) else {
+                    return false;
+                };
+                (0..zip.len().min(crate::portable::MAX_ENTRIES)).any(|index| {
+                    let Ok(file) = zip.by_index(index) else {
+                        return false;
+                    };
+                    let filename = crate::portable::basename(file.name());
+                    if !matches!(extension(filename).as_str(), "json" | "project" | "shows")
+                        || file.size() > crate::portable::MAX_DOCUMENT_BYTES
+                    {
+                        return false;
+                    }
+                    let mut data = Vec::new();
+                    file.take(crate::portable::MAX_DOCUMENT_BYTES + 1)
+                        .read_to_end(&mut data)
+                        .is_ok()
+                        && project_value(&data).is_some()
+                })
+            }
+            _ => false,
+        };
     }
-    project_value(bytes).is_some() && matches!(ext.as_str(), "project" | "shows" | "json" | "")
+    matches!(ext.as_str(), "project" | "shows" | "json" | "") && project_value(bytes).is_some()
 }
 
 pub fn import_project_package(
@@ -101,99 +121,37 @@ pub fn import_project_package(
     shows_dir: &Path,
     media_dir: &Path,
 ) -> Result<Vec<String>, DataError> {
-    let file_name = path
+    let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("project");
-    let (payload, bundled) = if looks_like_zip(bytes) {
-        let files = zip_entries(bytes)?;
-        let Some((_, data)) = files.iter().find(|(name, data)| {
-            project_value(data).is_some()
-                || name.ends_with(".project")
-                || name.ends_with("project.json")
-        }) else {
-            return Err(DataError::Scripture(format!(
-                "{file_name} did not contain a project"
-            )));
-        };
-        (
-            project_value(data).ok_or_else(|| {
-                DataError::Scripture(format!("{file_name} did not contain a project"))
-            })?,
-            files,
-        )
+    let bundled = if looks_like_zip(bytes) {
+        zip_entries(bytes)?
     } else {
-        (
-            project_value(bytes).ok_or_else(|| {
-                DataError::Scripture(format!("{file_name} did not contain a project"))
-            })?,
-            Vec::new(),
-        )
+        Vec::new()
     };
-    let root = shows_dir.parent().unwrap_or(shows_dir);
-    fs::create_dir_all(shows_dir)?;
-    fs::create_dir_all(media_dir)?;
-    let mut warnings = Vec::new();
-    if let Some(media) = payload.get("media").and_then(Value::as_object) {
-        for (name, _) in media {
-            if let Some((_, data)) = bundled.iter().find(|(entry, _)| {
-                Path::new(entry).file_name().and_then(|file| file.to_str()) == Some(name)
-            }) {
-                let dest = media_dir.join(name);
-                if !dest.exists() {
-                    fs::write(&dest, data)?;
-                }
-            }
-        }
-    }
-    if let Some(shows) = payload.get("shows").and_then(Value::as_object) {
-        for (id, show) in shows {
-            if !show.is_object() {
-                continue;
-            }
-            let dest = shows_dir.join(format!("{}.show", file_stem_str(id)));
-            if dest.exists() {
-                continue;
-            }
-            let file = ShowFile {
-                id: id.clone(),
-                show: show.clone(),
-                path: None,
-            };
-            if let Err(err) = file.save(&dest) {
-                warnings.push(format!("{}: {err}", path.display()));
-            }
-        }
-    }
-    if let Some(overlays) = payload.get("overlays").and_then(Value::as_object) {
-        let path = root.join("Config").join("overlays.json");
-        let mut catalog = Catalog::load(&path)?;
-        for (id, overlay) in overlays {
-            catalog.insert(id, overlay.clone());
-        }
-        catalog.save(&path)?;
-    }
-    if let Some(mut project) = payload.get("project").cloned() {
-        if let Some(object) = project.as_object_mut() {
-            object
-                .entry("name")
-                .or_insert_with(|| json!(file_stem_str(file_name)));
-        }
-        let id = project
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| file_stem_str(file_name));
-        if let Some(object) = project.as_object_mut() {
-            object.remove("id");
-        }
-        let projects_path = root.join("Config").join("projects.json");
-        let mut projects = ProjectsFile::load(&projects_path)?;
-        projects.put_project(&id, project);
-        projects.save(&projects_path)?;
-    }
-    Ok(warnings)
+    let payload = if looks_like_zip(bytes) {
+        ["data.json", "project.json"]
+            .into_iter()
+            .find_map(|wanted| {
+                bundled
+                    .iter()
+                    .find(|(name, _)| name == wanted)
+                    .and_then(|(_, data)| project_value(data))
+            })
+            .or_else(|| bundled.iter().find_map(|(_, data)| project_value(data)))
+    } else {
+        project_value(bytes)
+    };
+    let payload =
+        payload.ok_or_else(|| DataError::Scripture(format!("{name} did not contain a project")))?;
+    crate::portable::install(
+        payload,
+        &bundled,
+        &file_stem_str(name),
+        shows_dir,
+        media_dir,
+    )
 }
 
 pub fn softprojector_database(bytes: &[u8]) -> Result<Vec<ShowFile>, DataError> {
@@ -1053,6 +1011,9 @@ fn store_media(
 }
 
 fn project_value(bytes: &[u8]) -> Option<Value> {
+    if bytes.len() as u64 > crate::portable::MAX_DOCUMENT_BYTES {
+        return None;
+    }
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     value.get("project").is_some().then_some(value)
 }
@@ -1185,6 +1146,10 @@ fn looks_like_zip(bytes: &[u8]) -> bool {
 fn zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, DataError> {
     let mut archive =
         ZipArchive::new(Cursor::new(bytes)).map_err(|err| DataError::Scripture(err.to_string()))?;
+    if archive.len() > crate::portable::MAX_ENTRIES {
+        return Err(DataError::Scripture("Archive has too many entries".into()));
+    }
+    let mut remaining = crate::portable::MAX_PACKAGE_BYTES;
     let mut files = Vec::new();
     for index in 0..archive.len() {
         let mut file = archive
@@ -1194,9 +1159,22 @@ fn zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, DataError> {
             continue;
         }
         let name = file.name().to_string();
+        if file.size() > remaining {
+            return Err(DataError::Scripture(
+                "Archive exceeds the unpacked size limit".into(),
+            ));
+        }
         let mut data = Vec::new();
-        file.read_to_end(&mut data)
+        (&mut file)
+            .take(remaining + 1)
+            .read_to_end(&mut data)
             .map_err(|err| DataError::Scripture(err.to_string()))?;
+        if data.len() as u64 > remaining {
+            return Err(DataError::Scripture(
+                "Archive exceeds the unpacked size limit".into(),
+            ));
+        }
+        remaining -= data.len() as u64;
         files.push((name, data));
     }
     Ok(files)
@@ -1346,6 +1324,7 @@ fn child_text(node: &XmlEl, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Catalog, ProjectsFile};
 
     #[test]
     fn community_formats_import_lyrics_images_and_projects() {

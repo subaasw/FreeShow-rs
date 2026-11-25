@@ -49,6 +49,43 @@ pub fn write_project_package(
     Ok(())
 }
 
+/// A portable FreeShow project with local media and reusable templates.
+pub fn write_portable_project(
+    project: &ProjectEntry,
+    project_body: &Value,
+    shows: &[ShowFile],
+    library: &crate::Library,
+    dest: &Path,
+) -> Result<Vec<String>, DataError> {
+    let shows = crate::portable::project_shows(project_body, shows);
+    let overlays = Catalog::load(&library.overlays_path())?;
+    let templates = Catalog::load(&library.templates_path())?;
+    let mut payload = json!({
+        "project": package_project(project, project_body),
+        "shows": shows,
+    });
+    crate::portable::include_designs(&mut payload, &overlays, &templates);
+    crate::portable::write_archive(payload, library.root(), dest)
+}
+
+/// Shares one editable template and its media through the ordinary package importer.
+pub fn write_portable_template(
+    id: &str,
+    template: &Value,
+    library: &crate::Library,
+    dest: &Path,
+) -> Result<Vec<String>, DataError> {
+    let mut payload = json!({
+        "project": { "id": id, "name": template["name"], "shows": [] },
+        "freeshowRustTemplateOnly": true,
+    });
+    payload["templates"][id] = template.clone();
+    let overlays = Catalog::load(&library.overlays_path())?;
+    let templates = Catalog::load(&library.templates_path())?;
+    crate::portable::include_designs(&mut payload, &overlays, &templates);
+    crate::portable::write_archive(payload, library.root(), dest)
+}
+
 fn package_project(project: &ProjectEntry, body: &Value) -> Value {
     let mut object = body.as_object().cloned().unwrap_or_default();
     object.insert("id".into(), json!(project.id));

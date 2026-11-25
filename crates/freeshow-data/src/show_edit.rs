@@ -64,6 +64,9 @@ impl ShowFile {
     /// Existing slides are reused in order, keeping their style, color, notes and
     /// media; new slides copy the text style of the slide before them.
     pub fn set_lyrics_text(&mut self, text: &str, split_lines: u32) -> bool {
+        if self.has_locked_layers() {
+            return false;
+        }
         let layout_id = self.active_layout();
         let previous: Vec<(String, String)> = self
             .ordered_slides()

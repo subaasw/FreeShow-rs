@@ -65,6 +65,18 @@ pub fn import_sources_split(
         if extension.eq_ignore_ascii_case("olp") || extension.eq_ignore_ascii_case("olf") {
             continue;
         }
+        if matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "project" | "shows" | "zip"
+        ) && fs::metadata(&path)?.len()
+            > crate::portable::MAX_PACKAGE_BYTES + crate::portable::MAX_DOCUMENT_BYTES
+        {
+            warnings.push(format!(
+                "{}: archive exceeds the package size limit",
+                path.display()
+            ));
+            continue;
+        }
         let bytes = fs::read(&path)?;
         if serde_json::from_slice::<Value>(&bytes)
             .ok()

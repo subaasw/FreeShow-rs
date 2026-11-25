@@ -209,6 +209,102 @@ impl ItemFilters {
 }
 
 impl ShowFile {
+    /// The Rust editor's grouping marker. Each member remains a regular FreeShow item.
+    pub fn layer_group(&self, slide_id: &str, index: usize) -> Option<&str> {
+        self.item(slide_id, index).and_then(layer_group)
+    }
+
+    pub fn group_members(&self, slide_id: &str, index: usize) -> Vec<usize> {
+        let Some(items) = self.items(slide_id) else {
+            return Vec::new();
+        };
+        let Some(item) = items.get(index) else {
+            return Vec::new();
+        };
+        let Some(group) = layer_group(item) else {
+            return vec![index];
+        };
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (layer_group(item) == Some(group)).then_some(index))
+            .collect()
+    }
+
+    pub fn set_layer_group(&mut self, slide_id: &str, index: usize, group: Option<&str>) -> bool {
+        let Some(item) = self.item_mut(slide_id, index) else {
+            return false;
+        };
+        if let Some(group) = group {
+            item.insert(LAYER_GROUP.into(), group.into());
+        } else {
+            item.remove(LAYER_GROUP);
+        }
+        true
+    }
+
+    pub fn layer_locked(&self, slide_id: &str, index: usize) -> bool {
+        self.item(slide_id, index).is_some_and(item_locked)
+    }
+
+    pub fn layer_hidden(&self, slide_id: &str, index: usize) -> bool {
+        self.item(slide_id, index).is_some_and(item_hidden)
+    }
+
+    pub fn set_layer_locked(&mut self, slide_id: &str, index: usize, locked: bool) -> bool {
+        let Some(item) = self
+            .items_mut(slide_id)
+            .and_then(|items| items.get_mut(index))
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        if locked {
+            item.insert(LAYER_LOCK.to_string(), Value::Bool(true));
+        } else {
+            item.remove(LAYER_LOCK);
+        }
+        true
+    }
+
+    pub fn set_layer_hidden(&mut self, slide_id: &str, index: usize, hidden: bool) -> bool {
+        let Some(item) = self
+            .items_mut(slide_id)
+            .and_then(|items| items.get_mut(index))
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        let style = item.get("style").and_then(Value::as_str).unwrap_or("");
+        let visibility_hides = hidden_visibility(inline_keyword(style, "visibility"));
+        let display_hides = inline_keyword(style, "display")
+            .is_some_and(|value| value.eq_ignore_ascii_case("none"));
+        if (visibility_hides || display_hides) == hidden {
+            return true;
+        }
+        let updated = if hidden {
+            hide_item_style(style)
+        } else {
+            style
+                .split_inclusive(';')
+                .filter(|declaration| {
+                    let Some((property, field)) = declaration.trim_end_matches(';').split_once(':')
+                    else {
+                        return true;
+                    };
+                    let property = property.trim();
+                    let (keyword, _) = css_priority(field);
+                    !(property.eq_ignore_ascii_case("visibility")
+                        && hidden_visibility(Some(keyword))
+                        || property.eq_ignore_ascii_case("display")
+                            && keyword.eq_ignore_ascii_case("none"))
+                })
+                .collect()
+        };
+        item.insert("style".into(), Value::String(updated));
+        true
+    }
+
     pub fn item_count(&self, slide_id: &str) -> usize {
         self.items(slide_id).map(Vec::len).unwrap_or(0)
     }
@@ -244,35 +340,36 @@ impl ShowFile {
         let Some(lines) = lines_value.as_array_mut() else {
             return false;
         };
-        let new_lines: Vec<&str> = if text.is_empty() {
-            Vec::new()
-        } else {
-            text.split('\n').collect()
+        crate::item_text::replace_box_lines(lines, text);
+        true
+    }
+
+    pub fn format_item_text_range(
+        &mut self,
+        slide_id: &str,
+        index: usize,
+        range: std::ops::Range<usize>,
+        key: &str,
+        value: &str,
+    ) -> bool {
+        if !self
+            .item_text(slide_id, index)
+            .and_then(|text| {
+                text.get(range.clone())
+                    .map(|selected| selected.contains(|ch| ch != '\n'))
+            })
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let Some(lines) = self
+            .item_mut(slide_id, index)
+            .and_then(|item| item.get_mut("lines"))
+            .and_then(Value::as_array_mut)
+        else {
+            return false;
         };
-        lines.truncate(new_lines.len());
-        while lines.len() < new_lines.len() {
-            lines.push(serde_json::json!({
-                "align": "",
-                "text": [{ "value": "", "style": "" }]
-            }));
-        }
-        for (line, text) in lines.iter_mut().zip(new_lines) {
-            let Some(line) = line.as_object_mut() else {
-                continue;
-            };
-            let parts = line
-                .entry("text")
-                .or_insert_with(|| Value::Array(Vec::new()));
-            let Some(parts) = parts.as_array_mut() else {
-                continue;
-            };
-            if parts.is_empty() {
-                parts.push(serde_json::json!({ "value": text, "style": "" }));
-            } else if let Some(first) = parts[0].as_object_mut() {
-                first.insert("value".to_string(), Value::String(text.to_string()));
-                parts.truncate(1);
-            }
-        }
+        crate::item_text::format_box_range(lines, range, key, value);
         true
     }
 
@@ -299,6 +396,18 @@ impl ShowFile {
         Some(items.len() - 1)
     }
 
+    pub fn duplicate_item_box(&mut self, slide_id: &str, index: usize) -> Option<usize> {
+        let items = self.items_mut(slide_id)?;
+        let mut duplicate = items.get(index)?.clone();
+        if let Some(object) = duplicate.as_object_mut() {
+            object.remove(LAYER_LOCK);
+            object.remove(LAYER_GROUP);
+        }
+        let insert_at = index + 1;
+        items.insert(insert_at, duplicate);
+        Some(insert_at)
+    }
+
     pub fn move_item_box(&mut self, slide_id: &str, index: usize, forward: bool) -> Option<usize> {
         let items = self.items_mut(slide_id)?;
         let next = if forward {
@@ -306,7 +415,11 @@ impl ShowFile {
         } else {
             index.checked_sub(1)?
         };
-        if index >= items.len() || next >= items.len() {
+        if index >= items.len()
+            || next >= items.len()
+            || item_locked(&items[index])
+            || item_locked(&items[next])
+        {
             return None;
         }
         items.swap(index, next);
@@ -317,7 +430,7 @@ impl ShowFile {
         let Some(items) = self.items_mut(slide_id) else {
             return false;
         };
-        if items.len() <= 1 || index >= items.len() {
+        if items.len() <= 1 || index >= items.len() || item_locked(&items[index]) {
             return false;
         }
         items.remove(index);
@@ -840,9 +953,11 @@ impl ShowFile {
         slide_id: &str,
         index: usize,
     ) -> Option<&mut serde_json::Map<String, Value>> {
-        self.items_mut(slide_id)?
-            .get_mut(index)
-            .and_then(Value::as_object_mut)
+        let item = self.items_mut(slide_id)?.get_mut(index)?;
+        if item_locked(item) {
+            return None;
+        }
+        item.as_object_mut()
     }
 
     fn ensure_item(&mut self, slide_id: &str, index: usize) -> bool {
@@ -892,6 +1007,71 @@ fn line_height_percent(value: &str) -> Option<i32> {
     Some(number.round() as i32)
 }
 
+const LAYER_GROUP: &str = "freeshowRustLayerGroup";
+
+fn layer_group(item: &Value) -> Option<&str> {
+    item.get(LAYER_GROUP)
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+}
+
+const LAYER_LOCK: &str = "freeshowRustLocked";
+
+pub fn item_locked(item: &Value) -> bool {
+    item.get(LAYER_LOCK).and_then(Value::as_bool) == Some(true)
+}
+
+pub fn item_hidden(item: &Value) -> bool {
+    let Some(style) = item.get("style").and_then(Value::as_str) else {
+        return false;
+    };
+    hidden_visibility(inline_keyword(style, "visibility"))
+        || inline_keyword(style, "display").is_some_and(|value| value.eq_ignore_ascii_case("none"))
+}
+
+pub(crate) fn hide_item_style(style: &str) -> String {
+    let style = style.trim_end();
+    if style.is_empty() {
+        "visibility:hidden !important;".into()
+    } else {
+        format!(
+            "{};visibility:hidden !important;",
+            style.trim_end_matches(';')
+        )
+    }
+}
+
+fn inline_keyword<'a>(style: &'a str, key: &str) -> Option<&'a str> {
+    let mut value = None;
+    let mut priority = false;
+    for (name, field) in style.split(';').filter_map(|decl| decl.split_once(':')) {
+        if name.trim().eq_ignore_ascii_case(key) {
+            let (field, important) = css_priority(field);
+            if important || !priority {
+                value = Some(field);
+                priority = important;
+            }
+        }
+    }
+    value
+}
+
+fn css_priority(field: &str) -> (&str, bool) {
+    match field.rsplit_once('!') {
+        Some((keyword, flag)) if flag.trim().eq_ignore_ascii_case("important") => {
+            (keyword.trim(), true)
+        }
+        _ => (field.trim(), false),
+    }
+}
+
+fn hidden_visibility(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse")
+    })
+}
+
+/// The value of `key` in an inline CSS declaration list.
 pub fn css_value(style: &str, key: &str) -> Option<String> {
     for decl in style.split(';') {
         let decl = decl.trim();
@@ -920,7 +1100,11 @@ pub fn css_px(style: &str, key: &str) -> Option<i32> {
         .trim_end_matches("px")
         .trim_end_matches("pt")
         .trim();
-    number.parse().ok()
+    number
+        .parse::<f32>()
+        .ok()
+        .filter(|number| number.is_finite())
+        .map(|number| number.round() as i32)
 }
 
 /// `style` with `key` replaced by `value`; an empty value removes the declaration.
@@ -952,6 +1136,59 @@ pub fn css_set(style: &str, key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_text_stays_editable_without_adding_reveal_steps() {
+        let mut show = ShowFile::blank("test", "Test");
+        assert!(show.set_item_text("s1", 0, "First\nSecond"));
+        show.show["slides"]["s1"]["items"][0]["clickReveal"] = Value::Bool(true);
+        show.show["slides"]["s1"]["items"][0]["lineReveal"] = Value::Bool(true);
+        assert_eq!(show.most_lines(0), 2);
+        assert!(show.has_click_reveal(0));
+        assert_eq!(show.line_reveal_lines(0), Some(2));
+
+        assert!(show.set_layer_hidden("s1", 0, true));
+        assert_eq!(show.most_lines(0), 0);
+        assert!(!show.has_click_reveal(0));
+        assert_eq!(show.line_reveal_lines(0), None);
+        assert_eq!(
+            show.stage_text_boxes(0, true, 2, true, None),
+            [Vec::<String>::new()]
+        );
+        assert_eq!(show.item_text("s1", 0).as_deref(), Some("First\nSecond"));
+    }
+
+    #[test]
+    fn imported_visibility_uses_the_effective_css_declaration() {
+        let mut show = ShowFile::blank("test", "Test");
+        let slide = &mut show.show["slides"]["s1"];
+        slide["items"][0]["style"] =
+            serde_json::json!("visibility:hidden;visibility:visible;display:flex;left:30px;");
+        assert!(!show.layer_hidden("s1", 0));
+        assert!(show.set_layer_hidden("s1", 0, true));
+        assert!(show.layer_hidden("s1", 0));
+        assert_eq!(show.item_box("s1", 0).left, 30);
+        assert!(show.set_layer_hidden("s1", 0, false));
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert_eq!(css_value(style, "display").as_deref(), Some("flex"));
+
+        show.show["slides"]["s1"]["items"][0]["style"] =
+            serde_json::json!("display:none !important;display:flex;left:30px;");
+        assert!(show.layer_hidden("s1", 0));
+        assert!(show.set_layer_hidden("s1", 0, false));
+        assert!(!show.layer_hidden("s1", 0));
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert_eq!(css_value(style, "display").as_deref(), Some("flex"));
+
+        show.show["slides"]["s1"]["items"][0]["style"] = Value::String(String::new());
+        assert!(show.set_layer_hidden("s1", 0, true));
+        assert!(show.set_layer_hidden("s1", 0, false));
+        assert_eq!(show.show["slides"]["s1"]["items"][0]["style"], "");
+    }
 
     #[test]
     fn item_filters_round_trip_and_drop_what_changes_nothing() {
