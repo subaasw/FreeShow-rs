@@ -15,6 +15,8 @@ pub struct OmtSender {
     width: u32,
     height: u32,
     frames: mpsc::SyncSender<Vec<u8>>,
+    worker: std::thread::JoinHandle<()>,
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl OmtSender {
@@ -22,13 +24,16 @@ impl OmtSender {
         let (tx, rx) = mpsc::sync_channel(1);
         let name = name.to_string();
         let output = output.to_string();
-        std::thread::Builder::new()
+        let ready = std::sync::Arc::<std::sync::atomic::AtomicBool>::default();
+        let worker_ready = ready.clone();
+        let worker = std::thread::Builder::new()
             .name("freeshow-omt".into())
             .spawn(move || {
                 let start = || {
                     let mut sender = Sender::create(&name, FrameType::VIDEO | FrameType::AUDIO)?;
                     let mut discovery = Discovery::new()?;
                     discovery.register(&name, sender.port())?;
+                    worker_ready.store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!("omt sender {name} on port {}", sender.port());
                     stream(&mut sender, width, height, &rx, &output)
                 };
@@ -40,12 +45,19 @@ impl OmtSender {
             width,
             height,
             frames: tx,
+            worker,
+            ready,
         })
+    }
+
+    pub fn status(&self) -> crate::SenderStatus {
+        crate::sender_status(&self.worker, &self.ready)
     }
 
     pub fn submit(&self, pixels: &[u8], width: u32, height: u32) {
         if (width, height) == (self.width, self.height)
             && pixels.len() == width as usize * height as usize * 4
+            && !self.worker.is_finished()
         {
             let _ = self.frames.try_send(pixels.to_vec());
         }
