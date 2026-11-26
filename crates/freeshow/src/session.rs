@@ -18,6 +18,7 @@ use freeshow_media::{MediaKind, cameras, media_kind};
 use crate::slide_countdown::SlideCountdown;
 
 mod drawer_edit;
+mod editor_text;
 mod layer_builds;
 mod library_edit;
 mod panels;
@@ -236,15 +237,16 @@ pub struct Session {
     pub metronome_on: bool,
     metronome_started: Option<std::time::Instant>,
     pub metronome_beat: u32,
-    history: Vec<EditSnapshot>,
+    history: Vec<HistoryEntry>,
     layer_selection: Option<slide_layers::LayerSelection>,
     drafts: Vec<recovery::PendingDraft>,
+    pending_editor_text: Vec<editor_text::PendingEditorText>,
     timer_save_bases: HashMap<String, serde_json::Value>,
     /// Last library action result, shown in the status bar.
     pub notice: String,
     /// Shows deleted this session, newest last, for Restore.
     deleted_shows: Vec<ShowFile>,
-    redo: Vec<EditSnapshot>,
+    redo: Vec<HistoryEntry>,
     pub focus_mode: bool,
     pub guide_visible: bool,
     pub kiosk: bool,
@@ -502,6 +504,7 @@ impl Session {
             history: Vec::new(),
             layer_selection: None,
             drafts: Vec::new(),
+            pending_editor_text: Vec::new(),
             timer_save_bases: HashMap::new(),
             notice: String::new(),
             deleted_shows: Vec::new(),
@@ -716,6 +719,7 @@ impl Session {
                 .into_iter()
                 .map(recovery::PendingDraft::recorded)
                 .collect(),
+            pending_editor_text: Vec::new(),
             notice: String::new(),
             deleted_shows: Vec::new(),
             timer_save_bases: HashMap::new(),
@@ -2604,16 +2608,25 @@ impl Session {
             return false;
         };
         let snapshot = self.show_edit_snapshot(index, "Edit show");
+        let layout = self.shows[index].active_layout();
         if !edit(&mut self.shows[index]) {
             return false;
         }
-        if let Err(error) = self.persist_show_edit(index, snapshot) {
+        if let Err(error) = self.persist_show_edit_then(index, snapshot, |session| {
+            if session.shows[index].active_layout() != layout {
+                session.slide_index = Some(0);
+                session.item_index = 0;
+            } else if session.show_index != Some(index) {
+                session.slide_index = session.shows[index].first_enabled_slide();
+                session.item_index = 0;
+            }
+            session.layer_selection = None;
+            session.tab = "shows".to_string();
+            session.show_index = Some(index);
+        }) {
             self.notice = error;
             return false;
         }
-        self.layer_selection = None;
-        self.tab = "shows".to_string();
-        self.show_index = Some(index);
         self.hold_program();
         true
     }
@@ -4683,6 +4696,19 @@ impl Session {
         label: &str,
         edit: impl FnOnce(&mut ShowFile, &str, usize) -> bool,
     ) -> bool {
+        self.edit_selected_slide_then(
+            label,
+            |show, slide, item| edit(show, slide, item).then_some(()),
+            |_, ()| {},
+        )
+    }
+
+    fn edit_selected_slide_then<T>(
+        &mut self,
+        label: &str,
+        edit: impl FnOnce(&mut ShowFile, &str, usize) -> Option<T>,
+        select: impl FnOnce(&mut Self, T),
+    ) -> bool {
         let Some(snapshot) = self.edit_snapshot(label) else {
             return false;
         };
@@ -4700,11 +4726,11 @@ impl Session {
         let item = self
             .item_index
             .min(show.item_count(&slide_id).saturating_sub(1));
-        if !edit(show, &slide_id, item) {
+        let Some(selection) = edit(show, &slide_id, item) else {
             show.show = snapshot.show;
             return false;
-        }
-        match self.persist_show_edit(index, snapshot) {
+        };
+        match self.persist_show_edit_then(index, snapshot, |session| select(session, selection)) {
             Ok(()) => true,
             Err(error) => {
                 self.notice = error;
@@ -4714,7 +4740,14 @@ impl Session {
     }
 
     pub fn add_item_box(&mut self) -> bool {
-        self.edit_and_select_item(|show, slide, _| show.add_item_box(slide))
+        self.edit_and_select_item("Edit item", |show, slide, _| show.add_item_box(slide))
+    }
+
+    pub fn add_shape_box(&mut self, preset: &str) -> bool {
+        let size = self.edit_source_size();
+        self.edit_and_select_item("Add shape", |show, slide, _| {
+            show.add_shape_box(slide, preset, size)
+        })
     }
 
     pub fn slide_pictures(&self) -> impl Iterator<Item = &MediaEntry> {
@@ -4742,6 +4775,41 @@ impl Session {
     }
 
     pub fn add_picture_box(&mut self, index: usize) -> Result<(), String> {
+        let (_, src) = self.slide_picture_source(index)?;
+        if !self.edit_and_select_item("Edit item", |show, slide, _| {
+            show.add_picture_box(slide, &src)
+        }) {
+            return Err("Could not save the picture box".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn can_replace_picture_box(&self) -> bool {
+        self.layer_indices().len() == 1
+            && self.selected_layer_slide().is_some_and(|(show, slide)| {
+                show.can_replace_item_picture(&slide, self.current_item(show))
+            })
+    }
+
+    pub fn replace_picture_box(&mut self, index: usize) -> Result<(), String> {
+        if !self.can_replace_picture_box() {
+            return Err("Select one unlocked picture layer".into());
+        }
+        let (path, src) = self.slide_picture_source(index)?;
+        let bytes =
+            std::fs::read(path).map_err(|error| format!("Could not read the picture. {error}"))?;
+        if decode_image(&bytes).is_none() {
+            return Err("FreeShow could not open the replacement picture".into());
+        }
+        if !self.edit_selected_slide("Replace picture", |show, slide, item| {
+            show.replace_item_picture(slide, item, &src)
+        }) {
+            return Err("Could not replace the picture".into());
+        }
+        Ok(())
+    }
+
+    fn slide_picture_source(&self, index: usize) -> Result<(&Path, String), String> {
         let picture = self
             .slide_pictures()
             .nth(index)
@@ -4760,26 +4828,19 @@ impl Session {
         } else {
             src.to_string()
         };
-        if !self.edit_and_select_item(|show, slide, _| show.add_picture_box(slide, &src)) {
-            return Err("Could not save the picture box".to_string());
-        }
-        Ok(())
+        Ok((&picture.path, src))
     }
 
     fn edit_and_select_item(
         &mut self,
+        label: &str,
         edit: impl FnOnce(&mut ShowFile, &str, usize) -> Option<usize>,
     ) -> bool {
-        let mut next = None;
-        let saved = self.edit_current_item(|show, slide, index| {
-            next = edit(show, slide, index);
-            next.is_some()
-        });
-        if saved && let Some(next) = next {
-            self.item_index = next;
-            self.layer_selection = None;
-        }
-        saved
+        self.tab == "shows"
+            && self.edit_selected_slide_then(label, edit, |session, next| {
+                session.item_index = next;
+                session.layer_selection = None;
+            })
     }
 
     pub fn set_font_family(&mut self, family: &str) -> bool {
@@ -5364,16 +5425,18 @@ impl Session {
         ) {
             return false;
         }
-        if let Err(error) = self.persist_show_edit(index, snapshot) {
+        if let Err(error) = self.persist_show_edit_then(index, snapshot, |session| {
+            session.layer_selection = None;
+            session.tab = "shows".to_string();
+            session.show_index = Some(index);
+            session.slide_index = Some(0);
+            session.item_index = 0;
+        }) {
             self.notice = error;
             return false;
         }
-        self.layer_selection = None;
-        self.tab = "shows".to_string();
         self.hold_program();
         self.slide_hidden = false;
-        self.show_index = Some(index);
-        self.slide_index = Some(0);
         true
     }
 
@@ -5392,11 +5455,14 @@ impl Session {
             return false;
         }
         let slide = show.ordered_slides().len().saturating_sub(1);
-        if let Err(error) = self.persist_show_edit(index, snapshot) {
+        if let Err(error) = self.persist_show_edit_then(index, snapshot, |session| {
+            session.slide_index = Some(slide);
+            session.layer_selection = None;
+            session.item_index = 0;
+        }) {
             self.notice = error;
             return false;
         }
-        self.slide_index = Some(slide);
         self.hold_program();
         self.slide_hidden = false;
         true
@@ -5466,6 +5532,31 @@ impl Session {
         };
         let library = Library::open(root);
         if let Ok(mut shows) = library.list_shows() {
+            let previous: HashMap<_, _> = self
+                .shows
+                .iter()
+                .map(|show| (show.id.as_str(), &show.show))
+                .collect();
+            let mut unchanged = BTreeSet::new();
+            for fresh in &mut shows {
+                let Some(&loaded) = previous.get(fresh.id.as_str()) else {
+                    continue;
+                };
+                if loaded != &fresh.show {
+                    if self.timer_save_bases.get(&fresh.id) != Some(&fresh.show) {
+                        continue;
+                    }
+                    // An unrelated import must not discard pending timer edits.
+                    fresh.show.clone_from(loaded);
+                }
+                unchanged.insert(fresh.id.clone());
+            }
+            // History from a different on-disk revision could overwrite external edits.
+            self.history
+                .retain(|entry| unchanged.contains(&entry.snapshot.show_id));
+            self.redo
+                .retain(|entry| unchanged.contains(&entry.snapshot.show_id));
+            self.timer_save_bases.retain(|id, _| unchanged.contains(id));
             if let Some(show) = self.current_show() {
                 let previous_slide = self.slide_index.and_then(|index| {
                     show.ordered_slides()
@@ -6630,12 +6721,22 @@ fn overlay_views(catalog: &Catalog) -> Vec<freeshow_remote::RemoteOverlay> {
 
 #[derive(Debug, Clone)]
 struct EditSnapshot {
-    selection: Option<slide_layers::LayerSelection>,
     label: String,
     show_id: String,
     show: serde_json::Value,
+    selection: EditSelection,
+}
+
+struct HistoryEntry {
+    snapshot: EditSnapshot,
+    opposite_selection: EditSelection,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EditSelection {
     slide_index: Option<usize>,
     item_index: usize,
+    layers: Option<slide_layers::LayerSelection>,
 }
 
 impl Session {
@@ -6646,27 +6747,35 @@ impl Session {
 
     fn show_edit_snapshot(&self, index: usize, label: &str) -> EditSnapshot {
         let show = &self.shows[index];
-        let selected = self.show_index == Some(index);
         EditSnapshot {
-            selection: selected.then(|| self.layer_selection.clone()).flatten(),
             label: label.to_string(),
             show_id: show.id.clone(),
             show: show.show.clone(),
-            slide_index: if selected {
-                self.slide_index
-            } else {
-                show.first_enabled_slide()
-            },
-            item_index: if selected { self.item_index } else { 0 },
+            selection: self.edit_selection(index),
         }
     }
 
-    fn commit_edit(&mut self, snap: Option<EditSnapshot>) {
-        let Some(snap) = snap else {
-            return;
-        };
-        self.hold_edited_program(&snap.show_id);
-        self.history.push(snap);
+    fn edit_selection(&self, index: usize) -> EditSelection {
+        if self.show_index == Some(index) {
+            EditSelection {
+                slide_index: self.slide_index,
+                item_index: self.item_index,
+                layers: self.layer_selection.clone(),
+            }
+        } else {
+            EditSelection {
+                slide_index: self.shows[index].first_enabled_slide(),
+                ..Default::default()
+            }
+        }
+    }
+
+    fn commit_edit(&mut self, index: usize, snapshot: EditSnapshot) {
+        self.hold_edited_program(&snapshot.show_id);
+        self.history.push(HistoryEntry {
+            snapshot,
+            opposite_selection: self.edit_selection(index),
+        });
         self.redo.clear();
         if self.history.len() > 40 {
             self.history.remove(0);
@@ -6738,12 +6847,19 @@ impl Session {
         true
     }
 
-    fn restore_snapshot(&mut self, snap: &EditSnapshot) -> Result<EditSnapshot, String> {
-        let index = self
+    fn restore_snapshot(&mut self, entry: &HistoryEntry) -> Result<HistoryEntry, String> {
+        let snap = &entry.snapshot;
+        let mut targets = self
             .shows
             .iter()
-            .position(|show| show.id == snap.show_id)
+            .enumerate()
+            .filter(|(_, show)| show.id == snap.show_id);
+        let (index, _) = targets
+            .next()
             .ok_or_else(|| "The edited show is no longer in the library".to_string())?;
+        if targets.next().is_some() {
+            return Err("More than one show has the edited show’s ID".into());
+        }
         self.check_pending_show_draft(index)?;
         let show = &self.shows[index];
         let restored = ShowFile {
@@ -6760,32 +6876,25 @@ impl Session {
             restored.save(path).map_err(|err| err.to_string())?;
         }
 
-        let same_show = self.show_index == Some(index);
         let current = std::mem::replace(&mut self.shows[index], restored);
         self.timer_save_bases.remove(&current.id);
-        let inverse = EditSnapshot {
-            selection: same_show.then(|| self.layer_selection.clone()).flatten(),
-            label: snap.label.clone(),
-            show_id: current.id,
-            show: current.show,
-            slide_index: if same_show {
-                self.slide_index
-            } else {
-                snap.slide_index
+        // Each selection is paired with its exact saved layout, including repeated slides.
+        let inverse = HistoryEntry {
+            snapshot: EditSnapshot {
+                label: snap.label.clone(),
+                show_id: current.id,
+                show: current.show,
+                selection: entry.opposite_selection.clone(),
             },
-            item_index: if same_show {
-                self.item_index
-            } else {
-                snap.item_index
-            },
+            opposite_selection: snap.selection.clone(),
         };
         self.hold_edited_program(&snap.show_id);
         self.hold_program();
         self.tab = "shows".to_string();
         self.show_index = Some(index);
-        self.slide_index = snap.slide_index;
-        self.item_index = snap.item_index;
-        self.layer_selection.clone_from(&snap.selection);
+        self.slide_index = snap.selection.slide_index;
+        self.item_index = snap.selection.item_index;
+        self.layer_selection.clone_from(&snap.selection.layers);
         Ok(inverse)
     }
 
@@ -6841,7 +6950,9 @@ impl Session {
 
     #[cfg(test)]
     pub fn last_edit_label(&self) -> Option<&str> {
-        self.history.last().map(|snap| snap.label.as_str())
+        self.history
+            .last()
+            .map(|entry| entry.snapshot.label.as_str())
     }
 
     pub fn toggle_focus_mode(&mut self) -> bool {
@@ -8107,33 +8218,56 @@ mod tests {
         let first_path = session.shows[first].path.clone().unwrap();
         let second_path = session.shows[second].path.clone().unwrap();
         session.select_drawer(first);
-        session.select_slide_for_edit(0);
+        session.select_slide(0);
+        let on_air = crate::live::audience_frame(&session);
         assert!(session.save_lyrics("Second"));
         let edited = session.shows[first].show.clone();
         let other = session.shows[second].show.clone();
         session.select_drawer(second);
 
-        let blocked = root.join("blocked");
-        std::fs::write(&blocked, "a file cannot be a parent directory").unwrap();
-        session.shows[first].path = Some(blocked.join("Alpha.show"));
+        let mut duplicate = session.shows[second].clone();
+        duplicate.id = "a".into();
+        duplicate.path = None;
+        session.shows.insert(0, duplicate);
+        session.show_index = Some(second + 1);
+        assert!(!session.undo());
+        assert!(session.notice.contains("More than one show"));
+        session.shows.remove(0);
+        session.show_index = Some(second);
+
+        let blocked = first_path.with_extension("show.tmp");
+        std::fs::create_dir(&blocked).unwrap();
         assert!(!session.undo());
         assert!(session.notice.contains("Undo failed"));
         assert_eq!(session.show_index, Some(second));
         assert_eq!(session.shows[first].show, edited);
         assert_eq!(ShowFile::load(&first_path).unwrap().show, edited);
-        assert!(session.can_undo());
-        assert!(!session.can_redo());
+        assert_eq!((session.history.len(), session.redo.len()), (1, 0));
 
-        session.shows[first].path = Some(first_path.clone());
+        std::fs::remove_dir(&blocked).unwrap();
         session.shows.swap(first, second);
         session.show_index = Some(first);
         assert!(session.undo());
+        assert_eq!(session.current_show().unwrap().id, "a");
         assert_eq!(session.lyrics(), "First");
+        let undone = session.current_show().unwrap().show.clone();
         session.select_drawer(first);
+
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(!session.redo());
+        assert!(session.notice.contains("Redo failed"));
+        assert_eq!(session.current_show().unwrap().id, "b");
+        assert_eq!(session.shows[second].show, undone);
+        assert_eq!(ShowFile::load(&first_path).unwrap().show, undone);
+        assert_eq!((session.history.len(), session.redo.len()), (0, 1));
+
+        std::fs::remove_dir(&blocked).unwrap();
         assert!(session.redo());
+        assert_eq!(session.current_show().unwrap().id, "a");
         assert_eq!(session.lyrics(), "Second");
         assert_eq!(ShowFile::load(&first_path).unwrap().show, edited);
         assert_eq!(ShowFile::load(&second_path).unwrap().show, other);
+        assert_eq!(crate::live::audience_frame(&session), on_air);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -11858,6 +11992,37 @@ Second line"
     }
 
     #[test]
+    fn import_refresh_preserves_external_changes_and_keeps_unrelated_undo() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = Session::open(root.path().to_path_buf());
+        assert!(session.create_show_with("a", "Alpha", "Alpha original"));
+        assert!(session.save_lyrics("Alpha edit"));
+        let alpha = session.current_show().unwrap().path.clone().unwrap();
+        assert!(session.create_show_with("b", "Bravo", "Bravo original"));
+        assert!(session.save_lyrics("Bravo first edit"));
+        assert!(session.save_lyrics("Bravo second edit"));
+        assert!(session.undo());
+        assert_eq!(session.history.len(), 2);
+        assert_eq!(session.redo.len(), 1);
+        let mut external = session.current_show().unwrap().clone();
+        let bravo = external.path.clone().unwrap();
+        external.show["externalField"] = serde_json::json!({"preserve": true});
+        external.save(&bravo).unwrap();
+
+        session.reload_import_catalog(None);
+        assert_eq!(session.current_show().unwrap().show, external.show);
+        assert_eq!(session.history.len(), 1);
+        assert!(!session.can_redo());
+        assert!(session.undo());
+        assert_eq!(session.current_show().unwrap().id, "a");
+        assert_eq!(
+            ShowFile::load(&alpha).unwrap().lyrics_text(),
+            "Alpha original"
+        );
+        assert_eq!(ShowFile::load(&bravo).unwrap().show, external.show);
+    }
+
+    #[test]
     fn autosave_writes_a_changed_show_once() {
         let root =
             std::env::temp_dir().join(format!("freeshow-rust-autosave-{}", std::process::id()));
@@ -11870,6 +12035,8 @@ Second line"
             .timer_save_bases
             .insert(show.id.clone(), show.show.clone());
         show.show["name"] = serde_json::json!("Changed");
+        session.reload_import_catalog(None);
+        assert_eq!(session.shows[0].name(), "Changed");
         let backups = root.join("Backups");
         let before = std::fs::read_dir(&backups)
             .map(|dir| dir.count())

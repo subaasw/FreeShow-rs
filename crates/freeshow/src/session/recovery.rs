@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{EditSnapshot, Session};
+use super::{EditSelection, EditSnapshot, Session};
 use freeshow_data::{Library, ShowDraft, ShowFile, new_id};
 use std::path::Path;
 
@@ -17,13 +17,25 @@ impl PendingDraft {
             recorded: true,
         }
     }
+
+    pub(super) fn destination(&self) -> &Path {
+        &self.draft.destination
+    }
+
+    fn record_if_needed(&mut self) -> Result<(), freeshow_data::DataError> {
+        if !self.recorded {
+            self.draft.record()?;
+            self.recorded = true;
+        }
+        Ok(())
+    }
 }
 
 impl Session {
     pub(super) fn has_pending_show_draft(&self, path: &Path) -> bool {
         self.drafts
             .iter()
-            .any(|pending| pending.draft.destination == path)
+            .any(|pending| pending.destination() == path)
     }
 
     pub(super) fn check_pending_show_draft(&self, index: usize) -> Result<(), String> {
@@ -43,20 +55,55 @@ impl Session {
         index: usize,
         snapshot: EditSnapshot,
     ) -> Result<(), String> {
+        self.persist_show_edit_then(index, snapshot, |_| {})
+    }
+
+    pub(super) fn persist_show_edit_then(
+        &mut self,
+        index: usize,
+        snapshot: EditSnapshot,
+        select: impl FnOnce(&mut Self),
+    ) -> Result<(), String> {
+        self.persist_edit(index, snapshot, false, select)
+    }
+
+    pub(super) fn persist_typing_edit(
+        &mut self,
+        index: usize,
+        snapshot: EditSnapshot,
+        select: impl FnOnce(&mut Self),
+    ) -> Result<(), String> {
+        self.persist_edit(index, snapshot, true, select)
+    }
+
+    fn persist_edit(
+        &mut self,
+        index: usize,
+        snapshot: EditSnapshot,
+        typing: bool,
+        select: impl FnOnce(&mut Self),
+    ) -> Result<(), String> {
         if self.shows[index].show == snapshot.show {
+            select(self);
             return Ok(());
         }
-        if let Err(error) = self.write_show_edit(index, &snapshot) {
+        if let Err(error) = self.write_show_edit(index, &snapshot, typing) {
             self.shows[index].show = snapshot.show;
             return Err(error);
         }
         self.timer_save_bases.remove(&snapshot.show_id);
-        self.commit_edit(Some(snapshot));
+        select(self);
+        self.commit_edit(index, snapshot);
         self.notice.clear();
         Ok(())
     }
 
-    fn write_show_edit(&mut self, index: usize, snapshot: &EditSnapshot) -> Result<(), String> {
+    fn write_show_edit(
+        &mut self,
+        index: usize,
+        snapshot: &EditSnapshot,
+        typing: bool,
+    ) -> Result<(), String> {
         self.check_pending_show_draft(index)?;
         let show = &self.shows[index];
         let Some(path) = &show.path else {
@@ -74,9 +121,12 @@ impl Session {
             .timer_save_bases
             .get(&show.id)
             .unwrap_or(&snapshot.show);
-        let draft = library
-            .prepare_show_draft(show, base)
-            .map_err(|err| err.to_string())?;
+        let draft = if typing {
+            library.prepare_typing_draft(show, base)
+        } else {
+            library.prepare_show_draft(show, base)
+        }
+        .map_err(|err| err.to_string())?;
         if let Err(error) = draft.record() {
             self.drafts.push(PendingDraft {
                 draft,
@@ -118,6 +168,37 @@ impl Session {
         })
     }
 
+    pub fn record_memory_drafts(&mut self) -> Result<(), freeshow_data::DataError> {
+        self.drafts
+            .iter_mut()
+            .try_for_each(PendingDraft::record_if_needed)
+    }
+
+    pub(super) fn keep_conflicting_edit(
+        &mut self,
+        edited: &ShowFile,
+        base: &serde_json::Value,
+    ) -> Result<(), String> {
+        let library = self
+            .root
+            .as_ref()
+            .map(Library::open)
+            .ok_or("Choose a library first")?;
+        let draft = library
+            .prepare_typing_draft(edited, base)
+            .map_err(|error| error.to_string())?;
+        let mut pending = PendingDraft {
+            draft,
+            recorded: false,
+        };
+        let status = match pending.record_if_needed() {
+            Ok(()) => "The show changed while you were typing. Save the recovery draft as a copy to keep both versions.".into(),
+            Err(error) => format!("The show changed while you were typing. The recovery draft is still in memory. {error}"),
+        };
+        self.drafts.push(pending);
+        Err(status)
+    }
+
     pub(super) fn resolve_show_draft(&mut self, action: &str) -> Result<String, String> {
         let Some(pending) = self.drafts.first().cloned() else {
             return Err("There is no recovery draft".into());
@@ -129,34 +210,42 @@ impl Session {
             .position(|show| show.path.as_ref() == Some(&draft.destination));
         match action {
             "retry-draft" => {
-                if !pending.recorded {
-                    draft.record().map_err(|error| error.to_string())?;
-                    self.drafts[0].recorded = true;
-                }
+                self.drafts[0]
+                    .record_if_needed()
+                    .map_err(|error| error.to_string())?;
                 let show = draft.apply().map_err(|error| error.to_string())?;
                 self.hold_program();
                 self.tab = "shows".into();
-                match original_index {
+                let index = match original_index {
                     Some(index) => {
                         self.shows[index] = show;
                         self.show_index = Some(index);
                         self.slide_index = self.first_slide();
                         self.item_index = 0;
+                        index
                     }
-                    None => {
-                        self.insert_sorted(show);
-                    }
-                }
+                    None => self.insert_sorted(show),
+                };
                 self.timer_save_bases.remove(&draft.id);
                 self.layer_selection = None;
-                self.commit_edit(Some(EditSnapshot {
-                    selection: None,
-                    label: "Recover show".to_string(),
-                    show_id: draft.id.clone(),
+                let base = ShowFile {
+                    id: draft.id.clone(),
                     show: draft.base.clone(),
-                    slide_index: self.slide_index,
-                    item_index: self.item_index,
-                }));
+                    path: None,
+                };
+                let selection = EditSelection {
+                    slide_index: base.first_enabled_slide(),
+                    ..Default::default()
+                };
+                self.commit_edit(
+                    index,
+                    EditSnapshot {
+                        label: "Recover show".to_string(),
+                        show_id: base.id,
+                        show: base.show,
+                        selection,
+                    },
+                );
             }
             "copy-draft" => {
                 let id = new_id();
@@ -197,16 +286,30 @@ impl Session {
 
     fn keep_saved_version(&mut self, draft: &ShowDraft, original_index: Option<usize>) {
         if let (Some(index), Ok(show)) = (original_index, draft.saved_show()) {
-            self.hold_edited_program(&draft.id);
-            self.timer_save_bases.remove(&draft.id);
+            let current = &self.shows[index];
+            if show.id == current.id {
+                if show.show == current.show {
+                    self.timer_save_bases.remove(&current.id);
+                    return;
+                }
+                if self.timer_save_bases.get(&current.id) == Some(&show.show) {
+                    // The saved base still matches the timer edits waiting to be written.
+                    return;
+                }
+            }
+            let previous_id = current.id.clone();
+            self.hold_edited_program(&previous_id);
+            self.timer_save_bases.remove(&previous_id);
             self.shows[index] = show;
             if self.show_index == Some(index) {
                 self.layer_selection = None;
                 self.slide_index = self.first_slide();
                 self.item_index = 0;
             }
-            self.history.retain(|entry| entry.show_id != draft.id);
-            self.redo.retain(|entry| entry.show_id != draft.id);
+            self.history
+                .retain(|entry| entry.snapshot.show_id != previous_id);
+            self.redo
+                .retain(|entry| entry.snapshot.show_id != previous_id);
         }
     }
 }
@@ -308,7 +411,16 @@ mod tests {
         assert!(!session.save_lyrics("Draft"));
         assert_eq!(session.lyrics(), "Original");
         assert!(session.show_draft_status().contains("Draft in memory"));
+        assert!(session.record_memory_drafts().is_err());
+        assert!(session.show_draft_status().contains("Draft in memory"));
         std::fs::remove_file(directory).unwrap();
+        session.record_memory_drafts().unwrap();
+        assert!(session.show_draft_status().contains("Recovery draft"));
+        assert_eq!(session.lyrics(), "Original");
+        drop(session);
+
+        let mut session = Session::open(root.clone());
+        assert!(session.show_draft_status().contains("Recovery draft"));
         session.library_action("retry-draft", "").unwrap();
         assert_eq!(session.lyrics(), "Draft");
         assert!(session.show_draft_status().is_empty());

@@ -481,15 +481,16 @@ impl Session {
         } else {
             "Ungroup layers"
         };
-        if !self.edit_selected_slide(label, |show, slide, _| {
-            indices
-                .iter()
-                .all(|&index| show.set_layer_group(slide, index, id.as_deref()))
-        }) {
-            return false;
-        }
-        self.set_layer_selection(indices, primary);
-        true
+        self.edit_selected_slide_then(
+            label,
+            |show, slide, _| {
+                indices
+                    .iter()
+                    .all(|&index| show.set_layer_group(slide, index, id.as_deref()))
+                    .then_some(indices)
+            },
+            |session, indices| session.set_layer_selection(indices, primary),
+        )
     }
 
     pub fn exclude_primary_layer(&mut self) {
@@ -519,37 +520,42 @@ impl Session {
         let Some(at) = selected.iter().position(|&index| index == primary) else {
             return false;
         };
-        if !self.edit_selected_slide("Duplicate layers", |show, slide, _| {
-            let mut groups = std::collections::HashMap::new();
-            for group in selected
-                .iter()
-                .filter_map(|&index| show.layer_group(slide, index))
-            {
-                let (count, _) = groups
-                    .entry(group.to_owned())
-                    .or_insert_with(|| (0, freeshow_data::new_id()));
-                *count += 1;
-            }
-            selected.iter().rev().all(|&index| {
-                let group = show
-                    .layer_group(slide, index)
-                    .and_then(|id| groups.get(id))
-                    .filter(|(count, _)| *count > 1)
-                    .map(|(_, id)| id.as_str());
-                show.duplicate_item_box(slide, index)
-                    .is_some_and(|copy| group.is_none() || show.set_layer_group(slide, copy, group))
-            })
-        }) {
-            return false;
-        }
-        let copies: Vec<_> = selected
-            .iter()
-            .enumerate()
-            .map(|(offset, index)| index + offset + 1)
-            .collect();
-        let primary = copies[at];
-        self.set_layer_selection(copies, primary);
-        true
+        self.edit_selected_slide_then(
+            "Duplicate layers",
+            |show, slide, _| {
+                let mut groups = std::collections::HashMap::new();
+                for group in selected
+                    .iter()
+                    .filter_map(|&index| show.layer_group(slide, index))
+                {
+                    let (count, _) = groups
+                        .entry(group.to_owned())
+                        .or_insert_with(|| (0, freeshow_data::new_id()));
+                    *count += 1;
+                }
+                let duplicated = selected.iter().rev().all(|&index| {
+                    let group = show
+                        .layer_group(slide, index)
+                        .and_then(|id| groups.get(id))
+                        .filter(|(count, _)| *count > 1)
+                        .map(|(_, id)| id.as_str());
+                    show.duplicate_item_box(slide, index).is_some_and(|copy| {
+                        group.is_none() || show.set_layer_group(slide, copy, group)
+                    })
+                });
+                duplicated.then(|| {
+                    selected
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, index)| index + offset + 1)
+                        .collect::<Vec<_>>()
+                })
+            },
+            |session, copies| {
+                let primary = copies[at];
+                session.set_layer_selection(copies, primary);
+            },
+        )
     }
 
     pub fn can_move_layers(&self, forward: bool) -> bool {
@@ -575,35 +581,33 @@ impl Session {
         if !self.can_move_layers(forward) {
             return false;
         }
-        if !self.edit_selected_slide("Reorder layers", |show, slide, _| {
-            let count = show.item_count(slide);
-            for visit in 0..selected.len() {
-                let at = if forward {
-                    selected.len() - 1 - visit
-                } else {
-                    visit
-                };
-                let from = selected[at];
-                let Some(next) = adjacent_layer(from, count, forward) else {
-                    continue;
-                };
-                if selected.binary_search(&next).is_ok() || show.layer_locked(slide, next) {
-                    continue;
+        self.edit_selected_slide_then(
+            "Reorder layers",
+            |show, slide, _| {
+                let count = show.item_count(slide);
+                for visit in 0..selected.len() {
+                    let at = if forward {
+                        selected.len() - 1 - visit
+                    } else {
+                        visit
+                    };
+                    let from = selected[at];
+                    let Some(next) = adjacent_layer(from, count, forward) else {
+                        continue;
+                    };
+                    if selected.binary_search(&next).is_ok() || show.layer_locked(slide, next) {
+                        continue;
+                    }
+                    show.move_item_box(slide, from, forward)?;
+                    selected[at] = next;
+                    if from == primary {
+                        primary = next;
+                    }
                 }
-                if show.move_item_box(slide, from, forward).is_none() {
-                    return false;
-                }
-                selected[at] = next;
-                if from == primary {
-                    primary = next;
-                }
-            }
-            true
-        }) {
-            return false;
-        }
-        self.set_layer_selection(selected, primary);
-        true
+                Some((selected, primary))
+            },
+            |session, (selected, primary)| session.set_layer_selection(selected, primary),
+        )
     }
 
     pub fn remove_item_box(&mut self) -> bool {
@@ -612,16 +616,21 @@ impl Session {
         if selected.is_empty() || selected.len() == count || self.selected_layer_flags().0 {
             return false;
         }
-        if !self.edit_selected_slide("Remove layers", |show, slide, _| {
-            selected
-                .iter()
-                .rev()
-                .all(|&index| show.remove_item_box(slide, index))
-        }) {
-            return false;
-        }
         let position = primary.saturating_sub(selected.partition_point(|&index| index <= primary));
-        self.select_item(position.min(count - selected.len() - 1))
+        let next = position.min(count - selected.len() - 1);
+        self.edit_selected_slide_then(
+            "Remove layers",
+            |show, slide, _| {
+                selected
+                    .iter()
+                    .rev()
+                    .all(|&index| show.remove_item_box(slide, index))
+                    .then_some(())
+            },
+            |session, ()| {
+                session.select_item(next);
+            },
+        )
     }
 
     fn selected_layer_boxes(&self) -> Vec<(usize, ItemBox)> {
@@ -1283,6 +1292,56 @@ mod tests {
         let restored = session.inspector_form().item_box;
         assert_eq!((restored.left, restored.top), (original.left, original.top));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drag_preview_and_failed_save_preserve_redo_until_a_new_drag_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = Session::open(root.path().to_path_buf());
+        assert!(session.create_show_with("song", "Song", "Welcome"));
+        session.select_slide(0);
+        let on_air = crate::live::audience_frame(&session);
+        let path = session.current_show().unwrap().path.clone().unwrap();
+        let original = ShowFile::load(&path).unwrap();
+        assert!(session.translate_layers(30, 0));
+        let previous = ShowFile::load(&path).unwrap();
+        assert!(session.undo());
+        assert_eq!((session.history.len(), session.redo.len()), (0, 1));
+
+        let preview = session.begin_layer_drag().unwrap();
+        preview.snap(30, 10, 0, 0);
+        let (dx, dy, _, _) = preview.snap(70, 20, 0, 0);
+        drop(preview); // Cancel drops the pointer gesture without finishing it.
+        assert_eq!(ShowFile::load(&path).unwrap(), original);
+        assert_eq!(session.current_show().unwrap(), &original);
+        assert_eq!((session.history.len(), session.redo.len()), (0, 1));
+        assert!(session.show_draft_status().is_empty());
+
+        let blocked = path.with_extension("show.tmp");
+        std::fs::create_dir(&blocked).unwrap();
+        let drag = session.begin_layer_drag().unwrap();
+        assert!(!session.finish_layer_move(drag, dx, dy));
+        assert!(session.show_draft_status().contains("Recovery draft"));
+        assert_eq!(ShowFile::load(&path).unwrap(), original);
+        assert_eq!(session.current_show().unwrap(), &original);
+        assert_eq!((session.history.len(), session.redo.len()), (0, 1));
+
+        std::fs::remove_dir(&blocked).unwrap();
+        session.library_action("discard-draft", "").unwrap();
+        assert!(session.show_draft_status().is_empty());
+        assert!(session.redo());
+        assert_eq!(ShowFile::load(&path).unwrap(), previous);
+        assert!(session.undo());
+        let drag = session.begin_layer_drag().unwrap();
+        assert!(session.finish_layer_move(drag, dx, dy));
+        assert_eq!((session.history.len(), session.redo.len()), (1, 0));
+        let moved = ShowFile::load(&path).unwrap();
+        let before = original.item_box("s1", 0);
+        let after = moved.item_box("s1", 0);
+        assert_eq!((after.left, after.top), (before.left + dx, before.top + dy));
+        assert!(session.undo());
+        assert_eq!(ShowFile::load(&path).unwrap(), original);
+        assert_eq!(crate::live::audience_frame(&session), on_air);
     }
 
     #[test]

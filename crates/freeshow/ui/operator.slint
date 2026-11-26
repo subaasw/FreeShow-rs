@@ -151,6 +151,7 @@ export component ControlWindow inherits Window {
     in-out property <image> preview;
     in-out property <image> edit-preview;
     callback edit-mode-changed();
+    callback flush-editor-text();
     changed edit-mode => { root.edit-mode-changed(); }
     in property <string> import-status;
     in-out property <string> chrome-status: "";
@@ -279,6 +280,7 @@ export component ControlWindow inherits Window {
     in property <int> item-count;
     in property <int> next-build-step;
     in property <[string]> picture-choices;
+    in property <bool> can-replace-picture;
     in property <[StandardListViewItem]> layer-rows;
     in property <[LayerOutline]> layer-outlines;
     in property <LayerOutline> active-outline;
@@ -306,8 +308,8 @@ export component ControlWindow inherits Window {
     callback nudge-layers(int, int);
     callback duplicate-layer();
     callback align-layer(int);
-    callback add-item();
-    callback add-picture(int);
+    callback add-item(string);
+    callback place-picture(int, bool);
     callback move-item(bool);
     callback remove-item();
     // Click/drag on the edit preview: hit-test and move/resize the selected box.
@@ -336,8 +338,8 @@ export component ControlWindow inherits Window {
     out property <bool> editing: root.active-tab == "shows" && root.show-name != "" && root.edit-mode;
     callback clear-output(string);
     callback audio-control(string);
-    out property <bool> text-focused: show-editor.has-focus;
     in property <string> draft-status;
+    in property <bool> editor-text-has-recovery-draft;
     property <bool> confirm-discard-draft: false;
     changed draft-status => { root.confirm-discard-draft = false; }
     in property <string> notice;
@@ -575,7 +577,12 @@ export component ControlWindow inherits Window {
                             accent: root.edit-mode ? root.accent : root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.edit-mode ? root.accent-text : root.text-color;
-                            clicked => { root.edit-mode = !root.edit-mode; root.text-mode = false; root.confirm-show-delete = false; }
+                            clicked => {
+                                root.flush-editor-text();
+                                root.edit-mode = !root.edit-mode;
+                                root.text-mode = false;
+                                root.confirm-show-delete = false;
+                            }
                         }
                         if root.active-tab == "shows" && root.show-name != "" && !root.edit-mode: HeaderButton {
                             label: "Prev";
@@ -617,7 +624,7 @@ export component ControlWindow inherits Window {
                             accent: root.text-mode ? root.accent : root.primary-lighter;
                             text-color: root.text-color;
                             accent-text: root.text-mode ? root.accent-text : root.text-color;
-                            clicked => { root.text-mode = !root.text-mode; }
+                            clicked => { root.flush-editor-text(); root.text-mode = !root.text-mode; }
                         }
                         Text {
                             text: "Vol";
@@ -776,7 +783,7 @@ export component ControlWindow inherits Window {
                             font-size: 12px * OperatorStyle.font-scale;
                             wrap: word-wrap;
                         }
-                        SlideCanvas {
+                        if !(root.editing && root.text-mode): SlideCanvas {
                             frame: root.editing ? root.edit-preview : root.preview;
                             editing: root.editing;
                             viewport-height: root.editing ? clamp(editor-scroll.height * 0.5, 220px, 500px)
@@ -810,6 +817,23 @@ export component ControlWindow inherits Window {
                             BoxButton { label: "Overlays"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.clear-output("overlays"); } }
                             BoxButton { label: "Audio"; accent: root.primary-lighter; text-color: root.text-color; accent-text: root.text-color; clicked => { root.clear-output("audio"); } }
                         }
+                        if root.editing && root.text-mode: TextEdit {
+                            accessible-label: "Whole-show text";
+                            init => { self.focus(); }
+                            text <=> root.show-text;
+                            read-only: root.show-has-locked-layers || root.editor-text-has-recovery-draft;
+                            min-height: 260px;
+                            vertical-stretch: 1;
+                            wrap: word-wrap;
+                            edited(text) => { root.show-text-edited(text); }
+                        }
+                        if root.editing && root.text-mode: Text {
+                            text: root.show-has-locked-layers ? "Unlock the show’s layers before editing its text." : "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
+                            color: root.text-color;
+                            opacity: 0.7;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
+                        }
                         if root.editing && !root.text-mode: LineEdit {
                             text <=> root.group;
                             placeholder-text: "Group name, e.g. Verse 1 or Chorus";
@@ -832,7 +856,8 @@ export component ControlWindow inherits Window {
                             visible: root.editing && !root.text-mode;
                             max-height: self.visible ? 100000px : 0px;
                             text <=> root.lyrics;
-                            read-only: root.active-layer-locked || !root.inspector-data.has-item;
+                            read-only: root.active-layer-locked || !root.inspector-data.has-item
+                                || root.editor-text-has-recovery-draft;
                             ink: root.text-color;
                             panel: root.primary-darker;
                             accent: root.accent;
@@ -841,23 +866,6 @@ export component ControlWindow inherits Window {
                             format-text(text, anchor, cursor, key, value) => {
                                 root.format-layer-text(text, anchor, cursor, key, value)
                             }
-                        }
-                        show-editor := TextEdit {
-                            visible: root.editing && root.text-mode;
-                            max-height: root.editing && root.text-mode ? 100000px : 0px;
-                            text <=> root.show-text;
-                            read-only: root.show-has-locked-layers;
-                            min-height: root.editing && root.text-mode ? 260px : 0px;
-                            vertical-stretch: root.editing && root.text-mode ? 1 : 0;
-                            wrap: word-wrap;
-                            edited(text) => { root.show-text-edited(text); }
-                        }
-                        if root.editing && root.text-mode: Text {
-                            text: root.show-has-locked-layers ? "Unlock the show’s layers before editing its text." : "Blank line = new slide · [Verse 1] on its own line names the group · a repeated [Chorus] reuses one slide";
-                            color: root.text-color;
-                            opacity: 0.7;
-                            font-size: 12px * OperatorStyle.font-scale;
-                            wrap: word-wrap;
                         }
                         if root.editing && !root.text-mode: VerticalLayout {
                             spacing: OperatorStyle.space-sm;
@@ -929,9 +937,20 @@ export component ControlWindow inherits Window {
                             }
                             HorizontalLayout {
                                 spacing: 6px;
-                                Button { text: "Add text"; clicked => { root.add-item(); } }
+                                Button { text: "Add text"; clicked => { root.add-item("Text"); } }
                                 Button { text: "Duplicate"; enabled: root.item-count > 0; clicked => { root.duplicate-layer(); } }
                                 Button { text: "Remove"; enabled: !root.selection-has-locks && root.item-count > root.layer-selection-count; clicked => { root.remove-item(); } }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                add-shape := ComboBox {
+                                    model: ["Rectangle", "Rounded rectangle", "Ellipse", "Divider"];
+                                    accessible-label: "Shape to add";
+                                }
+                                Button {
+                                    text: "Add shape";
+                                    clicked => { root.add-item(add-shape.current-value); }
+                                }
                             }
                             if root.item-count > 0: HorizontalLayout {
                                 spacing: 6px;
@@ -972,16 +991,24 @@ export component ControlWindow inherits Window {
                                 }
                             }
                         }
-                        if root.editing && !root.text-mode && root.inspector-data.has-item && root.picture-choices.length > 0: HorizontalLayout {
+                        if root.editing && !root.text-mode && root.selected-slide >= 0 && root.picture-choices.length > 0: VerticalLayout {
                             spacing: OperatorStyle.space-sm;
                             picture := ComboBox {
                                 model: root.picture-choices;
                                 accessible-label: "Media library picture";
                             }
-                            Button {
-                                text: "Add picture";
-                                enabled: picture.current-index >= 0 && picture.current-index < root.picture-choices.length;
-                                clicked => { root.add-picture(picture.current-index); }
+                            HorizontalLayout {
+                                spacing: OperatorStyle.space-sm;
+                                Button {
+                                    text: "Add picture";
+                                    enabled: picture.current-index >= 0 && picture.current-index < root.picture-choices.length;
+                                    clicked => { root.place-picture(picture.current-index, false); }
+                                }
+                                if root.can-replace-picture: Button {
+                                    text: "Replace picture";
+                                    enabled: picture.current-index >= 0 && picture.current-index < root.picture-choices.length;
+                                    clicked => { root.place-picture(picture.current-index, true); }
+                                }
                             }
                         }
                         if root.editing && !root.text-mode: InspectorPanel {
