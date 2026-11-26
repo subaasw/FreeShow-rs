@@ -347,41 +347,61 @@ impl OpeningFade {
 pub(crate) enum ProgramContent {
     Scripture(Vec<String>),
     Slide {
-        show_id: String,
-        slide_id: String,
+        cue: SlideOccurrence,
         slide: Rc<serde_json::Value>,
-        layout_id: String,
-        occurrence: usize,
-        occurrence_count: usize,
         reveal: u32,
         clicks: bool,
         page: Option<(usize, usize)>,
     },
 }
 
-impl ProgramContent {
-    pub(crate) fn slide_index_in(&self, show: &ShowFile) -> Option<usize> {
-        let Self::Slide {
-            show_id,
-            slide_id,
-            layout_id,
-            occurrence,
-            occurrence_count,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        if &show.id != show_id || &show.active_layout() != layout_id {
+/// A slide can appear more than once in an arrangement.
+#[derive(Clone)]
+pub(crate) struct SlideOccurrence {
+    pub(crate) show_id: String,
+    pub(crate) slide_id: String,
+    layout_id: String,
+    occurrence: usize,
+    occurrence_count: usize,
+}
+
+impl SlideOccurrence {
+    pub(crate) fn at(show: &ShowFile, index: usize) -> Option<Self> {
+        let slides = show.ordered_slide_ids();
+        let slide_id = *slides.get(index)?;
+        let count = |slides: &[&str]| slides.iter().filter(|&&id| id == slide_id).count();
+        Some(Self {
+            show_id: show.id.clone(),
+            slide_id: slide_id.to_owned(),
+            layout_id: show.active_layout(),
+            occurrence: count(&slides[..index]),
+            occurrence_count: count(&slides),
+        })
+    }
+
+    pub(crate) fn index_in(&self, show: &ShowFile) -> Option<usize> {
+        if show.id != self.show_id || show.active_layout() != self.layout_id {
             return None;
         }
         let slides = show.ordered_slide_ids();
-        let matching = slides.iter().enumerate().filter(|(_, id)| **id == slide_id);
+        let matches = slides
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| **id == self.slide_id);
         // A changed repeat count makes the taken occurrence ambiguous.
-        if matching.clone().count() != *occurrence_count {
+        if matches.clone().count() != self.occurrence_count {
             return None;
         }
-        matching.map(|(index, _)| index).nth(*occurrence)
+        matches.map(|(index, _)| index).nth(self.occurrence)
+    }
+}
+
+impl ProgramContent {
+    pub(crate) fn slide_index_in(&self, show: &ShowFile) -> Option<usize> {
+        match self {
+            Self::Slide { cue, .. } => cue.index_in(show),
+            Self::Scripture(_) => None,
+        }
     }
 }
 
@@ -630,20 +650,11 @@ pub(crate) fn capture_program_content(session: &Session) {
         .show_index
         .and_then(|slot| session.shows.get(slot))
         .and_then(|show| {
-            let index = session.slide_index?;
-            let slides = show.ordered_slide_ids();
-            let slide_id = *slides.get(index)?;
-            let slide = show.show.get("slides")?.get(slide_id)?;
-            let repeats = |slides: &[&str]| slides.iter().filter(|&&id| id == slide_id).count();
-            Some((
-                show,
-                slide,
-                repeats(&slides[..index]),
-                repeats(&slides),
-                slide_id.to_owned(),
-            ))
+            let cue = SlideOccurrence::at(show, session.slide_index?)?;
+            let slide = show.show.get("slides")?.get(&cue.slide_id)?;
+            Some((cue, slide))
         });
-    let Some((show, slide, occurrence, occurrence_count, slide_id)) = selected else {
+    let Some((cue, slide)) = selected else {
         *program = None;
         return;
     };
@@ -652,22 +663,20 @@ pub(crate) fn capture_program_content(session: &Session) {
     }
     let snapshot = match program.as_ref() {
         Some(ProgramContent::Slide {
-            show_id,
-            slide_id: live_id,
+            cue: live,
             slide: live_slide,
             ..
-        }) if show_id == &show.id && live_id == &slide_id && live_slide.as_ref() == slide => {
+        }) if live.show_id == cue.show_id
+            && live.slide_id == cue.slide_id
+            && live_slide.as_ref() == slide =>
+        {
             Rc::clone(live_slide)
         }
         _ => Rc::new(slide.clone()),
     };
     *program = Some(ProgramContent::Slide {
-        show_id: show.id.clone(),
-        slide_id,
+        cue,
         slide: snapshot,
-        layout_id: show.active_layout(),
-        occurrence,
-        occurrence_count,
         reveal: session.reveal_count,
         clicks: session.click_revealed,
         page: session.style_page(),
@@ -949,17 +958,15 @@ pub fn stage_frame(session: &Session) -> Frame {
         None
     };
     let held_slide = match &held {
-        Some(Some(
-            program @ ProgramContent::Slide {
-                show_id,
-                reveal,
-                clicks,
-                page,
-                ..
-            },
-        )) => {
-            let slot = session.shows.iter().position(|show| &show.id == show_id);
-            let index = slot.and_then(|slot| program.slide_index_in(&session.shows[slot]));
+        Some(Some(ProgramContent::Slide {
+            cue,
+            reveal,
+            clicks,
+            page,
+            ..
+        })) => {
+            let slot = session.shows.iter().position(|show| show.id == cue.show_id);
+            let index = slot.and_then(|slot| cue.index_in(&session.shows[slot]));
             Some((slot, index, *reveal, *clicks, *page))
         }
         _ => None,
