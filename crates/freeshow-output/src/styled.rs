@@ -250,11 +250,21 @@ pub struct StyledLine {
     pub wrapped: bool,
     /// Imported line height, space before, and space after.
     pub pptx_spacing: [Option<String>; 3],
+    pub rtf_line_spacing: Option<RtfLineSpacing>,
     /// Left margin, right margin, and signed first-line indent, in slide pixels.
     pub pptx_margins: [i32; 3],
     pub pptx_bullet: Option<TextRun>,
     /// Source pixels to lift the painted glyphs. The line box stays put.
     pub shift_y: i32,
+}
+
+/// Cocoa RTF line-height limits and leading, in twips. Zero maximum means no cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RtfLineSpacing {
+    pub minimum: i32,
+    pub maximum: i32,
+    pub leading: i32,
+    pub continuation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1832,7 +1842,8 @@ fn draw_item_content(
     };
     let layouts: Vec<_> = visual
         .iter()
-        .map(|line| line_layout(line, style, slide, &item.style))
+        .enumerate()
+        .map(|(index, line)| line_layout(line, style, slide, &item.style, index + 1 < visual.len()))
         .collect();
     let mut cursor_y = text_y.saturating_add(vertical_offset(item, &visual, &layouts, text_h, gap));
     let text_bottom = text_y.saturating_add(text_h).min(y.saturating_add(h));
@@ -2918,6 +2929,7 @@ fn split_line(
                 line.pptx_spacing[1].clone().filter(|_| index == 0),
                 line.pptx_spacing[2].clone().filter(|_| index == last),
             ],
+            rtf_line_spacing: line.rtf_line_spacing,
             pptx_margins: if index == 0 {
                 line.pptx_margins
             } else {
@@ -3131,6 +3143,7 @@ fn line_layout(
     style: &BoxStyle,
     slide: &StyledSlide,
     item_css: &str,
+    has_next_row: bool,
 ) -> Option<LineLayout> {
     let mut painted = line
         .runs
@@ -3153,14 +3166,39 @@ fn line_layout(
     }
     let natural_height = (ascent + below).ceil() as i32;
     let [height, before, after] = paragraph_spacing(line, style, slide, natural_height);
-    let height =
+    let mut height =
         height.unwrap_or_else(|| line_box(&first.style, item_css, font_px, natural_height, slide));
+    let mut after = after.unwrap_or(0);
+    let baseline = if let Some(spacing) = line.rtf_line_spacing {
+        let pixels = |twips| {
+            scale(
+                twips as f32 / 20.0,
+                slide.output_height,
+                slide.source_height,
+            )
+        };
+        height = height.max(pixels(spacing.minimum));
+        if spacing.maximum > 0 {
+            height = height.min(pixels(spacing.maximum));
+        }
+        let leading = pixels(spacing.leading);
+        // AppKit applies negative leading to continuation rows and positive leading after each row.
+        if spacing.continuation || line.wrapped {
+            height = height.saturating_add(leading.min(0)).max(1);
+        }
+        if has_next_row {
+            after = after.saturating_add(leading.max(0));
+        }
+        ascent + (height - natural_height) as f32
+    } else {
+        ascent + (height - natural_height).max(0) as f32 / 2.0
+    };
     Some(LineLayout {
         height,
-        baseline: ascent + (height - natural_height).max(0) as f32 / 2.0,
+        baseline,
         font_px,
         before: before.unwrap_or(0),
-        after: after.unwrap_or(0),
+        after,
     })
 }
 
@@ -5244,6 +5282,7 @@ mod tests {
                     line_bar: true,
                     wrapped: false,
                     pptx_spacing: Default::default(),
+                    rtf_line_spacing: None,
                     pptx_margins: [0; 3],
                     pptx_bullet: None,
                     shift_y: 0,
@@ -6172,6 +6211,7 @@ mod tests {
                     line_bar: true,
                     wrapped: false,
                     pptx_spacing: Default::default(),
+                    rtf_line_spacing: None,
                     pptx_margins: [0; 3],
                     pptx_bullet: None,
                     shift_y: 0,
@@ -6391,7 +6431,7 @@ mod tests {
         let item = &slide.items[0];
         let style = parse_style(&item.style);
         let mut line = item.lines[0].clone();
-        let natural = line_layout(&line, &style, &slide, &item.style)
+        let natural = line_layout(&line, &style, &slide, &item.style, false)
             .unwrap()
             .height;
         assert!(natural > 4);
@@ -6403,13 +6443,60 @@ mod tests {
         ] {
             line.pptx_spacing[0] = Some(spacing.into());
             assert_eq!(
-                line_layout(&line, &style, &slide, &item.style)
+                line_layout(&line, &style, &slide, &item.style, false)
                     .unwrap()
                     .height,
                 expected,
                 "{spacing}"
             );
         }
+    }
+
+    #[test]
+    fn cocoa_line_height_preserves_limits_and_leading_on_wrapped_rows() {
+        let mut slide = shadow_slide("font-size:20px;color:#FFFFFF;");
+        let width = piece_width("HH ", "font-size:20px;", "", &slide) + 1;
+        let item = &mut slide.items[0];
+        item.align = "align-items:flex-end;".into();
+        item.style = format!("left:0px;top:0px;width:{width}px;height:80px;");
+        item.line_bg = Some(Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        item.lines[0].runs[0].text = "HH HH".into();
+        item.lines[0].pptx_spacing[0] = Some("80px".into());
+        item.lines[0].rtf_line_spacing = Some(RtfLineSpacing {
+            minimum: 600,
+            maximum: 620,
+            leading: 120,
+            continuation: false,
+        });
+        let item = &slide.items[0];
+        assert_eq!(wrap_lines(&item.lines, &item.style, &slide, width).len(), 2);
+        let frame = render_styled(&slide);
+        for (y, red) in [
+            (11, 0),
+            (12, 255),
+            (42, 255),
+            (43, 0),
+            (48, 0),
+            (49, 255),
+            (79, 255),
+        ] {
+            assert_eq!(frame.pixel(width as u32 - 1, y).r, red, "row {y}");
+        }
+
+        let line = &mut slide.items[0].lines[0];
+        line.pptx_spacing[0] = Some("8px".into());
+        let spacing = line.rtf_line_spacing.as_mut().unwrap();
+        spacing.maximum = 0;
+        spacing.leading = -80;
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(width as u32 - 1, 23).r, 0);
+        assert_eq!(frame.pixel(width as u32 - 1, 24).r, 255);
+        assert_eq!(frame.pixel(width as u32 - 1, 79).r, 255);
     }
 
     #[test]
@@ -7432,6 +7519,7 @@ mod tests {
             line_bar: true,
             wrapped: false,
             pptx_spacing: Default::default(),
+            rtf_line_spacing: None,
             pptx_margins: [0; 3],
             pptx_bullet: None,
             shift_y: 0,
@@ -7532,6 +7620,7 @@ mod tests {
             line_bar: true,
             wrapped: false,
             pptx_spacing: Default::default(),
+            rtf_line_spacing: None,
             pptx_margins: [0; 3],
             pptx_bullet: None,
             shift_y: 0,

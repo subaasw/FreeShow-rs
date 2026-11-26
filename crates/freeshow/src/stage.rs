@@ -326,6 +326,7 @@ pub fn paint_stage_at(
                         line_bar: true,
                         wrapped: false,
                         pptx_spacing: Default::default(),
+                        rtf_line_spacing: None,
                         pptx_margins: [0; 3],
                         pptx_bullet: None,
                         shift_y: 0,

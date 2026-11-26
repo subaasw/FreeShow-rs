@@ -12,7 +12,6 @@ pub use text::register_custom_fonts;
 pub use charts::{
     ChartPoint, chart_image, display_url, html_snippet, strip_html, weather_card, web_preview,
 };
-pub use styled::qr_image;
 pub use styled::{
     Align, Blend, Crop, Fit, ItemGeometry, ItemSample, Raster, SOURCE_HEIGHT, SOURCE_WIDTH,
     SlideWay, StyledItem, StyledLine, StyledSlide, TextRun, blend_mode, blur_frames, clear_frame,
@@ -24,6 +23,7 @@ pub use styled::{
     uncover_frames, valid_backdrop_filter, valid_box_gradient, valid_box_radius, valid_box_shadow,
     wipe_frames, with_underlay,
 };
+pub use styled::{RtfLineSpacing, qr_image};
 
 use font8x8::{BASIC_FONTS, LATIN_FONTS, UnicodeFonts};
 
