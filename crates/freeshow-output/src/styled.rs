@@ -645,14 +645,55 @@ pub fn render_styled(slide: &StyledSlide) -> crate::Frame {
 /// Draws `slide` onto an existing framebuffer. Items are painted directly when
 /// the sizes match, so a lyric slide does not need a second full-frame `over`.
 pub fn composite_styled(base: &mut crate::Frame, slide: &StyledSlide) {
+    composite_styled_sampled(base, slide, |_| Some(ItemSample::SHOWN));
+}
+
+/// The sampled opacity, source-space offset, and centered scale of an item.
+#[derive(Clone, Copy, PartialEq)]
+pub struct ItemSample {
+    pub opacity: f32,
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+}
+
+impl ItemSample {
+    pub const SHOWN: Self = Self {
+        opacity: 1.0,
+        x: 0.0,
+        y: 0.0,
+        scale: 1.0,
+    };
+}
+
+/// Samples existing items without copying their image or text data.
+pub fn composite_styled_sampled(
+    base: &mut crate::Frame,
+    slide: &StyledSlide,
+    sample: impl FnMut(usize) -> Option<ItemSample>,
+) {
     if base.width != slide.output_width || base.height != slide.output_height {
-        *base = over(base, &render_styled(slide));
+        let mut layer = crate::Frame {
+            width: slide.output_width,
+            height: slide.output_height,
+            pixels: vec![0; (slide.output_width * slide.output_height * 4) as usize],
+        };
+        paint_sampled(&mut layer.pixels, slide, sample);
+        *base = over(base, &layer);
         return;
     }
-    paint_styled(&mut base.pixels, slide);
+    paint_sampled(&mut base.pixels, slide, sample);
 }
 
 fn paint_styled(pixels: &mut [u8], slide: &StyledSlide) {
+    paint_sampled(pixels, slide, |_| Some(ItemSample::SHOWN));
+}
+
+fn paint_sampled(
+    pixels: &mut [u8],
+    slide: &StyledSlide,
+    mut sample: impl FnMut(usize) -> Option<ItemSample>,
+) {
     if slide.background.a > 0 {
         fill(
             pixels,
@@ -661,8 +702,12 @@ fn paint_styled(pixels: &mut [u8], slide: &StyledSlide) {
             slide.background,
         );
     }
-    for item in &slide.items {
-        draw_item(pixels, slide, item);
+    for (index, item) in slide.items.iter().enumerate() {
+        if let Some(sample) = sample(index)
+            && sample.opacity > 0.0
+        {
+            draw_item(pixels, slide, item, sample);
+        }
     }
 }
 
@@ -1347,8 +1392,10 @@ pub fn decode_image(bytes: &[u8]) -> Option<Raster> {
     })
 }
 
-fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
+fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem, sample: ItemSample) {
     let mut style = parse_style(&item.style);
+    style.left += sample.x;
+    style.top += sample.y;
     if let Some(align) = align_in(&item.align) {
         style.align = align;
     }
@@ -1357,9 +1404,9 @@ fn draw_item(pixels: &mut [u8], slide: &StyledSlide, item: &StyledItem) {
     let w = scale(style.width, slide.output_width, slide.source_width).max(1);
     let h = scale(style.height, slide.output_height, slide.source_height).max(1);
     let bounds = text::Clip { x, y, w, h };
-    let opacity = item.opacity.clamp(0.0, 1.0);
-    if (style.rotation_deg != 0.0 || style.pptx_group_matrix.is_some())
-        && draw_transformed_item(pixels, slide, item, &style, &bounds, opacity)
+    let opacity = (item.opacity * sample.opacity).clamp(0.0, 1.0);
+    if (style.rotation_deg != 0.0 || style.pptx_group_matrix.is_some() || sample.scale != 1.0)
+        && draw_transformed_item(pixels, slide, item, &style, &bounds, opacity, sample.scale)
     {
         return;
     }
@@ -1506,6 +1553,7 @@ fn draw_transformed_item(
     style: &BoxStyle,
     bounds: &text::Clip,
     opacity: f32,
+    item_scale: f32,
 ) -> bool {
     let text::Clip { x, y, w, h } = *bounds;
     let scale_x = if slide.source_width > 0.0 {
@@ -1522,7 +1570,7 @@ fn draw_transformed_item(
     if !ratio.is_finite() || ratio <= 0.0 {
         return false;
     }
-    let [a, b, c, d] = style.source_transform();
+    let [a, b, c, d] = style.source_transform().map(|factor| factor * item_scale);
     let (b, c) = (b / ratio, c * ratio);
     let determinant = a * d - b * c;
     if !determinant.is_finite() || determinant == 0.0 {
@@ -5279,6 +5327,37 @@ mod tests {
         assert_eq!(frame.pixel(20, 70), parse_color("#0000FF").unwrap());
         assert_eq!(frame.pixel(40, 50), Rgba::TRANSPARENT);
         assert_eq!(frame.pixel(20, 10), Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn sampled_scale_keeps_a_rotated_picture_centered_and_preserves_its_pixels() {
+        let mut slide =
+            style_slide("left:20px;top:40px;width:60px;height:20px;transform:rotate(90deg);");
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        slide.background = Rgba::TRANSPARENT;
+        slide.items[0].image = Some(Raster {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        });
+        let mut frame = clear_frame(100, 100);
+        composite_styled_sampled(&mut frame, &slide, |_| {
+            Some(ItemSample {
+                scale: 0.5,
+                ..ItemSample::SHOWN
+            })
+        });
+        assert_eq!(frame.pixel(50, 40), parse_color("#ff0000").unwrap());
+        assert_eq!(frame.pixel(50, 60), parse_color("#0000ff").unwrap());
+        assert_eq!(frame.pixel(50, 34), Rgba::BLACK);
+        assert_eq!(frame.pixel(50, 65), Rgba::BLACK);
+        assert_eq!(
+            render_styled(&slide).pixel(50, 34),
+            parse_color("#ff0000").unwrap()
+        );
     }
 
     #[test]
