@@ -350,12 +350,39 @@ pub(crate) enum ProgramContent {
         show_id: String,
         slide_id: String,
         slide: Rc<serde_json::Value>,
-        /// Position in the show's layout, so the slide list can mark what is live.
-        index: usize,
+        layout_id: String,
+        occurrence: usize,
+        occurrence_count: usize,
         reveal: u32,
         clicks: bool,
         page: Option<(usize, usize)>,
     },
+}
+
+impl ProgramContent {
+    pub(crate) fn slide_index_in(&self, show: &ShowFile) -> Option<usize> {
+        let Self::Slide {
+            show_id,
+            slide_id,
+            layout_id,
+            occurrence,
+            occurrence_count,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if &show.id != show_id || &show.active_layout() != layout_id {
+            return None;
+        }
+        let slides = show.ordered_slide_ids();
+        let matching = slides.iter().enumerate().filter(|(_, id)| **id == slide_id);
+        // A changed repeat count makes the taken occurrence ambiguous.
+        if matching.clone().count() != *occurrence_count {
+            return None;
+        }
+        matching.map(|(index, _)| index).nth(*occurrence)
+    }
 }
 
 /// One slide of `show` drawn small for the slide list.
@@ -604,11 +631,19 @@ pub(crate) fn capture_program_content(session: &Session) {
         .and_then(|slot| session.shows.get(slot))
         .and_then(|show| {
             let index = session.slide_index?;
-            let slide_id = show.ordered_slides().get(index)?.id.clone();
-            let slide = show.show.get("slides")?.get(&slide_id)?;
-            Some((show, index, slide_id, slide))
+            let slides = show.ordered_slide_ids();
+            let slide_id = *slides.get(index)?;
+            let slide = show.show.get("slides")?.get(slide_id)?;
+            let repeats = |slides: &[&str]| slides.iter().filter(|&&id| id == slide_id).count();
+            Some((
+                show,
+                slide,
+                repeats(&slides[..index]),
+                repeats(&slides),
+                slide_id.to_owned(),
+            ))
         });
-    let Some((show, index, slide_id, slide)) = selected else {
+    let Some((show, slide, occurrence, occurrence_count, slide_id)) = selected else {
         *program = None;
         return;
     };
@@ -630,7 +665,9 @@ pub(crate) fn capture_program_content(session: &Session) {
         show_id: show.id.clone(),
         slide_id,
         slide: snapshot,
-        index,
+        layout_id: show.active_layout(),
+        occurrence,
+        occurrence_count,
         reveal: session.reveal_count,
         clicks: session.click_revealed,
         page: session.style_page(),
@@ -912,18 +949,19 @@ pub fn stage_frame(session: &Session) -> Frame {
         None
     };
     let held_slide = match &held {
-        Some(Some(ProgramContent::Slide {
-            show_id,
-            index,
-            reveal,
-            clicks,
-            page,
-            ..
-        })) => session
-            .shows
-            .iter()
-            .position(|show| &show.id == show_id)
-            .map(|slot| (Some(slot), Some(*index), *reveal, *clicks, *page)),
+        Some(Some(
+            program @ ProgramContent::Slide {
+                show_id,
+                reveal,
+                clicks,
+                page,
+                ..
+            },
+        )) => {
+            let slot = session.shows.iter().position(|show| &show.id == show_id);
+            let index = slot.and_then(|slot| program.slide_index_in(&session.shows[slot]));
+            Some((slot, index, *reveal, *clicks, *page))
+        }
         _ => None,
     };
     let scripture_lines = match &held {
@@ -960,6 +998,9 @@ pub fn stage_frame(session: &Session) -> Frame {
             }],
             index,
         )
+    } else if held_slide.is_some() && current_index.is_none() {
+        // The held picture still exists even if its cue was removed from the arrangement.
+        (vec![program_stage_slide(session, &variables)], Some(0))
     } else {
         let slides = show_slot
             .and_then(|slot| session.shows.get(slot))
@@ -993,7 +1034,7 @@ pub fn stage_frame(session: &Session) -> Frame {
     let root = session.root.as_deref();
     let mut still_backgrounds = std::collections::HashMap::new();
     if showing_show
-        && let Some(index) = index
+        && let Some(index) = current_index
         && let Some(show) = show_slot.and_then(|slot| session.shows.get(slot))
     {
         for item in &session.stage.items {
@@ -2347,10 +2388,100 @@ mod tests {
         session.select_slide_for_edit(0);
 
         let program = session.program_content.borrow();
-        assert!(matches!(
-            program.as_ref(),
-            Some(ProgramContent::Slide { index: 1, .. })
-        ));
+        assert_eq!(
+            program
+                .as_ref()
+                .and_then(|program| program.slide_index_in(&session.shows[0])),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn taken_repeat_keeps_its_arrangement_position_after_reordering() {
+        let mut session = Session::empty();
+        session.tab = "shows".into();
+        let mut show = ShowFile::blank("show", "Repeats");
+        assert!(show.replace_lyrics_with_split("A\n\nB\n\nC\n\nD", false, 0));
+        let ids: Vec<_> = show
+            .ordered_slides()
+            .into_iter()
+            .map(|slide| slide.id)
+            .collect();
+        show.show["layouts"]["main"]["slides"] = serde_json::json!([
+            {"id": ids[0]}, {"id": ids[1]}, {"id": ids[0]}, {"id": ids[2]}, {"id": ids[3]}
+        ]);
+        session.shows.push(show);
+        session.show_index = Some(0);
+        assert!(session.select_slide(2));
+        capture_program_content(&session);
+        session.select_slide_for_edit(4);
+        assert_eq!(session.shows[0].move_slide_at(4, -2), Some(2));
+
+        assert_eq!(session.live_slide_index(), Some(3));
+        assert_eq!(session.to_snapshot().slide_index, Some(3));
+        assert_eq!(session.to_snapshot().taken_slide.unwrap().lines, ["A"]);
+        assert!(!session.can_update_live_slide());
+        assert!(session.advance_show());
+        capture_program_content(&session);
+        assert_eq!(session.to_snapshot().taken_slide.unwrap().lines, ["C"]);
+
+        assert!(session.select_slide(3));
+        capture_program_content(&session);
+        assert!(session.shows[0].move_slide_at(2, 2).is_some());
+        session.select_slide_for_edit(0);
+        assert!(session.shows[0].set_plain_text(&ids[0], "Edited A"));
+        assert!(!session.can_update_live_slide());
+        session.select_slide_for_edit(2);
+        assert!(session.can_update_live_slide());
+        assert!(session.update_live_slide());
+        assert_eq!(
+            session.to_snapshot().taken_slide.unwrap().lines,
+            ["Edited A"]
+        );
+        session.select_slide_for_edit(0);
+        assert!(session.retreat_show());
+        capture_program_content(&session);
+        assert_eq!(session.to_snapshot().taken_slide.unwrap().lines, ["B"]);
+    }
+
+    #[test]
+    fn deleting_the_live_cue_leaves_audience_and_stage_on_the_taken_picture() {
+        let mut session = Session::empty();
+        session.tab = "shows".into();
+        session.output_width = 320;
+        session.output_height = 180;
+        session
+            .stage
+            .items
+            .retain(|item| item.kind == freeshow_data::StageItemKind::Slide && item.offset == 0);
+        assert!(!session.stage.items.is_empty());
+        let mut show = ShowFile::blank("show", "Remove");
+        assert!(show.replace_lyrics_with_split("Held cue\n\nRemaining", false, 0));
+        session.shows.push(show);
+        session.show_index = Some(0);
+        assert!(session.select_slide(0));
+        let live = audience_frame(&session);
+        let stage = stage_frame(&session);
+
+        session.select_slide_for_edit(0);
+        assert!(session.shows[0].remove_slide_at(0));
+        assert_eq!(session.live_slide_index(), None);
+        assert_eq!(session.to_snapshot().slide_index, None);
+        assert!(!session.advance_show());
+        assert!(!session.retreat_show());
+        assert!(session.program_held);
+        assert_eq!(audience_frame(&session).pixels, live.pixels);
+        assert_eq!(stage_frame(&session).pixels, stage.pixels);
+        assert_eq!(
+            session.to_snapshot().taken_slide.unwrap().lines,
+            ["Held cue"]
+        );
+        assert!(session.select_slide(0));
+        capture_program_content(&session);
+        assert_eq!(
+            session.to_snapshot().taken_slide.unwrap().lines,
+            ["Remaining"]
+        );
     }
 
     #[test]

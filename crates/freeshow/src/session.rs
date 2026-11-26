@@ -4520,13 +4520,27 @@ impl Session {
     }
 
     /// Before stepping, the open show and slide jump back to what is live, as FreeShow steps the output.
-    fn resume_program(&mut self) {
+    fn resume_program(&mut self) -> bool {
         if !self.program_held {
-            return;
+            return true;
         }
         let live = match self.program_content.borrow().as_ref() {
-            Some(crate::live::ProgramContent::Slide { show_id, index, .. }) => {
-                Some((show_id.clone(), *index))
+            Some(
+                program @ crate::live::ProgramContent::Slide {
+                    show_id,
+                    reveal,
+                    clicks,
+                    page,
+                    ..
+                },
+            ) => {
+                let Some(slot) = self.shows.iter().position(|show| &show.id == show_id) else {
+                    return false;
+                };
+                let Some(index) = program.slide_index_in(&self.shows[slot]) else {
+                    return false;
+                };
+                Some((slot, index, *reveal, *clicks, *page))
             }
             Some(crate::live::ProgramContent::Scripture(lines)) => {
                 let verse = self
@@ -4539,17 +4553,28 @@ impl Session {
             }
             _ => None,
         };
-        if let Some((show_id, index)) = live
-            && let Some(show) = self.shows.iter().position(|show| show.id == show_id)
-        {
-            if self.show_index != Some(show) {
-                self.show_index = Some(show);
+        if let Some((slot, index, reveal, clicks, page)) = live {
+            if self.show_index != Some(slot) {
+                self.show_index = Some(slot);
                 self.load_timeline();
             }
             self.tab = "shows".to_string();
             self.slide_index = Some(index);
+            self.reveal_count = reveal;
+            self.click_revealed = clicks;
+            self.line_index = page.map_or(0, |(start, _)| start as u32);
         }
         self.program_held = false;
+        true
+    }
+
+    fn step_program(&mut self, step: impl FnOnce(&mut Self) -> bool) -> bool {
+        let held = self.program_held;
+        let stepped = self.resume_program() && step(self);
+        if held && !stepped {
+            self.hold_program();
+        }
+        stepped
     }
 
     fn show_has_slide(&self, index: usize) -> bool {
@@ -4887,16 +4912,17 @@ impl Session {
         let mut taken_slide = None;
         if !self.blanked
             && !self.slide_hidden
-            && let Some(crate::live::ProgramContent::Slide {
-                show_id,
-                slide_id,
-                slide,
-                index,
-                ..
-            }) = program.as_ref()
+            && let Some(
+                taken @ crate::live::ProgramContent::Slide {
+                    show_id,
+                    slide_id,
+                    slide,
+                    ..
+                },
+            ) = program.as_ref()
         {
             show_index = self.shows.iter().position(|show| &show.id == show_id);
-            slide_index = Some(*index);
+            slide_index = show_index.and_then(|slot| taken.slide_index_in(&self.shows[slot]));
             taken_slide = Some(freeshow_remote::RemoteSlide {
                 id: slide_id.clone(),
                 label: String::new(),
@@ -5827,14 +5853,7 @@ impl Session {
             };
         }
         let show = self.current_show()?;
-        match self.program_content.borrow().as_ref() {
-            Some(crate::live::ProgramContent::Slide { show_id, index, .. })
-                if show_id == &show.id =>
-            {
-                Some(*index)
-            }
-            _ => None,
-        }
+        self.program_content.borrow().as_ref()?.slide_index_in(show)
     }
 
     fn current_show(&self) -> Option<&ShowFile> {
@@ -6053,7 +6072,10 @@ impl Session {
         if self.step_layer_build(true) {
             return true;
         }
-        self.resume_program();
+        self.step_program(Self::advance_from_selection)
+    }
+
+    fn advance_from_selection(&mut self) -> bool {
         if self.tab == "scripture" {
             return self.step_verse(1);
         }
@@ -6342,7 +6364,10 @@ impl Session {
             return false;
         }
         let was_held = self.program_held;
-        self.resume_program();
+        self.step_program(|session| session.retreat_from_selection(was_held))
+    }
+
+    fn retreat_from_selection(&mut self, was_held: bool) -> bool {
         if self.tab == "scripture" {
             return self.step_verse(-1);
         }
@@ -6838,20 +6863,15 @@ impl Session {
             return None;
         }
         let show = self.current_show()?;
+        let program = self.program_content.borrow();
+        let taken @ crate::live::ProgramContent::Slide { slide_id, .. } = program.as_ref()? else {
+            return None;
+        };
         let index = self.slide_index?;
-        let slides = show.ordered_slides();
-        let slide_id = &slides.get(index)?.id;
-        match self.program_content.borrow().as_ref() {
-            Some(crate::live::ProgramContent::Slide {
-                show_id,
-                slide_id: live_id,
-                index: live_index,
-                ..
-            }) if show_id == &show.id && live_id == slide_id && *live_index == index => {
-                show.show.get("slides")?.get(slide_id)
-            }
-            _ => None,
+        if taken.slide_index_in(show) != Some(index) {
+            return None;
         }
+        show.show.get("slides")?.get(slide_id)
     }
 
     pub fn can_update_live_slide(&self) -> bool {

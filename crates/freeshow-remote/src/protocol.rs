@@ -412,10 +412,9 @@ impl ShowSnapshot {
     }
 
     fn current_slide(&self) -> Option<&RemoteSlide> {
-        let index = self.slide_index?;
         self.taken_slide
             .as_ref()
-            .or_else(|| self.current_show()?.slides.get(index))
+            .or_else(|| self.current_show()?.slides.get(self.slide_index?))
     }
 }
 
@@ -673,7 +672,7 @@ pub fn handle_message_authenticated(
 
 fn step(snapshot: &mut ShowSnapshot, delta: isize) -> Option<Command> {
     let len = snapshot.current_show()?.slides.len();
-    if len == 0 {
+    if len == 0 || (snapshot.slide_index.is_none() && snapshot.taken_slide.is_some()) {
         return None;
     }
     snapshot.cleared = false;
@@ -3351,6 +3350,27 @@ mod tests {
             &json!({ "channel": "API:index_select_slide", "data": { "index": 0 } }),
         );
         assert_eq!(replies[0]["data"]["lines"][0], "Edited lyrics");
+    }
+
+    #[test]
+    fn remote_keeps_the_taken_lyrics_when_the_cue_has_no_position() {
+        let mut snapshot = sample();
+        snapshot.taken_slide = snapshot.current_slide().cloned();
+        snapshot.slide_index = None;
+
+        for channel in ["API:next_slide", "API:previous_slide"] {
+            let (replies, commands) = handle_message(&mut snapshot, &json!({ "channel": channel }));
+            assert!(commands.is_empty());
+            assert_eq!(replies[0]["data"]["lines"][0], "Amazing grace");
+            assert_eq!(replies[0]["data"]["nextLines"], json!([]));
+        }
+
+        let (_, commands) = handle_message(
+            &mut snapshot,
+            &json!({ "channel": "API:index_select_slide", "data": { "index": 0 } }),
+        );
+        assert_eq!(commands, [Command::SetSlide(0)]);
+        assert!(snapshot.taken_slide.is_none());
     }
 
     #[test]
