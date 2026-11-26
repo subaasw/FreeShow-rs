@@ -54,6 +54,40 @@ pub struct WindowProfile {
     pub stage: Option<WindowPlacement>,
 }
 
+/// The OS display name and bounds saved when the operator picks a screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayIdentity {
+    pub name: String,
+    pub bounds: WindowPlacement,
+    #[serde(default)]
+    pub match_by_name: bool,
+}
+
+impl DisplayIdentity {
+    /// A unique name survives monitor reordering. Identically named displays
+    /// require a bounds match so an ambiguous choice never jumps to a new screen.
+    pub fn locate(&self, displays: &[Self]) -> Option<usize> {
+        let mut exact = displays
+            .iter()
+            .enumerate()
+            .filter(|(_, display)| display.name == self.name && display.bounds == self.bounds);
+        if let Some((index, _)) = exact.next()
+            && exact.next().is_none()
+        {
+            return Some(index);
+        }
+        if !self.match_by_name || self.name.is_empty() {
+            return None;
+        }
+        let mut named = displays
+            .iter()
+            .enumerate()
+            .filter(|(_, display)| display.name == self.name);
+        let (index, _) = named.next()?;
+        named.next().is_none().then_some(index)
+    }
+}
+
 impl WindowProfile {
     pub fn is_empty(&self) -> bool {
         self.control.is_none() && self.output.is_none() && self.stage.is_none()
@@ -77,6 +111,8 @@ pub struct AppSettings {
     /// Monitor index for the audience window. Empty means the second monitor when one is connected.
     #[serde(default)]
     pub output_screen: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_display: Option<DisplayIdentity>,
     /// FreeShow speaker node IDs mapped to native output device names.
     #[serde(default)]
     pub audio_devices: std::collections::BTreeMap<String, String>,

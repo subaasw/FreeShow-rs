@@ -620,6 +620,7 @@ pub fn format_clock(clock_24: &str, twelve_hour: bool, seconds: bool) -> String 
     }
 }
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -4179,6 +4180,19 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn starter_templates() -> &'static Self {
+        static STARTERS: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
+        STARTERS.get_or_init(|| {
+            Self::parse(include_str!("../assets/starter-templates.json"))
+                .expect("the bundled template catalog must be valid")
+        })
+    }
+
+    /// A library copy wins if a bundled template has been imported or customized.
+    pub fn get_template(&self, id: &str) -> Option<&Value> {
+        self.get(id).or_else(|| Self::starter_templates().get(id))
+    }
+
     pub fn save(&self, path: &Path) -> Result<(), DataError> {
         atomic_write(path, self.to_json()?.as_bytes())
     }
@@ -4541,6 +4555,27 @@ impl Library {
 
     pub fn load_templates(&self) -> Result<Catalog, DataError> {
         Catalog::load(&self.templates_path())
+    }
+
+    fn template_favorites_path(&self) -> PathBuf {
+        self.root
+            .join(CONFIG_DIR)
+            .join("freeshow-rust-template-favorites.json")
+    }
+
+    pub fn load_template_favorites(&self) -> Result<BTreeSet<String>, DataError> {
+        match fs::read_to_string(self.template_favorites_path()) {
+            Ok(text) => Ok(serde_json::from_str(&text)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_template_favorites(&self, ids: &BTreeSet<String>) -> Result<(), DataError> {
+        atomic_write(
+            &self.template_favorites_path(),
+            &serde_json::to_vec_pretty(ids)?,
+        )
     }
 
     pub fn load_overlays(&self) -> Result<Catalog, DataError> {

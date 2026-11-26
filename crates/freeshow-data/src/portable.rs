@@ -122,6 +122,60 @@ fn package_media(payload: &mut Value, mut visit: impl FnMut(&mut Value)) {
     }
 }
 
+fn strip_design_notes(design: &mut Value) {
+    match design {
+        Value::Object(fields) => {
+            if fields.get("notes").is_some_and(Value::is_string) {
+                fields.remove("notes");
+            }
+            for value in fields.values_mut() {
+                strip_design_notes(value);
+            }
+        }
+        Value::Array(rows) => rows.iter_mut().for_each(strip_design_notes),
+        _ => {}
+    }
+}
+
+fn named_fonts(value: &Value, families: &mut BTreeMap<String, String>) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(css) = fields.get("style").and_then(Value::as_str)
+                && let Some(fonts) = crate::css_value(css, "font-family")
+                && let Some(first) = fonts.split(',').next()
+            {
+                // Match the compositor, which uses the first family in the declaration.
+                let family = first.trim().trim_matches(['\'', '"']).trim();
+                let key = family.to_lowercase();
+                if !matches!(
+                    key.as_str(),
+                    "" | "dejavu sans"
+                        | "serif"
+                        | "sans-serif"
+                        | "monospace"
+                        | "cursive"
+                        | "fantasy"
+                        | "system-ui"
+                        | "inherit"
+                        | "initial"
+                        | "unset"
+                ) {
+                    families.entry(key).or_insert_with(|| family.to_owned());
+                }
+            }
+            for value in fields.values() {
+                named_fonts(value, families);
+            }
+        }
+        Value::Array(rows) => {
+            for value in rows {
+                named_fonts(value, families);
+            }
+        }
+        _ => {}
+    }
+}
+
 const SHOW_REFS: &[&str] = &["show", "showId", "showID", "startShow", "start_show"];
 const OVERLAY_REFS: &[&str] = &[
     "overlays",
@@ -217,7 +271,7 @@ pub(crate) fn include_designs(payload: &mut Value, overlays: &Catalog, templates
         reference_ids(value, TEMPLATE_REFS, &mut template_ids);
     }
     for id in &template_ids {
-        if let Some(template) = templates.get(id) {
+        if let Some(template) = templates.get_template(id) {
             reference_ids(template, OVERLAY_REFS, &mut overlay_ids);
         }
     }
@@ -226,7 +280,12 @@ pub(crate) fn include_designs(payload: &mut Value, overlays: &Catalog, templates
         ("templates", template_ids, templates),
     ] {
         for id in ids {
-            if let Some(entry) = catalog.get(&id) {
+            let entry = if key == "templates" {
+                catalog.get_template(&id)
+            } else {
+                catalog.get(&id)
+            };
+            if let Some(entry) = entry {
                 payload[key][id] = entry.clone();
             }
         }
@@ -288,6 +347,24 @@ pub(crate) fn write_archive(
     library: &Path,
     dest: &Path,
 ) -> Result<Vec<String>, DataError> {
+    if payload["freeshowRustTemplateOnly"] == true {
+        for key in ["templates", "overlays"] {
+            if let Some(entries) = payload.get_mut(key).and_then(Value::as_object_mut) {
+                entries.values_mut().for_each(strip_design_notes);
+            }
+        }
+    }
+    let mut fonts = BTreeMap::new();
+    for key in ["shows", "overlays", "templates"] {
+        named_fonts(&payload[key], &mut fonts);
+    }
+    let mut warnings = Vec::new();
+    if !fonts.is_empty() {
+        let families = fonts.into_values().collect::<Vec<_>>().join(", ");
+        warnings.push(format!(
+            "Verify or install these fonts for this package ({families})"
+        ));
+    }
     let mut references = BTreeSet::new();
     package_media(&mut payload, |value| {
         if let Some(reference) = value
@@ -299,7 +376,6 @@ pub(crate) fn write_archive(
     });
     let mut assets: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut mapped = BTreeMap::new();
-    let mut warnings = Vec::new();
     if let Some(rows) = payload["project"]["shows"].as_array() {
         for row in rows {
             if let Some(id) = row["id"].as_str() {
@@ -809,6 +885,7 @@ mod tests {
         }
         let mut show = ShowFile::blank("shared", "Packaged show");
         show.show["settings"]["template"] = json!("poster");
+        assert!(show.set_notes("s1", "Stage instruction"));
         show.show["slides"]["s1"]["items"] = json!([
             {"type":"media","src":"Media/a/banner.png"},
             {"type":"media","src":"Media/b/banner.png"},
@@ -922,6 +999,7 @@ mod tests {
             .iter()
             .find(|show| show.id == imported.shows[0].id)
             .unwrap();
+        assert_eq!(show.show["slides"]["s1"]["notes"], "Stage instruction");
         let linked_id = show.started_show_at(0).unwrap();
         assert_ne!(linked_id, "linked");
         assert!(
@@ -949,24 +1027,55 @@ mod tests {
         let destination = Fixture::new();
         fs::create_dir_all(source.0.join("Media")).unwrap();
         fs::write(source.0.join("Media/art.png"), b"artwork").unwrap();
-        let template = json!({"name":"Editable","settings":{"backgroundColor":"#123456"},"items":[
+        let template = json!({"name":"Editable","notes":"Private template note",
+            "overlay":"linked", "settings":{"backgroundColor":"#123456"},"items":[
             {"type":"media","src":"Media/art.png","custom":{"keep":true}},
-            {"type":"text","lines":[{"text":[{"value":"Edit me"}]}]}
+            {"type":"text","style":"font-family: 'Poster Sans', sans-serif;",
+             "lines":[{"notes":"Private line note","text":[
+                 {"value":"Edit ","style":"font-family: poster sans;"},
+                 {"value":"me","style":"font-family: DejaVu Sans;"}]}]}
         ]});
-        crate::write_portable_template(
+        let source_library = Library::open(&source.0);
+        let mut overlays = Catalog::empty();
+        overlays.insert(
+            "linked",
+            json!({"name":"Linked design","notes":"Private overlay note",
+            "items":[{"style":"font-family: Overlay Serif;"}]}),
+        );
+        overlays.save(&source_library.overlays_path()).unwrap();
+        let warnings = crate::write_portable_template(
             "art",
             &template,
-            &Library::open(&source.0),
+            &source_library,
             &destination.0.join("Imports/Editable.project"),
         )
         .unwrap();
-        assert!(destination.import().is_empty());
+        assert_eq!(
+            warnings,
+            ["Verify or install these fonts for this package (Overlay Serif, Poster Sans)"]
+        );
+        assert_eq!(destination.import(), warnings);
+        assert_eq!(template["notes"], "Private template note");
         let library = Library::open(&destination.0);
         assert!(!library.projects_path().exists());
         let templates = Catalog::load(&library.templates_path()).unwrap();
         let entry = templates.get("art").unwrap();
+        assert!(entry.get("notes").is_none());
+        assert!(entry["items"][1]["lines"][0].get("notes").is_none());
+        let imported_overlays = Catalog::load(&library.overlays_path()).unwrap();
+        assert!(
+            imported_overlays
+                .get("linked")
+                .unwrap()
+                .get("notes")
+                .is_none()
+        );
         let editable = ShowFile::from_template("copy", "Copy", entry).unwrap();
         assert_eq!(editable.item_text("s1", 1).as_deref(), Some("Edit me"));
+        assert_eq!(
+            editable.show["slides"]["s1"]["items"][1]["style"],
+            template["items"][1]["style"]
+        );
         assert_eq!(
             fs::read(entry["items"][0]["src"].as_str().unwrap()).unwrap(),
             b"artwork"

@@ -1,0 +1,61 @@
+{
+  "freeshow-rust-starter-lyrics": {
+    "name": "Lyrics — Calm Blue",
+    "settings": {"backgroundColor": "#101d35"},
+    "items": [
+      {"type": "text", "style": "left:140px;top:265px;width:1640px;height:560px;align-items:center;",
+       "lines": [{"align":"center","text":[{"value":"Add the first lyric line","style":"font-size:94px;color:#f5f8ff;font-weight:bold;"}]},
+                 {"align":"center","text":[{"value":"Add the next lyric line","style":"font-size:94px;color:#f5f8ff;font-weight:bold;"}]}]},
+      {"type": "shape", "style": "left:890px;top:224px;width:140px;height:8px;border-radius:4px;background:#78cfff;"}
+    ]
+  },
+  "freeshow-rust-starter-scripture": {
+    "name": "Scripture — Soft Ivory",
+    "settings": {"backgroundColor": "#faf0db"},
+    "items": [
+      {"type": "text", "style": "left:223px;top:240px;width:1474px;height:550px;align-items:center;",
+       "lines": [{"align":"left","text":[{"value":"Paste the scripture passage here.","style":"font-size:92px;color:#293427;"}]}]},
+      {"type": "shape", "style": "left:154px;top:252px;width:12px;height:494px;border-radius:6px;background:#748958;"},
+      {"type": "text", "style": "left:223px;top:835px;width:1474px;height:85px;",
+       "lines": [{"align":"left","text":[{"value":"Book · Chapter:Verse","style":"font-size:44px;font-weight:bold;color:#475b36;"}]}]}
+    ]
+  },
+  "freeshow-rust-starter-announcement": {
+    "name": "Announcement — Sunrise",
+    "settings": {"backgroundColor": "#281d34"},
+    "items": [
+      {"type": "text", "style": "left:148px;top:280px;width:1320px;height:235px;align-items:center;",
+       "lines": [{"align":"left","text":[{"value":"Your event title","style":"font-size:116px;font-weight:bold;color:#fff3e8;"}]}]},
+      {"type": "shape", "style": "left:1535px;top:164px;width:225px;height:225px;border-radius:50%;background:#ffb086;"},
+      {"type": "text", "style": "left:148px;top:180px;width:1100px;height:85px;",
+       "lines": [{"align":"left","text":[{"value":"COMING UP","style":"font-size:46px;font-weight:bold;letter-spacing:8px;color:#ffb086;"}]}]},
+      {"type": "text", "style": "left:148px;top:568px;width:1555px;height:235px;",
+       "lines": [{"align":"left","text":[{"value":"Date · Time · Location","style":"font-size:66px;color:#f2ddec;"}]},
+                 {"align":"left","text":[{"value":"Add a short invitation or next step.","style":"font-size:51px;color:#f2ddec;"}]}]}
+    ]
+  },
+  "freeshow-rust-starter-title": {
+    "name": "Title — Welcome",
+    "settings": {"backgroundColor": "#123d39"},
+    "items": [
+      {"type": "text", "style": "left:150px;top:328px;width:1620px;height:235px;align-items:center;",
+       "lines": [{"align":"center","text":[{"value":"Welcome","style":"font-size:154px;font-weight:bold;color:#f5fff4;"}]}]},
+      {"type": "shape", "style": "left:872px;top:617px;width:176px;height:8px;border-radius:4px;background:#94dfba;"},
+      {"type": "text", "style": "left:150px;top:687px;width:1620px;height:105px;",
+       "lines": [{"align":"center","text":[{"value":"Add your service or series name","style":"font-size:56px;color:#d2ede1;"}]}]}
+    ]
+  },
+  "freeshow-rust-starter-countdown": {
+    "name": "Service Start — Countdown",
+    "settings": {"backgroundColor": "#15172b"},
+    "items": [
+      {"type": "text", "freeshowRustCountdown": true, "style": "left:180px;top:278px;width:1560px;height:425px;align-items:center;",
+       "lines": [{"align":"center","text":[{"value":"05:00","style":"font-size:270px;font-weight:bold;color:#f8edce;"}]}]},
+      {"type": "text", "style": "left:180px;top:190px;width:1560px;height:95px;",
+       "lines": [{"align":"center","text":[{"value":"SERVICE STARTS IN","style":"font-size:49px;font-weight:bold;letter-spacing:7px;color:#ccb7fa;"}]}]},
+      {"type": "shape", "style": "left:572px;top:768px;width:776px;height:5px;border-radius:2px;background:#7664a6;"},
+      {"type": "text", "style": "left:180px;top:816px;width:1560px;height:95px;",
+       "lines": [{"align":"center","text":[{"value":"We’re glad you’re here","style":"font-size:52px;color:#eee8fa;"}]}]}
+    ]
+  }
+}

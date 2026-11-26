@@ -11,8 +11,8 @@ mod theme;
 
 pub use log::{init_logging, local_timestamp, log_file_path};
 pub use settings::{
-    AppSettings, SettingsError, WindowPlacement, WindowProfile, config_dir, next_output_monitor,
-    output_monitor_index, screen_combo_index, screen_from_combo,
+    AppSettings, DisplayIdentity, SettingsError, WindowPlacement, WindowProfile, config_dir,
+    next_output_monitor, output_monitor_index, screen_combo_index, screen_from_combo,
 };
 pub use theme::{BUILT_IN_THEMES, Rgb, Rgba, ThemePalette, theme_by_name};
 
@@ -128,6 +128,11 @@ mod tests {
             show_output: true,
             show_stage: false,
             output_screen: Some(1),
+            output_display: Some(DisplayIdentity {
+                name: "Projector".into(),
+                bounds: WindowPlacement::new(1920, 0, 1920, 1080),
+                match_by_name: true,
+            }),
             audio_devices: [("speaker_sub_id".into(), "Stage Speakers".into())].into(),
             window_profiles: Default::default(),
             active_window_profile: None,
@@ -200,6 +205,32 @@ mod tests {
         assert_eq!(screen_from_combo(0), None);
         assert_eq!(screen_from_combo(1), Some(0));
         assert_eq!(screen_from_combo(3), Some(2));
+    }
+
+    #[test]
+    fn display_identity_handles_reordering_and_ambiguous_names() {
+        let display = |name: &str, x, match_by_name| DisplayIdentity {
+            name: name.into(),
+            bounds: WindowPlacement::new(x, 0, 1920, 1080),
+            match_by_name,
+        };
+        let operator = display("Operator", 0, true);
+        let audience = display("Projector", 1920, true);
+        assert_eq!(
+            audience.locate(&[audience.clone(), operator.clone()]),
+            Some(0)
+        );
+        assert_eq!(audience.locate(std::slice::from_ref(&operator)), None);
+        assert_eq!(
+            audience.locate(&[operator, display("Projector", -1920, true)]),
+            Some(1)
+        );
+        let audience = display("HDMI", 1920, false);
+        assert_eq!(audience.locate(&[display("HDMI", 0, false)]), None);
+        assert_eq!(
+            audience.locate(&[display("HDMI", 0, false), display("HDMI", 1920, false)]),
+            Some(1)
+        );
     }
 
     #[test]
