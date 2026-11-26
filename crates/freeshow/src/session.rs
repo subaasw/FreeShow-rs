@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use freeshow_core::{NetworkRoute, SpeakerRoute};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +15,10 @@ use freeshow_data::{
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 
+use crate::slide_countdown::SlideCountdown;
+
 mod drawer_edit;
+mod layer_builds;
 mod library_edit;
 mod panels;
 mod recovery;
@@ -23,10 +26,11 @@ mod slide_layers;
 use freeshow_output::{
     Fit, OUTPUT_HEIGHT, OUTPUT_WIDTH, Raster, aligned_output_size, crop_raster, decode_image,
 };
+pub(crate) use layer_builds::LayerBuilds;
 pub use library_edit::ProjectPick;
 pub use panels::{
     AUTOSAVE_CHOICES, STAGE_ADD_KINDS, STAGE_ADD_NAMES, STAGE_DATE_FORMATS, TRANSITION_KINDS,
-    setting_label,
+    lan_host, setting_label,
 };
 pub use slide_layers::LayerDrag;
 
@@ -263,11 +267,16 @@ pub struct Session {
     pub show_index: Option<usize>,
     pub slide_index: Option<usize>,
     pub(crate) program_content: std::cell::RefCell<Option<crate::live::ProgramContent>>,
+    pub(crate) layer_builds: Option<LayerBuilds>,
+    pub(crate) slide_countdown: Option<SlideCountdown>,
+    layer_build_stepped: bool,
     /// The selected text box on the current slide.
     pub item_index: usize,
     pub templates: Vec<String>,
     pub template_catalog: Catalog,
     template_pick: Option<String>,
+    template_favorites: BTreeSet<String>,
+    pub(crate) template_favorites_only: bool,
     pub overlays: Vec<String>,
     pub overlay_catalog: Catalog,
     pub active_overlays: Vec<String>,
@@ -518,10 +527,15 @@ impl Session {
             show_index: None,
             slide_index: None,
             program_content: Default::default(),
+            layer_builds: None,
+            slide_countdown: None,
+            layer_build_stepped: false,
             item_index: 0,
             templates: Vec::new(),
             template_catalog: Catalog::empty(),
             template_pick: None,
+            template_favorites: BTreeSet::new(),
+            template_favorites_only: false,
             overlays: Vec::new(),
             overlay_catalog: Catalog::empty(),
             active_overlays: Vec::new(),
@@ -629,6 +643,8 @@ impl Session {
         let template_catalog =
             take(library.load_templates(), &mut warnings).unwrap_or_else(Catalog::empty);
         let templates = template_catalog.names();
+        let template_favorites =
+            take(library.load_template_favorites(), &mut warnings).unwrap_or_default();
         let overlay_catalog =
             take(library.load_overlays(), &mut warnings).unwrap_or_else(Catalog::empty);
         let overlays = overlay_catalog.names();
@@ -725,10 +741,15 @@ impl Session {
             show_index: None,
             slide_index: None,
             program_content: Default::default(),
+            layer_builds: None,
+            slide_countdown: None,
+            layer_build_stepped: false,
             item_index: 0,
             templates,
             template_catalog,
             template_pick: None,
+            template_favorites,
+            template_favorites_only: false,
             overlays,
             overlay_catalog,
             active_overlays,
@@ -1244,6 +1265,12 @@ impl Session {
     }
 
     fn drawer_entries(&self) -> Vec<(usize, String)> {
+        if self.tab == "templates" {
+            return self
+                .visible_template_entries()
+                .map(|(index, (_, name, _))| (index, name.to_owned()))
+                .collect();
+        }
         let query = self.search_query.trim().to_ascii_lowercase();
         self.drawer_names()
             .into_iter()
@@ -1472,6 +1499,9 @@ impl Session {
     }
 
     pub fn select_drawer(&mut self, index: usize) -> DrawerAction {
+        if self.tab == "templates" {
+            return self.choose_template(index);
+        }
         let index = self.drawer_real_index(index);
         match self.tab.as_str() {
             "shows" => {
@@ -1511,7 +1541,6 @@ impl Session {
             }
             "audio" => self.choose_audio(index),
             "overlays" => self.toggle_overlay(index),
-            "templates" => self.choose_template(index),
             _ => DrawerAction::None,
         }
     }
@@ -1557,6 +1586,9 @@ impl Session {
             return;
         }
         self.program_content.get_mut().take();
+        self.layer_builds = None;
+        self.slide_countdown = None;
+        self.layer_build_stepped = false;
         self.pending_cue_completion = None;
         self.pending_cue_actions = None;
         self.replace_underlay(None);
@@ -2424,12 +2456,37 @@ impl Session {
     }
 
     pub fn template_entries(&self) -> Vec<(&str, &str, &serde_json::Value)> {
+        self.visible_template_entries()
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
+    fn visible_template_entries(
+        &self,
+    ) -> impl Iterator<Item = (usize, (&str, &str, &serde_json::Value))> {
         let query = self.search_query.trim().to_lowercase();
         self.template_catalog
             .named_entries()
             .into_iter()
-            .filter(|(_, name, _)| query.is_empty() || name.to_lowercase().contains(&query))
-            .collect()
+            .chain(
+                Catalog::starter_templates()
+                    .named_entries()
+                    .into_iter()
+                    .filter(|(id, _, _)| self.template_catalog.get(id).is_none()),
+            )
+            .enumerate()
+            .filter(move |(_, (id, name, _))| {
+                (!self.template_favorites_only || self.is_template_favorite(id))
+                    && (query.is_empty() || name.to_lowercase().contains(&query))
+            })
+    }
+
+    pub fn is_template_favorite(&self, id: &str) -> bool {
+        self.template_favorites.contains(id)
+    }
+
+    pub fn is_starter_template(&self, id: &str) -> bool {
+        self.template_catalog.get(id).is_none() && Catalog::starter_templates().get(id).is_some()
     }
 
     pub fn selected_template(&self) -> Option<(&str, &str, &serde_json::Value)> {
@@ -2456,14 +2513,18 @@ impl Session {
     }
 
     fn choose_template(&mut self, index: usize) -> DrawerAction {
-        if let Some((id, _, _)) = self.template_catalog.named_entries().get(index) {
-            self.template_pick = Some((*id).into());
+        let picked = self
+            .visible_template_entries()
+            .nth(index)
+            .map(|(_, (id, _, _))| id.to_owned());
+        if picked.is_some() {
+            self.template_pick = picked;
         }
         DrawerAction::None
     }
 
     fn apply_template_id(&mut self, id: &str) -> bool {
-        let Some(template) = self.template_catalog.get(id).cloned() else {
+        let Some(template) = self.template_catalog.get_template(id).cloned() else {
             return false;
         };
         let Some(show_id) = self.current_show().map(|show| show.id.clone()) else {
@@ -2869,6 +2930,9 @@ impl Session {
             return false;
         }
         self.slide_hidden = true;
+        self.layer_builds = None;
+        self.slide_countdown = None;
+        self.layer_build_stepped = false;
         self.pending_cue_completion = None;
         self.timed_seconds = None;
         true
@@ -2973,6 +3037,18 @@ impl Session {
     fn apply_slide_actions(&mut self) {
         if self.tab == "scripture" {
             return;
+        }
+        self.layer_build_stepped = false;
+        let slide = self.current_show().and_then(|show| {
+            let ordered = show.ordered_slides();
+            show.show["slides"].get(&ordered.get(self.slide_index?)?.id)
+        });
+        // Action-only cues can change media while retaining the composed slide.
+        if !slide.is_some_and(|slide| slide["settings"]["actionOnly"].as_bool() == Some(true)) {
+            let now = Instant::now();
+            let countdown = slide.and_then(|slide| SlideCountdown::on_take(slide, now));
+            self.layer_builds = slide.and_then(|slide| LayerBuilds::on_take(slide, now));
+            self.slide_countdown = countdown;
         }
         self.pending_actions = None;
         self.pending_cue_actions = self.current_show().and_then(|show| {
@@ -3975,7 +4051,8 @@ impl Session {
             self.refresh_output |= ended_video;
             return ended_video;
         }
-        let advanced = self.advance_show();
+        // An automatic media completion cannot stand in for an operator's build click.
+        let advanced = !self.waiting_for_layer_build() && self.advance_show();
         self.media_finished = Some(key);
         self.refresh_output |= advanced || ended_video;
         advanced || ended_video
@@ -4399,6 +4476,11 @@ impl Session {
 
     /// The selection becomes the program again.
     pub fn go_live(&mut self) {
+        if self.tab == "scripture" {
+            self.layer_builds = None;
+            self.slide_countdown = None;
+            self.layer_build_stepped = false;
+        }
         if self.tab == "scripture"
             || (self.program_held
                 && self.pending_cue_actions.as_ref().is_some_and(|pending| {
@@ -4746,7 +4828,9 @@ impl Session {
             taken_slide = Some(freeshow_remote::RemoteSlide {
                 id: slide_id.clone(),
                 label: String::new(),
-                lines: freeshow_data::visible_slide_lines(slide),
+                lines: freeshow_data::visible_slide_lines(&crate::live::program_slide_readback(
+                    self, slide,
+                )),
                 notes: slide["notes"].as_str().unwrap_or_default().to_string(),
                 group: String::new(),
             });
@@ -5630,6 +5714,7 @@ impl Session {
     pub fn output_motion(&mut self) -> (freeshow_data::TextTransition, bool) {
         let background = self.background_transition;
         self.background_transition = false;
+        let build = std::mem::take(&mut self.layer_build_stepped);
         if let Some(fade) = self.video_end_fade.take() {
             let mut motion = self
                 .style_motion("media")
@@ -5643,7 +5728,7 @@ impl Session {
             }
             return (motion, true);
         }
-        if self.blanked {
+        if self.blanked || (build && !background) {
             return (
                 freeshow_data::TextTransition {
                     kind: "none".into(),
@@ -5714,7 +5799,7 @@ impl Session {
 
     /// Seconds until this slide should advance on its own.
     pub fn next_timer_seconds(&self) -> Option<f64> {
-        if self.blanked {
+        if self.blanked || self.waiting_for_layer_build() {
             return None;
         }
         if let Some(seconds) = self.folder_timer_seconds() {
@@ -5723,11 +5808,70 @@ impl Session {
         if self.tab != "shows" {
             return None;
         }
-        self.timed_seconds.filter(|seconds| *seconds > 0.0)
+        self.timed_seconds
+            .filter(|seconds| *seconds > 0.0)
+            .map(|seconds| {
+                seconds.max(self.automatic_build_remaining(Instant::now()).as_secs_f64())
+            })
     }
 
     pub fn has_pending_cue_completion(&self) -> bool {
         self.pending_cue_completion.is_some()
+    }
+
+    pub(crate) fn waiting_for_layer_build(&self) -> bool {
+        !self.blanked
+            && !self.slide_hidden
+            && self
+                .layer_builds
+                .as_ref()
+                .is_some_and(LayerBuilds::waiting_for_next)
+    }
+
+    pub(crate) fn automatic_build_remaining(&self, now: Instant) -> Duration {
+        if self.blanked || self.slide_hidden {
+            return Duration::ZERO;
+        }
+        self.layer_builds.as_ref().map_or(Duration::ZERO, |builds| {
+            builds.automatic_entrance_remaining(now)
+        })
+    }
+
+    fn step_layer_build(&mut self, forward: bool) -> bool {
+        if self.blanked || self.slide_hidden || (self.tab != "shows" && !self.program_held) {
+            return false;
+        }
+        let changed = self.layer_builds.as_mut().is_some_and(|builds| {
+            if forward {
+                builds.next(Instant::now())
+            } else {
+                builds.previous(Instant::now())
+            }
+        });
+        self.layer_build_stepped |= changed;
+        changed
+    }
+
+    pub(crate) fn tick_layer_builds(&mut self, now: Instant) -> bool {
+        let delay = self.preferences.output_delay_ms();
+        !self.blanked
+            && !self.slide_hidden
+            && self
+                .layer_builds
+                .as_mut()
+                .is_some_and(|builds| builds.tick(now, delay))
+    }
+
+    pub(crate) fn tick_live_graphics(&mut self, now: Instant) -> bool {
+        if self.blanked || self.slide_hidden {
+            return false;
+        }
+        let delay = self.preferences.output_delay_ms();
+        let countdown_changed = self
+            .slide_countdown
+            .as_mut()
+            .is_some_and(|countdown| countdown.tick(now, delay));
+        self.tick_layer_builds(now) || countdown_changed
     }
 
     pub fn run_due_cue_completion(&mut self, now: Instant) -> bool {
@@ -5745,7 +5889,10 @@ impl Session {
             self.pending_cue_completion = None;
             return false;
         };
-        if now < pending.due {
+        if now < pending.due
+            || self.waiting_for_layer_build()
+            || !self.automatic_build_remaining(now).is_zero()
+        {
             return false;
         }
         let (output_id, output_name) = self.audience();
@@ -5771,6 +5918,9 @@ impl Session {
     pub fn advance_show(&mut self) -> bool {
         if self.preferences.out_locked() {
             return false;
+        }
+        if self.step_layer_build(true) {
+            return true;
         }
         self.resume_program();
         if self.tab == "scripture" {
@@ -6060,6 +6210,7 @@ impl Session {
         if self.preferences.out_locked() {
             return false;
         }
+        let was_held = self.program_held;
         self.resume_program();
         if self.tab == "scripture" {
             return self.step_verse(-1);
@@ -6080,6 +6231,12 @@ impl Session {
             self.click_revealed = false;
             return true;
         }
+        if self.step_layer_build(false) {
+            if was_held {
+                self.hold_program();
+            }
+            return true;
+        }
         let index = self.slide_index.unwrap_or(0);
         let (output_id, output_name) = self.audience();
         let previous = self
@@ -6088,6 +6245,9 @@ impl Session {
         if let Some(previous) = previous {
             self.step_slide(-1);
             if self.slide_index == Some(previous) {
+                if let Some(builds) = &mut self.layer_builds {
+                    builds.finish();
+                }
                 if let Some(total) = self
                     .current_show()
                     .and_then(|show| show.line_reveal_lines(previous))
@@ -6565,6 +6725,13 @@ impl Session {
         else {
             return false;
         };
+        let now = Instant::now();
+        self.slide_countdown =
+            SlideCountdown::update(&replacement, self.slide_countdown.as_ref(), now);
+        self.layer_builds = self
+            .layer_builds
+            .as_ref()
+            .and_then(|builds| builds.updated(&replacement, now));
         *slide = std::rc::Rc::new(replacement);
         self.hold_program();
         self.live_edited = true;
@@ -8986,7 +9153,7 @@ Second line"
     }
 
     #[test]
-    fn project_package_import_plays_its_bundled_picture_offline() {
+    fn project_package_import_plays_its_bundled_picture_and_video_offline() {
         let source = std::env::temp_dir().join(format!("freeshow-package-source-{}", new_id()));
         let incoming = std::env::temp_dir().join(format!("freeshow-package-incoming-{}", new_id()));
         let mut session = Session::open(source.clone());
@@ -9001,6 +9168,19 @@ Second line"
         };
         std::fs::create_dir_all(source.join("Media")).unwrap();
         std::fs::write(source.join(relative), image.encode_png().unwrap()).unwrap();
+        let clip = "Media/Clip.mp4";
+        let clip_bytes = include_bytes!("../../freeshow-data/tests/fixtures/lesson-clip.mp4");
+        std::fs::write(source.join(clip), clip_bytes).unwrap();
+        let project_id = session.project_id.clone().unwrap();
+        let mut project = session.projects.project_body(&project_id).unwrap();
+        project["shows"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": clip, "type": "video", "name": "Closing clip",
+            }));
+        assert!(session.projects.put_project(&project_id, project));
+        assert!(session.save_projects());
         assert!(
             session.edit_selected_slide("Attach a picture", |show, _, _| {
                 show.show["media"]["b"] = serde_json::json!({"path": relative});
@@ -9022,7 +9202,7 @@ Second line"
                 .iter()
                 .filter(|entry| entry.path.starts_with(incoming.join("Media")))
                 .count(),
-            1
+            2
         );
         let project = reopened.projects.projects().into_iter().next().unwrap();
         reopened.project_id = Some(project.id);
@@ -9038,6 +9218,13 @@ Second line"
                 .as_ref()
                 .is_some_and(|path| path.starts_with(incoming.join("Media")))
         );
+        assert!(reopened.open_project_item(1, None));
+        let [Some(PendingPlay::Video(copied)), _] = reopened.take_plays() else {
+            panic!("The imported project's second cue should play the bundled video");
+        };
+        assert!(copied.starts_with(incoming.join("Media")));
+        assert_eq!(std::fs::read(&copied).unwrap(), clip_bytes);
+        assert!(freeshow_media::video_thumbnail(&copied, 96, 54).is_some());
         std::fs::remove_dir_all(incoming).unwrap();
     }
 

@@ -3,17 +3,19 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Instant;
 
-use crate::session::Session;
-use freeshow_data::ShowFile;
+use crate::session::{LayerBuilds, Session};
+use freeshow_data::{Library, ShowFile, SlideBackdrop};
 use freeshow_output::render_styled;
 use freeshow_output::{
     Blend, Fit, Frame, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine,
-    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled, cover_frames,
-    crossfade, decode_image, ease_progress, fade_through_black, filter_blur, filter_brightness,
-    filter_contrast, filter_grayscale, filter_hue_rotate, filter_invert, filter_opacity,
-    filter_saturate, filter_sepia, parse_color, placed_image, push_frames, scale_frames,
-    slide_frames, slide_way, spin_frames, uncover_frames, wipe_frames,
+    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled,
+    composite_styled_sampled, cover_frames, crossfade, decode_image, ease_progress,
+    fade_through_black, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
+    filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, parse_color,
+    placed_image, push_frames, scale_frames, slide_frames, slide_way, spin_frames, uncover_frames,
+    wipe_frames,
 };
 #[cfg(test)]
 use freeshow_output::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
@@ -96,6 +98,213 @@ impl TransitionAudition {
             motion_frame(&self.from, &self.to, &self.motion, progress)
         }
     }
+}
+
+/// An off-air still composition and its own manually stepped clock.
+pub struct BuildAudition {
+    pub slide_number: usize,
+    pub builds: LayerBuilds,
+    scene: StyledSlide,
+    authored_indices: Vec<usize>,
+    base: Frame,
+}
+
+impl BuildAudition {
+    pub fn prepare(session: &Session, now: Instant) -> Option<Self> {
+        if session.tab != "shows" {
+            return None;
+        }
+        let show = session
+            .show_index
+            .and_then(|index| session.shows.get(index))?;
+        let index = session.slide_index?;
+        let order = show.ordered_slides();
+        let slide_id = &order.get(index)?.id;
+        let slide = show.show["slides"].get(slide_id)?;
+        if action_only(slide) {
+            return None;
+        }
+        let builds = LayerBuilds::on_take(slide, now)?;
+        let (source_width, source_height) = slide_source_size(slide);
+        let edge = source_width.max(source_height);
+        let width = (576.0 * (source_width / edge)).round().max(1.0) as u32;
+        let height = (576.0 * (source_height / edge)).round().max(1.0) as u32;
+        let root = session.root.as_deref();
+        let base = build_audition_backdrop(show, index, root, width, height)
+            .unwrap_or_else(|| clear_frame(width, height));
+        let mut authored_indices = Vec::new();
+        let scene = styled_slide(
+            slide,
+            root,
+            true,
+            Some(0),
+            false,
+            None,
+            &session_variables(session),
+            width,
+            height,
+            false,
+            |item| {
+                authored_indices.push(item);
+                true
+            },
+        );
+        Some(Self {
+            slide_number: index + 1,
+            builds,
+            scene,
+            authored_indices,
+            base,
+        })
+    }
+
+    pub fn frame(&self, now: Instant) -> Frame {
+        let mut frame = self.base.clone();
+        composite_styled_sampled(&mut frame, &self.scene, |index| {
+            self.builds.sample(
+                self.authored_indices[index],
+                now,
+                self.scene.source_width,
+                self.scene.source_height,
+            )
+        });
+        frame
+    }
+}
+
+fn build_audition_backdrop(
+    show: &ShowFile,
+    index: usize,
+    root: Option<&Path>,
+    width: u32,
+    height: u32,
+) -> Option<Frame> {
+    let SlideBackdrop::Picture {
+        path,
+        foreground: false,
+    } = show.backdrop_at(index)
+    else {
+        return None;
+    };
+    let path = resolve_media(root, &path)?;
+    if freeshow_media::media_kind(&path) != freeshow_media::MediaKind::Image {
+        return None;
+    }
+    let image = decode_image(&std::fs::read(&path).ok()?)?;
+    let library = root.map(Library::open);
+    let (left, right, top, bottom) = library
+        .as_ref()
+        .map_or((0, 0, 0, 0), |library| library.media_crop(&path));
+    let (fit, flip_x, flip_y) = library.as_ref().map_or_else(
+        || (String::new(), false, false),
+        |library| library.media_look(&path),
+    );
+    let fit = if fit.is_empty() {
+        library
+            .as_ref()
+            .map_or_else(String::new, Library::style_fit)
+    } else {
+        fit
+    };
+    let (filter, blend) = library.as_ref().map_or_else(
+        || (String::new(), String::new()),
+        |library| library.media_effect(&path),
+    );
+    let (blur, blur_opacity) = library.as_ref().map_or((6.0, 0.3), Library::style_blur);
+    Some(placed_image(
+        &freeshow_output::crop_raster(&image, left, right, top, bottom),
+        width,
+        height,
+        Fit::named(&fit),
+        flip_x,
+        flip_y,
+        &filter,
+        &blend,
+        blur,
+        blur_opacity,
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn build_audition_rehearses_saved_layers_without_touching_the_live_cue() {
+    use serde_json::json;
+    use std::time::Duration;
+
+    let root = std::env::temp_dir().join(format!(
+        "freeshow-build-preview-{}",
+        freeshow_data::new_id()
+    ));
+    let mut session = Session::open(root.clone());
+    assert!(session.create_show());
+    session.output_width = 160;
+    session.output_height = 90;
+    let slot = session.show_index.unwrap();
+    let show = &mut session.shows[slot];
+    assert!(show.set_item_text("s1", 0, "On air"));
+    let preview = show.add_slide().unwrap();
+    show.show["slides"][&preview] = json!({
+        "settings":{"resolution":{"width":576,"height":576},"backgroundImage":"cover.png"},
+        "items":[
+            {"style":"display:none;background:#f00;width:576px;height:576px;"},
+            {"type":"media","src":"logo.png","style":"left:288px;top:288px;width:192px;height:192px;",
+             "freeshowRustBuild":{"step":0,"enter":{"effect":"fade","durationMs":100}}},
+            {"type":"shape","style":"left:16px;top:16px;width:128px;height:128px;background:#00ffdd;",
+             "freeshowRustBuild":{"step":7,"enter":{"effect":"scale","durationMs":100},
+             "exit":{"effect":"scale","delayMs":120,"durationMs":100}}}
+        ]
+    });
+    let cover = root.join("cover.png");
+    let logo = root.join("logo.png");
+    std::fs::write(
+        &cover,
+        include_bytes!("../../freeshow-data/tests/fixtures/lesson-cover.png"),
+    )
+    .unwrap();
+    std::fs::write(&logo, include_bytes!("../../../assets/freeshow.png")).unwrap();
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    session.select_slide(0);
+    let program = compose_audience(&session, start);
+    session.select_slide_for_edit(1);
+    let mut rehearsal = BuildAudition::prepare(&session, start).unwrap();
+    assert_eq!(rehearsal.slide_number, 2);
+    assert_eq!(rehearsal.builds.next_step(), Some(7));
+    let before = rehearsal.frame(at(200));
+    assert_eq!((before.width, before.height), (576, 576));
+    let pixel = |frame: &Frame, x: usize| frame.pixels[(50 * 576 + x) * 4..][..3].to_vec();
+    assert_eq!(pixel(&before, 100), [0, 255, 0]);
+    assert_ne!(rehearsal.frame(at(0)), before);
+    assert!(!rehearsal.builds.motion_remaining(at(200)));
+    std::fs::remove_file(cover).unwrap();
+    std::fs::remove_file(logo).unwrap();
+    assert_eq!(rehearsal.frame(at(200)), before);
+    assert!(rehearsal.builds.next(at(201)));
+    assert!(rehearsal.builds.can_rewind());
+    let entering = rehearsal.frame(at(251));
+    assert_eq!(pixel(&entering, 20), [0, 255, 0]);
+    assert!(pixel(&entering, 100)[2] > 0);
+    let shown = rehearsal.frame(at(320));
+    assert_eq!(pixel(&shown, 20), [0, 255, 221]);
+    assert_eq!(pixel(&shown, 100), [0, 255, 221]);
+    assert!(rehearsal.builds.motion_remaining(at(350)));
+    let exiting = rehearsal.frame(at(471));
+    assert_eq!(pixel(&exiting, 20), [0, 255, 0]);
+    assert!(pixel(&exiting, 100)[2] > 0);
+    assert_eq!(rehearsal.frame(at(521)), before);
+    assert!(!rehearsal.builds.motion_remaining(at(521)));
+    assert!(rehearsal.builds.previous(at(530)));
+    assert!(!rehearsal.builds.can_rewind());
+    assert_eq!(rehearsal.builds.next_step(), Some(7));
+    rehearsal.builds.restart(at(550));
+    assert_eq!(rehearsal.frame(at(550)), rehearsal.frame(at(0)));
+
+    assert_eq!(compose_audience(&session, at(600)), program);
+    assert_eq!(session.to_snapshot().taken_slide.unwrap().lines, ["On air"]);
+    assert_eq!(session.live_slide_index(), Some(0));
+    assert_eq!(session.slide_index, Some(1));
+    assert!(session.layer_builds.is_none());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 pub fn same_frame_size(a: &Frame, b: &Frame) -> bool {
@@ -203,7 +412,9 @@ fn catalog_items(session: &Session, entry: &serde_json::Value) -> Vec<StyledItem
             items
                 .iter()
                 .filter(|item| !freeshow_data::item_hidden(item))
-                .map(|item| styled_item(item, session.root.as_deref(), None, None, &variables))
+                .map(|item| {
+                    styled_item(item, session.root.as_deref(), None, None, &variables, true)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -240,15 +451,15 @@ pub fn audience_frame(session: &Session) -> Frame {
     } else {
         session.preferences.output_delay_ms()
     };
-    delayed_audience_frame(compose_audience(session), delay)
+    delayed_audience_frame(compose_audience(session, Instant::now()), delay)
 }
 
 /// An explicit Clear must discard pictures queued before the operator pressed it.
 pub fn cleared_audience_frame(session: &Session) -> Frame {
-    delayed_audience_frame(compose_audience(session), 0)
+    delayed_audience_frame(compose_audience(session, Instant::now()), 0)
 }
 
-fn compose_audience(session: &Session) -> Frame {
+fn compose_audience(session: &Session, now: Instant) -> Frame {
     let mut frame = if !session.blanked {
         if let Some(image) = &session.underlay {
             placed_image(
@@ -270,12 +481,93 @@ fn compose_audience(session: &Session) -> Frame {
         style_blank(session)
     };
     paint_overlays(&mut frame, session, true);
-    paint_program_content(&mut frame, session);
+    paint_program_content(&mut frame, session, now);
     paint_overlays(&mut frame, session, false);
     paint_interaction(&mut frame, session);
     paint_drawing(&mut frame, session);
     paint_effects(&mut frame, session);
     frame
+}
+
+#[cfg(test)]
+#[test]
+fn a_taken_build_changes_live_pixels_and_readback_without_restarting_the_cue() {
+    use serde_json::json;
+    use std::time::Duration;
+
+    let root = std::env::temp_dir().join(format!("freeshow-build-{}", freeshow_data::new_id()));
+    let mut session = Session::open(root.clone());
+    assert!(session.create_show());
+    let slot = session.show_index.unwrap();
+    let show = &mut session.shows[slot];
+    show.show["slides"]["s1"]["items"] = json!([
+        {"type":"shape","style":"left:100px;top:100px;width:400px;height:200px;background:#ff0000;",
+            "freeshowRustBuild":{"step":0,"enter":{"effect":"fade","durationMs":100}}},
+        {"type":"text","style":"left:700px;top:100px;width:400px;height:200px;background:#00ff00;",
+            "lines":[{"text":[{"value":"Built words","style":"font-size:40px;color:#ffffff;"}]}],
+            "freeshowRustBuild":{"step":1,"enter":{"effect":"fade","durationMs":0},
+                "exit":{"effect":"fade","delayMs":10000,"durationMs":100}}}
+    ]);
+    assert!(show.add_slide().is_some());
+    show.save(show.path.as_deref().unwrap()).unwrap();
+    session.output_width = 320;
+    session.output_height = 180;
+    session.select_slide(0);
+    let taken_at = Instant::now();
+    let slide = &session.shows[slot].show["slides"]["s1"];
+    session.layer_builds = LayerBuilds::on_take(slide, taken_at);
+    let at = |ms| compose_audience(&session, taken_at + Duration::from_millis(ms));
+    let sample =
+        |image: &Frame, x: usize, channel: usize| image.pixels[(25 * 320 + x) * 4 + channel];
+    assert_eq!(sample(&at(0), 25, 0), 0);
+    assert!((120..=135).contains(&sample(&at(50), 25, 0)));
+    assert_eq!(sample(&at(120), 25, 0), 255);
+    assert_eq!(sample(&at(120), 130, 1), 0);
+    assert_eq!(sample(&edit_frame(&session), 130, 1), 255);
+    assert!(session.to_snapshot().taken_slide.unwrap().lines.is_empty());
+    assert!(
+        program_stage_slide(&session, &[])
+            .text_boxes
+            .iter()
+            .all(Vec::is_empty)
+    );
+
+    assert!(session.select_item(1));
+    assert!(session.save_lyrics("The edited wording"));
+    assert!(session.advance_show());
+    assert_eq!(session.slide_index, Some(0));
+    assert_eq!(session.output_motion().0.kind, "none");
+    let frame = compose_audience(&session, Instant::now());
+    assert_eq!(sample(&frame, 130, 1), 255);
+    assert_eq!(
+        session.to_snapshot().taken_slide.unwrap().lines,
+        ["Built words"]
+    );
+    assert_eq!(
+        program_stage_slide(&session, &[]).text_boxes,
+        [vec!["Built words"]]
+    );
+    assert!(session.retreat_show());
+    assert!(session.to_snapshot().taken_slide.unwrap().lines.is_empty());
+    assert!(session.advance_show());
+    assert!(session.update_live_slide());
+    assert_eq!(
+        session.to_snapshot().taken_slide.unwrap().lines,
+        ["The edited wording"]
+    );
+    assert!(session.advance_show());
+    assert_eq!(session.slide_index, Some(1));
+    assert!(session.retreat_show());
+    assert_eq!(session.slide_index, Some(0));
+    // Previous enters the earlier cue's completed build state, including exits.
+    assert_eq!(sample(&audience_frame(&session), 130, 1), 0);
+    session.select_slide(0);
+    assert_eq!(sample(&audience_frame(&session), 130, 1), 0);
+    assert!(session.clear_all_layers());
+    assert!(session.layer_builds.is_none());
+    assert!(!session.tick_layer_builds(Instant::now() + Duration::from_secs(1)));
+    assert!(session.to_snapshot().taken_slide.is_none());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// An empty audience picture in the active output style's background colour.
@@ -345,7 +637,7 @@ pub(crate) fn capture_program_content(session: &Session) {
     });
 }
 
-fn paint_program_content(frame: &mut Frame, session: &Session) {
+fn paint_program_content(frame: &mut Frame, session: &Session, now: Instant) {
     capture_program_content(session);
     let (width, height) = (session.output_width, session.output_height);
     match session.program_content.borrow().as_ref() {
@@ -358,10 +650,15 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
             clicks,
             page,
             ..
-        }) => composite_styled(
-            frame,
-            &styled_slide(
-                &output_look(session, slide),
+        }) => {
+            let mut slide = output_look(session, slide);
+            if let Some(countdown) = session.slide_countdown.as_ref() {
+                slide = countdown.render(slide, now);
+            }
+            let (source_width, source_height) = slide_source_size(&slide);
+            let mut samples = Vec::new();
+            let styled = styled_slide(
+                &slide,
                 session.root.as_deref(),
                 true,
                 Some(*reveal),
@@ -370,8 +667,25 @@ fn paint_program_content(frame: &mut Frame, session: &Session) {
                 &session_variables(session),
                 width,
                 height,
-            ),
-        ),
+                true,
+                |index| {
+                    let Some(builds) = &session.layer_builds else {
+                        return true;
+                    };
+                    let Some(sample) = builds.sample(index, now, source_width, source_height)
+                    else {
+                        return false;
+                    };
+                    samples.push(sample);
+                    true
+                },
+            );
+            if session.layer_builds.is_some() {
+                composite_styled_sampled(frame, &styled, |index| samples.get(index).copied());
+            } else {
+                composite_styled(frame, &styled);
+            }
+        }
         None => {}
     }
 }
@@ -384,7 +698,7 @@ fn output_look<'a>(
     let template = session
         .style_template
         .as_deref()
-        .and_then(|id| session.template_catalog.get(id));
+        .and_then(|id| session.template_catalog.get_template(id));
     match template {
         Some(template) => {
             let mut restyled = slide.clone();
@@ -571,6 +885,9 @@ fn paint_overlays(frame: &mut Frame, session: &Session, under_slide: bool) {
 }
 
 pub fn stage_frame(session: &Session) -> Frame {
+    if session.layer_builds.is_some() {
+        capture_program_content(session);
+    }
     let variables = session_variables(session);
     let timers = session.timer_labels();
     let audience = session
@@ -654,6 +971,7 @@ pub fn stage_frame(session: &Session) -> Frame {
                         let current = current_index == Some(slide_index);
                         if current
                             && (held_slide.is_some()
+                                || session.layer_builds.is_some()
                                 || action_only(&show.show["slides"][&slide.id]))
                         {
                             program_stage_slide(session, &variables)
@@ -770,12 +1088,61 @@ fn program_stage_slide(
             page,
             ..
         }) => stage_slide(
-            ShowFile::stage_text_boxes_from_slide(slide, true, *reveal, *clicks, *page),
+            ShowFile::stage_text_boxes_from_slide(
+                &program_slide_readback(session, slide),
+                true,
+                *reveal,
+                *clicks,
+                *page,
+            ),
             slide["notes"].as_str().unwrap_or_default(),
             variables,
         ),
         None => stage_slide(Vec::new(), "", variables),
     }
+}
+
+/// Stage and remote read back live digits and visible builds at their authored box indices.
+pub(crate) fn program_slide_readback<'a>(
+    session: &Session,
+    slide: &'a serde_json::Value,
+) -> std::borrow::Cow<'a, serde_json::Value> {
+    let now = Instant::now();
+    let mut composed = std::borrow::Cow::Borrowed(slide);
+    if let Some(countdown) = session.slide_countdown.as_ref() {
+        composed = countdown.render(composed, now);
+    }
+    let Some((builds, items)) = session
+        .layer_builds
+        .as_ref()
+        .zip(composed["items"].as_array())
+    else {
+        return composed;
+    };
+    let hidden = |index| builds.visual(index, now).opacity <= 0.0;
+    if !(0..items.len()).any(hidden) {
+        return composed;
+    }
+    for (index, item) in composed.to_mut()["items"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        if hidden(index)
+            && let Some(item) = item.as_object_mut()
+        {
+            let style = item
+                .get("style")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            item.insert(
+                "style".into(),
+                serde_json::Value::String(format!("{style};display:none !important;")),
+            );
+        }
+    }
+    composed
 }
 
 fn stage_slide(
@@ -887,6 +1254,8 @@ fn styled_slide_at(
         variables,
         output_width,
         output_height,
+        true,
+        |_| true,
     ))
 }
 
@@ -901,6 +1270,8 @@ fn styled_slide(
     variables: &[(String, String)],
     output_width: u32,
     output_height: u32,
+    remote_images: bool,
+    mut include: impl FnMut(usize) -> bool,
 ) -> StyledSlide {
     let background = slide
         .pointer("/settings/color")
@@ -918,13 +1289,15 @@ fn styled_slide(
         .map(|items| {
             items
                 .iter()
-                .filter(|item| {
+                .enumerate()
+                .filter(|(_, item)| {
                     !freeshow_data::item_hidden(item)
                         && (clicks_shown
                             || item.get("clickReveal").and_then(|value| value.as_bool())
                                 != Some(true))
                 })
-                .map(|item| styled_item(item, root, reveal, page, variables))
+                .filter(|(index, _)| include(*index))
+                .map(|(_, item)| styled_item(item, root, reveal, page, variables, remote_images))
                 .collect()
         })
         .unwrap_or_default();
@@ -958,6 +1331,7 @@ fn styled_item(
     reveal: Option<u32>,
     page: Option<(usize, usize)>,
     variables: &[(String, String)],
+    remote_images: bool,
 ) -> StyledItem {
     let chords_on = item
         .pointer("/chords/enabled")
@@ -1005,6 +1379,7 @@ fn styled_item(
     } else {
         item.get("src")
             .and_then(|value| value.as_str())
+            .filter(|src| remote_images || !freeshow_media::is_remote_url(src))
             .and_then(|src| load_image(root, src))
     };
     StyledItem {
@@ -1523,6 +1898,69 @@ fn lines_slide_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_countdown_starter_ticks_only_after_take_and_keeps_its_clock_on_live_update() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = Session::open(root.path().to_path_buf());
+        session.output_width = 320;
+        session.output_height = 180;
+        session.switch_tab("templates");
+        let id = "freeshow-rust-starter-countdown";
+        assert!(session.browse_template(id));
+        session.library_action("template-new-show", id).unwrap();
+        assert!(session.selected_layer_is_countdown());
+        assert!(session.save_lyrics("00:05"));
+        let edit = edit_frame(&session);
+        assert!(session.slide_countdown.is_none());
+        assert!(!session.tick_live_graphics(Instant::now()));
+
+        session.select_slide(0);
+        assert!(session.slide_countdown.is_some());
+        let start = Instant::now() - Duration::from_secs(8);
+        session.slide_countdown = crate::slide_countdown::SlideCountdown::on_take(
+            &session.shows[session.show_index.unwrap()].show["slides"]["s1"],
+            start,
+        );
+        let starting_frame = compose_audience(&session, start);
+        let after_one = start + Duration::from_secs(1);
+        assert!(session.tick_live_graphics(after_one));
+        assert_ne!(compose_audience(&session, after_one), starting_frame);
+        assert!(!session.tick_live_graphics(after_one + Duration::from_millis(400)));
+        assert_eq!(program_stage_slide(&session, &[]).text_boxes[0], ["00:00"]);
+        assert_eq!(session.to_snapshot().slide_lines()[0], "00:00");
+        assert_eq!(edit_frame(&session), edit);
+
+        session.select_slide_for_edit(0);
+        assert!(session.save_lyrics("00:45"));
+        assert_eq!(session.to_snapshot().slide_lines()[0], "00:00");
+        assert!(session.update_live_slide());
+        let program = session.program_content.borrow();
+        let Some(ProgramContent::Slide { slide, .. }) = program.as_ref() else {
+            panic!("missing taken slide")
+        };
+        let adjusted = session.slide_countdown.as_ref().unwrap().render(
+            std::borrow::Cow::Borrowed(slide),
+            start + Duration::from_secs(12),
+        );
+        assert_eq!(
+            adjusted["items"][0]["lines"][0]["text"][0]["value"],
+            "00:33"
+        );
+        drop(program);
+
+        let done = start + Duration::from_secs(45);
+        assert!(session.tick_live_graphics(done));
+        assert!(!session.tick_live_graphics(done + Duration::from_secs(1)));
+        session.select_slide(0);
+        let _ = audience_frame(&session);
+        assert_eq!(session.to_snapshot().slide_lines()[0], "00:45");
+        assert!(session.clear_all_layers());
+        assert!(session.slide_countdown.is_none());
+        assert!(!session.tick_live_graphics(Instant::now() + Duration::from_secs(60)));
+        assert!(session.to_snapshot().taken_slide.is_none());
+    }
 
     #[test]
     fn powerpoint_wipe_reveals_pixels_in_place_and_covers_move_the_correct_slide() {

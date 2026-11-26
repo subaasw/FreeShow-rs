@@ -3,13 +3,15 @@
 
 import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, Slider, StandardListView, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, RailButton, BoxButton, HeaderButton, ListRow, HotkeyScope, SlideCard } from "widgets.slint";
-import { ComboIndex, ColorFmt, ValueEdit, SettingsPanel, SettingsData, ThemeColorRow, InspectorPanel, InspectorData, StageEditorPanel, StageRowData } from "panels.slint";
+import { ComboIndex, ColorFmt, ValueEdit, SettingsPanel, SettingsData, ThemeColorRow, InspectorPanel, InspectorData, BuildRowData, StageEditorPanel, StageRowData } from "panels.slint";
+import { AudioCheckRow, AudioMappingRow, NetworkCheckRow } from "panels.slint";
 
 import { SlideCanvas, LayerOutline, LayerMovePreview } from "slide_canvas.slint";
 import { LayerTextEditor } from "layer_text.slint";
 
 export { LayerOutline, LayerMovePreview }
-export { ComboIndex, ColorFmt, OperatorStyle, SettingsData, ThemeColorRow, InspectorData, StageRowData }
+export { ComboIndex, ColorFmt, OperatorStyle, SettingsData, ThemeColorRow, InspectorData, BuildRowData, StageRowData }
+export { AudioCheckRow, AudioMappingRow, NetworkCheckRow }
 
 component EditorLayerList inherits StandardListView {
     in property <int> selected-row: -1;
@@ -36,6 +38,8 @@ export struct DrawerRowData {
     thumb: image,
     show-thumb: bool,
     on: bool,
+    favorite: bool,
+    starter: bool,
 }
 
 export struct SlideRowData {
@@ -74,9 +78,13 @@ export component ControlWindow inherits Window {
     in property <string> template-target;
     in property <image> template-preview;
     in property <bool> template-has-style;
+    in property <bool> template-is-favorite;
+    in property <bool> template-is-starter;
+    in-out property <bool> template-favorites-only;
     in-out property <bool> template-save-open;
     private property <string> template-save-name;
     callback choose-template(string);
+    callback filter-template-favorites(bool);
     in-out property <bool> media-relink-open;
     in-out property <string> media-replacement;
     in property <[string]> missing-media-labels;
@@ -86,6 +94,13 @@ export component ControlWindow inherits Window {
     callback scan-missing-media();
     callback relink-media(string, string);
     callback preview-media(string);
+    in-out property <string> video-download-url;
+    in-out property <string> video-download-name;
+    in property <bool> video-download-active;
+    in property <string> video-download-status;
+    private property <bool> video-download-open;
+    callback start-video-download(string, string);
+    callback cancel-video-download();
     changed active-tab => {
         if (root.active-tab != "media") {
             root.media-relink-open = false;
@@ -148,6 +163,9 @@ export component ControlWindow inherits Window {
     in property <[string]> screen-choices;
     in-out property <int> screen-index: 0;
     in-out property <string> screen-label: "Screen";
+    in property <string> display-warning;
+    in property <string> display-summary;
+    private property <bool> show-display-check;
     in property <bool> can-undo: false;
     in property <bool> can-redo: false;
     callback undo-edit();
@@ -169,6 +187,15 @@ export component ControlWindow inherits Window {
     callback dismiss-guide();
     in-out property <bool> show-settings: false;
     in property <SettingsData> settings-data;
+    in property <string> remote-web-status: "Phone remote is starting…";
+    in property <string> stage-web-status: "Stage web view is starting…";
+    in property <string> audio-check-status: "Scan devices to check the current speaker routes.";
+    in property <[AudioCheckRow]> audio-check-rows;
+    in property <[AudioMappingRow]> audio-mapping-rows;
+    in property <bool> audio-scan-running;
+    in property <[NetworkCheckRow]> network-check-rows;
+    callback scan-audio-devices();
+    callback save-audio-mapping(string, string);
     in property <[string]> theme-names;
     in property <[string]> autosave-choices;
     in property <[string]> transition-kinds;
@@ -181,11 +208,14 @@ export component ControlWindow inherits Window {
     callback lyrics-edited(string);
     callback format-layer-text(string, int, int, string, string) -> bool;
     in property <string> layer-text-target;
+    in property <bool> countdown-layer;
     changed layer-text-target => { layer-text-editor.reset-selection(); }
     public function reset-layer-text-selection() { layer-text-editor.reset-selection(); }
     in property <InspectorData> inspector-data;
+    in property <[BuildRowData]> build-rows;
     callback inspector-set(string, string);
     callback preview-transition();
+    callback preview-builds();
     callback apply-transition-range(int, int);
     in-out property <bool> show-stage-editor: false;
     // The stage layout drawn small in the stage editor, refreshed after each edit.
@@ -247,6 +277,7 @@ export component ControlWindow inherits Window {
     callback save-notes(string);
     in property <int> item-index;
     in property <int> item-count;
+    in property <int> next-build-step;
     in property <[string]> picture-choices;
     in property <[StandardListViewItem]> layer-rows;
     in property <[LayerOutline]> layer-outlines;
@@ -397,9 +428,26 @@ export component ControlWindow inherits Window {
                 if root.screen-choices.length > 0: ComboBox {
                     width: 168px;
                     model: root.screen-choices;
-                    current-index: root.screen-index;
+                    property <int> assigned-index: root.screen-index;
+                    current-index: self.assigned-index;
+                    function follow-assignment() {
+                        if (self.assigned-index >= 0 && self.assigned-index < self.model.length) {
+                            self.current-index = self.assigned-index;
+                            self.current-value = self.model[self.assigned-index];
+                        }
+                    }
+                    changed assigned-index => { self.follow-assignment(); }
+                    changed model => { self.follow-assignment(); }
                     accessible-label: "Audience screen";
                     selected(value) => { root.pick-screen(self.current-index); }
+                }
+                HeaderButton {
+                    label: "Displays";
+                    accessible-label: "Check displays";
+                    accent: root.show-display-check ? root.accent : root.primary-lighter;
+                    accent-text: root.show-display-check ? root.accent-text : root.text-color;
+                    text-color: root.text-color;
+                    clicked => { root.show-display-check = !root.show-display-check; }
                 }
                 HeaderButton {
                     label: root.show-labels ? "Output" : "O";
@@ -415,6 +463,31 @@ export component ControlWindow inherits Window {
                     accent-text: root.stage-open ? root.accent-text : root.text-color;
                     clicked => { root.open-stage(); }
                 }
+            }
+        }
+        if root.show-display-check || root.display-warning != "": VerticalLayout {
+            padding-left: OperatorStyle.space-lg;
+            padding-right: OperatorStyle.space-lg;
+            padding-top: OperatorStyle.space-xs;
+            padding-bottom: OperatorStyle.space-xs;
+            spacing: OperatorStyle.space-xs;
+            if root.display-warning != "": Text {
+                text: root.display-warning;
+                color: root.text-color;
+                font-weight: 600;
+                wrap: word-wrap;
+                accessible-role: text;
+                accessible-label: "Display warning";
+                accessible-value: root.display-warning;
+            }
+            Text {
+                text: root.display-summary;
+                color: root.text-color;
+                opacity: 0.8;
+                wrap: word-wrap;
+                accessible-role: text;
+                accessible-label: "Display readiness";
+                accessible-value: root.display-summary;
             }
         }
         HorizontalLayout {
@@ -690,7 +763,12 @@ export component ControlWindow inherits Window {
                         spacing: 8px;
                         alignment: start;
                         Text {
-                            text: !root.editing ? "Live output" : root.live-slide >= 0 && root.live-slide == root.selected-slide ? "Changes stay in Edit until you choose Update Live or Go." : "Press Go to send this slide to the audience.";
+                            text: !root.editing && root.next-build-step > 0
+                                ? "Next plays animation step \{root.next-build-step}."
+                                : !root.editing ? "Live output"
+                                : root.live-slide >= 0 && root.live-slide == root.selected-slide
+                                    ? "Changes stay in Edit until you choose Update Live or Go."
+                                    : "Press Go to send this slide to the audience.";
                             color: root.text-color;
                             opacity: 0.7;
                             font-size: 12px * OperatorStyle.font-scale;
@@ -739,6 +817,14 @@ export component ControlWindow inherits Window {
                             shown: root.notes;
                             placeholder-text: "Stage notes for this slide";
                             accepted(value) => { root.save-notes(value); }
+                        }
+                        if root.editing && !root.text-mode && root.countdown-layer: Text {
+                            text: "Countdown duration · MM:SS or HH:MM:SS. Starts when you take this slide.";
+                            accessible-role: text;
+                            accessible-label: self.text;
+                            color: root.text-color;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
                         }
                         layer-text-editor := LayerTextEditor {
                             visible: root.editing && !root.text-mode;
@@ -901,8 +987,14 @@ export component ControlWindow inherits Window {
                             item-locked: root.active-layer-locked;
                             text-color: root.text-color;
                             panel: root.primary-darker;
+                            accent: root.accent;
+                            accent-text: root.accent-text;
+                            build-rows: root.build-rows;
+                            selected-layer: root.item-index;
                             transition-slide-count: root.slide-cards.length;
                             preview-transition => { root.preview-transition(); }
+                            preview-builds => { root.preview-builds(); }
+                            choose-build-layer(layer) => { root.select-edit-box(layer, "list"); }
                             apply-transition-range(first, last) => { root.apply-transition-range(first, last); }
                             set(key, value) => { root.inspector-set(key, value); }
                         }
@@ -1369,6 +1461,48 @@ export component ControlWindow inherits Window {
                         overflow: elide;
                         horizontal-stretch: 1;
                     }
+                    Button {
+                        text: root.video-download-open ? "Close download" : "Download video";
+                        enabled: !root.video-download-active;
+                        clicked => { root.video-download-open = !root.video-download-open; }
+                    }
+                }
+                if root.video-download-open: VerticalLayout {
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        LineEdit {
+                            text <=> root.video-download-url;
+                            placeholder-text: "Direct video URL";
+                            accessible-label: "Direct video URL";
+                            enabled: !root.video-download-active;
+                            horizontal-stretch: 2;
+                        }
+                        LineEdit {
+                            text <=> root.video-download-name;
+                            placeholder-text: "Name (optional)";
+                            accessible-label: "Downloaded video name";
+                            enabled: !root.video-download-active;
+                            horizontal-stretch: 1;
+                        }
+                        if !root.video-download-active: Button {
+                            text: "Save video";
+                            enabled: root.video-download-url != "";
+                            clicked => { root.start-video-download(root.video-download-url, root.video-download-name); }
+                        }
+                        if root.video-download-active: Button {
+                            text: "Cancel download";
+                            clicked => { root.cancel-video-download(); }
+                        }
+                    }
+                }
+                if root.video-download-status != "": Text {
+                    text: root.video-download-status;
+                    accessible-role: text;
+                    accessible-label: "Video download status";
+                    accessible-value: root.video-download-status;
+                    color: root.text-color;
+                    wrap: word-wrap;
                 }
                 if root.media-relink-open && root.missing-media-labels.length == 0: Text {
                     text: "No missing local media in the open show or project.";
@@ -1449,6 +1583,18 @@ export component ControlWindow inherits Window {
                 }
             }
         }
+        if !root.focus-mode && root.active-tab == "templates": Rectangle {
+            background: root.primary-darker;
+            HorizontalLayout {
+                padding: 6px;
+                alignment: start;
+                CheckBox {
+                    text: "Favorites only";
+                    checked <=> root.template-favorites-only;
+                    toggled => { root.filter-template-favorites(self.checked); }
+                }
+            }
+        }
         if !root.focus-mode && root.active-tab == "templates" && root.drawer-rows.length > 0: template-details := Rectangle {
             height: root.selected-template == "" ? 32px : 100px;
             background: root.primary-darker;
@@ -1474,14 +1620,24 @@ export component ControlWindow inherits Window {
                     horizontal-stretch: 1;
                     spacing: 4px;
                     alignment: center;
-                    Text {
-                        text: root.template-title;
-                        color: root.text-color;
-                        font-weight: 600;
-                        overflow: elide;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.template-title;
+                            color: root.text-color;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Button {
+                            text: root.template-is-favorite ? "Remove favorite" : "Add to favorites";
+                            clicked => { root.library-action("template-toggle-favorite", root.selected-template); }
+                        }
                     }
                     Text {
-                        text: root.template-target == "" ? "Open a show to apply the style."
+                        text: root.template-is-starter ? "Use as New, then replace the sample text in Edit."
+                            : root.template-target == "" ? "Open a show to apply the style."
                             : root.template-has-style ? "Apply Style keeps the words in “" + root.template-target + "”."
                             : "This template has a layout you can use as a new show.";
                         color: root.text-color;
@@ -1525,7 +1681,8 @@ export component ControlWindow inherits Window {
                     : root.active-tab == "audio" ? "Drag audio files onto this window to add them."
                     : root.active-tab == "scripture" ? "Drag a Bible file (.fsb or USFM) onto this window to add it."
                     : root.active-tab == "overlays" ? "No overlays yet. Open a show, click Edit, pick a slide and press Save as overlay. Click an overlay here to show or hide it over the output."
-                    : root.active-tab == "templates" ? "No templates yet. Open a show in Edit and use Save as template on a slide you want to reuse."
+                    : root.active-tab == "templates" ? (root.template-favorites-only ? "No favorite templates yet. Turn off Favorites only to see all templates."
+                        : "No templates yet. Open a show in Edit and use Save as template on a slide you want to reuse.")
                     : root.active-tab == "calendar" ? "No events yet. Type a name, date and time above and press Add. Leave the time blank for an all-day event, or pick a show to start it automatically at that time."
                     : root.active-tab == "player" ? "No player videos yet. Paste a YouTube or Vimeo link, a stream address or a video file path above and press Add."
                     : root.active-tab == "rss" ? "No headlines yet. Add a feed address above and press Save feeds; headlines appear here a moment later."
@@ -1553,6 +1710,9 @@ export component ControlWindow inherits Window {
                     y: 4px + floor(index / drawer-flick.columns) * drawer-flick.cell-height;
                     width: drawer-flick.cell-width - 4px;
                     label: item.name;
+                    tag: item.starter ? (item.favorite ? "Starter ★" : "Starter") : (item.favorite ? "★" : "");
+                    accessible-description: item.starter ? (item.favorite ? "Favorite starter template" : "Starter template")
+                        : item.favorite ? "Favorite template" : "";
                     thumb: item.thumb;
                     show-thumb: item.show-thumb;
                     on: item.on;
@@ -1671,6 +1831,15 @@ export component ControlWindow inherits Window {
             height: parent.height - OperatorStyle.header-height - OperatorStyle.status-height;
             background: root.primary;
             data: root.settings-data;
+            remote-web-status: root.remote-web-status;
+            stage-web-status: root.stage-web-status;
+            audio-check-status: root.audio-check-status;
+            audio-check-rows: root.audio-check-rows;
+            audio-mapping-rows: root.audio-mapping-rows;
+            audio-scan-running: root.audio-scan-running;
+            network-check-rows: root.network-check-rows;
+            scan-audio-devices => { root.scan-audio-devices(); }
+            save-audio-mapping(key, name) => { root.save-audio-mapping(key, name); }
             themes: root.theme-names;
             autosave-choices: root.autosave-choices;
             transition-kinds: root.transition-kinds;
@@ -1796,7 +1965,7 @@ export component MediaPreviewWindow inherits Window {
 }
 
 export component TransitionPreviewWindow inherits Window {
-    title: "FreeShow · Transition preview";
+    title: root.build-mode ? "FreeShow · Layer animation preview" : "FreeShow · Transition preview";
     icon: @image-url("../../../assets/freeshow.png");
     min-width: 320px;
     min-height: 240px;
@@ -1807,8 +1976,14 @@ export component TransitionPreviewWindow inherits Window {
     in property <string> description;
     in-out property <float> progress;
     in property <bool> can-scrub;
+    in property <bool> build-mode;
+    in property <bool> can-rewind;
+    in property <int> next-build-step;
+    in property <string> build-status;
     callback replay();
     callback seek(float);
+    callback previous-build();
+    callback next-build();
     callback dismiss();
     forward-focus: keys;
 
@@ -1818,6 +1993,14 @@ export component TransitionPreviewWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.dismiss();
+                return accept;
+            }
+            if (root.build-mode && event.text == Key.RightArrow) {
+                if (root.next-build-step > 0) { root.next-build(); }
+                return accept;
+            }
+            if (root.build-mode && event.text == Key.LeftArrow) {
+                if (root.can-rewind) { root.previous-build(); }
                 return accept;
             }
             return reject;
@@ -1832,10 +2015,28 @@ export component TransitionPreviewWindow inherits Window {
                 background: black;
                 Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
             }
+            if root.build-mode: Text {
+                text: root.build-status;
+                color: Palette.foreground;
+                wrap: word-wrap;
+                accessible-role: text;
+            }
             HorizontalLayout {
                 spacing: 8px;
-                Button { text: "Replay"; clicked => { root.replay(); } }
-                Slider {
+                Button { text: root.build-mode ? "Restart" : "Replay"; clicked => { root.replay(); } }
+                if root.build-mode: Button {
+                    text: "Previous";
+                    accessible-label: "Previous animation step";
+                    enabled: root.can-rewind;
+                    clicked => { root.previous-build(); }
+                }
+                if root.build-mode: Button {
+                    text: "Next";
+                    accessible-label: "Next animation step";
+                    enabled: root.next-build-step > 0;
+                    clicked => { root.next-build(); }
+                }
+                if !root.build-mode: Slider {
                     accessible-label: "Transition preview progress";
                     horizontal-stretch: 1;
                     minimum: 0;

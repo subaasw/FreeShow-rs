@@ -74,7 +74,6 @@ pub struct SettingsForm {
     pub media_duration: i32,
     pub media_direction: String,
     /// Where phones and tablets on this network open the remote and stage pages.
-    pub addresses: String,
     /// Output styles by name, and the look of the one the active output uses.
     pub style_names: Vec<String>,
     pub style_name: String,
@@ -162,20 +161,16 @@ pub fn setting_label(key: &str) -> &str {
 
 /// This computer's address on the local network, or `localhost` when it has none.
 pub fn lan_host() -> String {
-    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HOST.get_or_init(|| {
-        // Connecting a UDP socket picks the outgoing interface without sending anything.
-        std::net::UdpSocket::bind("0.0.0.0:0")
-            .and_then(|socket| {
-                socket.connect("192.0.2.1:80")?;
-                socket.local_addr()
-            })
-            .ok()
-            .map(|addr| addr.ip())
-            .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
-            .map_or_else(|| "localhost".to_string(), |ip| ip.to_string())
-    })
-    .clone()
+    // Connecting a UDP socket picks the outgoing interface without sending anything.
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect("192.0.2.1:80")?;
+            socket.local_addr()
+        })
+        .ok()
+        .map(|addr| addr.ip())
+        .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+        .map_or_else(|| "localhost".to_string(), |ip| ip.to_string())
 }
 
 /// CSS blend modes the output can draw, in the order the Inspector lists them.
@@ -420,14 +415,6 @@ impl Session {
             remote_port: i32::from(prefs.remote_port.unwrap_or(freeshow_remote::REMOTE_PORT)),
             remote_password: prefs.remote_password.clone().unwrap_or_default(),
             stage_port: i32::from(prefs.stage_port.unwrap_or(freeshow_remote::STAGE_PORT)),
-            addresses: {
-                let host = lan_host();
-                format!(
-                    "On a phone or tablet on this network, open the remote at http://{host}:{} and the stage display at http://{host}:{}",
-                    prefs.remote_port.unwrap_or(freeshow_remote::REMOTE_PORT),
-                    prefs.stage_port.unwrap_or(freeshow_remote::STAGE_PORT)
-                )
-            },
             max_connections: prefs.max_connections.unwrap_or(10) as i32,
             has_library: self.root.is_some(),
             icecast_host: icecast["host"]
@@ -1302,6 +1289,7 @@ impl Session {
     pub fn inspector_set(&mut self, key: &str, value: &str) -> Result<(), String> {
         let value = value.trim().to_string();
         let ok = match key {
+            key if key.starts_with("build-") => self.set_layer_build_field(key, &value)?,
             "font-family" => self.set_font_family(&value),
             "font-size" => {
                 let px = parse_int(&value, 12, 400)? as i32;

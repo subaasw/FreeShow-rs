@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use freeshow_data::{EXPORTS_DIR, ShowFile};
+use freeshow_data::{EXPORTS_DIR, Library, ShowFile};
 use freeshow_media::VideoPlayer;
 use freeshow_output::fingerprint;
 use serde_json::{Value, json};
 
-use crate::live::{audience_frame, stage_frame};
-use crate::session::Session;
+use crate::live::{audience_frame, cleared_audience_frame, stage_frame};
+use crate::session::{PendingPlay, Session};
 
 const STILL_BUDGET_FPS: f64 = 60.0;
 const VIDEO_BUDGET_FPS: f64 = 30.0;
@@ -218,6 +218,243 @@ fn present_song(session: &mut Session) -> bool {
         .and_then(|index| session.shows.get(index).map(|show| show.id.clone()))
         .is_some_and(|id| session.present_show(&id))
         || session.open_first_show()
+}
+
+const HANDOFF_WORDS: &str = "Doors open at 10:30";
+const HANDOFF_NOTE: &str = "Bring up the lectern microphone";
+const HANDOFF_CLIP: &[u8] =
+    include_bytes!("../../freeshow-data/tests/fixtures/service-handoff.mp4");
+const HANDOFF_STILLS: [(&str, &str, [u8; 4]); 2] = [
+    ("Media/red/Banner.png", "Red banner", [220, 40, 30, 255]),
+    ("Media/blue/Banner.png", "Blue banner", [30, 80, 220, 255]),
+];
+
+fn export_handoff_fixture(
+    root: &Path,
+    imports: &Path,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    const STARTER: &str = "freeshow-rust-starter-announcement";
+    const TEMPLATE: &str = "Rehearsal Announcement";
+    let mut sender = Session::open(root.to_path_buf());
+    if !sender.create_project() {
+        return Err("handoff could not create the sender project".into());
+    }
+    sender.switch_tab("templates");
+    if !sender.browse_template(STARTER) {
+        return Err("handoff could not open the announcement starter".into());
+    }
+    sender.library_action("template-new-show", STARTER)?;
+    if !sender.save_lyrics(HANDOFF_WORDS) || !sender.save_notes(HANDOFF_NOTE) {
+        return Err("handoff could not save the sender's text and stage note".into());
+    }
+    let show_name = sender.show_name();
+    sender.library_action("slide-to-template", TEMPLATE)?;
+    sender.switch_tab("templates");
+    let template_id = sender
+        .template_catalog
+        .id_named(TEMPLATE)
+        .ok_or("handoff template was not saved")?;
+    if !sender.browse_template(&template_id) {
+        return Err("handoff could not select the saved template".into());
+    }
+    sender.library_action("template-export", &template_id)?;
+    std::fs::copy(
+        root.join(EXPORTS_DIR)
+            .join(format!("{TEMPLATE} - Template.project")),
+        imports.join("Template.project"),
+    )?;
+
+    let project_id = sender
+        .project_id
+        .as_deref()
+        .ok_or("handoff project was not selected")?;
+    let mut project = sender
+        .projects
+        .project_body(project_id)
+        .ok_or("handoff project was not saved")?;
+    let cues = project["shows"]
+        .as_array_mut()
+        .ok_or("handoff project had no cue list")?;
+    for (relative, label, color) in HANDOFF_STILLS {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().ok_or("handoff still path had no parent")?)?;
+        std::fs::write(
+            path,
+            freeshow_output::Frame {
+                width: 1,
+                height: 1,
+                pixels: color.to_vec(),
+            }
+            .encode_png()?,
+        )?;
+        cues.push(json!({"id":relative, "type":"image", "name":label}));
+    }
+    std::fs::write(root.join("Media/Closing.mp4"), HANDOFF_CLIP)?;
+    cues.push(json!({"id":"Media/Closing.mp4", "type":"video", "name":"Closing clip"}));
+    if !sender.projects.put_project(project_id, project) {
+        return Err("handoff could not add media cues to the sender project".into());
+    }
+    sender.projects.save(&Library::open(root).projects_path())?;
+    let (package, warnings) = sender.export_current_project_package()?;
+    if !warnings.is_empty() {
+        return Err(format!(
+            "handoff project export reported dependencies: {}",
+            warnings.join(", ")
+        )
+        .into());
+    }
+    std::fs::copy(package, imports.join("Service.project"))?;
+    Ok((show_name, template_id))
+}
+
+/// Rehearses a package handoff with disposable libraries and embedded local media.
+fn check_portable_handoff() -> Result<Value, Box<dyn std::error::Error>> {
+    let sender_dir = tempfile::tempdir()?;
+    let receiver_dir = tempfile::tempdir()?;
+    let imports = Library::open(receiver_dir.path()).imports_dir();
+    std::fs::create_dir_all(&imports)?;
+    let (show_name, template_id) = export_handoff_fixture(sender_dir.path(), &imports)?;
+    sender_dir.close()?;
+
+    let mut receiver = Session::open(receiver_dir.path().to_path_buf());
+    if !receiver.warnings.is_empty() {
+        return Err(format!("handoff import reported: {}", receiver.warnings.join(", ")).into());
+    }
+    receiver.library_action("open-project", "0")?;
+    let cue_order = receiver.project_labels();
+    if cue_order
+        != [
+            show_name.as_str(),
+            "Red banner",
+            "Blue banner",
+            "Closing clip",
+        ]
+    {
+        return Err(format!("handoff cue order changed: {cue_order:?}").into());
+    }
+    receiver.output_width = 320;
+    receiver.output_height = 180;
+    let imported_show = receiver
+        .shows
+        .iter()
+        .find(|show| show.name() == show_name)
+        .map(|show| show.id.clone())
+        .ok_or("handoff announcement was not imported")?;
+    if !receiver.present_show(&imported_show) {
+        return Err("handoff could not take the imported announcement".into());
+    }
+    let _ = audience_frame(&receiver);
+    let taken = receiver.to_snapshot();
+    if taken
+        .slide_lines()
+        .first()
+        .is_none_or(|line| line != HANDOFF_WORDS)
+        || taken.notes() != HANDOFF_NOTE
+    {
+        return Err("handoff did not keep the live announcement or stage note".into());
+    }
+    for (_, label, color) in HANDOFF_STILLS {
+        if !receiver.advance_show() {
+            return Err(format!("handoff could not take {label}").into());
+        }
+        let image = audience_frame(&receiver);
+        let pixel = image.pixel(image.width / 2, image.height / 2);
+        if [pixel.r, pixel.g, pixel.b, pixel.a] != color {
+            return Err(format!("handoff rendered the wrong picture for {label}").into());
+        }
+    }
+    if !receiver.advance_show() {
+        return Err("handoff could not take the imported closing clip".into());
+    }
+    let [Some(PendingPlay::Video(clip)), _] = receiver.take_plays() else {
+        return Err("handoff did not queue the imported video".into());
+    };
+    if !clip.starts_with(Library::open(receiver_dir.path()).media_dir())
+        || std::fs::read(&clip)? != HANDOFF_CLIP
+    {
+        return Err("handoff video did not resolve inside the receiving library".into());
+    }
+    let playback = freeshow_media::probe_routed_video(&clip)?;
+    let first_frame = [playback.frame.width, playback.frame.height];
+    receiver.replace_underlay(Some(playback.frame));
+    let picture = fingerprint(&audience_frame(&receiver).pixels);
+    if !receiver.clear_all_layers()
+        || fingerprint(&cleared_audience_frame(&receiver).pixels) == picture
+    {
+        return Err("handoff Clear did not remove the closing clip".into());
+    }
+
+    let replacement = receiver_dir.path().join("Replacement.mp4");
+    std::fs::rename(&clip, &replacement)?;
+    let missing = receiver
+        .missing_media()
+        .into_iter()
+        .find(|entry| Path::new(&entry.reference) == clip)
+        .ok_or("handoff did not report the missing closing clip")?;
+    receiver.relink_missing_media(
+        &missing.key,
+        replacement
+            .to_str()
+            .ok_or("handoff replacement path was not Unicode")?,
+    )?;
+    let new_path = receiver
+        .projects
+        .project_body(
+            receiver
+                .project_id
+                .as_deref()
+                .ok_or("handoff receiver project went missing")?,
+        )
+        .and_then(|project| project["shows"][3]["id"].as_str().map(PathBuf::from))
+        .ok_or("handoff relink did not update the closing cue")?;
+    if !receiver.missing_media().is_empty()
+        || !new_path.starts_with(Library::open(receiver_dir.path()).media_dir())
+    {
+        return Err("handoff relink did not resolve the missing clip locally".into());
+    }
+    let relinked = freeshow_media::probe_routed_video(&new_path)?;
+
+    receiver.switch_tab("templates");
+    if !receiver.browse_template(&template_id) {
+        return Err("handoff standalone template did not appear in the gallery".into());
+    }
+    receiver.library_action("template-new-show", &template_id)?;
+    if receiver.lyrics() != HANDOFF_WORDS
+        || !receiver.notes().is_empty()
+        || !receiver.save_lyrics("Edited after handoff")
+    {
+        return Err(
+            "handoff template did not reopen as editable text without private notes".into(),
+        );
+    }
+    let edited_name = receiver.show_name();
+    let reopened = Session::open(receiver_dir.path().to_path_buf());
+    if !reopened.shows.iter().any(|show| {
+        show.name() == edited_name
+            && show.item_text("s1", 0).as_deref() == Some("Edited after handoff")
+    }) {
+        return Err("handoff edits did not survive reopening the receiving library".into());
+    }
+
+    Ok(json!({
+        "cue_order": cue_order,
+        "project_stage_note_preserved": true,
+        "distinct_same_named_pictures": true,
+        "video_first_frame_pixels": first_frame,
+        "video_audio_peak": playback.audio_peak,
+        "relinked_video_audio_peak": relinked.audio_peak,
+        "video_relinked_and_decoded": true,
+        "audience_cleared": true,
+        "template_edited_and_reopened_without_private_notes": true,
+    }))
+}
+
+pub fn check_handoff() -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&check_portable_handoff()?)?
+    );
+    Ok(())
 }
 
 /// Measure the §4 performance budgets against a library (created when missing).
@@ -430,23 +667,25 @@ pub fn check_library(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
         return Err("slide frames did not change after Go/Next".into());
     }
 
-    let remote = free_port()?;
-    let stage_port = free_port()?;
     let (commands, _rx) = std::sync::mpsc::channel();
     let (frames, _) = std::sync::mpsc::sync_channel(1);
-    freeshow_remote::spawn_limited(
+    let listeners = freeshow_remote::spawn_limited(
         std::sync::Arc::new(std::sync::Mutex::new(
             freeshow_remote::ShowSnapshot::default(),
         )),
         commands,
         None,
         freeshow_remote::RemotePorts {
-            remote,
-            stage: stage_port,
+            remote: 0,
+            stage: 0,
         },
         frames,
         4,
     );
+    let freeshow_remote::RemotePorts {
+        remote,
+        stage: stage_port,
+    } = started_ports(listeners)?;
     let remote_ok = wait_http(remote)?;
     let stage_ok = wait_http(stage_port)?;
     if !remote_ok || !stage_ok {
@@ -475,6 +714,7 @@ pub fn check_library(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
 /// a project, present audience and stage outputs, then drive Go/Next over the
 /// REST and Companion HTTP APIs.
 pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let handoff = check_portable_handoff()?;
     let owned: PathBuf;
     let root = match root {
         Some(path) => path,
@@ -584,24 +824,41 @@ pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
     }
     let stage_fp = fingerprint(&stage.pixels);
 
-    let remote = free_port()?;
-    let stage_port = free_port()?;
     let snapshot = std::sync::Arc::new(std::sync::Mutex::new(session.to_snapshot()));
     let (commands, command_rx) = std::sync::mpsc::channel();
     let (frames, _) = std::sync::mpsc::sync_channel(1);
-    freeshow_remote::spawn_limited(
+    const PASSWORD: &str = "service-check";
+    let listeners = freeshow_remote::spawn_limited(
         std::sync::Arc::clone(&snapshot),
         commands,
-        None,
+        Some(PASSWORD.into()),
         freeshow_remote::RemotePorts {
-            remote,
-            stage: stage_port,
+            remote: 0,
+            stage: 0,
         },
         frames,
         4,
     );
+    let freeshow_remote::RemotePorts {
+        remote,
+        stage: stage_port,
+    } = started_ports(listeners)?;
     if !wait_http(remote)? || !wait_http(stage_port)? {
         return Err("remote or stage page did not respond".into());
+    }
+
+    let remote_state = format!("http://127.0.0.1:{remote}/state");
+    for supplied in ["", "wrong-password"] {
+        let unauthorized = ureq::get(&remote_state)
+            .set("x-freeshow-password", supplied)
+            .call();
+        if !matches!(unauthorized, Err(ureq::Error::Status(401, _))) {
+            return Err("protected remote state did not reject an invalid password".into());
+        }
+    }
+    let before = remote_view(&remote_state, PASSWORD)?;
+    if before["slide_index"] != json!(session.slide_index) {
+        return Err("authenticated remote did not report the starting slide".into());
     }
 
     let starting_slide = session.slide_index;
@@ -610,6 +867,7 @@ pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
         .timeout_read(Duration::from_secs(2))
         .build()
         .post(&format!("http://127.0.0.1:{remote}/api/next"))
+        .set("x-freeshow-password", PASSWORD)
         .call()
         .map_err(|err| format!("POST /api/next: {err}"))?;
     if api.status() != 200 {
@@ -635,6 +893,7 @@ pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
         .timeout_read(Duration::from_secs(2))
         .build()
         .post(&format!("http://127.0.0.1:{remote}/companion/next"))
+        .set("x-freeshow-password", PASSWORD)
         .set("content-type", "application/json")
         .send_string("{}")
         .map_err(|err| format!("POST /companion/next: {err}"))?;
@@ -650,6 +909,16 @@ pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
     let after_stage = stage_frame(&session);
     if fingerprint(&after_stage.pixels) == stage_fp && session.slide_index == starting_slide {
         return Err("stage display did not follow the remote advance".into());
+    }
+
+    *snapshot.lock().expect("snapshot") = session.to_snapshot();
+    let returned = remote_view(&remote_state, PASSWORD)?;
+    let staged = remote_view(&format!("http://127.0.0.1:{stage_port}/state"), PASSWORD)?;
+    if returned["slide_index"] == before["slide_index"]
+        || returned["slide_index"] != json!(session.slide_index)
+        || returned["lines"] != staged["lines"]
+    {
+        return Err("reconnected remote and stage did not report the current cue".into());
     }
 
     let stage_page = ureq::AgentBuilder::new()
@@ -685,11 +954,14 @@ pub fn check_service(root: Option<&Path>) -> Result<(), Box<dyn std::error::Erro
         "stage_fingerprint": fingerprint(&after_stage.pixels),
         "starting_slide": starting_slide,
         "slide_index": session.slide_index,
+        "remote_reconnected": true,
+        "remote_bad_password_rejected": true,
         "rest_next_commands": applied_api,
         "companion_next_commands": applied_companion,
         "remote_url": format!("http://127.0.0.1:{remote}/"),
         "stage_url": format!("http://127.0.0.1:{stage_port}/"),
         "stage_ok": true,
+        "portable_handoff": handoff,
         "network_sources": sources.len(),
         "inspector": session.inspector_text(),
         "settings_has_alert_updates": session.settings_text().contains("alertUpdates"),
@@ -727,11 +999,39 @@ fn drain_remote(
     applied
 }
 
-fn free_port() -> Result<u16, Box<dyn std::error::Error>> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+fn started_ports(
+    events: std::sync::mpsc::Receiver<(freeshow_remote::WebPage, freeshow_remote::ListenerState)>,
+) -> Result<freeshow_remote::RemotePorts, Box<dyn std::error::Error>> {
+    use freeshow_remote::{ListenerState, RemotePorts, WebPage};
+    let mut ports = RemotePorts {
+        remote: 0,
+        stage: 0,
+    };
+    for _ in 0..2 {
+        let (page, state) = events.recv_timeout(Duration::from_secs(4))?;
+        let ListenerState::Listening(port) = state else {
+            return Err(format!("{page:?} listener reported {state:?}").into());
+        };
+        match page {
+            WebPage::Remote => ports.remote = port,
+            WebPage::Stage => ports.stage = port,
+        }
+    }
+    if ports.remote == 0 || ports.stage == 0 {
+        return Err("did not receive both listener addresses".into());
+    }
+    Ok(ports)
+}
+
+fn remote_view(url: &str, password: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let response = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(400))
+        .timeout_read(Duration::from_secs(2))
+        .build()
+        .get(url)
+        .set("x-freeshow-password", password)
+        .call()?;
+    Ok(serde_json::from_reader(response.into_reader())?)
 }
 
 fn wait_http(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
