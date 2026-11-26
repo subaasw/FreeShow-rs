@@ -1596,9 +1596,9 @@ mod tests {
             .unwrap()
             .rtf =
             concat!(
-                r"{\rtf1\pard\li400\ri200\fi-200\sb80\sa120\sl360\slmult1 First\line Continuation\uc0\u8232 Last line",
+                r"{\rtf1\pard\li400\ri200\fi-200\sb80\sa120\sl360\slmult1\slminimum600\slmaximum700\slleading180 First\line Continuation\uc0\u8232 Last line",
                 "\\\n",
-                r"{\pard\sl-480 Exact\par}{\pard\sl280 At least\par}\pard Unformatted}",
+                r"{\pard\sl-480 Exact\par}{\pard\sl280\slleading-60 At least\par}\pard Unformatted}",
             ).as_bytes().to_vec();
         let show =
             crate::import::import_show("Paragraphs.pro", &presentation.encode_to_vec()).unwrap();
@@ -1621,12 +1621,23 @@ mod tests {
         assert_eq!(rows[0]["paragraphSpacing"], json!(["1.5lh", "4px", null]));
         assert_eq!(rows[1]["paragraphSpacing"], json!(["1.5lh", null, null]));
         assert_eq!(rows[2]["paragraphSpacing"], json!(["1.5lh", null, "6px"]));
+        assert_eq!(
+            rows[0]["rtfLineSpacing"],
+            json!({"minimum":600,"maximum":700,"leading":180,"continuation":false})
+        );
+        assert_eq!(
+            rows[2]["rtfLineSpacing"],
+            json!({"minimum":600,"maximum":700,"leading":180,"continuation":true})
+        );
         assert_eq!(rows[3]["paragraphSpacing"], json!(["24px", null, null]));
         assert_eq!(
             rows[4]["paragraphSpacing"],
             json!(["max(1lh,14px)", null, null])
         );
         assert!(rows[3].get("paragraphMargins").is_none());
+        assert!(rows[3].get("rtfLineSpacing").is_none());
+        assert_eq!(rows[4]["rtfLineSpacing"]["leading"], -60);
+        assert!(rows[5].get("rtfLineSpacing").is_none());
         assert!(rows[5].get("paragraphSpacing").is_none());
     }
 

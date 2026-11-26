@@ -49,6 +49,9 @@ struct Paragraph {
     after: i32,
     spacing: i32,
     multiple: bool,
+    minimum_line_height: i32,
+    maximum_line_height: i32,
+    line_leading: i32,
 }
 
 impl Paragraph {
@@ -164,6 +167,17 @@ impl Document {
                 }
                 if height.is_some() || first_gap.is_some() || last_gap.is_some() {
                     row["paragraphSpacing"] = json!([height, first_gap, last_gap]);
+                }
+                if paragraph.minimum_line_height != 0
+                    || paragraph.maximum_line_height != 0
+                    || paragraph.line_leading != 0
+                {
+                    row["rtfLineSpacing"] = json!({
+                        "minimum": paragraph.minimum_line_height,
+                        "maximum": paragraph.maximum_line_height,
+                        "leading": paragraph.line_leading,
+                        "continuation": index > 0,
+                    });
                 }
                 styled.push(row);
             }
@@ -513,6 +527,9 @@ impl Reader {
             "sa" => paragraph.after = dimension,
             "sl" => paragraph.spacing = dimension,
             "slmult" => paragraph.multiple = number == Some(1),
+            "slminimum" => paragraph.minimum_line_height = dimension.max(0),
+            "slmaximum" => paragraph.maximum_line_height = dimension.max(0),
+            "slleading" => paragraph.line_leading = dimension,
             _ => return,
         }
         self.line.paragraph = Some(*paragraph);

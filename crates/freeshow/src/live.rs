@@ -9,8 +9,8 @@ use crate::session::{LayerBuilds, Session};
 use freeshow_data::{Library, ShowFile, SlideBackdrop};
 use freeshow_output::render_styled;
 use freeshow_output::{
-    Blend, Fit, Frame, Raster, Rgba, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem, StyledLine,
-    StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled,
+    Blend, Fit, Frame, Raster, Rgba, RtfLineSpacing, SOURCE_HEIGHT, SOURCE_WIDTH, StyledItem,
+    StyledLine, StyledSlide, TextRun, blend_mode, blur_frames, clear_frame, composite_styled,
     composite_styled_sampled, cover_frames, crossfade, decode_image, ease_progress,
     fade_through_black, filter_blur, filter_brightness, filter_contrast, filter_grayscale,
     filter_hue_rotate, filter_invert, filter_opacity, filter_saturate, filter_sepia, parse_color,
@@ -1561,6 +1561,25 @@ fn styled_line(line: &serde_json::Value, variables: &[(String, String)]) -> Styl
         line_bar: true,
         wrapped: false,
         pptx_spacing: std::array::from_fn(|index| spacing?.get(index)?.as_str().map(str::to_owned)),
+        rtf_line_spacing: line.get("rtfLineSpacing").and_then(|value| {
+            let fields = value.as_object()?;
+            let twips = |key| {
+                fields
+                    .get(key)
+                    .and_then(|value| value.as_i64())
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(0)
+            };
+            Some(RtfLineSpacing {
+                minimum: twips("minimum"),
+                maximum: twips("maximum"),
+                leading: twips("leading"),
+                continuation: fields
+                    .get("continuation")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+            })
+        }),
         pptx_margins: std::array::from_fn(|index| {
             margins
                 .and_then(|values| values.get(index)?.as_i64())
@@ -1653,6 +1672,7 @@ fn chord_line(item: &serde_json::Value, line: &serde_json::Value) -> Option<Styl
         line_bar: false,
         wrapped: false,
         pptx_spacing: Default::default(),
+        rtf_line_spacing: None,
         pptx_margins: [0; 3],
         pptx_bullet: None,
         shift_y: json_number(item.pointer("/chords/offsetY"))
@@ -1916,6 +1936,7 @@ fn lines_slide_at(
                     line_bar: true,
                     wrapped: false,
                     pptx_spacing: Default::default(),
+                    rtf_line_spacing: None,
                     pptx_margins: [0; 3],
                     pptx_bullet: None,
                     shift_y: 0,
