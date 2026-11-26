@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import tomllib
 
-from package_media import serve_sample
+from package_media import serve_sample, verify_handoff
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE = ROOT / "crates/freeshow-data/tests/fixtures/lesson-clip.mp4"
@@ -132,6 +132,7 @@ def verify(directory):
         with serve_sample(SAMPLE) as url:
             run(launcher, "--check-media", url, env=environment, timeout=60)
         run(launcher, "--check-perf", env=environment, timeout=180)
+        handoff = verify_handoff(launcher, env=environment, cwd=temporary)
         run(relocated / "install.sh", env=environment, timeout=30)
         desktop = home / ".local/share/applications/org.freeshow.rust.desktop"
         run("desktop-file-validate", desktop)
@@ -150,7 +151,7 @@ def verify(directory):
         if desktop.exists() or (home / ".local/bin/freeshow-rust").is_symlink() or not sentinel.is_file():
             raise RuntimeError("desktop uninstall removed user data or left a launcher behind")
     return {"relocated_special_character_path":True,"empty_home_and_registry":True,"h264_decoded":True,"http_video_decoded":True,"check_perf":True,
-        "desktop_entry_validated_and_launched":True,"uninstall_keeps_library":True}
+        "desktop_entry_validated_and_launched":True,"uninstall_keeps_library":True,"portable_handoff":handoff}
 
 
 def main():
