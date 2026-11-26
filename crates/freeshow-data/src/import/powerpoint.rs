@@ -814,22 +814,20 @@ impl SlideObject {
             return;
         };
         let kind = ph_type.to_ascii_lowercase();
-        let geom = placeholders
-            .get(&(kind.clone(), self.ph_idx))
-            .or_else(|| {
-                // Slide placeholders often omit type and only set idx.
-                if kind.is_empty() {
-                    placeholders
-                        .iter()
-                        .find(|((_, idx), _)| *idx == self.ph_idx)
-                        .map(|(_, value)| value)
-                } else {
-                    placeholders
-                        .iter()
-                        .find(|((entry, _), _)| entry == &kind)
-                        .map(|(_, value)| value)
-                }
-            });
+        let geom = placeholders.get(&(kind.clone(), self.ph_idx)).or_else(|| {
+            // Slide placeholders often omit type and only set idx.
+            if kind.is_empty() {
+                placeholders
+                    .iter()
+                    .find(|((_, idx), _)| *idx == self.ph_idx)
+                    .map(|(_, value)| value)
+            } else {
+                placeholders
+                    .iter()
+                    .find(|((entry, _), _)| entry == &kind)
+                    .map(|(_, value)| value)
+            }
+        });
         let Some(geom) = geom else {
             return;
         };
@@ -1235,8 +1233,7 @@ fn slide_content(
                         (Some("blipFill"), "tile") => object.tile = true,
                         (Some("blipFill"), "srcRect") => object.crop = percentages(&element),
                         (_, "ph") => {
-                            object.ph_type =
-                                Some(attribute(&element, "type").unwrap_or_default());
+                            object.ph_type = Some(attribute(&element, "type").unwrap_or_default());
                             object.ph_idx = attribute(&element, "idx")
                                 .and_then(|value| value.parse().ok())
                                 .unwrap_or(0);
