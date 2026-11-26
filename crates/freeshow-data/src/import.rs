@@ -99,7 +99,15 @@ pub fn import_sources_split(
             }
             continue;
         }
-        let found = if propresenter::is_bundle(&path) {
+        let found = if extension.eq_ignore_ascii_case("ppt")
+            || extension.eq_ignore_ascii_case("key")
+            || extension.eq_ignore_ascii_case("odp")
+        {
+            Err(DataError::Scripture(format!(
+                "{}: save as .pptx or PDF, then import again",
+                path.display()
+            )))
+        } else if propresenter::is_bundle(&path) {
             propresenter::import_bundle(&bytes, media)
         } else if extension.eq_ignore_ascii_case("pptx") || looks_like_pptx(&bytes) {
             let name = path
@@ -269,6 +277,11 @@ fn import_one(
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if matches!(ext.as_str(), "ppt" | "key" | "odp") {
+        return Err(DataError::Scripture(format!(
+            "{file_name}: save as .pptx or PDF, then import again"
+        )));
+    }
     if ext == "pptx" || looks_like_pptx(bytes) {
         return powerpoint::import(file_name, bytes, None);
     }

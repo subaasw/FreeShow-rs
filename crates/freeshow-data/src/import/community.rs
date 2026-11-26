@@ -801,39 +801,62 @@ fn render_pdf_pages(
         }
         dest
     };
-    let prefix = media_dir.join(format!("{}-page", file_stem_str(file_name)));
+    let stem_name = format!("{}-page", file_stem_str(file_name));
+    let prefix = media_dir.join(&stem_name);
+    // Drop stale pages from an earlier import of a longer PDF with the same name.
+    if let Ok(entries) = fs::read_dir(media_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name.starts_with(&stem_name) && name.ends_with(".png") {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
     let rendered = Command::new("pdftoppm")
-        .args(["-png", "-r", "72"])
+        .args(["-png", "-scale-to", "1920"])
         .arg(&pdf_path)
         .arg(&prefix)
         .output();
-    if rendered
-        .as_ref()
-        .is_ok_and(|output| output.status.success())
-    {
-        let mut pages = Vec::new();
-        let stem = prefix
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "page".to_string());
-        if let Ok(entries) = fs::read_dir(media_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-                if name.starts_with(&stem) && name.ends_with(".png") {
-                    pages.push((file_stem_str(name), path));
+    match rendered {
+        Ok(output) if output.status.success() => {
+            let mut pages = Vec::new();
+            if let Ok(entries) = fs::read_dir(media_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    if name.starts_with(&stem_name) && name.ends_with(".png") {
+                        pages.push((file_stem_str(name), path));
+                    }
                 }
             }
+            pages.sort_by(|left, right| left.1.file_name().cmp(&right.1.file_name()));
+            if !pages.is_empty() {
+                return Ok(pages);
+            }
+            Err(DataError::Scripture(format!(
+                "{file_name}: pdftoppm produced no pages"
+            )))
         }
-        pages.sort_by(|left, right| left.1.file_name().cmp(&right.1.file_name()));
-        if !pages.is_empty() {
-            return Ok(pages);
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let detail = detail.trim();
+            Err(DataError::Scripture(if detail.is_empty() {
+                format!("{file_name}: install Poppler (pdftoppm) to import PDF pages")
+            } else {
+                format!("{file_name}: pdftoppm failed: {detail}")
+            }))
         }
+        Err(_) => Err(DataError::Scripture(format!(
+            "{file_name}: install Poppler (pdftoppm) to import PDF pages"
+        ))),
     }
-    Ok(pdf_placeholder_pages(file_name, bytes))
 }
 
 fn pdf_placeholder_pages(file_name: &str, bytes: &[u8]) -> Vec<(String, PathBuf)> {
@@ -1504,14 +1527,25 @@ Amazing love, how can it be</Contents></Item></Easyslides>"#;
         fs::create_dir_all(root.join("Shows")).unwrap();
         fs::create_dir_all(root.join("Media")).unwrap();
         let bytes = two_page_pdf();
-        let shows = import_shows("notes.pdf", &bytes, None, Some(&root.join("Media")))
-            .unwrap()
-            .unwrap();
-        assert_eq!(shows.len(), 1);
-        let show = &shows[0];
-        assert_eq!(show.show["origin"], "pdf");
-        assert_eq!(show.ordered_slides().len(), 2);
+        match import_shows("notes.pdf", &bytes, None, Some(&root.join("Media"))) {
+            Ok(Some(shows)) => {
+                assert_eq!(shows.len(), 1);
+                let show = &shows[0];
+                assert_eq!(show.show["origin"], "pdf");
+                assert_eq!(show.ordered_slides().len(), 2);
+            }
+            Err(err) if err.to_string().contains("pdftoppm") => {}
+            other => panic!("unexpected pdf import result: {other:?}"),
+        }
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_ppt_is_rejected_with_a_clear_message() {
+        let err = crate::import::import_shows("deck.ppt", b"not a pptx")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pptx") || err.contains("PDF"), "{err}");
     }
 
     fn two_page_pdf() -> Vec<u8> {
