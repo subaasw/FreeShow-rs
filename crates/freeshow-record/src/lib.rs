@@ -14,12 +14,32 @@ pub use sinks::{
 #[cfg(feature = "webrtc")]
 pub use webrtc::WebrtcSender;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebrtcStatus {
+    Negotiating,
+    Running,
+    Unavailable,
+}
+
 #[cfg(not(feature = "webrtc"))]
 /// Stub used when the crate is built without the webrtc feature.
 pub struct WebrtcSender;
 
 #[cfg(not(feature = "webrtc"))]
 impl WebrtcSender {
+    pub fn start_routed(
+        _url: &str,
+        _token: Option<&str>,
+        _width: u32,
+        _height: u32,
+        _output: &str,
+    ) -> Option<Self> {
+        None
+    }
+
+    pub fn status(&self) -> WebrtcStatus {
+        WebrtcStatus::Unavailable
+    }
     pub fn open(_url: &str, _token: Option<&str>, _width: u32, _height: u32) -> Option<Self> {
         None
     }
@@ -81,6 +101,12 @@ impl OutputCapture for ServiceCapture {
 }
 
 impl ServiceCapture {
+    pub fn rtmp_running(&self) -> bool {
+        rtmp_slot().inner.lock().ok().is_some_and(|slot| {
+            slot.as_ref()
+                .is_some_and(|running| !running.thread.is_finished())
+        })
+    }
     pub fn stop_all(&self) {
         stop_slot(&FILE);
         stop_slot(&RTMP);
@@ -284,6 +310,7 @@ fn open_pipeline(descriptions: &[String]) -> Option<(gstreamer::Pipeline, AppSrc
 }
 
 fn serve(pipeline: gstreamer::Pipeline, appsrc: AppSrc, jobs: Receiver<Job>) {
+    let bus = pipeline.bus();
     let period = std::time::Duration::from_nanos(1_000_000_000 / 30);
     let mut next = std::time::Instant::now();
     let mut last: Option<Vec<u8>> = None;
@@ -308,6 +335,12 @@ fn serve(pipeline: gstreamer::Pipeline, appsrc: AppSrc, jobs: Receiver<Job>) {
         let now = std::time::Instant::now();
         if now < next {
             continue;
+        }
+        if let Some(bus) = &bus
+            && bus.pop_filtered(&[gstreamer::MessageType::Error]).is_some()
+        {
+            tracing::warn!("capture pipeline stopped due to a sink error");
+            break;
         }
         // Stay on the frame cadence when a timer wakes slightly late. Skip
         // missed ticks after a stall so we never send a burst to catch up.

@@ -22,6 +22,7 @@ pub struct WebrtcSender {
     height: u32,
     jobs: SyncSender<Job>,
     thread: Option<JoinHandle<()>>,
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WebrtcSender {
@@ -46,16 +47,54 @@ impl WebrtcSender {
         height: u32,
         output: Option<&str>,
     ) -> Option<Self> {
+        let (sender, ready) = Self::start_output(url, token, width, height, output)?;
+        (ready.recv_timeout(HANDSHAKE + Duration::from_secs(5)).ok() == Some(true))
+            .then_some(sender)
+    }
+
+    /// Starts negotiation on the sender thread and makes readiness available to the caller.
+    pub fn start_routed(
+        url: &str,
+        token: Option<&str>,
+        width: u32,
+        height: u32,
+        output: &str,
+    ) -> Option<Self> {
+        Self::start_output(url, token, width, height, Some(output)).map(|(sender, _)| sender)
+    }
+
+    pub fn status(&self) -> crate::WebrtcStatus {
+        use crate::WebrtcStatus;
+        use std::sync::atomic::Ordering;
+        match &self.thread {
+            Some(thread) if !thread.is_finished() && self.ready.load(Ordering::Relaxed) => {
+                WebrtcStatus::Running
+            }
+            Some(thread) if !thread.is_finished() => WebrtcStatus::Negotiating,
+            _ => WebrtcStatus::Unavailable,
+        }
+    }
+
+    fn start_output(
+        url: &str,
+        token: Option<&str>,
+        width: u32,
+        height: u32,
+        output: Option<&str>,
+    ) -> Option<(Self, Receiver<bool>)> {
         let url = url.to_string();
         let token = token.map(str::to_string);
         let output = output.map(str::to_string);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (jobs, jobs_rx) = mpsc::sync_channel(2);
+        let ready = std::sync::Arc::<std::sync::atomic::AtomicBool>::default();
+        let worker_ready = ready.clone();
         let thread = std::thread::Builder::new()
             .name("freeshow-webrtc".into())
             .spawn(move || {
                 match start_session(&url, token.as_deref(), width, height, output.as_deref()) {
                     Ok((pipeline, appsrc)) => {
+                        worker_ready.store(true, std::sync::atomic::Ordering::Relaxed);
                         let _ = ready_tx.send(true);
                         serve(pipeline, appsrc, jobs_rx);
                     }
@@ -66,25 +105,23 @@ impl WebrtcSender {
                 }
             })
             .ok()?;
-        if ready_rx
-            .recv_timeout(HANDSHAKE + Duration::from_secs(5))
-            .ok()
-            != Some(true)
-        {
-            let _ = jobs.send(Job::Stop);
-            let _ = thread.join();
-            return None;
-        }
-        Some(Self {
-            width,
-            height,
-            jobs,
-            thread: Some(thread),
-        })
+        Some((
+            Self {
+                width,
+                height,
+                jobs,
+                thread: Some(thread),
+                ready,
+            },
+            ready_rx,
+        ))
     }
 
     pub fn submit(&self, pixels: &[u8], width: u32, height: u32) {
-        if self.width != width || self.height != height {
+        if self.width != width
+            || self.height != height
+            || self.status() == crate::WebrtcStatus::Unavailable
+        {
             return;
         }
         let _ = self.jobs.try_send(Job::Frame(pixels.to_vec()));
@@ -284,6 +321,7 @@ fn serve(pipeline: gstreamer::Pipeline, appsrc: AppSrc, jobs: Receiver<Job>) {
     let period = Duration::from_nanos(1_000_000_000 / 30);
     let mut next = Instant::now();
     let mut last: Option<Vec<u8>> = None;
+    let bus = pipeline.bus();
     loop {
         match jobs.recv_timeout(next.saturating_duration_since(Instant::now())) {
             Ok(Job::Frame(frame)) => last = Some(frame),
@@ -298,6 +336,13 @@ fn serve(pipeline: gstreamer::Pipeline, appsrc: AppSrc, jobs: Receiver<Job>) {
         let now = Instant::now();
         if now < next {
             continue;
+        }
+        if let Some(bus) = &bus
+            && bus.pop_filtered(&[gstreamer::MessageType::Error]).is_some()
+        {
+            tracing::warn!("WebRTC pipeline stopped due to a sink error");
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            break;
         }
         next += period;
         if next <= now {
@@ -472,9 +517,10 @@ mod tests {
     }
 
     #[test]
-    fn webrtcbin_posts_the_offer_and_applies_the_answer() {
+    fn nonblocking_webrtc_sender_reports_negotiation_and_the_accepted_answer() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/whip", listener.local_addr().unwrap());
+        let (answer_allowed, allow_answer) = mpsc::channel();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -511,6 +557,7 @@ mod tests {
                 body.push(byte[0]);
             }
             let offer = String::from_utf8_lossy(&body).to_string();
+            allow_answer.recv_timeout(Duration::from_secs(8)).unwrap();
             let answer = answer_sdp(&offer).expect("loopback answer");
             let response = format!(
                 "HTTP/1.1 201 Created\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\nLocation: /whip/res\r\nConnection: close\r\n\r\n{answer}",
@@ -519,8 +566,15 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
             offer
         });
-        let sender = WebrtcSender::open_routed(&url, Some("secret"), 64, 64, "audience")
+        let sender = WebrtcSender::start_routed(&url, Some("secret"), 64, 64, "audience")
             .expect("WHIP encode session");
+        assert_eq!(sender.status(), crate::WebrtcStatus::Negotiating);
+        answer_allowed.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sender.status() == crate::WebrtcStatus::Negotiating && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(sender.status(), crate::WebrtcStatus::Running);
         sender.submit(&[80u8; 64 * 64 * 4], 64, 64);
         drop(sender);
         let offer = server.join().unwrap();

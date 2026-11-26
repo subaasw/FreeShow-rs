@@ -46,6 +46,29 @@ pub struct NdiSender {
     width: u32,
     height: u32,
     frames: Option<mpsc::SyncSender<Vec<u8>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SenderStatus {
+    Starting,
+    Running,
+    Unavailable,
+}
+
+fn sender_status(
+    worker: &std::thread::JoinHandle<()>,
+    ready: &std::sync::atomic::AtomicBool,
+) -> SenderStatus {
+    use std::sync::atomic::Ordering;
+    if worker.is_finished() {
+        SenderStatus::Unavailable
+    } else if ready.load(Ordering::Relaxed) {
+        SenderStatus::Running
+    } else {
+        SenderStatus::Starting
+    }
 }
 
 impl NdiSender {
@@ -62,32 +85,45 @@ impl NdiSender {
             width,
             height,
             frames: None,
+            worker: None,
+            ready: Default::default(),
         }
     }
 
     fn open_audio(name: &str, width: u32, height: u32, output: Option<String>) -> Self {
         let (tx, rx) = mpsc::sync_channel(1);
         let name = name.to_string();
-        let started = std::thread::Builder::new()
+        let ready = std::sync::Arc::<std::sync::atomic::AtomicBool>::default();
+        let worker_ready = ready.clone();
+        let worker = std::thread::Builder::new()
             .name("freeshow-ndi".into())
-            .spawn(move || serve(name, width, height, rx, output));
-        if started.is_err() {
+            .spawn(move || serve(name, width, height, rx, output, worker_ready));
+        let Ok(worker) = worker else {
             tracing::error!("could not start the ndi sender");
-            return Self {
-                width,
-                height,
-                frames: None,
-            };
-        }
+            return Self::disabled(width, height);
+        };
         Self {
             width,
             height,
             frames: Some(tx),
+            worker: Some(worker),
+            ready,
         }
     }
 
+    pub fn status(&self) -> SenderStatus {
+        self.worker
+            .as_ref()
+            .map_or(SenderStatus::Unavailable, |worker| {
+                sender_status(worker, &self.ready)
+            })
+    }
+
     pub fn submit(&self, pixels: &[u8], width: u32, height: u32) {
-        if width != self.width || height != self.height {
+        if width != self.width
+            || height != self.height
+            || self.status() == SenderStatus::Unavailable
+        {
             return;
         }
         let Some(frames) = &self.frames else {
@@ -141,6 +177,7 @@ fn serve(
     height: u32,
     frames: mpsc::Receiver<Vec<u8>>,
     output: Option<String>,
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     if let Err(err) = gstreamer::init() {
         tracing::error!("ndi sender did not start: {err}");
@@ -175,11 +212,13 @@ fn serve(
         return;
     }
     tracing::info!("ndi sender {safe_name}");
+    ready.store(true, std::sync::atomic::Ordering::Relaxed);
     let period = std::time::Duration::from_nanos(1_000_000_000 / 30);
     let mut next = std::time::Instant::now();
     let mut last = vec![0u8; width as usize * height as usize * 4];
     let mut cached = rgba_to_uyvy(&last, width, height).unwrap_or_default();
     let mut changed = false;
+    let bus = pipeline.bus();
     loop {
         match frames.recv_timeout(next.saturating_duration_since(std::time::Instant::now())) {
             Ok(frame) => {
@@ -191,6 +230,13 @@ fn serve(
         }
         if std::time::Instant::now() < next {
             continue;
+        }
+        if let Some(bus) = &bus
+            && let Some(message) = bus.pop_filtered(&[gstreamer::MessageType::Error])
+            && let gstreamer::MessageView::Error(error) = message.view()
+        {
+            tracing::warn!("ndi sender {safe_name} stopped: {}", error.error());
+            break;
         }
         next = std::time::Instant::now() + period;
         if changed {
