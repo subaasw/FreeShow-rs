@@ -2327,6 +2327,83 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_picture_changes_only_its_source_and_keeps_the_taken_slide() {
+        let (dir, _) = library("replace-library-picture");
+        let media = dir.path().join("Media");
+        std::fs::create_dir(&media).unwrap();
+        for (name, color) in [
+            ("original.png", [255, 0, 0, 255]),
+            ("replacement.png", [0, 255, 0, 255]),
+        ] {
+            let image = freeshow_output::Frame {
+                width: 16,
+                height: 9,
+                pixels: color.repeat(16 * 9),
+            };
+            std::fs::write(media.join(name), image.encode_png().unwrap()).unwrap();
+        }
+        std::fs::write(media.join("broken.png"), "invalid picture").unwrap();
+        let mut session = Session::open(dir.path().to_path_buf());
+        assert!(session.create_show_with("picture", "Picture", "Caption"));
+        let index = |session: &Session, name: &str| {
+            session
+                .slide_pictures()
+                .position(|entry| entry.path.ends_with(name))
+                .unwrap()
+        };
+        let original = index(&session, "original.png");
+        let replacement = index(&session, "replacement.png");
+        let broken = index(&session, "broken.png");
+        assert!(session.replace_picture_box(replacement).is_err());
+        session.add_picture_box(original).unwrap();
+        assert!(
+            session.edit_selected_slide("Set picture fixture", |show, slide, item| {
+                let layer = &mut show.show["slides"][slide]["items"][item];
+                layer["fit"] = "cover".into();
+                layer["cropping"] = serde_json::json!({"left": 12, "bottom": 9});
+                layer["flipped"] = true.into();
+                layer["style"] =
+                    "left:480px;top:270px;width:960px;height:540px;transform:rotate(20deg);".into();
+                layer["animation"] = serde_json::json!({"pluginData": {"keep": true}});
+                layer["futureProperty"] = serde_json::json!([1, 2]);
+                true
+            })
+        );
+        session.select_slide(0);
+        assert!(session.select_item(1));
+        let taken = crate::live::audience_frame(&session);
+        let before = session.current_show().unwrap().clone();
+        let edits = session.history.len();
+        assert!(session.replace_picture_box(broken).is_err());
+        assert_eq!(session.history.len(), edits);
+        assert_eq!(session.current_show().unwrap(), &before);
+
+        session.replace_picture_box(replacement).unwrap();
+        let mut expected = before.clone();
+        expected.show["slides"]["s1"]["items"][1]["src"] = "Media/replacement.png".into();
+        let saved = || freeshow_data::ShowFile::load(before.path.as_deref().unwrap()).unwrap();
+        assert_eq!(saved(), expected);
+        assert_eq!(session.item_position(), (1, 2));
+        assert_eq!(session.layer_indices(), [1]);
+        assert_eq!(session.history.len(), edits + 1);
+        assert_eq!(crate::live::audience_frame(&session), taken);
+        assert_ne!(
+            crate::live::edit_frame(&session).pixel(960, 540),
+            taken.pixel(960, 540)
+        );
+        assert!(session.undo());
+        assert_eq!(saved(), before);
+        assert!(session.redo());
+        assert_eq!(saved(), expected);
+        assert!(session.set_layer_flags(true, true));
+        assert!(session.replace_picture_box(original).is_err());
+        assert_eq!(
+            saved().show["slides"]["s1"]["items"][1]["src"],
+            "Media/replacement.png"
+        );
+    }
+
+    #[test]
     fn inspector_picture_fit_and_flips_persist_and_render() {
         let (dir, mut session) = library("inspector-picture");
         assert!(session.create_show());

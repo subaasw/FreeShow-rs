@@ -231,11 +231,6 @@ fn strings(items: &[String]) -> slint::ModelRc<slint::SharedString> {
     slint::ModelRc::new(slint::VecModel::from(values))
 }
 
-fn commit_pending_layer_text(ui: &ControlWindow, session: &mut Session) -> bool {
-    let lyrics = ui.get_lyrics();
-    session.lyrics() == lyrics.as_str() || session.save_lyrics(lyrics.as_str())
-}
-
 fn layer_outline([[x1, y1], [x2, y2], [x3, y3], [x4, y4]]: [[f32; 2]; 4]) -> LayerOutline {
     LayerOutline {
         x1,
@@ -729,6 +724,8 @@ thread_local! {
 }
 
 fn refresh(ui: &ControlWindow, session: &Session) {
+    use slint::Model;
+
     STAGE_DIRTY.set(true);
     // A shortcut or remote command can open the next project item in another drawer tab.
     if ui.get_active_tab().as_str() != session.tab {
@@ -764,7 +761,9 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     if ui.get_layer_text_target().as_str() != layer_text_target {
         ui.set_layer_text_target(layer_text_target.into());
     }
-    let lyrics = session.lyrics();
+    let lyrics = session
+        .pending_editor_text(false)
+        .map_or_else(|| session.lyrics(), str::to_owned);
     if ui.get_lyrics().as_str() != lyrics {
         ui.set_spelling(spelling_note(session, &lyrics).into());
         ui.set_lyrics(lyrics.into());
@@ -780,24 +779,32 @@ fn refresh(ui: &ControlWindow, session: &Session) {
         refresh_layer_rows(ui, session);
     }
     refresh_build_rows(ui, session);
-    ui.set_picture_choices(strings(
-        &session
-            .slide_pictures()
-            .map(|entry| entry.label())
-            .collect::<Vec<_>>(),
-    ));
+    let pictures: Vec<_> = session
+        .slide_pictures()
+        .map(|entry| entry.label())
+        .collect();
+    let choices = ui.get_picture_choices();
+    if choices.row_count() != pictures.len()
+        || choices
+            .iter()
+            .zip(&pictures)
+            .any(|(row, label)| row.as_str() != label)
+    {
+        ui.set_picture_choices(strings(&pictures));
+    }
+    ui.set_can_replace_picture(ui.get_edit_mode() && session.can_replace_picture_box());
     ui.set_show_name(session.show_name().into());
     ui.set_notice(sentence_case(&session.notice).into());
     ui.set_can_restore(session.can_restore_show());
     ui.set_draft_status(session.show_draft_status().into());
+    ui.set_editor_text_has_recovery_draft(session.editor_text_has_recovery_draft());
     ui.set_project_choices(strings(&session.project_choices()));
     ui.set_project_choice(session.project_choice_index());
-    // Do not rewrite the show text under the operator's cursor while they type.
-    if !(ui.get_text_mode() && ui.get_text_focused()) {
-        let text = session.show_text();
-        if ui.get_show_text().as_str() != text {
-            ui.set_show_text(text.into());
-        }
+    let text = session
+        .pending_editor_text(true)
+        .map_or_else(|| session.show_text(), str::to_owned);
+    if ui.get_show_text().as_str() != text {
+        ui.set_show_text(text.into());
     }
     refresh_panels(ui, session);
     ui.set_selected_drawer(match session.tab.as_str() {
@@ -3173,7 +3180,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = control.as_weak();
     let session_for_tab = Rc::clone(&session);
     control.on_select_tab(move |tab| {
-        session_for_tab.borrow_mut().switch_tab(tab.as_str());
+        {
+            let mut current = session_for_tab.borrow_mut();
+            current.flush_editor_text();
+            current.switch_tab(tab.as_str());
+        }
         if let Some(ui) = ui.upgrade() {
             refresh(&ui, &session_for_tab.borrow());
             fill_drawer_form(&ui, &session_for_tab.borrow());
@@ -3323,8 +3334,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return false;
             };
             let mut current = session.borrow_mut();
+            if !current.pending_layer_matches_saved_show() {
+                current.flush_editor_text();
+                refresh(&ui, &current);
+                return false;
+            }
             match current.format_text_selection(&text, anchor, cursor, &key, &value) {
                 Ok(true) => {
+                    current.clear_pending_layer_text();
                     refresh(&ui, &current);
                     publish(&edit_slot, edit_frame(&current));
                     true
@@ -3346,14 +3363,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_inspector_set(move |key, value| {
-            if key.starts_with("build-") {
-                let Some(ui) = ui.upgrade() else { return };
-                if !commit_pending_layer_text(&ui, &mut session.borrow_mut()) {
+            if !session.borrow_mut().flush_editor_text() {
+                if let Some(ui) = ui.upgrade() {
                     let current = session.borrow();
-                    ui.set_notice(current.notice.clone().into());
-                    ui.set_draft_status(current.show_draft_status().into());
-                    return;
+                    refresh(&ui, &current);
                 }
+                return;
             }
             let result = session.borrow_mut().inspector_set(&key, &value);
             if let Err(err) = &result {
@@ -4110,7 +4125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return;
             }
-            let action = session.borrow_mut().select_drawer(index);
+            let action = {
+                let mut current = session.borrow_mut();
+                current.flush_editor_text();
+                current.select_drawer(index)
+            };
             match action {
                 DrawerAction::PlayAudio(path) => {
                     *audio_out.borrow_mut() = None;
@@ -4245,6 +4264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             {
                 let mut current = session.borrow_mut();
+                current.flush_editor_text();
                 // As in FreeShow, a click outside the editor puts the slide on the output.
                 // Edit mode only applies where the editor is shown.
                 if ui.get_editing() {
@@ -4267,6 +4287,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
+        let mode_session = Rc::clone(&session);
+        let mode_ui = ui.clone();
+        let mode_slot = Rc::clone(&edit_slot);
+        control.on_flush_editor_text(move || {
+            let mut current = mode_session.borrow_mut();
+            if current.has_buffered_editor_text() {
+                current.flush_editor_text();
+                if let Some(ui) = mode_ui.upgrade() {
+                    refresh(&ui, &current);
+                    publish(&mode_slot, edit_frame(&current));
+                }
+            }
+        });
         control.on_edit_mode_changed(move || {
             let Some(ui) = ui.upgrade() else {
                 return;
@@ -4375,7 +4408,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_undo_edit(move || {
-            let changed = session.borrow_mut().undo();
+            let changed = {
+                let mut session = session.borrow_mut();
+                session.flush_editor_text() && session.undo()
+            };
             if let Some(ui) = ui.upgrade() {
                 if changed {
                     refresh(&ui, &session.borrow());
@@ -4391,7 +4427,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_redo_edit(move || {
-            let changed = session.borrow_mut().redo();
+            let changed = {
+                let mut session = session.borrow_mut();
+                session.flush_editor_text() && session.redo()
+            };
             if let Some(ui) = ui.upgrade() {
                 if changed {
                     refresh(&ui, &session.borrow());
@@ -4439,7 +4478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if index >= count {
                 return false;
             }
-            if !commit_pending_layer_text(&ui, &mut session) {
+            if !session.flush_editor_text() {
                 refresh(&ui, &session);
                 return false;
             }
@@ -4518,7 +4557,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let mut session = session.borrow_mut();
-            if commit_pending_layer_text(&ui, &mut session) {
+            if session.flush_editor_text() {
                 session.duplicate_layer();
             }
             refresh(&ui, &session);
@@ -4532,7 +4571,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         control.on_set_layer_grouping(move |group| {
             let Some(ui) = ui.upgrade() else { return };
             let mut session = session.borrow_mut();
-            if commit_pending_layer_text(&ui, &mut session) {
+            if session.flush_editor_text() {
                 session.set_layer_grouping(group);
             }
             refresh(&ui, &session);
@@ -4546,7 +4585,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         control.on_align_layer(move |alignment| {
             if let Some(ui) = ui.upgrade() {
                 let mut session = session.borrow_mut();
-                if commit_pending_layer_text(&ui, &mut session) {
+                if session.flush_editor_text() {
                     session.align_layer(alignment);
                 }
                 refresh(&ui, &session);
@@ -4562,7 +4601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let mut session = session.borrow_mut();
-            if commit_pending_layer_text(&ui, &mut session) {
+            if session.flush_editor_text() {
                 session.exclude_primary_layer();
             }
             refresh(&ui, &session);
@@ -4575,7 +4614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         control.on_set_layer_flags(move |lock, value| {
             if let Some(ui) = ui.upgrade() {
                 let mut session = session.borrow_mut();
-                if commit_pending_layer_text(&ui, &mut session) {
+                if session.flush_editor_text() {
                     session.set_layer_flags(lock, value);
                 }
                 refresh(&ui, &session);
@@ -4590,7 +4629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         control.on_nudge_layers(move |dx, dy| {
             if let Some(ui) = ui.upgrade() {
                 let mut session = session.borrow_mut();
-                if commit_pending_layer_text(&ui, &mut session) {
+                if session.flush_editor_text() {
                     session.translate_layers(dx, dy);
                 }
                 refresh(&ui, &session);
@@ -4602,13 +4641,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
-        control.on_add_item(move || {
-            if !session.borrow_mut().add_item_box() {
-                tracing::error!("could not add a text box");
+        control.on_add_item(move |kind| {
+            let mut session = session.borrow_mut();
+            if session.flush_editor_text() {
+                session.notice.clear();
+                let added = if kind == "Text" {
+                    session.add_item_box()
+                } else {
+                    session.add_shape_box(&kind)
+                };
+                if !added && session.notice.is_empty() {
+                    session.notice = "Could not add the layer".into();
+                }
             }
             if let Some(ui) = ui.upgrade() {
-                refresh(&ui, &session.borrow());
-                publish(&edit_slot, edit_frame(&session.borrow()));
+                refresh(&ui, &session);
+                publish(&edit_slot, edit_frame(&session));
             }
         });
     }
@@ -4616,12 +4664,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
-        control.on_add_picture(move |index| {
+        control.on_place_picture(move |index, replace| {
             let Ok(index) = usize::try_from(index) else {
                 return;
             };
             let mut session = session.borrow_mut();
-            session.notice = session.add_picture_box(index).err().unwrap_or_default();
+            if session.flush_editor_text() {
+                session.notice.clear();
+                let result = if replace {
+                    session.replace_picture_box(index)
+                } else {
+                    session.add_picture_box(index)
+                };
+                if let Err(error) = result
+                    && session.notice.is_empty()
+                {
+                    session.notice = error;
+                }
+            }
             if let Some(ui) = ui.upgrade() {
                 refresh(&ui, &session);
                 publish(&edit_slot, edit_frame(&session));
@@ -4637,7 +4697,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let mut session = session.borrow_mut();
-            if !commit_pending_layer_text(&ui, &mut session) {
+            if !session.flush_editor_text() {
                 ui.set_notice(session.notice.clone().into());
                 ui.set_draft_status(session.show_draft_status().into());
                 return;
@@ -4668,12 +4728,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let session = Rc::clone(&session);
         let live_pump = Rc::clone(&live_pump);
-        control.on_go_slide(move |text| {
+        control.on_go_slide(move |_| {
             {
                 let mut current = session.borrow_mut();
-                if current.tab == "shows" {
-                    current.save_lyrics(text.as_str());
-                }
+                current.flush_editor_text();
                 if current.preferences.out_locked() {
                     return;
                 }
@@ -4696,9 +4754,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_choose_project(move |index| {
-            let picked = session
-                .borrow_mut()
-                .pick_project_item(index.max(0) as usize);
+            let picked = {
+                let mut current = session.borrow_mut();
+                current.flush_editor_text();
+                current.pick_project_item(index.max(0) as usize)
+            };
             let Some(ui) = ui.upgrade() else {
                 return;
             };
@@ -5369,13 +5429,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let spell_timer = Rc::new(slint::Timer::default());
     let lyrics_timer = Rc::new(slint::Timer::default());
+    let schedule_text_checkpoint = {
+        let timer = slint::Timer::default();
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        Rc::new(move || {
+            if timer.running() {
+                return;
+            }
+            let ui = ui.clone();
+            let session = Rc::clone(&session);
+            timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(300),
+                move || {
+                    let mut current = session.borrow_mut();
+                    if let Err(error) = current.checkpoint_editor_text() {
+                        current.notice =
+                            format!("Could not protect the latest typed text. {error}");
+                        if let Some(ui) = ui.upgrade() {
+                            ui.set_notice(current.notice.as_str().into());
+                        }
+                    }
+                },
+            );
+        })
+    };
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let spell_timer = Rc::clone(&spell_timer);
         let lyrics_timer = Rc::clone(&lyrics_timer);
+        let schedule_text_checkpoint = Rc::clone(&schedule_text_checkpoint);
         let edit_slot = Rc::clone(&edit_slot);
-        control.on_lyrics_edited(move |_| {
+        control.on_lyrics_edited(move |text| {
+            session.borrow_mut().queue_editor_text(false, &text);
+            schedule_text_checkpoint();
             {
                 let ui = ui.clone();
                 let session = Rc::clone(&session);
@@ -5401,11 +5490,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let Some(ui) = ui.upgrade() else {
                         return;
                     };
-                    let text = ui.get_lyrics();
-                    if session.borrow().lyrics() == text.as_str() {
-                        return;
-                    }
-                    session.borrow_mut().save_lyrics(text.as_str());
+                    session.borrow_mut().flush_editor_text();
                     refresh(&ui, &session.borrow());
                     publish(&edit_slot, edit_frame(&session.borrow()));
                 },
@@ -5462,16 +5547,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = ui.upgrade() else { return };
             let result = {
                 let mut current = session.borrow_mut();
-                let capture_slide =
-                    matches!(action.as_str(), "slide-to-template" | "slide-to-overlay");
-                if capture_slide && !commit_pending_layer_text(&ui, &mut current) {
-                    let error = "Could not save the current slide text".to_string();
-                    if current.notice.is_empty() {
-                        current.notice = error.clone();
-                    }
-                    Err(error)
+                let recovery = matches!(
+                    action.as_str(),
+                    "retry-draft" | "copy-draft" | "discard-draft"
+                );
+                if !recovery && !current.flush_editor_text() {
+                    Err(current.notice.clone())
                 } else {
-                    current.library_action(action.as_str(), arg.as_str())
+                    let result = current.library_action(action.as_str(), arg.as_str());
+                    if recovery && result.is_ok() && !current.flush_editor_text() {
+                        Err(current.notice.clone())
+                    } else {
+                        result
+                    }
                 }
             };
             if result.is_ok()
@@ -5566,8 +5654,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
         let library_done = Rc::clone(&library_done);
-        let timer = Rc::new(slint::Timer::default());
-        control.on_show_text_edited(move |_| {
+        let timer = Rc::clone(&lyrics_timer);
+        control.on_show_text_edited(move |text| {
+            session.borrow_mut().queue_editor_text(true, &text);
+            schedule_text_checkpoint();
             let ui = ui.clone();
             let session = Rc::clone(&session);
             let library_done = Rc::clone(&library_done);
@@ -5578,10 +5668,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let Some(ui) = ui.upgrade() else {
                         return;
                     };
-                    let text = ui.get_show_text();
-                    let _ = session
-                        .borrow_mut()
-                        .library_action("show-text", text.as_str());
+                    session.borrow_mut().flush_editor_text();
                     library_done(&ui);
                 },
             );
@@ -5784,12 +5871,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         control.window().on_close_requested(move || {
             if let Some(ui) = ui.upgrade() {
                 let mut session = session.borrow_mut();
-                let lyrics = ui.get_lyrics();
-                if session.tab == "shows" && session.lyrics() != lyrics.as_str() {
-                    session.save_lyrics(lyrics.as_str());
+                session.flush_editor_text();
+                if session.has_buffered_editor_text() {
+                    ui.set_draft_status(session.show_draft_status().into());
+                    ui.set_notice(session.notice.as_str().into());
+                    return slint::CloseRequestResponse::KeepWindowShown;
                 }
-                if ui.get_text_mode() {
-                    let _ = session.library_action("show-text", ui.get_show_text().as_str());
+                if let Err(error) = session.record_memory_drafts() {
+                    session.notice = format!(
+                        "The recovery draft is still in memory. Free up space, save a copy, or discard the draft before closing. {error}"
+                    );
+                    ui.set_draft_status(session.show_draft_status().into());
+                    ui.set_notice(session.notice.as_str().into());
+                    return slint::CloseRequestResponse::KeepWindowShown;
                 }
             }
             let _ = slint::quit_event_loop();

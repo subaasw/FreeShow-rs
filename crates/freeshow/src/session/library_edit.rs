@@ -374,12 +374,6 @@ impl Session {
                 ));
             }
         }
-        if songs > 0 && parts.is_empty() {
-            if let Some(error) = notes.first() {
-                return Err(error.clone());
-            }
-            parts.push("0 new shows, projects or templates".into());
-        }
         if media > 0 {
             parts.push(format!(
                 "{media} media file{}",
@@ -398,6 +392,12 @@ impl Session {
                 if bibles == 1 { "" } else { "s" }
             ));
         }
+        if songs > 0 && parts.is_empty() {
+            if let Some(error) = notes.first() {
+                return Err(error.clone());
+            }
+            parts.push("0 new shows, projects or templates".into());
+        }
         if parts.is_empty() {
             if let Some(error) = copy_errors.into_iter().next() {
                 return Err(error);
@@ -409,16 +409,6 @@ impl Session {
             });
         }
         let mut message = format!("Imported {}", parts.join(", "));
-        if songs > 0 && shows == 0 {
-            message = if notes
-                .iter()
-                .any(|note| note.contains("save as .pptx") || note.contains("pdftoppm"))
-            {
-                "Import did not add a show".into()
-            } else {
-                format!("{message} (no new shows; a show with that name may exist already)")
-            };
-        }
         if let Some(first) = notes.first() {
             let first = first.rsplit(['/', '\\']).next().unwrap_or(first);
             message.push_str(&format!(" · {first}"));
@@ -847,19 +837,27 @@ impl Session {
             .collect();
         let name = unique_name(name, others);
         let old_path = self.shows[index].path.clone();
-        let mut show = self.shows.remove(index);
-        show.set_name(&name);
         let path = self.free_show_path(&name, old_path.as_deref())?;
-        if let Err(err) = show.save(&path) {
-            let _ = show.set_name(&old_name);
-            self.shows.insert(index, show);
-            return Err(format!("could not save {}: {err}", path.display()));
-        }
+        let mut show = self.shows[index].clone();
+        show.set_name(&name);
+        show.save(&path)
+            .map_err(|err| format!("could not save {}: {err}", path.display()))?;
         if let Some(old) = old_path.filter(|old| *old != path) {
             let _ = std::fs::remove_file(old);
         }
         show.path = Some(path);
         self.timer_save_bases.remove(&show.id);
+        for snapshot in self
+            .history
+            .iter_mut()
+            .chain(&mut self.redo)
+            .map(|entry| &mut entry.snapshot)
+        {
+            if snapshot.show_id == show.id {
+                snapshot.show["name"] = show.show["name"].clone();
+            }
+        }
+        self.shows.remove(index);
         let slide = self.slide_index;
         self.insert_sorted(show);
         self.slide_index = slide;
@@ -899,8 +897,9 @@ impl Session {
         }
         let show = self.shows.remove(index);
         self.timer_save_bases.remove(&show.id);
-        self.history.retain(|snap| snap.show_id != show.id);
-        self.redo.retain(|snap| snap.show_id != show.id);
+        self.history
+            .retain(|entry| entry.snapshot.show_id != show.id);
+        self.redo.retain(|entry| entry.snapshot.show_id != show.id);
         self.deleted_shows.push(show);
         if self.deleted_shows.len() > 20 {
             self.deleted_shows.remove(0);
@@ -940,12 +939,13 @@ impl Session {
         if !self.shows[index].set_lyrics_text(text, split) {
             return Err("could not update the show text".into());
         }
-        self.persist_show_edit(index, snap)?;
-        self.layer_selection = None;
         let count = self.shows[index].ordered_slides().len();
         let last = count.saturating_sub(1);
-        self.slide_index = Some(self.slide_index.unwrap_or(0).min(last));
-        self.item_index = 0;
+        self.persist_show_edit_then(index, snap, |session| {
+            session.layer_selection = None;
+            session.slide_index = Some(session.slide_index.unwrap_or(0).min(last));
+            session.item_index = 0;
+        })?;
         Ok(format!(
             "Saved {count} slide{}",
             if count == 1 { "" } else { "s" }
@@ -967,10 +967,11 @@ impl Session {
                 _ => format!("{label} failed"),
             });
         };
-        self.persist_show_edit(index, snap)?;
-        self.layer_selection = None;
-        self.slide_index = Some(next);
-        self.item_index = 0;
+        self.persist_show_edit_then(index, snap, |session| {
+            session.layer_selection = None;
+            session.slide_index = Some(next);
+            session.item_index = 0;
+        })?;
         Ok(String::new())
     }
 
@@ -1148,6 +1149,21 @@ mod tests {
     }
 
     #[test]
+    fn dropped_media_count_stays_visible_with_a_legacy_deck_warning() {
+        let (dir, mut session) = library("drop-legacy-deck");
+        let deck = dir.0.join("Legacy.ppt");
+        let picture = dir.0.join("Cover.png");
+        std::fs::write(&deck, b"legacy deck").unwrap();
+        let image = include_bytes!("../../../freeshow-data/tests/fixtures/lesson-cover.png");
+        std::fs::write(&picture, image).unwrap();
+
+        let result = session.import_files(&[deck, picture]).unwrap();
+        assert!(result.starts_with("Imported 1 media file · "), "{result}");
+        assert!(result.contains("save as .pptx or PDF"), "{result}");
+        assert_eq!(std::fs::read(dir.0.join("Media/Cover.png")).unwrap(), image);
+    }
+
+    #[test]
     fn dropped_files_land_in_the_right_folders_and_import_once() {
         let (dir, mut session) = library("drop");
         let outside = dir.0.join("outside");
@@ -1261,6 +1277,66 @@ mod tests {
         assert_eq!(session.show_name(), "Amazing Grace / Chains copy");
         let reloaded = Session::open(dir.0.clone());
         assert_eq!(reloaded.shows.len(), 2);
+    }
+
+    #[test]
+    fn show_rename_keeps_the_new_name_through_undo_and_redo() {
+        let (dir, mut session) = library("rename-history");
+        assert!(session.create_show_with("b", "Bravo", "Another show"));
+        assert!(session.create_show_with("a", "Alpha", "Original lyrics"));
+        assert!(session.save_lyrics("First edit"));
+        assert!(session.save_lyrics("Second edit"));
+        assert!(session.undo());
+
+        session.library_action("rename-show", "Zulu").unwrap();
+        assert_eq!(session.show_index, Some(1));
+        assert!(session.redo());
+        assert_eq!(session.show_name(), "Zulu");
+        assert_eq!(session.lyrics(), "Second edit");
+        assert!(session.undo());
+        assert!(session.undo());
+        assert_eq!(session.show_name(), "Zulu");
+        assert_eq!(session.lyrics(), "Original lyrics");
+        assert_eq!(files(&dir), ["Bravo.show", "Zulu.show"]);
+        let saved = ShowFile::load(&dir.0.join("Shows/Zulu.show")).unwrap();
+        assert_eq!(saved, *session.current_show().unwrap());
+    }
+
+    #[test]
+    fn undo_and_redo_reselect_the_moved_slide_and_copied_layer_across_shows() {
+        let (_dir, mut session) = library("history-selection");
+        assert!(session.create_show_with("a", "Alpha", "One\n\nTwo\n\nThree"));
+        assert!(session.create_show_with("b", "Bravo", "Other"));
+        session.select_drawer(0);
+        session.select_slide_for_edit(2);
+        let slide_id = session.current_show().unwrap().ordered_slides()[2]
+            .id
+            .clone();
+        session.library_action("slide-up", "").unwrap();
+        let position = |session: &Session| {
+            let index = session.slide_index.unwrap();
+            let show = session.current_show().unwrap();
+            (index, show.ordered_slides()[index].id.clone())
+        };
+        assert_eq!(position(&session), (1, slide_id.clone()));
+
+        session.select_drawer(1);
+        assert!(session.undo());
+        assert_eq!(position(&session), (2, slide_id.clone()));
+        session.select_drawer(1);
+        assert!(session.redo());
+        assert_eq!(position(&session), (1, slide_id.clone()));
+
+        assert!(session.duplicate_layer());
+        assert_eq!(session.layer_indices(), [1]);
+        session.select_drawer(1);
+        assert!(session.undo());
+        assert_eq!(position(&session), (1, slide_id.clone()));
+        assert_eq!(session.layer_indices(), [0]);
+        session.select_drawer(1);
+        assert!(session.redo());
+        assert_eq!(position(&session), (1, slide_id));
+        assert_eq!(session.layer_indices(), [1]);
     }
 
     #[test]
