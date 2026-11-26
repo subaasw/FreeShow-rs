@@ -384,6 +384,38 @@ impl ShowFile {
         Some(items.len() - 1)
     }
 
+    /// Inserts a shape as an ordinary FreeShow box with an editable fill and radius.
+    pub fn add_shape_box(
+        &mut self,
+        slide_id: &str,
+        preset: &str,
+        slide_size: (f32, f32),
+    ) -> Option<usize> {
+        let (height_fraction, radius) = match preset {
+            "Rectangle" => (0.28, ""),
+            "Rounded rectangle" => (0.28, "border-radius:12%;"),
+            "Ellipse" => (0.28, "border-radius:50%;"),
+            "Divider" => (0.02, ""),
+            _ => return None,
+        };
+        let (slide_width, slide_height) = slide_size;
+        let width = (slide_width * 0.4).round().max(1.0);
+        let height = (slide_height * height_fraction).round().max(1.0);
+        let left = ((slide_width - width) / 2.0).round();
+        let top = ((slide_height - height) / 2.0).round();
+        let style = format!(
+            "left:{left}px;top:{top}px;width:{width}px;height:{height}px;background-color:#2f80ed;{radius}"
+        );
+        let items = self.items_mut(slide_id)?;
+        items.push(serde_json::json!({
+            "type": "text",
+            "name": preset,
+            "style": style,
+            "lines": []
+        }));
+        Some(items.len() - 1)
+    }
+
     pub fn add_picture_box(&mut self, slide_id: &str, src: &str) -> Option<usize> {
         let items = self.items_mut(slide_id)?;
         items.push(serde_json::json!({
@@ -394,6 +426,35 @@ impl ShowFile {
             "lines": []
         }));
         Some(items.len() - 1)
+    }
+
+    pub fn can_replace_item_picture(&self, slide_id: &str, index: usize) -> bool {
+        let Some(item) = self.item(slide_id, index) else {
+            return false;
+        };
+        if item_locked(item) || !matches!(item["type"].as_str(), None | Some("media" | "image")) {
+            return false;
+        }
+        item["src"].as_str().is_some_and(|src| {
+            let bare = src.trim().split(['?', '#']).next().unwrap_or_default();
+            !bare.is_empty()
+                && matches!(
+                    crate::media_entry_kind(std::path::Path::new(bare)),
+                    crate::MediaEntryKind::Image | crate::MediaEntryKind::Other
+                )
+        })
+    }
+
+    /// Replaces a still without touching its crop, geometry, or other layer properties.
+    pub fn replace_item_picture(&mut self, slide_id: &str, index: usize, src: &str) -> bool {
+        if src.trim().is_empty() || !self.can_replace_item_picture(slide_id, index) {
+            return false;
+        }
+        let Some(item) = self.item_mut(slide_id, index) else {
+            return false;
+        };
+        item.insert("src".into(), src.into());
+        true
     }
 
     pub fn duplicate_item_box(&mut self, slide_id: &str, index: usize) -> Option<usize> {

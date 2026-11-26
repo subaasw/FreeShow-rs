@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::{BACKUPS_DIR, DataError, Library, ShowFile, atomic_write};
+use crate::{BACKUPS_DIR, DataError, Library, ShowFile, atomic_replace};
 
 /// A pending library show edit, recorded before replacing the saved show.
 #[derive(Clone)]
@@ -28,17 +28,7 @@ impl Library {
         base: &Value,
     ) -> Result<ShowDraft, DataError> {
         let destination = show.path.as_deref().ok_or_else(invalid_draft)?;
-        let name = destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(invalid_draft)?;
-        if destination.parent() != Some(self.shows_dir().as_path()) || !show_name(Path::new(name)) {
-            return Err(invalid_draft());
-        }
-        let journal = self
-            .show_draft_directory()
-            .join(name)
-            .with_extension("draft");
+        let journal = self.show_draft_path(destination, "draft")?;
         Ok(ShowDraft {
             destination: destination.to_path_buf(),
             id: show.id.clone(),
@@ -46,6 +36,35 @@ impl Library {
             edited: show.show.clone(),
             journal,
         })
+    }
+
+    /// Keeps typing checkpoints independent of other saves to the same show.
+    pub fn prepare_typing_draft(
+        &self,
+        show: &ShowFile,
+        base: &Value,
+    ) -> Result<ShowDraft, DataError> {
+        let mut draft = self.prepare_show_draft(show, base)?;
+        draft.journal.set_extension("typing");
+        Ok(draft)
+    }
+
+    pub fn discard_typing_draft(&self, destination: &Path) -> Result<(), DataError> {
+        remove_journal(&self.show_draft_path(destination, "typing")?)
+    }
+
+    fn show_draft_path(&self, destination: &Path, extension: &str) -> Result<PathBuf, DataError> {
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(invalid_draft)?;
+        if destination.parent() != Some(self.shows_dir().as_path()) || !show_name(Path::new(name)) {
+            return Err(invalid_draft());
+        }
+        Ok(self
+            .show_draft_directory()
+            .join(name)
+            .with_extension(extension))
     }
 
     /// Returns pending drafts and leaves unreadable journal files available for repair.
@@ -66,9 +85,10 @@ impl Library {
             let result = entry.map_err(DataError::from).and_then(|entry| {
                 let journal = entry.path();
                 if !entry.file_type()?.is_file()
-                    || journal
-                        .extension()
-                        .is_none_or(|extension| extension != "draft")
+                    || !matches!(
+                        journal.extension().and_then(|ext| ext.to_str()),
+                        Some("draft" | "typing")
+                    )
                 {
                     return Ok(None);
                 }
@@ -108,7 +128,7 @@ impl Library {
                 Err(error) => warnings.push(format!("Could not load a recovery draft: {error}")),
             }
         }
-        drafts.sort_by(|a, b| a.destination.cmp(&b.destination));
+        drafts.sort_by(|a, b| a.journal.cmp(&b.journal));
         (drafts, warnings)
     }
 }
@@ -120,14 +140,17 @@ impl ShowDraft {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(invalid_draft)?;
-        let value = json!({
-            "version": 1,
-            "file": file,
-            "id": self.id,
-            "base": self.base,
-            "edited": self.edited,
-        });
-        atomic_write(&self.journal, &serde_json::to_vec(&value)?)
+        let version = Value::from(1);
+        let file = Value::from(file);
+        let id = Value::from(self.id.as_str());
+        let journal = std::collections::BTreeMap::from([
+            ("version", &version),
+            ("file", &file),
+            ("id", &id),
+            ("base", &self.base),
+            ("edited", &self.edited),
+        ]);
+        atomic_replace(&self.journal, &serde_json::to_vec(&journal)?)
     }
 
     pub fn saved_show(&self) -> Result<ShowFile, DataError> {
@@ -157,10 +180,14 @@ impl ShowDraft {
     }
 
     pub fn discard(&self) -> Result<(), DataError> {
-        match fs::remove_file(&self.journal) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            result => Ok(result?),
-        }
+        remove_journal(&self.journal)
+    }
+}
+
+fn remove_journal(path: &Path) -> Result<(), DataError> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => Ok(result?),
     }
 }
 
@@ -178,6 +205,7 @@ fn invalid_draft() -> DataError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn reopening_finds_an_interrupted_commit_and_cleans_up_an_applied_draft() {

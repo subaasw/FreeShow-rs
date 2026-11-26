@@ -6764,15 +6764,19 @@ pub fn default_library_dir() -> Option<PathBuf> {
 /// Writes `bytes` by flushing a temporary file and renaming it into place.
 /// The previous file, when there was one, is copied into the library `Backups` folder first.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DataError> {
+    if path.is_file() && fs::read(path).ok().as_deref() == Some(bytes) {
+        return Ok(());
+    }
+    let _ = keep_previous(path);
+    atomic_replace(path, bytes)
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), DataError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)?;
     }
-    if path.is_file() && fs::read(path).ok().as_deref() == Some(bytes) {
-        return Ok(());
-    }
-    let _ = keep_previous(path);
     let tmp = temp_path(path);
     {
         let mut file = File::create(&tmp)?;
