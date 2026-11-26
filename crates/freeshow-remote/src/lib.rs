@@ -43,6 +43,29 @@ impl Default for RemotePorts {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebPage {
+    Remote,
+    Stage,
+}
+
+impl WebPage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Remote => "remote",
+            Self::Stage => "stage",
+        }
+    }
+}
+
+/// Result of the real listener, including the assigned port when configured as zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerState {
+    Listening(u16),
+    BindFailed(u16, std::io::ErrorKind),
+    Stopped,
+}
+
 const REMOTE_PAGE: &str = include_str!("../pages/remote.html");
 const STAGE_PAGE: &str = include_str!("../pages/stage.html");
 
@@ -162,7 +185,7 @@ pub fn spawn(
     ports: RemotePorts,
     stage_frames: mpsc::SyncSender<StageFrameRequest>,
 ) {
-    spawn_limited(snapshot, commands, password, ports, stage_frames, 10);
+    let _ = spawn_limited(snapshot, commands, password, ports, stage_frames, 10);
 }
 
 pub fn spawn_limited(
@@ -172,7 +195,9 @@ pub fn spawn_limited(
     ports: RemotePorts,
     stage_frames: mpsc::SyncSender<StageFrameRequest>,
     max_connections: u32,
-) {
+) -> mpsc::Receiver<(WebPage, ListenerState)> {
+    let (events, receiver) = mpsc::channel();
+    let thread_events = events.clone();
     let started = std::thread::Builder::new()
         .name("freeshow-remote".into())
         .spawn(move || {
@@ -183,6 +208,7 @@ pub fn spawn_limited(
                 Ok(runtime) => runtime,
                 Err(err) => {
                     tracing::error!("remote runtime failed: {err}");
+                    listener_start_failed(&thread_events);
                     return;
                 }
             };
@@ -193,13 +219,21 @@ pub fn spawn_limited(
                 let remote = with_socket(remote_router(state.clone()), state.clone(), "REMOTE");
                 let stage = stage_router(state);
                 tokio::join!(
-                    listen(ports.remote, remote, "remote"),
-                    listen(ports.stage, stage, "stage"),
+                    listen(ports.remote, remote, WebPage::Remote, &thread_events),
+                    listen(ports.stage, stage, WebPage::Stage, &thread_events),
                 );
             });
         });
     if started.is_err() {
         tracing::error!("could not start the remote server thread");
+        listener_start_failed(&events);
+    }
+    receiver
+}
+
+fn listener_start_failed(events: &mpsc::Sender<(WebPage, ListenerState)>) {
+    for page in [WebPage::Remote, WebPage::Stage] {
+        let _ = events.send((page, ListenerState::Stopped));
     }
 }
 
@@ -265,15 +299,27 @@ fn with_socket(router: Router, state: AppState, event: &'static str) -> Router {
     router.layer(layer)
 }
 
-async fn listen(port: u16, app: Router, name: &str) {
+async fn listen(
+    port: u16,
+    app: Router,
+    page: WebPage,
+    events: &mpsc::Sender<(WebPage, ListenerState)>,
+) {
+    let name = page.name();
     match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(listener) => {
+            let port = listener.local_addr().map_or(port, |address| address.port());
+            let _ = events.send((page, ListenerState::Listening(port)));
             tracing::info!("{name} page on http://127.0.0.1:{port}/");
             if let Err(err) = serve(listener, app).await {
                 tracing::error!("{name} server stopped: {err}");
             }
+            let _ = events.send((page, ListenerState::Stopped));
         }
-        Err(err) => tracing::error!("{name} port {port} is not available: {err}"),
+        Err(err) => {
+            let _ = events.send((page, ListenerState::BindFailed(port, err.kind())));
+            tracing::error!("{name} port {port} is not available: {err}");
+        }
     }
 }
 
@@ -319,7 +365,7 @@ async fn stage_frame_png(
 async fn state_json(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     if !state.authorized(&headers) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -334,7 +380,7 @@ async fn state_json(
         .snapshot
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    Ok(Json(snapshot.view()))
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(snapshot.view())))
 }
 
 async fn action(
@@ -602,6 +648,52 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn listener_reports_the_bound_port_and_an_independent_bind_failure() {
+        let reserved = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let conflict = reserved.local_addr().unwrap().port();
+        let (state, _) = harness();
+        let (events, receiver) = mpsc::channel();
+        listen(
+            conflict,
+            remote_router(state.clone()),
+            WebPage::Remote,
+            &events,
+        )
+        .await;
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            (
+                WebPage::Remote,
+                ListenerState::BindFailed(conflict, std::io::ErrorKind::AddrInUse)
+            )
+        );
+
+        let server = tokio::spawn(async move {
+            listen(0, stage_router(state), WebPage::Stage, &events).await;
+        });
+        let (page, event) =
+            tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(4)))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(page, WebPage::Stage);
+        let ListenerState::Listening(port) = event else {
+            panic!("stage listener reported {event:?}");
+        };
+        assert_ne!(port, 0);
+        assert!(
+            timeout(
+                Duration::from_secs(2),
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+        server.abort();
+    }
+
     fn harness() -> (AppState, mpsc::Receiver<Command>) {
         let snapshot = ShowSnapshot {
             shows: vec![RemoteShow {
@@ -808,6 +900,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), 200);
+        assert_eq!(authorized.headers()[header::CACHE_CONTROL], "no-store");
         let body: Value =
             serde_json::from_slice(&authorized.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();

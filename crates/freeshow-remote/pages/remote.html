@@ -46,6 +46,9 @@
       padding: 12px;
     }
     .controls button { text-align: center; font-weight: 650; }
+    fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+    fieldset:disabled { opacity: 0.55; }
+    #enter-password { margin-top: 8px; min-height: 44px; }
     select { font: inherit; max-width: 100%; }
     #next { background: var(--accent); }
     button.active { outline: 2px solid var(--accent); }
@@ -65,80 +68,128 @@
 <body>
   <header>
     <h1>FreeShow</h1>
-    <p id="show-name">Connecting</p>
+    <p id="show-name" role="status">Connecting</p>
+    <button id="enter-password" type="button" hidden>Enter password</button>
+    <p id="command-status" role="status" hidden></p>
   </header>
   <main>
     <p id="lines" class="lines"></p>
     <p id="next-lines" class="next-lines"></p>
-    <div class="controls">
-      <button id="prev" type="button">Previous</button>
-      <button id="next" type="button">Next</button>
-      <button id="clear" type="button">Clear</button>
-    </div>
-    <div class="controls secondary">
-      <button id="prev-item" type="button">Previous item</button>
-      <button id="next-item" type="button">Next item</button>
-      <button id="clear-slide" type="button">Hide text</button>
-      <button id="clear-background" type="button">Stop background</button>
-    </div>
-    <div class="columns" style="margin-top: 16px">
-      <section>
-        <h2 id="project-title">Project</h2>
-        <ul id="project"></ul>
-        <h2 style="margin-top: 16px">Slides</h2>
-        <ul id="slides"></ul>
-      </section>
-      <section>
-        <h2>Shows</h2>
-        <input id="show-filter" type="search" placeholder="Find a show" aria-label="Find a show">
-        <ul id="shows"></ul>
-      </section>
-      <section>
-        <h2>Overlays</h2>
-        <ul id="overlays"></ul>
-        <h2 style="margin-top: 16px">Timers</h2>
-        <ul id="timers"></ul>
-        <h2 style="margin-top: 16px">Media</h2>
-        <ul id="media"></ul>
-        <label for="audio-channel">Audio channel</label>
-        <select id="audio-channel"><option value="main">Main</option></select>
-        <button id="channel-mute" type="button" aria-pressed="false">Mute</button>
-        <label for="volume">Volume</label>
-        <input id="volume" type="range" min="0" max="100" value="100">
-      </section>
-    </div>
+    <fieldset id="remote-controls" aria-label="Show controls" disabled>
+      <div class="controls">
+        <button id="prev" type="button">Previous</button>
+        <button id="next" type="button">Next</button>
+        <button id="clear" type="button">Clear</button>
+      </div>
+      <div class="controls secondary">
+        <button id="prev-item" type="button">Previous item</button>
+        <button id="next-item" type="button">Next item</button>
+        <button id="clear-slide" type="button">Hide text</button>
+        <button id="clear-background" type="button">Stop background</button>
+      </div>
+      <div class="columns" style="margin-top: 16px">
+        <section>
+          <h2 id="project-title">Project</h2>
+          <ul id="project"></ul>
+          <h2 style="margin-top: 16px">Slides</h2>
+          <ul id="slides"></ul>
+        </section>
+        <section>
+          <h2>Shows</h2>
+          <input id="show-filter" type="search" placeholder="Find a show" aria-label="Find a show">
+          <ul id="shows"></ul>
+        </section>
+        <section>
+          <h2>Overlays</h2>
+          <ul id="overlays"></ul>
+          <h2 style="margin-top: 16px">Timers</h2>
+          <ul id="timers"></ul>
+          <h2 style="margin-top: 16px">Media</h2>
+          <ul id="media"></ul>
+          <label for="audio-channel">Audio channel</label>
+          <select id="audio-channel"><option value="main">Main</option></select>
+          <button id="channel-mute" type="button" aria-pressed="false">Mute</button>
+          <label for="volume">Volume</label>
+          <input id="volume" type="range" min="0" max="100" value="100">
+        </section>
+      </div>
+    </fieldset>
   </main>
   <script>
     let busy = false;
+    let connected = false;
+    let actionPending = false;
+    let connectionRevision = 0;
     let channelState = {};
-    let passwordAttempts = 0;
     let lastStateText = "";
     let lastFilter = "";
+    let secret = "";
+    try { secret = localStorage.getItem("freeshow-password") || ""; } catch {}
 
-    function password() {
-      return localStorage.getItem("freeshow-password") || "";
+    const controls = document.getElementById("remote-controls");
+    const heading = document.getElementById("show-name");
+    const enterPassword = document.getElementById("enter-password");
+    const commandStatus = document.getElementById("command-status");
+
+    function disconnect(message, locked = false) {
+      connectionRevision += 1;
+      connected = false;
+      lastStateText = "";
+      controls.disabled = true;
+      heading.textContent = message;
+      enterPassword.hidden = !locked;
+      if (locked) {
+        document.getElementById("lines").textContent = "";
+        document.getElementById("next-lines").textContent = "";
+        for (const id of ["project", "slides", "shows", "overlays", "timers", "media"]) {
+          document.getElementById(id).replaceChildren();
+        }
+        document.getElementById("project-title").textContent = "Project";
+        // Drop protected information from the disabled controls too.
+        document.getElementById("audio-channel").replaceChildren();
+        channelState = {};
+      }
     }
 
-    async function authorizedFetch(url, options = {}) {
-      options.headers = Object.assign({}, options.headers, {
-        "x-freeshow-password": password()
-      });
-      let response = await fetch(url, options);
-      if (response.status !== 401 || passwordAttempts >= 2) return response;
-      passwordAttempts += 1;
-      const value = prompt("Remote password");
-      if (value == null) return response;
-      localStorage.setItem("freeshow-password", value);
-      options.headers["x-freeshow-password"] = value;
-      return fetch(url, options);
+    async function request(url, options = {}, readBody = false) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch(url, {
+          ...options,
+          headers: { ...options.headers, "x-freeshow-password": secret },
+          cache: "no-store",
+          signal: controller.signal
+        });
+        return { status: response.status, ok: response.ok,
+          text: response.ok && readBody ? await response.text() : "" };
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     async function act(channel, data) {
-      await authorizedFetch("/action", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ channel: channel, data: data == null ? null : data })
-      });
+      if (!connected || actionPending) return;
+      commandStatus.hidden = true;
+      actionPending = true;
+      try {
+        const response = await request("/action", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ channel: channel, data: data == null ? null : data })
+        });
+        if (response.status === 401) {
+          disconnect("Password required", true);
+          return;
+        }
+        if (!response.ok) throw new Error("Action response failed");
+      } catch {
+        commandStatus.textContent = "Command status unknown. Check the live cue before trying again.";
+        commandStatus.hidden = false;
+        disconnect("Lost the connection to FreeShow, retrying…");
+      } finally {
+        actionPending = false;
+      }
       await refresh();
     }
 
@@ -156,20 +207,23 @@
     async function refresh() {
       if (busy) return;
       busy = true;
+      const revision = connectionRevision;
       try {
-        const response = await authorizedFetch("/state");
+        const response = await request("/state", {}, true);
+        if (revision !== connectionRevision) return;
         if (response.status === 401) {
-          document.getElementById("show-name").textContent = "Password required";
+          disconnect("Password required", true);
           return;
         }
+        if (!response.ok) throw new Error("State response failed");
         // Rebuilding only on change keeps a button under a finger from being replaced mid-tap.
-        const text = await response.text();
+        const text = response.text;
         const filterText = document.getElementById("show-filter").value;
         if (text === lastStateText && filterText === lastFilter) return;
+        const state = JSON.parse(text);
         lastStateText = text;
         lastFilter = filterText;
-        const state = JSON.parse(text);
-        document.getElementById("show-name").textContent = state.cleared
+        heading.textContent = state.cleared
           ? "Cleared"
           : (state.show_name || "No show");
         document.getElementById("lines").textContent = state.cleared
@@ -269,16 +323,25 @@
             showId: current.id
           })));
         });
+        connected = true;
+        controls.disabled = false;
+        enterPassword.hidden = true;
       } catch {
-        // FreeShow closed or the Wi-Fi dropped; the next poll tries again.
-        document.getElementById("show-name").textContent = "Lost the connection to FreeShow, retrying…";
-        lastStateText = "";
+        if (revision === connectionRevision) disconnect("Lost the connection to FreeShow, retrying…");
       } finally {
         busy = false;
       }
     }
 
     document.getElementById("next").addEventListener("click", () => act("API:next_slide"));
+    enterPassword.addEventListener("click", () => {
+      const value = prompt("Remote password");
+      if (value == null) return;
+      secret = value;
+      try { localStorage.setItem("freeshow-password", value); } catch {}
+      connectionRevision += 1;
+      refresh();
+    });
     document.getElementById("prev").addEventListener("click", () => act("API:previous_slide"));
     document.getElementById("clear").addEventListener("click", () => act("API:clear_all"));
     document.getElementById("next-item").addEventListener("click", () => act("API:next_project_item"));

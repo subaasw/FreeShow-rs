@@ -39,6 +39,7 @@
     }
     #status.gone { opacity: 0; }
     body.preview #status { display: block; }
+    #enter-password { position: fixed; top: 16px; right: 16px; font: inherit; padding: 8px 12px; }
   </style>
 </head>
 <body>
@@ -47,12 +48,16 @@
   <p id="lines"></p>
   <p id="next"></p>
   <p id="notes"></p>
-  <p id="status">Tap for full screen</p>
+  <p id="status" role="status">Tap for full screen</p>
+  <button id="enter-password" type="button" hidden>Enter password</button>
   <script>
-    let passwordAttempts = 0;
     let frameUrl;
     let useFrame = true;
+    let locked = false;
+    let secret = "";
+    try { secret = localStorage.getItem("freeshow-password") || ""; } catch {}
     const stageFrame = document.getElementById("stage-frame");
+    const enterPassword = document.getElementById("enter-password");
 
     function hideFrame() {
       document.body.classList.remove("preview");
@@ -62,22 +67,19 @@
       frameUrl = undefined;
     }
 
-    function password() {
-      return localStorage.getItem("freeshow-password") || "";
-    }
-
-    async function authorizedFetch(url, options = {}) {
-      options.headers = Object.assign({}, options.headers, {
-        "x-freeshow-password": password()
-      });
-      let response = await fetch(url, options);
-      if (response.status !== 401 || passwordAttempts >= 2) return response;
-      passwordAttempts += 1;
-      const value = prompt("Stage password");
-      if (value == null) return response;
-      localStorage.setItem("freeshow-password", value);
-      options.headers["x-freeshow-password"] = value;
-      return fetch(url, options);
+    async function request(url, read) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      try {
+        const response = await fetch(url, {
+          headers: { "x-freeshow-password": secret },
+          cache: "no-store", signal: controller.signal
+        });
+        return { status: response.status, ok: response.ok,
+          body: response.ok ? await response[read]() : null };
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     function paintClock() {
@@ -87,33 +89,33 @@
     async function refresh() {
       let response;
       if (useFrame) {
-        response = await authorizedFetch("/stage-frame", { cache: "no-store" });
+        response = await request("/stage-frame", "blob");
         if (response.ok) {
-          const nextUrl = URL.createObjectURL(await response.blob());
+          const nextUrl = URL.createObjectURL(response.body);
           stageFrame.src = nextUrl;
           stageFrame.hidden = false;
           document.body.classList.add("preview");
           if (frameUrl) URL.revokeObjectURL(frameUrl);
           frameUrl = nextUrl;
-          return;
+          return true;
         }
         if (response.status === 404) useFrame = false;
-        else if (response.status !== 401) return;
       }
-      if (!useFrame) response = await authorizedFetch("/state");
+      if (!useFrame) response = await request("/state", "json");
       if (response.status === 401) {
         hideFrame();
-        document.getElementById("lines").textContent = "Password required";
+        document.getElementById("lines").textContent = "";
         document.getElementById("next").textContent = "";
         document.getElementById("notes").textContent = "";
-        return;
+        return false;
       }
-      if (!response.ok) return;
-      const state = await response.json();
+      if (!response.ok) throw new Error("Stage response failed");
+      const state = response.body;
       document.getElementById("lines").textContent = (state.lines || []).join("\n");
       const next = state.next_lines || [];
       document.getElementById("next").textContent = next.length ? next.join("\n") : "";
       document.getElementById("notes").textContent = state.notes || "";
+      return true;
     }
 
     const status = document.getElementById("status");
@@ -125,6 +127,13 @@
       clearTimeout(hintTimer);
       if (!sticky) hintTimer = setTimeout(() => status.classList.add("gone"), 3000);
     }
+    enterPassword.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const value = prompt("Stage password");
+      if (value == null) return;
+      secret = value;
+      try { localStorage.setItem("freeshow-password", value); } catch {}
+    });
     // A tablet on a music stand is easier to read without browser bars.
     document.addEventListener("click", () => {
       const root = document.documentElement;
@@ -139,8 +148,11 @@
     setInterval(paintClock, 1000);
     async function poll() {
       try {
-        await refresh();
-        if (failures >= 3) showStatus("Connected", false);
+        const authorized = await refresh();
+        if (!authorized && (!locked || failures >= 3)) showStatus("Password required", true);
+        if (authorized && (locked || failures >= 3)) showStatus("Connected", false);
+        locked = !authorized;
+        enterPassword.hidden = authorized;
         failures = 0;
       } catch {
         // Keep the last frame through a transient network interruption, but say so if it lasts.
