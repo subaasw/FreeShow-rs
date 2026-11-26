@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import tomllib
 
-from package_media import serve_sample
+from package_media import serve_sample, verify_handoff
 
 ROOT = Path(__file__).resolve().parent.parent
 SYSTEM = ("/usr/lib/", "/System/Library/")
@@ -214,8 +214,9 @@ def verify(app):
             run(*prefix, executable, *args, env=environment, timeout=90)
         with serve_sample(sample) as url:
             run(*prefix, executable, "--check-media", url, env=environment, timeout=90)
+        handoff = verify_handoff(*prefix, executable, env=environment, cwd=temp)
         run("codesign", "--verify", "--deep", "--strict", relocated)
-        return {"relocated_path_with_spaces":True, "empty_home_and_registry":True, "homebrew_and_rust_reads_blocked":bool(prefix), "h264_decoded":True, "http_video_decoded":True}
+        return {"relocated_path_with_spaces":True, "empty_home_and_registry":True, "homebrew_and_rust_reads_blocked":bool(prefix), "h264_decoded":True, "http_video_decoded":True, "portable_handoff":handoff}
 
 
 def main():

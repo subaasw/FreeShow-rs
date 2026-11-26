@@ -48,27 +48,33 @@ jobs:
         run: |
           sudo apt-get remove -y libgstreamer1.0-0 libgstreamer-plugins-base1.0-0
           python3 - <<'PY'
-          import json, pathlib, subprocess, sys, tempfile
+          import json, pathlib, subprocess, sys, tarfile, tempfile
 
           root = pathlib.Path.cwd()
           sys.path.insert(0, str(root / 'scripts'))
-          from package_media import serve_sample
+          from package_media import serve_sample, verify_handoff
 
-          apps = list((root / 'dist').glob('freeshow-*/freeshow-rust-*-linux-x86_64'))
-          assert len(apps) == 1, apps
-          app = apps[0] / 'AppRun'
+          archives = list((root / 'dist').glob('freeshow-*/*.tar.gz'))
+          assert len(archives) == 1, archives
+          archive = archives[0]
           sample = root / 'crates/freeshow-data/tests/fixtures/lesson-clip.mp4'
           with tempfile.TemporaryDirectory(prefix='freeshow-clean-runtime-') as temp:
-              env = {'HOME': temp, 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
+              with tarfile.open(archive, 'r:gz') as package:
+                  package.extractall(temp, filter='data')
+              apps = list(pathlib.Path(temp).glob('freeshow-rust-*-linux-x86_64/AppRun'))
+              assert len(apps) == 1, apps
+              app = apps[0]
+              env = {'HOME': temp, 'PATH': '/usr/bin:/bin', 'TMPDIR': temp, 'LANG': 'C.UTF-8'}
               subprocess.run([str(app), '--check-media', str(sample)], env=env, check=True, timeout=60)
               with serve_sample(sample) as url:
                   subprocess.run([str(app), '--check-media', url], env=env, check=True, timeout=60)
               perf = subprocess.run([str(app), '--check-perf'], env=env, text=True, stdout=subprocess.PIPE, timeout=180)
               print(perf.stdout, end='', flush=True)
               perf.check_returncode()
-          (app.parent.parent / 'linux-check-perf.json').write_text(perf.stdout)
-          report = {'system_gstreamer_removed': True, 'empty_home_and_registry': True, 'h264_decoded': True, 'http_video_decoded': True}
-          (app.parent.parent / 'linux-clean-runtime.json').write_text(json.dumps(report, indent=2) + '\n')
+              handoff = verify_handoff(app, env=env, cwd=temp)
+          (archive.parent / 'linux-check-perf.json').write_text(perf.stdout)
+          report = {'extracted_release_archive': True, 'system_gstreamer_removed': True, 'empty_home_and_registry': True, 'h264_decoded': True, 'http_video_decoded': True, 'portable_handoff': handoff}
+          (archive.parent / 'linux-clean-runtime.json').write_text(json.dumps(report, indent=2) + '\n')
           print('::notice::' + json.dumps(report))
           PY
       - name: Upload the installable archive and verification reports

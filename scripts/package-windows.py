@@ -13,7 +13,7 @@ import sys
 import tempfile
 import tomllib
 
-from package_media import serve_sample
+from package_media import serve_sample, verify_handoff
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGINS = """coreelements app playback typefindfunctions videoconvertscale videorate
@@ -173,6 +173,7 @@ def verify(installer, sdk):
             with serve_sample(sample) as url:
                 remote = run(app, "--check-media", url, env=env, cwd=temp, stdout=subprocess.PIPE, timeout=90)
             perf = run(app, "--check-perf", env=env, cwd=temp, stdout=subprocess.PIPE, timeout=180)
+            handoff = verify_handoff(app, env={**env, "TEMP": str(temp), "TMP": str(temp)}, cwd=temp)
             assert json.loads(runtime.stdout)["missing"] == [], runtime.stdout
             assert json.loads(decode.stdout.splitlines()[-1])["decoded_video"], decode.stdout
             assert json.loads(remote.stdout.splitlines()[-1])["decoded_video"], remote.stdout
@@ -186,7 +187,7 @@ def verify(installer, sdk):
         assert sentinel.read_text(encoding="utf-8") == "keep this library file"
     return {"installed_in_relocated_unicode_path": True, "sdk_hidden": True,
             "cold_registry": True, "h264_decoded": True, "http_video_decoded": True,
-            "uninstall_kept_library": True, "performance": performance}
+            "uninstall_kept_library": True, "performance": performance, "portable_handoff": handoff}
 
 
 def main():
