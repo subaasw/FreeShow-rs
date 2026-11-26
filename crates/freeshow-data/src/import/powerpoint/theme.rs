@@ -570,12 +570,227 @@ struct Theme {
     minor_font: Option<String>,
     fills: Vec<Option<StyleFill>>,
     backgrounds: Vec<Option<StyleFill>>,
+    lines: Vec<LineStyle>,
 }
 
 #[derive(Clone)]
 enum StyleFill {
     Solid(Color),
     Gradient(GradientFill),
+}
+
+#[derive(Default)]
+struct LineStyle {
+    emu: Option<u32>,
+    paint: Option<LinePaint>,
+    cap: Option<StrokeCap>,
+    dash: Option<DashPattern>,
+    ends: [LineEnd; 2],
+    compound: Option<CompoundStroke>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) enum StrokeCap {
+    #[default]
+    Flat,
+    Round,
+    Square,
+}
+
+impl StrokeCap {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Flat => 0,
+            Self::Round => 1,
+            Self::Square => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct LineEnd {
+    kind: Option<MarkerKind>,
+    width: Option<usize>,
+    length: Option<usize>,
+}
+
+impl LineEnd {
+    fn read(node: Node<'_, '_>) -> Self {
+        let kind = match node.attribute("type") {
+            Some("none") => Some(MarkerKind::None),
+            Some("triangle") => Some(MarkerKind::Triangle),
+            Some("stealth") => Some(MarkerKind::Stealth),
+            Some("diamond") => Some(MarkerKind::Diamond),
+            Some("oval") => Some(MarkerKind::Oval),
+            Some("arrow") => Some(MarkerKind::Arrow),
+            _ => None,
+        };
+        let size = |key| match node.attribute(key) {
+            Some("sm") => Some(0),
+            Some("med") => Some(1),
+            Some("lg") => Some(2),
+            _ => None,
+        };
+        Self {
+            kind,
+            width: size("w"),
+            length: size("len"),
+        }
+    }
+
+    fn resolve(self, themed: Self) -> Option<StrokeMarker> {
+        let kind = self.kind.or(themed.kind)?;
+        let sizes = match kind {
+            MarkerKind::None => return None,
+            MarkerKind::Arrow => [2.5, 3.5, 5.5],
+            _ => [2.0, 3.0, 5.0],
+        };
+        Some(StrokeMarker {
+            kind,
+            width: sizes[self.width.or(themed.width).unwrap_or(1)],
+            length: sizes[self.length.or(themed.length).unwrap_or(1)],
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MarkerKind {
+    None,
+    Triangle,
+    Stealth,
+    Diamond,
+    Oval,
+    Arrow,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StrokeMarker {
+    pub kind: MarkerKind,
+    pub width: f64,
+    pub length: f64,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct DashPattern {
+    pub lengths: Vec<f64>,
+    preset: bool,
+}
+
+impl DashPattern {
+    pub fn includes_cap(&self, cap: StrokeCap) -> bool {
+        matches!(cap, StrokeCap::Round) || (self.preset && matches!(cap, StrokeCap::Square))
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) enum CompoundStroke {
+    #[default]
+    Single,
+    Double,
+    ThickThin,
+    ThinThick,
+    Triple,
+}
+
+impl CompoundStroke {
+    pub fn bands(self) -> &'static [[f64; 2]] {
+        // DrawingML names the relative weights without specifying exact band boundaries.
+        match self {
+            Self::Single => &[[-0.5, 0.5]],
+            Self::Double => &[[-0.5, -1.0 / 6.0], [1.0 / 6.0, 0.5]],
+            Self::ThickThin => &[[-0.5, 0.1], [0.3, 0.5]],
+            Self::ThinThick => &[[-0.5, -0.3], [-0.1, 0.5]],
+            Self::Triple => &[
+                [-0.5, -1.0 / 3.0],
+                [-1.0 / 6.0, 1.0 / 6.0],
+                [1.0 / 3.0, 0.5],
+            ],
+        }
+    }
+}
+
+enum LinePaint {
+    Solid(Color),
+    Suppressed,
+}
+
+impl LineStyle {
+    fn read(line: Node<'_, '_>) -> Self {
+        let paint = line
+            .children()
+            .find_map(|fill| match fill.tag_name().name() {
+                "solidFill" => Some(
+                    Color::in_node(fill)
+                        .map(LinePaint::Solid)
+                        .unwrap_or(LinePaint::Suppressed),
+                ),
+                "noFill" | "gradFill" | "pattFill" => Some(LinePaint::Suppressed),
+                _ => None,
+            });
+        let emu = line.attribute("w").and_then(|width| width.parse().ok());
+        let cap = match line.attribute("cap") {
+            Some("flat") => Some(StrokeCap::Flat),
+            Some("rnd") => Some(StrokeCap::Round),
+            Some("sq") => Some(StrokeCap::Square),
+            _ => None,
+        };
+        let dash = child(line, "prstDash")
+            .and_then(|dash| match dash.attribute("val")? {
+                "solid" => Some(Vec::new()),
+                "dot" => Some(vec![1.0, 3.0]),
+                "dash" => Some(vec![4.0, 3.0]),
+                "dashDot" => Some(vec![4.0, 3.0, 1.0, 3.0]),
+                "lgDash" => Some(vec![8.0, 3.0]),
+                "lgDashDot" => Some(vec![8.0, 3.0, 1.0, 3.0]),
+                "lgDashDotDot" => Some(vec![8.0, 3.0, 1.0, 3.0, 1.0, 3.0]),
+                "sysDot" => Some(vec![1.0, 1.0]),
+                "sysDash" => Some(vec![3.0, 1.0]),
+                "sysDashDot" => Some(vec![3.0, 1.0, 1.0, 1.0]),
+                "sysDashDotDot" => Some(vec![3.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+                _ => None,
+            })
+            .map(|lengths| DashPattern {
+                lengths,
+                preset: true,
+            })
+            .or_else(|| {
+                child(line, "custDash").map(|dash| DashPattern {
+                    lengths: custom_dash(dash).unwrap_or_default(),
+                    preset: false,
+                })
+            });
+        let compound = match line.attribute("cmpd") {
+            Some("sng") => Some(CompoundStroke::Single),
+            Some("dbl") => Some(CompoundStroke::Double),
+            Some("thickThin") => Some(CompoundStroke::ThickThin),
+            Some("thinThick") => Some(CompoundStroke::ThinThick),
+            Some("tri") => Some(CompoundStroke::Triple),
+            _ => None,
+        };
+        Self {
+            emu,
+            compound,
+            paint,
+            cap,
+            dash,
+            ends: ["headEnd", "tailEnd"]
+                .map(|name| child(line, name).map(LineEnd::read).unwrap_or_default()),
+        }
+    }
+}
+
+fn custom_dash(dash: Node<'_, '_>) -> Option<Vec<f64>> {
+    let mut lengths = Vec::new();
+    for stop in dash.children().filter(|node| node.has_tag_name("ds")) {
+        for attribute in ["d", "sp"] {
+            let length = percentage(stop.attribute(attribute)?)?;
+            if length <= 0.0 {
+                return None;
+            }
+            lengths.push(length);
+        }
+    }
+    Some(lengths)
 }
 
 impl Theme {
@@ -596,6 +811,13 @@ impl Theme {
         if let Some(format) = child(elements, "fmtScheme") {
             theme.fills = style_fills(format, "fillStyleLst");
             theme.backgrounds = style_fills(format, "bgFillStyleLst");
+            if let Some(lines) = child(format, "lnStyleLst") {
+                theme.lines = lines
+                    .children()
+                    .filter(|line| line.has_tag_name("ln"))
+                    .map(LineStyle::read)
+                    .collect();
+            }
         }
         if let Some(fonts) = child(elements, "fontScheme") {
             let latin = |label| {
@@ -719,30 +941,147 @@ pub(super) struct ObjectStyle {
     pub fill: Option<String>,
     pub text: Option<TextBody>,
     pub paths: Vec<CustomPath>,
+    pub path_shades: Vec<i8>,
+    pub connector: Option<ConnectorStroke>,
+}
+
+pub(super) struct ConnectorStroke {
+    pub width: [f64; 2],
+    pub color: String,
+    pub inverse: bool,
+    pub route: Vec<[f64; 2]>,
+    pub cap: StrokeCap,
+    pub dash: DashPattern,
+    pub markers: [Option<StrokeMarker>; 2],
+    pub compound: CompoundStroke,
+}
+
+fn connector_route(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<(bool, Vec<[f64; 2]>)> {
+    let geometry = child(properties, "prstGeom");
+    let bend = |guide| {
+        geometry.map_or(50_000.0, |geometry| {
+            preset_adjustment(geometry, guide, 50_000.0)
+        }) / 100_000.0
+    };
+    let middle = match geometry.and_then(|geom| geom.attribute("prst")) {
+        Some("lineInv") => return Some((true, vec![[0.0, 0.0], [1.0, 1.0]])),
+        Some("line" | "straightConnector1") => Vec::new(),
+        Some("bentConnector2") => vec![[1.0, 0.0]],
+        Some("bentConnector3") => {
+            let x = bend("adj1");
+            vec![[x, 0.0], [x, 1.0]]
+        }
+        Some("bentConnector4") => {
+            let (x, y) = (bend("adj1"), bend("adj2"));
+            vec![[x, 0.0], [x, y], [1.0, y]]
+        }
+        Some("bentConnector5") => {
+            let (x1, y, x2) = (bend("adj1"), bend("adj2"), bend("adj3"));
+            vec![[x1, 0.0], [x1, y], [x2, y], [x2, 1.0]]
+        }
+        None if shape.has_tag_name("cxnSp") && child(properties, "custGeom").is_none() => {
+            Vec::new()
+        }
+        _ => return None,
+    };
+    let mut route = vec![[0.0, 0.0]];
+    route.extend(middle);
+    route.push([1.0, 1.0]);
+    Some((false, route))
+}
+
+fn connector_stroke(
+    shape: Node<'_, '_>,
+    properties: Node<'_, '_>,
+    context: &Context,
+    size: &SlideSize,
+    (inverse, route): (bool, Vec<[f64; 2]>),
+) -> Option<ConnectorStroke> {
+    let reference = child(shape, "style").and_then(|style| child(style, "lnRef"));
+    let index = reference
+        .and_then(|reference| reference.attribute("idx"))
+        .and_then(|index| index.parse::<usize>().ok());
+    let themed = index.and_then(|index| context.theme.as_ref()?.lines.get(index.checked_sub(1)?));
+    let line = child(properties, "ln");
+    let direct = line.map(LineStyle::read).unwrap_or_default();
+    let placeholder = reference.and_then(Color::in_node);
+    let scheme = |slot: &str| context.color_with_placeholder(slot, placeholder.as_ref());
+    let color = match direct
+        .paint
+        .as_ref()
+        .or_else(|| themed.and_then(|line| line.paint.as_ref()))
+    {
+        Some(LinePaint::Suppressed) => return None,
+        Some(LinePaint::Solid(color)) => color.hex_in(scheme)?,
+        None if index == Some(0) && line.is_none() => return None,
+        None => placeholder
+            .and_then(|color| color.hex_in(|slot| context.color(slot)))
+            .unwrap_or_else(|| "#000000".into()),
+    };
+    // Office's hard-coded line width is 3/4 pt when no drawing or theme width is set.
+    let emu = f64::from(
+        direct
+            .emu
+            .or_else(|| themed.and_then(|line| line.emu))
+            .unwrap_or(9_525),
+    );
+    let width = [size.px_x(emu).max(1.0), size.px_y(emu).max(1.0)];
+    Some(ConnectorStroke {
+        width,
+        color,
+        inverse,
+        route,
+        cap: direct
+            .cap
+            .or_else(|| themed.and_then(|line| line.cap))
+            .unwrap_or_default(),
+        compound: direct
+            .compound
+            .or_else(|| themed.and_then(|line| line.compound))
+            .unwrap_or_default(),
+        markers: std::array::from_fn(|i| {
+            direct.ends[i].resolve(themed.map(|line| line.ends[i]).unwrap_or_default())
+        }),
+        dash: direct
+            .dash
+            .or_else(|| themed.and_then(|line| line.dash.clone()))
+            .unwrap_or_default(),
+    })
 }
 
 type CustomPath = Vec<Vec<[f64; 2]>>;
+type ShadedPaths = (Vec<CustomPath>, Vec<i8>);
 
-fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
+fn preset_adjustment(geometry: Node<'_, '_>, name: &str, default: f64) -> f64 {
+    child(geometry, "avLst")
+        .and_then(|guides| {
+            guides
+                .children()
+                .find(|guide| guide.has_tag_name("gd") && guide.attribute("name") == Some(name))
+        })
+        .and_then(|guide| {
+            let mut formula = guide.attribute("fmla")?.split_ascii_whitespace();
+            if formula.next()? != "val" {
+                return None;
+            }
+            let value = f64::from(formula.next()?.parse::<i32>().ok()?);
+            formula.next().is_none().then_some(value)
+        })
+        .unwrap_or(default)
+}
+
+fn preset_paths(properties: Node<'_, '_>) -> Option<ShadedPaths> {
     let geometry = child(properties, "prstGeom")?;
-    let adjustment = |name, default| {
-        child(geometry, "avLst")
-            .and_then(|guides| {
-                guides
-                    .children()
-                    .find(|guide| guide.has_tag_name("gd") && guide.attribute("name") == Some(name))
-            })
-            .and_then(|guide| {
-                let mut formula = guide.attribute("fmla")?.split_ascii_whitespace();
-                if formula.next()? != "val" {
-                    return None;
-                }
-                let value = f64::from(formula.next()?.parse::<i32>().ok()?);
-                formula.next().is_none().then_some(value)
-            })
-            .unwrap_or(default)
+    let adjustment = |name: &str, default| preset_adjustment(geometry, name, default);
+    let short_side = || {
+        let ext = child(child(properties, "xfrm")?, "ext")?;
+        let (width, height) = (shape_extent(ext, "cx")?, shape_extent(ext, "cy")?);
+        let short = width.min(height);
+        Some([short / width, short / height])
     };
     let name = geometry.attribute("prst")?;
+    let arc_angle = |guide, default| adjustment(guide, default).clamp(0.0, DRAWINGML_TURN - 1.0);
+    let band_width = |guide, default| adjustment(guide, default).clamp(0.0, 50_000.0) / 100_000.0;
     let outline = match name {
         "triangle" => vec![
             [0.0, 1.0],
@@ -754,6 +1093,185 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
         ],
         "rtTriangle" => vec![[0.0, 1.0], [0.0, 0.0], [1.0, 1.0]],
         "diamond" => vec![[0.0, 0.5], [0.5, 0.0], [1.0, 0.5], [0.5, 1.0]],
+        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" | "leftRightArrow" | "upDownArrow" => {
+            block_arrow(
+                name,
+                short_side()?,
+                adjustment("adj1", 50_000.0),
+                adjustment("adj2", 50_000.0),
+            )
+        }
+        "chevron" | "homePlate" => {
+            let [sx, _] = short_side()?;
+            let head = (sx * adjustment("adj", 50_000.0) / 100_000.0).clamp(0.0, 1.0);
+            let shoulder = 1.0 - head;
+            let mut points = vec![
+                [0.0, 0.0],
+                [shoulder, 0.0],
+                [1.0, 0.5],
+                [shoulder, 1.0],
+                [0.0, 1.0],
+            ];
+            if name == "chevron" {
+                points.push([head, 0.5]);
+            }
+            points
+        }
+        "parallelogram" | "trapezoid" | "nonIsoscelesTrapezoid" => {
+            let [sx, _] = short_side()?;
+            let offset =
+                |guide, limit| (sx * adjustment(guide, 25_000.0) / 100_000.0).clamp(0.0, limit);
+            match name {
+                "parallelogram" => {
+                    let x = offset("adj", 1.0);
+                    vec![[0.0, 1.0], [x, 0.0], [1.0, 0.0], [1.0 - x, 1.0]]
+                }
+                "trapezoid" => {
+                    let x = offset("adj", 0.5);
+                    vec![[0.0, 1.0], [x, 0.0], [1.0 - x, 0.0], [1.0, 1.0]]
+                }
+                _ => vec![
+                    [0.0, 1.0],
+                    [offset("adj1", 0.5), 0.0],
+                    [1.0 - offset("adj2", 0.5), 0.0],
+                    [1.0, 1.0],
+                ],
+            }
+        }
+        "roundRect" | "round1Rect" | "round2SameRect" | "round2DiagRect" | "snip1Rect"
+        | "snip2SameRect" | "snip2DiagRect" | "snipRoundRect" => {
+            rect_corner_outline(name, short_side()?, adjustment)?
+        }
+        "pie" | "chord" | "arc" => {
+            let defaults = match name {
+                "pie" => [0.0, 16_200_000.0],
+                "chord" => [2_700_000.0, 16_200_000.0],
+                _ => [16_200_000.0, 0.0],
+            };
+            let start = arc_angle("adj1", defaults[0]);
+            let end = arc_angle("adj2", defaults[1]);
+            let sweep = clockwise_sweep(start, end);
+            let mut outline = preset_ellipse_arc([0.5; 2], short_side()?, start, sweep)?;
+            if sweep != DRAWINGML_TURN && name != "chord" {
+                outline.push([0.5, 0.5]);
+            }
+            outline
+        }
+        "blockArc" => {
+            return block_arc_paths(
+                short_side()?,
+                arc_angle("adj1", 10_800_000.0),
+                arc_angle("adj2", 0.0),
+                band_width("adj3", 25_000.0),
+            )
+            .map(|paths| (paths, Vec::new()));
+        }
+        "pieWedge" => {
+            let mut outline = vec![[0.0, 1.0]];
+            append_ellipse_arc(
+                &mut outline,
+                [1.0; 2],
+                -std::f64::consts::PI,
+                std::f64::consts::FRAC_PI_2,
+            )?;
+            outline.push([1.0, 1.0]);
+            outline
+        }
+        "donut" | "noSmoking" => {
+            use std::f64::consts::{PI, TAU};
+
+            let size @ [sx, sy] = short_side()?;
+            let thickness = band_width("adj", if name == "donut" { 25_000.0 } else { 18_750.0 });
+            if thickness == 0.0 {
+                return Some(ShadedPaths::default());
+            }
+            let mut contours = vec![ellipse_contour([0.5; 2], PI, TAU)?];
+            let inner @ [rx, ry] = [0.5 - sx * thickness, 0.5 - sy * thickness];
+            if rx > 0.0 && ry > 0.0 {
+                if name == "donut" {
+                    contours.push(ellipse_contour(inner, PI, -TAU)?);
+                } else {
+                    let diagonal = sx.atan2(sy);
+                    let (sin, cos) = diagonal.sin_cos();
+                    let radius = 1.0 / (cos * sx / rx).hypot(sin * sy / ry);
+                    let offset = (thickness / 2.0).atan2(radius);
+                    let start = (diagonal - offset).to_degrees() * 60_000.0;
+                    let sweep = (2.0 * offset - PI).to_degrees() * 60_000.0;
+                    for angle in [start, start - DRAWINGML_TURN / 2.0] {
+                        let hole = preset_ellipse_arc(inner, size, angle, sweep)?;
+                        if hole.len() >= 3 {
+                            contours.push(hole);
+                        }
+                    }
+                }
+            }
+            return Some((vec![contours], Vec::new()));
+        }
+        "cube" | "bevel" | "foldedCorner" | "can" => {
+            return shaded_preset_faces(
+                name,
+                short_side()?,
+                adjustment(
+                    "adj",
+                    match name {
+                        "bevel" => 12_500.0,
+                        "foldedCorner" => 16_667.0,
+                        _ => 25_000.0,
+                    },
+                ),
+            );
+        }
+        "hexagon" => {
+            let [sx, _] = short_side()?;
+            let x = (sx * adjustment("adj", 25_000.0) / 100_000.0).clamp(0.0, 0.5);
+            let dy = (adjustment("vf", 115_470.0) / 200_000.0).clamp(0.0, 1.0)
+                * (std::f64::consts::PI / 3.0).sin();
+            vec![
+                [0.0, 0.5],
+                [x, 0.5 - dy],
+                [1.0 - x, 0.5 - dy],
+                [1.0, 0.5],
+                [1.0 - x, 0.5 + dy],
+                [x, 0.5 + dy],
+            ]
+        }
+        "octagon" | "plus" => {
+            let [sx, sy] = short_side()?;
+            let default = if name == "octagon" {
+                29_289.0
+            } else {
+                25_000.0
+            };
+            let inset = adjustment("adj", default).clamp(0.0, 50_000.0) / 100_000.0;
+            let (x, y) = (sx * inset, sy * inset);
+            if name == "octagon" {
+                vec![
+                    [0.0, y],
+                    [x, 0.0],
+                    [1.0 - x, 0.0],
+                    [1.0, y],
+                    [1.0, 1.0 - y],
+                    [1.0 - x, 1.0],
+                    [x, 1.0],
+                    [0.0, 1.0 - y],
+                ]
+            } else {
+                vec![
+                    [0.0, y],
+                    [x, y],
+                    [x, 0.0],
+                    [1.0 - x, 0.0],
+                    [1.0 - x, y],
+                    [1.0, y],
+                    [1.0, 1.0 - y],
+                    [1.0 - x, 1.0 - y],
+                    [1.0 - x, 1.0],
+                    [x, 1.0],
+                    [x, 1.0 - y],
+                    [0.0, 1.0 - y],
+                ]
+            }
+        }
         name => {
             // Default DrawingML star adjustments and ellipse scale factors from ECMA-376.
             let (points, inner, horizontal, vertical) = match name {
@@ -790,23 +1308,499 @@ fn preset_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
                 .collect()
         }
     };
-    Some(vec![vec![outline]])
+    let paths = if outline.len() < 3 {
+        Vec::new()
+    } else {
+        vec![vec![outline]]
+    };
+    Some((paths, Vec::new()))
 }
 
-fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
+fn shaded_preset_faces(name: &str, [sx, sy]: [f64; 2], adjustment: f64) -> Option<ShadedPaths> {
+    let limit = if name == "cube" { 1.0 } else { 0.5 };
+    let inset = (adjustment / 100_000.0).clamp(0.0, limit);
+    let (x, y) = (sx * inset, sy * inset);
+    let (r, b) = (1.0 - x, 1.0 - y);
+    let (faces, shades) = match name {
+        "cube" => (
+            vec![
+                vec![[0.0, y], [r, y], [r, 1.0], [0.0, 1.0]],
+                vec![[r, y], [1.0, 0.0], [1.0, b], [r, 1.0]],
+                vec![[0.0, y], [x, 0.0], [1.0, 0.0], [r, y]],
+            ],
+            vec![0, -20, 20],
+        ),
+        "bevel" => (
+            vec![
+                vec![[x, y], [r, y], [r, b], [x, b]],
+                vec![[0.0, 0.0], [1.0, 0.0], [r, y], [x, y]],
+                vec![[0.0, 1.0], [x, b], [r, b], [1.0, 1.0]],
+                vec![[0.0, 0.0], [x, y], [x, b], [0.0, 1.0]],
+                vec![[1.0, 0.0], [1.0, 1.0], [r, b], [r, y]],
+            ],
+            vec![0, 20, -20, 40, -40],
+        ),
+        "foldedCorner" => (
+            vec![
+                vec![[0.0, 0.0], [1.0, 0.0], [1.0, b], [r, 1.0], [0.0, 1.0]],
+                vec![[r, 1.0], [r + x / 5.0, b + y / 5.0], [1.0, b]],
+            ],
+            vec![0, -20],
+        ),
+        "can" => {
+            use std::f64::consts::PI;
+
+            let y = (sy * adjustment / 200_000.0).clamp(0.0, 0.25);
+            if y == 0.0 {
+                return Some((
+                    vec![vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]]],
+                    Vec::new(),
+                ));
+            }
+            let radii = [0.5, y];
+            let mut side = vec![[0.0, y]];
+            append_ellipse_arc(&mut side, radii, PI, -PI)?;
+            side.push([1.0, 1.0 - y]);
+            append_ellipse_arc(&mut side, radii, 0.0, PI)?;
+            let mut lid = vec![[0.0, y]];
+            append_ellipse_arc(&mut lid, radii, PI, PI)?;
+            append_ellipse_arc(&mut lid, radii, 0.0, PI)?;
+            lid.pop();
+            (vec![side, lid], vec![0, 40])
+        }
+        _ => return None,
+    };
+    Some((faces.into_iter().map(|face| vec![face]).collect(), shades))
+}
+
+fn clockwise_sweep(start: f64, end: f64) -> f64 {
+    if end > start {
+        end - start
+    } else {
+        end - start + DRAWINGML_TURN
+    }
+}
+
+fn preset_ellipse_arc(
+    radii @ [rx, ry]: [f64; 2],
+    [sx, sy]: [f64; 2],
+    start: f64,
+    sweep: f64,
+) -> Option<Vec<[f64; 2]>> {
+    // Restore the original aspect ratio before converting the saved ray angles.
+    let raw_radii = [rx * sy, ry * sx];
+    let parameter = ellipse_ray_parameter(raw_radii, start);
+    let span = ellipse_parameter_span(raw_radii, parameter, start, sweep);
+    ellipse_contour(radii, parameter, span)
+}
+
+fn block_arc_paths(
+    size @ [sx, sy]: [f64; 2],
+    start: f64,
+    end: f64,
+    thickness: f64,
+) -> Option<Vec<CustomPath>> {
+    if thickness == 0.0 {
+        return Some(Vec::new());
+    }
+    let sweep = clockwise_sweep(start, end);
+    let inner = [0.5 - sx * thickness, 0.5 - sy * thickness];
+    let outline = |from, sweep| preset_ellipse_arc([0.5; 2], size, from, sweep);
+    let hole = |to, sweep: f64| preset_ellipse_arc(inner, size, to, -sweep);
+    let mut outer = outline(start, sweep)?;
+    if inner.into_iter().any(|r| r == 0.0) {
+        if sweep != DRAWINGML_TURN {
+            outer.push([0.5, 0.5]);
+        }
+        return Some(vec![vec![outer]]);
+    }
+    let reverse = hole(end, sweep)?;
+    if sweep == DRAWINGML_TURN {
+        return Some(vec![vec![outer, reverse]]);
+    }
+    if outer.len() + reverse.len() <= 128 {
+        outer.extend(reverse);
+        return Some(vec![vec![outer]]);
+    }
+
+    // Divide very long bands into adjoining contours to keep each within the compositor limit.
+    let half = sweep / 2.0;
+    let middle = start + half;
+    let mut first = outline(start, half)?;
+    first.extend(hole(middle, half)?);
+    let mut second = outline(middle, half)?;
+    second.extend(hole(end, half)?);
+    Some(vec![vec![first, second]])
+}
+
+fn ellipse_contour([rx, ry]: [f64; 2], start: f64, span: f64) -> Option<Vec<[f64; 2]>> {
+    let point = |angle: f64| {
+        let (sin, cos) = angle.sin_cos();
+        [0.5 + rx * cos, 0.5 + ry * sin]
+    };
+    let mut outline = vec![point(start)];
+    append_ellipse_arc(&mut outline, [rx, ry], start, span)?;
+    if same_path_point(outline[0], *outline.last()?) {
+        outline.pop();
+    }
+    if outline.len() == 2 {
+        // A narrow chord still has a curved edge when one segment meets the tolerance.
+        outline.insert(1, point(start + span / 2.0));
+    }
+    Some(outline)
+}
+
+fn rect_corner_outline(
+    name: &str,
+    [sx, sy]: [f64; 2],
+    adjustment: impl Fn(&str, f64) -> f64,
+) -> Option<Vec<[f64; 2]>> {
+    let inset = |guide, default| adjustment(guide, default).clamp(0.0, 50_000.0) / 100_000.0;
+    let single = || inset("adj", 16_667.0);
+    let first = |default| inset("adj1", default);
+    let second = |default| inset("adj2", default);
+    // Corners run clockwise from the top left.
+    let (insets, rounded) = match name {
+        "roundRect" => ([single(); 4], [true; 4]),
+        "round1Rect" => ([0.0, single(), 0.0, 0.0], [true; 4]),
+        "round2SameRect" => {
+            let (a, b) = (first(16_667.0), second(0.0));
+            ([a, a, b, b], [true; 4])
+        }
+        "round2DiagRect" => {
+            let (a, b) = (first(16_667.0), second(0.0));
+            ([a, b, a, b], [true; 4])
+        }
+        "snip1Rect" => ([0.0, single(), 0.0, 0.0], [false; 4]),
+        "snip2SameRect" => {
+            let (a, b) = (first(16_667.0), second(0.0));
+            ([a, a, b, b], [false; 4])
+        }
+        "snip2DiagRect" => {
+            let (a, b) = (first(0.0), second(16_667.0));
+            ([a, b, a, b], [false; 4])
+        }
+        "snipRoundRect" => (
+            [first(16_667.0), second(16_667.0), 0.0, 0.0],
+            [true, false, false, false],
+        ),
+        _ => return None,
+    };
+
+    let mut points = Vec::new();
+    let quarter = std::f64::consts::FRAC_PI_2;
+    for (corner, (inset, rounded)) in insets.into_iter().zip(rounded).enumerate() {
+        let (x, y) = (sx * inset, sy * inset);
+        let (start, end) = match corner {
+            0 => ([0.0, y], [x, 0.0]),
+            1 => ([1.0 - x, 0.0], [1.0, y]),
+            2 => ([1.0, 1.0 - y], [1.0 - x, 1.0]),
+            _ => ([x, 1.0], [0.0, 1.0 - y]),
+        };
+        push_path_vertex(&mut points, start)?;
+        if rounded && inset > 0.0 {
+            append_ellipse_arc(
+                &mut points,
+                [x, y],
+                (corner as f64 - 2.0) * quarter,
+                quarter,
+            )?;
+        } else {
+            push_path_vertex(&mut points, end)?;
+        }
+    }
+    if same_path_point(points[0], *points.last()?) {
+        points.pop();
+    }
+    Some(points)
+}
+
+fn block_arrow(name: &str, [sx, sy]: [f64; 2], shaft: f64, head: f64) -> Vec<[f64; 2]> {
+    let vertical = matches!(name, "upArrow" | "downArrow" | "upDownArrow");
+    let double = matches!(name, "leftRightArrow" | "upDownArrow");
+    let along = if vertical { sy } else { sx };
+    let head = (along * head / 100_000.0).clamp(0.0, if double { 0.5 } else { 1.0 });
+    let top = 0.5 - shaft.clamp(0.0, 100_000.0) / 200_000.0;
+    let bottom = 1.0 - top;
+    let shoulder = 1.0 - head;
+    let mut points = if double {
+        vec![
+            [0.0, 0.5],
+            [head, 0.0],
+            [head, top],
+            [shoulder, top],
+            [shoulder, 0.0],
+            [1.0, 0.5],
+            [shoulder, 1.0],
+            [shoulder, bottom],
+            [head, bottom],
+            [head, 1.0],
+        ]
+    } else {
+        vec![
+            [0.0, top],
+            [shoulder, top],
+            [shoulder, 0.0],
+            [1.0, 0.5],
+            [shoulder, 1.0],
+            [shoulder, bottom],
+            [0.0, bottom],
+        ]
+    };
+    for point in &mut points {
+        let [x, y] = *point;
+        *point = match name {
+            "leftArrow" => [1.0 - x, y],
+            "upArrow" => [y, 1.0 - x],
+            "downArrow" | "upDownArrow" => [y, x],
+            _ => [x, y],
+        };
+    }
+    points
+}
+
+#[test]
+fn block_arc_preserves_its_inner_band_on_wide_and_almost_closed_shapes() {
+    let wide = block_arc_paths([0.5, 1.0], 0.0, 5_400_000.0, 0.25).unwrap();
+    let points = &wide[0][0];
+    assert!(same_path_point(points[0], [1.0, 0.5]));
+    assert!(
+        points
+            .iter()
+            .any(|&point| same_path_point(point, [0.5, 1.0]))
+    );
+    assert!(
+        points
+            .iter()
+            .any(|&point| same_path_point(point, [0.5, 0.75]))
+    );
+    assert!(same_path_point(*points.last().unwrap(), [0.875, 0.5]));
+    let long = block_arc_paths([1.0; 2], 0.0, 21_599_999.0, 0.01).unwrap();
+    assert_eq!(long[0].len(), 2);
+    assert!(
+        long[0]
+            .iter()
+            .all(|points| (3..=128).contains(&points.len()))
+    );
+    let full = block_arc_paths([0.5, 1.0], 0.0, 0.0, 0.25).unwrap();
+    assert!(full[0][0][1][1] > 0.5 && full[0][1][1][1] < 0.5);
+}
+
+#[test]
+fn prohibition_symbol_has_two_mirrored_cutouts() {
+    let document = Document::parse(
+        r#"<spPr><xfrm><ext cx="4000" cy="2000"/></xfrm>
+            <prstGeom prst="noSmoking"/></spPr>"#,
+    )
+    .unwrap();
+    let (paths, _) = preset_paths(document.root_element()).unwrap();
+    let [_, first, second] = paths[0].as_slice() else {
+        panic!("expected two cutouts")
+    };
+    assert!(first.len() > 3);
+    assert_eq!(first.len(), second.len());
+    for (&[x, y], &opposite) in first.iter().zip(second) {
+        assert!(same_path_point(opposite, [1.0 - x, 1.0 - y]));
+    }
+}
+
+#[test]
+fn curved_presets_preserve_the_ray_angle_and_donut_cutout() {
+    let paths = |name, guides| {
+        let xml = format!(
+            r#"<spPr><xfrm><ext cx="4000" cy="2000"/></xfrm>
+                <prstGeom prst="{name}"><avLst>{guides}</avLst></prstGeom></spPr>"#
+        );
+        let document = Document::parse(&xml).unwrap();
+        preset_paths(document.root_element()).unwrap().0
+    };
+
+    let pie = paths("pie", r#"<gd name="adj1" fmla="val 2700000"/>"#);
+    let outline = &pie[0][0];
+    let [x, y] = outline[0];
+    assert!((x - (0.5 + 0.5 / 5.0f64.sqrt())).abs() < 1e-12);
+    assert!((y - (0.5 + 1.0 / 5.0f64.sqrt())).abs() < 1e-12);
+    assert_eq!(outline.last(), Some(&[0.5, 0.5]));
+
+    let small = r#"<gd name="adj1" fmla="val 0"/><gd name="adj2" fmla="val 60000"/>"#;
+    assert_eq!(paths("chord", small)[0][0].len(), 3);
+
+    let ring = paths("donut", "");
+    let [outer, inner] = ring[0].as_slice() else {
+        panic!("expected a donut with a cutout")
+    };
+    assert!(same_path_point(outer[0], [0.0, 0.5]));
+    assert!(same_path_point(inner[0], [0.125, 0.5]));
+    assert!(outer[1][1] < 0.5 && inner[1][1] > 0.5);
+    assert!(paths("donut", r#"<gd name="adj" fmla="val 0"/>"#).is_empty());
+}
+
+#[test]
+fn adjusted_block_presets_use_the_short_side_in_both_orientations() {
+    let outline = |name, width, height, guides| {
+        let xml = format!(
+            r#"<spPr><xfrm><ext cx="{width}" cy="{height}"/></xfrm>
+                <prstGeom prst="{name}"><avLst>{guides}</avLst></prstGeom></spPr>"#
+        );
+        let document = Document::parse(&xml).unwrap();
+        preset_paths(document.root_element())
+            .unwrap()
+            .0
+            .remove(0)
+            .remove(0)
+    };
+    let guides = r#"<gd name="adj1" fmla="val 25000"/><gd name="adj2" fmla="val 80000"/>"#;
+    let right = outline("rightArrow", 4000, 2000, guides);
+    assert_eq!(
+        right,
+        [
+            [0.0, 0.375],
+            [0.6, 0.375],
+            [0.6, 0.0],
+            [1.0, 0.5],
+            [0.6, 1.0],
+            [0.6, 0.625],
+            [0.0, 0.625]
+        ]
+    );
+    let up = outline("upArrow", 2000, 4000, guides);
+    assert_eq!(
+        up,
+        [
+            [0.375, 1.0],
+            [0.375, 0.4],
+            [0.0, 0.4],
+            [0.5, 0.0],
+            [1.0, 0.4],
+            [0.625, 0.4],
+            [0.625, 1.0]
+        ]
+    );
+    let double = outline("leftRightArrow", 1000, 2000, guides);
+    assert_eq!((double[1], double[4]), ([0.5, 0.0], [0.5, 0.0]));
+    let outer = r#"<gd name="adj" fmla="val 25000"/>"#;
+    assert_eq!(outline("chevron", 4000, 2000, outer)[5], [0.125, 0.5]);
+    let octagon = outline("octagon", 4000, 2000, outer);
+    assert_eq!((octagon[0], octagon[1]), ([0.0, 0.25], [0.125, 0.0]));
+}
+
+fn shape_extent(ext: Node<'_, '_>, axis: &str) -> Option<f64> {
+    let size = ext.attribute(axis)?.parse::<f64>().ok()?;
+    (size.is_finite() && size > 0.0).then_some(size)
+}
+
+const DRAWINGML_TURN: f64 = 360.0 * 60_000.0;
+
+fn builtin_guide(name: &str, [w, h]: [f64; 2]) -> Option<f64> {
+    let short = w.min(h);
+    let value = match name {
+        "l" | "t" => 0.0,
+        "w" | "r" => w,
+        "h" | "b" => h,
+        "ss" => short,
+        "ls" => w.max(h),
+        "hc" => w / 2.0,
+        "vc" => h / 2.0,
+        "cd2" => DRAWINGML_TURN / 2.0,
+        "cd4" => DRAWINGML_TURN / 4.0,
+        "cd8" => DRAWINGML_TURN / 8.0,
+        "3cd4" => DRAWINGML_TURN * 3.0 / 4.0,
+        "3cd8" => DRAWINGML_TURN * 3.0 / 8.0,
+        "5cd8" => DRAWINGML_TURN * 5.0 / 8.0,
+        "7cd8" => DRAWINGML_TURN * 7.0 / 8.0,
+        _ => {
+            let (base, divisor) = name.split_once('d')?;
+            let extent = match base {
+                "w" => w,
+                "h" => h,
+                "ss" => short,
+                _ => return None,
+            };
+            extent / f64::from(divisor.parse::<std::num::NonZeroU32>().ok()?.get())
+        }
+    };
+    Some(value)
+}
+
+fn guide_value(name: &str, guides: &HashMap<&str, Option<f64>>, size: [f64; 2]) -> Option<f64> {
+    if let Ok(value) = name.parse::<f64>() {
+        return value.is_finite().then_some(value);
+    }
+    match guides.get(name) {
+        Some(value) => *value,
+        None => builtin_guide(name, size),
+    }
+}
+
+fn guide_formula(formula: &str, value: impl Fn(&str) -> Option<f64>) -> Option<f64> {
+    let mut fields = formula.split_ascii_whitespace();
+    let op = fields.next()?;
+    let x = value(fields.next()?)?;
+    let y = fields.next();
+    let z = fields.next();
+    if fields.next().is_some() {
+        return None;
+    }
+    let angle = |units: f64| (units / 60_000.0).to_radians();
+    let result = match (op, y, z) {
+        ("val", None, None) => x,
+        ("abs", None, None) => x.abs(),
+        ("sqrt", None, None) => x.sqrt(),
+        ("?:", Some(y), Some(z)) => value(if x > 0.0 { y } else { z })?,
+        (op, Some(y), None) => {
+            let y = value(y)?;
+            match op {
+                "min" => x.min(y),
+                "max" => x.max(y),
+                "at2" => y.atan2(x).to_degrees() * 60_000.0,
+                "cos" => x * angle(y).cos(),
+                "sin" => x * angle(y).sin(),
+                "tan" => x * angle(y).tan(),
+                _ => return None,
+            }
+        }
+        (op, Some(y), Some(z)) => {
+            let (y, z) = (value(y)?, value(z)?);
+            match op {
+                "*/" => x * y / z,
+                "+-" => x + y - z,
+                "+/" => (x + y) / z,
+                "cat2" => x * z.atan2(y).cos(),
+                "sat2" => x * z.atan2(y).sin(),
+                "mod" => x.hypot(y).hypot(z),
+                "pin" => y.min(z).max(x),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    result.is_finite().then_some(result)
+}
+
+fn custom_paths(properties: Node<'_, '_>) -> Option<ShadedPaths> {
     let geometry = child(properties, "custGeom")?;
+    let ext = child(properties, "xfrm").and_then(|xfrm| child(xfrm, "ext"));
     let mut paths = Vec::new();
+    let mut shades = Vec::new();
     let mut vertices = 0;
+    let mut guide_budget = 16_384;
     for path in child(geometry, "pathLst")?
         .children()
         .filter(Node::is_element)
     {
-        match path.attribute("fill") {
-            Some("none") => continue,
-            None | Some("norm") if path.has_tag_name("path") => {}
-            _ => return None,
+        if !path.has_tag_name("path") {
+            return None;
         }
-        let contours = custom_path(path)?;
+        let shade = match path.attribute("fill") {
+            Some("none") => continue,
+            None | Some("norm") => 0,
+            Some("lighten") => 40,
+            Some("lightenLess") => 20,
+            Some("darken") => -40,
+            Some("darkenLess") => -20,
+            _ => return None,
+        };
+        let contours = custom_path(path, geometry, ext, &mut guide_budget)?;
         if contours.is_empty() {
             continue;
         }
@@ -815,59 +1809,88 @@ fn custom_paths(properties: Node<'_, '_>) -> Option<Vec<CustomPath>> {
             return None;
         }
         paths.push(contours);
+        shades.push(shade);
     }
-    Some(paths)
+    Some((paths, shades))
 }
 
-fn custom_path(path: Node<'_, '_>) -> Option<CustomPath> {
-    let dimension = |key| {
-        path.attribute(key)?
-            .parse::<i64>()
-            .ok()
-            .filter(|n| *n > 0)
-            .map(|n| n as f64)
+fn custom_path(
+    path: Node<'_, '_>,
+    geometry: Node<'_, '_>,
+    ext: Option<Node<'_, '_>>,
+    guide_budget: &mut usize,
+) -> Option<CustomPath> {
+    let dimension = |key, axis| match path.attribute(key).unwrap_or("0").parse::<i64>().ok()? {
+        0 => shape_extent(ext?, axis),
+        n if n > 0 => Some(n as f64),
+        _ => None,
     };
-    let (width, height) = (dimension("w")?, dimension("h")?);
+    let (width, height) = (dimension("w", "cx")?, dimension("h", "cy")?);
+    let size = [width, height];
+    let mut guides = HashMap::new();
+    for list in ["avLst", "gdLst"]
+        .into_iter()
+        .filter_map(|name| child(geometry, name))
+    {
+        for guide in list.children().filter(|node| node.has_tag_name("gd")) {
+            // shortcut: bound per-shape guide work until evaluations are cached by path size.
+            *guide_budget = guide_budget.checked_sub(1)?;
+            if let Some(name) = guide.attribute("name") {
+                let result = guide.attribute("fmla").and_then(|formula| {
+                    guide_formula(formula, |token| guide_value(token, &guides, size))
+                });
+                guides.insert(name, result);
+            }
+        }
+    }
+    let value = |name: &str| guide_value(name, &guides, size);
     let point = |node: Node<'_, '_>| {
         if !node.has_tag_name("pt") {
             return None;
         }
         let coordinate = |key, extent: f64| {
-            let value = node.attribute(key)?.parse::<f64>().ok()? / extent;
+            let value = value(node.attribute(key)?)? / extent;
             value.is_finite().then_some(value)
         };
         Some([coordinate("x", width)?, coordinate("y", height)?])
     };
     let mut polygon = Vec::new();
     let mut contours = Vec::new();
-    let mut vertices = 0;
+    let mut remaining_vertices = 1024usize;
+    let mut finish_contour = |polygon: &mut Vec<[f64; 2]>| {
+        if polygon
+            .first()
+            .zip(polygon.last())
+            .is_some_and(|(&first, &last)| same_path_point(first, last))
+        {
+            polygon.pop();
+        }
+        match polygon.len() {
+            0..=2 => polygon.clear(),
+            3..=128 => {
+                remaining_vertices = remaining_vertices.checked_sub(polygon.len())?;
+                contours.push(std::mem::take(polygon));
+            }
+            _ => return None,
+        }
+        Some(())
+    };
     for command in path.children().filter(Node::is_element) {
         let mut points = command.children().filter(Node::is_element);
         match command.tag_name().name() {
             "moveTo" => {
-                polygon.clear();
+                finish_contour(&mut polygon)?;
                 push_path_vertex(&mut polygon, point(points.next()?)?)?;
             }
             "close" => {
-                if same_path_point(*polygon.last()?, polygon[0]) {
-                    polygon.pop();
-                }
-                if polygon.len() > 128 {
-                    return None;
-                }
-                if polygon.len() >= 3 {
-                    vertices += polygon.len();
-                    if vertices > 1024 {
-                        return None;
-                    }
-                    contours.push(std::mem::take(&mut polygon));
-                }
-                polygon.clear();
+                let start = *polygon.first()?;
+                finish_contour(&mut polygon)?;
+                polygon.push(start);
             }
             "lnTo" if !polygon.is_empty() => {
                 push_path_vertex(&mut polygon, point(points.next()?)?)?;
             }
-            "arcTo" => flatten_arc_path(&mut polygon, command, [width, height])?,
+            "arcTo" => flatten_arc_path(&mut polygon, command, size, value)?,
             "quadBezTo" | "cubicBezTo" => {
                 let first = point(points.next()?)?;
                 let second = point(points.next()?)?;
@@ -890,18 +1913,25 @@ fn custom_path(path: Node<'_, '_>) -> Option<CustomPath> {
             return None;
         }
     }
+    finish_contour(&mut polygon)?;
     Some(contours)
 }
 
 fn push_path_vertex(vertices: &mut Vec<[f64; 2]>, point: [f64; 2]) -> Option<()> {
-    // Trigonometric endpoints can round just outside a cardinal edge.
-    if !point
-        .iter()
-        .all(|axis| (-1e-12..=1.0 + 1e-12).contains(axis))
-    {
+    // Match the compositor's range for paths that extend beyond the item box.
+    if !point.iter().all(|axis| (-1.0..=2.0).contains(axis)) {
         return None;
     }
-    let point = point.map(|axis| axis.clamp(0.0, 1.0));
+    // Trigonometric endpoints can round just outside a cardinal edge.
+    let point = point.map(|axis| {
+        if (-1e-12..0.0).contains(&axis) {
+            0.0
+        } else if (1.0..=1.0 + 1e-12).contains(&axis) {
+            1.0
+        } else {
+            axis
+        }
+    });
     if vertices
         .last()
         .is_some_and(|&last| same_path_point(last, point))
@@ -926,35 +1956,52 @@ fn flatten_arc_path(
     vertices: &mut Vec<[f64; 2]>,
     command: Node<'_, '_>,
     [width, height]: [f64; 2],
+    value: impl Fn(&str) -> Option<f64>,
 ) -> Option<()> {
-    use std::f64::consts::TAU;
-
-    const TURN: i64 = 360 * 60_000;
-    let number = |key| command.attribute(key)?.parse::<i64>().ok();
-    let (rx, ry) = (number("wR")? as f64, number("hR")? as f64);
-    let start_angle = number("stAng")?.rem_euclid(TURN);
+    let number = |key| value(command.attribute(key)?);
+    let (rx, ry) = (number("wR")?, number("hR")?);
+    let start_angle = number("stAng")?.rem_euclid(DRAWINGML_TURN);
     let sweep = number("swAng")?;
-    if rx <= 0.0 || ry <= 0.0 || !(-TURN..=TURN).contains(&sweep) {
+    if rx < 0.0 || ry < 0.0 || sweep.abs() > DRAWINGML_TURN {
         return None;
     }
-    if sweep == 0 {
+    if (rx == 0.0 && ry == 0.0) || sweep == 0.0 {
         return Some(());
     }
-    let parameter = |angle| {
-        // DrawingML measures the ray from the ellipse center in path coordinates.
-        let (sin, cos) = (angle as f64 * TAU / TURN as f64).sin_cos();
-        (rx * sin).atan2(ry * cos)
-    };
-    let start = parameter(start_angle);
-    let stop = parameter(start_angle + sweep);
-    let span = if sweep.abs() == TURN {
-        TAU.copysign(sweep as f64)
-    } else if sweep > 0 {
-        (stop - start).rem_euclid(TAU)
+    if rx == 0.0 || ry == 0.0 {
+        return None;
+    }
+    let radii = [rx, ry];
+    let start = ellipse_ray_parameter(radii, start_angle);
+    let span = ellipse_parameter_span(radii, start, start_angle, sweep);
+    append_ellipse_arc(vertices, [rx / width, ry / height], start, span)
+}
+
+fn ellipse_parameter_span(radii: [f64; 2], parameter: f64, start: f64, sweep: f64) -> f64 {
+    use std::f64::consts::TAU;
+
+    let stop = ellipse_ray_parameter(radii, start + sweep);
+    if sweep.abs() == DRAWINGML_TURN {
+        TAU.copysign(sweep)
+    } else if sweep > 0.0 {
+        (stop - parameter).rem_euclid(TAU)
     } else {
-        -(start - stop).rem_euclid(TAU)
-    };
-    let (rx, ry) = (rx / width, ry / height);
+        -(parameter - stop).rem_euclid(TAU)
+    }
+}
+
+fn ellipse_ray_parameter([rx, ry]: [f64; 2], angle: f64) -> f64 {
+    // DrawingML measures the ray from the ellipse center in path coordinates.
+    let (sin, cos) = (angle * std::f64::consts::TAU / DRAWINGML_TURN).sin_cos();
+    (rx * sin).atan2(ry * cos)
+}
+
+fn append_ellipse_arc(
+    vertices: &mut Vec<[f64; 2]>,
+    [rx, ry]: [f64; 2],
+    start: f64,
+    span: f64,
+) -> Option<()> {
     let offset = |angle: f64| {
         let (sin, cos) = angle.sin_cos();
         [rx * cos, ry * sin]
@@ -970,7 +2017,7 @@ fn flatten_arc_path(
     }
     for segment in 1..=segments {
         let [dx, dy] = offset(start + span * (segment as f64 / segments as f64));
-        let point = if sweep.abs() == TURN && segment == segments {
+        let point = if span.abs() == std::f64::consts::TAU && segment == segments {
             current
         } else {
             [cx + dx, cy + dy]
@@ -1025,7 +2072,7 @@ fn a_closed_bezier_outline_does_not_count_the_repeated_starting_point() {
         <close/>
     </path></pathLst></custGeom></spPr>"#;
     let document = Document::parse(xml).unwrap();
-    let paths = custom_paths(document.root_element()).unwrap();
+    let (paths, _) = custom_paths(document.root_element()).unwrap();
     let vertices = &paths[0][0];
     assert_eq!(vertices.len(), 128);
     assert_eq!(vertices[0], [0.5, 0.0]);
@@ -1043,7 +2090,7 @@ fn full_turn_arcs_close_without_a_repeated_vertex() {
             </path></pathLst></custGeom></spPr>"#
         );
         let document = Document::parse(&xml).unwrap();
-        let paths = custom_paths(document.root_element()).unwrap();
+        let (paths, _) = custom_paths(document.root_element()).unwrap();
         let vertices = &paths[0][0];
         assert!((60..=128).contains(&vertices.len()));
         assert_eq!(vertices[0], [1.0, 0.5]);
@@ -1060,7 +2107,7 @@ fn full_turn_arcs_close_without_a_repeated_vertex() {
         <close/>
     </path></pathLst></custGeom></spPr>"#;
     let document = Document::parse(xml).unwrap();
-    let paths = custom_paths(document.root_element()).unwrap();
+    let (paths, _) = custom_paths(document.root_element()).unwrap();
     let vertices = &paths[0][0];
     assert_eq!(vertices.len() % 4, 0);
     assert!(!same_path_point(vertices[0], *vertices.last().unwrap()));
@@ -1128,7 +2175,7 @@ impl ThemeReader {
             let paths = custom_paths(properties).or_else(|| preset_paths(properties));
             let geometry = if paths
                 .as_ref()
-                .is_some_and(|paths| paths.len() == 1 && paths[0].len() == 1)
+                .is_some_and(|(paths, _)| paths.len() == 1 && paths[0].len() == 1)
             {
                 GradientShape::Polygon
             } else if child(properties, "prstGeom").and_then(|geom| geom.attribute("prst"))
@@ -1160,21 +2207,31 @@ impl ThemeReader {
                     .and_then(|index| index.parse().ok())
                     .and_then(|index| context.style(index, placeholder.as_ref(), geometry)),
             };
+            let route = connector_route(shape, properties);
             let fill = match fill {
-                _ if paths.as_ref().is_some_and(Vec::is_empty) => Some(String::new()),
+                _ if route.is_some()
+                    || paths.as_ref().is_some_and(|(paths, _)| paths.is_empty()) =>
+                {
+                    Some(String::new())
+                }
                 Some(ResolvedFill::Color(fill)) => Some(format!("background:{fill};")),
                 Some(ResolvedFill::Gradient { style, .. }) => Some(style),
                 None if direct.is_some() => Some(String::new()),
                 None => None,
             };
             let text = TextBody::read(shape, &context, size);
+            let connector =
+                route.and_then(|route| connector_stroke(shape, properties, &context, size, route));
             if fill.is_some() || text.is_some() {
+                let (paths, path_shades) = paths.unwrap_or_default();
                 styles.insert(
                     shape.range().start as u64,
                     ObjectStyle {
                         fill,
                         text,
-                        paths: paths.unwrap_or_default(),
+                        paths,
+                        path_shades,
+                        connector,
                     },
                 );
             }

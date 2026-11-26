@@ -29,6 +29,8 @@ pub struct BoxStyle {
     pub background: Option<Rgba>,
     pub elliptical_background: bool,
     fill_paths: Vec<FillPath>,
+    pptx_path_shades: Vec<i8>,
+    pptx_line_dash: Option<LineDash>,
     fill_even_odd: bool,
     pub font_px: f32,
     pub align: Align,
@@ -188,6 +190,8 @@ impl Default for BoxStyle {
             background: None,
             elliptical_background: false,
             fill_paths: Vec::new(),
+            pptx_path_shades: Vec::new(),
+            pptx_line_dash: None,
             fill_even_odd: false,
             font_px: 100.0,
             align: Align::Center,
@@ -458,6 +462,20 @@ pub fn parse_style(css: &str) -> BoxStyle {
                     .map(|contour| vec![vec![contour]])
                     .unwrap_or_default();
                 style.fill_even_odd = true;
+            }
+            "--pptx-line-dash" => style.pptx_line_dash = LineDash::parse(value),
+            "--pptx-path-shades" => {
+                style.pptx_path_shades = value
+                    .split_ascii_whitespace()
+                    .take(342)
+                    .map(|value| {
+                        value
+                            .parse::<i8>()
+                            .ok()
+                            .filter(|value| matches!(value, -40 | -20 | 0 | 20 | 40))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default();
             }
             "--pptx-fill-paths" => {
                 style.fill_paths = parse_fill_paths(value).unwrap_or_default();
@@ -4069,6 +4087,222 @@ fn outside_round_corner(dx: i32, dy: i32, w: i32, h: i32, radii: Radii) -> bool 
         || outside(left, bottom, bl)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct DashSegment {
+    origin: [f64; 2],
+    unit: [f64; 2],
+    length: f64,
+    phase: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LineDash {
+    segments: Vec<DashSegment>,
+    scale: [f64; 2],
+    length: f64,
+    cap: u8,
+    inset_cap: bool,
+    bands: Vec<[f64; 2]>,
+    painted: Vec<[f64; 2]>,
+    period: f64,
+}
+
+impl LineDash {
+    fn parse(value: &str) -> Option<Self> {
+        let mut fields = value.split_ascii_whitespace();
+        let mut finite = || fields.next()?.parse::<f64>().ok().filter(|n| n.is_finite());
+        let origin = [finite()?, finite()?];
+        let scale = [finite()?, finite()?];
+        let unit = [finite()?, finite()?];
+        let length = finite()?;
+        let cap = fields.next()?.parse().ok()?;
+        if !origin.into_iter().all(|v| (0.0..=1.0).contains(&v))
+            || !scale.into_iter().all(|v| v > 0.0)
+            || !unit.into_iter().all(|v| (-1.0..=1.0).contains(&v))
+            || length <= 0.0
+            || cap > 2
+        {
+            return None;
+        }
+        let inset_cap = fields.clone().next() == Some("inset");
+        if inset_cap {
+            fields.next();
+        }
+        let mut bands = Vec::new();
+        if let Some(encoded) = fields
+            .clone()
+            .next()
+            .and_then(|token| token.strip_prefix("bands="))
+        {
+            fields.next();
+            let mut previous = -0.5;
+            for interval in encoded.split(',') {
+                let (low, high) = interval.split_once(':')?;
+                let (low, high) = (low.parse::<f64>().ok()?, high.parse::<f64>().ok()?);
+                if !(previous <= low && low < high && high <= 0.5) || bands.len() == 3 {
+                    return None;
+                }
+                bands.push([low, high]);
+                previous = high;
+            }
+        } else {
+            bands.push([-0.5, 0.5]);
+        }
+        let segments = if let Some(encoded) = fields
+            .clone()
+            .next()
+            .and_then(|token| token.strip_prefix("turns="))
+        {
+            fields.next();
+            let mut phase = 0.0;
+            let mut segments = Vec::new();
+            for item in encoded.split(',') {
+                let mut nums = item
+                    .split(':')
+                    .map(|value| value.parse::<f64>().ok().filter(|n| n.is_finite()));
+                let origin = [nums.next()??, nums.next()??];
+                let unit = [nums.next()??, nums.next()??];
+                let length = nums.next()??;
+                if nums.next().is_some()
+                    || length <= 0.0
+                    || segments.len() == 5
+                    || !origin.into_iter().all(|n| (0.0..=1.0).contains(&n))
+                    || !unit.into_iter().all(|n| (-1.0..=1.0).contains(&n))
+                {
+                    return None;
+                }
+                segments.push(DashSegment {
+                    origin,
+                    unit,
+                    length,
+                    phase,
+                });
+                phase += length;
+            }
+            if !phase.is_finite() || (phase - length).abs() > 1e-10 * length {
+                return None;
+            }
+            segments
+        } else {
+            vec![DashSegment {
+                origin,
+                unit,
+                length,
+                phase: 0.0,
+            }]
+        };
+        let mut painted = Vec::new();
+        let mut period = 0.0;
+        while let Some(dash) = fields.next() {
+            let dash = dash.parse::<f64>().ok()?;
+            let gap = fields.next()?.parse::<f64>().ok()?;
+            let end = period + dash;
+            let next = end + gap;
+            if !(end > period && next > end && next.is_finite()) {
+                return None;
+            }
+            painted.push([period, end]);
+            period = next;
+        }
+        (!painted.is_empty()).then_some(Self {
+            segments,
+            scale,
+            length,
+            cap,
+            inset_cap,
+            bands,
+            painted,
+            period,
+        })
+    }
+
+    fn contains(&self, [x, y]: [f64; 2]) -> bool {
+        self.segments.iter().enumerate().any(|(index, segment)| {
+            let (x, y) = (
+                (x - segment.origin[0]) * self.scale[0],
+                (y - segment.origin[1]) * self.scale[1],
+            );
+            let [ux, uy] = segment.unit;
+            let along = x * ux + y * uy;
+            let across = y * ux - x * uy;
+            if along < -0.5 || along > segment.length + 0.5 {
+                return false;
+            }
+            // Miter edges extend to either side of a bend. Hold the pattern at the joint there.
+            let lower = if index == 0 { along } else { 0.0 };
+            let upper = if index + 1 == self.segments.len() {
+                along
+            } else {
+                segment.length
+            };
+            let along = if along < 0.0 {
+                lower
+            } else if along > segment.length {
+                upper
+            } else {
+                along
+            };
+            self.painted_at(along + segment.phase, across)
+        })
+    }
+
+    fn painted_at(&self, along: f64, across: f64) -> bool {
+        let Some(&[low, high]) = self
+            .bands
+            .iter()
+            .find(|&&[low, high]| (low..=high).contains(&across))
+        else {
+            return false;
+        };
+        let radius = (high - low) / 2.0;
+        let across = across - (high + low) / 2.0;
+        let clamped = along.clamp(0.0, self.length);
+        let cycle = (clamped / self.period).floor() * self.period;
+        [cycle - self.period, cycle, cycle + self.period]
+            .into_iter()
+            .any(|offset| {
+                let index = self
+                    .painted
+                    .partition_point(|&[_, end]| end <= clamped - offset);
+                // Only the nearest interval on either side can cover the pixel.
+                [index.checked_sub(1), Some(index)]
+                    .into_iter()
+                    .flatten()
+                    .any(|index| {
+                        let Some(&[start, end]) = self.painted.get(index) else {
+                            return false;
+                        };
+                        let (start, end) =
+                            ((offset + start).max(0.0), (offset + end).min(self.length));
+                        if start >= end {
+                            return false;
+                        }
+                        if self.inset_cap {
+                            if !(start..end).contains(&along) {
+                                return false;
+                            }
+                            if self.cap != 1 {
+                                return true;
+                            }
+                            // Dashes shorter than a band width use a compressed cap.
+                            let cap_radius = ((end - start) / 2.0).min(radius);
+                            let cap_distance = (start + cap_radius - along)
+                                .max(along - (end - cap_radius))
+                                .max(0.0);
+                            return (cap_distance / cap_radius).powi(2) + (across / radius).powi(2)
+                                <= 1.0;
+                        }
+                        let distance = (start - along).max(along - end).max(0.0);
+                        match self.cap {
+                            1 => distance * distance + across * across <= radius * radius,
+                            2 => distance <= radius,
+                            _ => (start..end).contains(&along),
+                        }
+                    })
+            })
+    }
+}
+
 fn fill_item_background(
     pixels: &mut [u8],
     slide: &StyledSlide,
@@ -4085,6 +4319,14 @@ fn fill_item_background(
     }
     let frame_w = slide.output_width;
     let frame_h = slide.output_height;
+    let path_shade = |index| {
+        if style.pptx_path_shades.len() == style.fill_paths.len() {
+            style.pptx_path_shades.get(index).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    };
+    let bounds = text::Clip { x, y, w, h };
     if let Some(gradient) = &style.gradient
         && !gradient.stops.is_empty()
     {
@@ -4187,7 +4429,7 @@ fn fill_item_background(
                 .collect();
             PolygonGradient::new(&points, point).map(|gradient| (point, gradient))
         });
-        let mut draw_stop = |px, py| {
+        let mut draw_stop = |px, py, stops: &[(f32, Rgba)]| {
             let (local_x, local_y) = if let Some((columns, rows)) = &tile_coordinates {
                 (columns[(px - x0) as usize], rows[(py - y0) as usize])
             } else if let Some(GradientSpace {
@@ -4250,46 +4492,123 @@ fn fill_item_background(
                 frame_h,
                 px,
                 py,
-                interpolate_stops(&gradient.stops, position, style.pptx_gradient_gamma),
+                interpolate_stops(stops, position, style.pptx_gradient_gamma),
             );
         };
         if style.fill_paths.is_empty() {
             for py in y0..y1 {
                 for px in x0..x1 {
                     if in_item_shape(px, py, x, y, w, h, radius) {
-                        draw_stop(px, py);
+                        draw_stop(px, py, &gradient.stops);
                     }
                 }
             }
         } else {
-            for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
-                for px in start..end {
-                    draw_stop(px, py);
-                }
-            });
+            for (index, path) in style.fill_paths.iter().enumerate() {
+                let shade = path_shade(index);
+                let shaded;
+                let stops = if shade != 0 {
+                    shaded = gradient
+                        .stops
+                        .iter()
+                        .map(|&(t, color)| (t, shade_path(color, shade)))
+                        .collect::<Vec<_>>();
+                    shaded.as_slice()
+                } else {
+                    gradient.stops.as_slice()
+                };
+                for_path_span(
+                    slide,
+                    &bounds,
+                    path,
+                    style.fill_even_odd,
+                    |py, start, end| {
+                        for px in start..end {
+                            draw_stop(px, py, stops);
+                        }
+                    },
+                );
+            }
         }
         return;
     }
     let Some(background) = style.background else {
         return;
     };
-    if !style.fill_paths.is_empty() {
-        for_shape_span(slide, text::Clip { x, y, w, h }, style, |py, start, end| {
-            fill_rect(
-                pixels,
-                frame_w,
-                frame_h,
-                start,
-                py,
-                end.saturating_sub(start),
-                1,
-                background,
-            );
+    if let Some(dash) = &style.pptx_line_dash
+        && let [path] = style.fill_paths.as_slice()
+    {
+        let normalized = |pixel, origin, extent, flip| {
+            let v = (f64::from(pixel) + 0.5 - f64::from(origin)) / f64::from(extent);
+            if flip { 1.0 - v } else { v }
+        };
+        let mut marker_spans = Vec::new();
+        if let Some(markers) = path.get(dash.bands.len()..)
+            && !markers.is_empty()
+        {
+            for_path_span(slide, &bounds, markers, false, |y, left, right| {
+                marker_spans.push((y, left, right));
+            });
+        }
+        for_shape_span(slide, bounds, style, |py, start, end| {
+            let ly = normalized(py, y, h, style.pptx_fill_flip_y);
+            let first = marker_spans.partition_point(|&(y, _, _)| y < py);
+            let marked = &marker_spans[first..];
+            for px in start..end {
+                let lx = normalized(px, x, w, style.pptx_fill_flip_x);
+                if dash.contains([lx, ly])
+                    || marked
+                        .iter()
+                        .take_while(|&&(y, _, _)| y == py)
+                        .any(|&(_, left, right)| (left..right).contains(&px))
+                {
+                    paint(pixels, frame_w, frame_h, px, py, background);
+                }
+            }
         });
+        return;
+    }
+    if !style.fill_paths.is_empty() {
+        for (index, path) in style.fill_paths.iter().enumerate() {
+            let color = shade_path(background, path_shade(index));
+            for_path_span(
+                slide,
+                &bounds,
+                path,
+                style.fill_even_odd,
+                |py, start, end| {
+                    fill_rect(
+                        pixels,
+                        frame_w,
+                        frame_h,
+                        start,
+                        py,
+                        end.saturating_sub(start),
+                        1,
+                        color,
+                    );
+                },
+            );
+        }
     } else if radius != Radii::default() {
         fill_round_rect(pixels, frame_w, frame_h, x, y, w, h, radius, background);
     } else {
         fill_rect(pixels, frame_w, frame_h, x, y, w, h, background);
+    }
+}
+
+fn shade_path(color: Rgba, shade: i8) -> Rgba {
+    let channel = |value: u8| {
+        let value = i32::from(value);
+        let target = if shade < 0 { 0 } else { 255 };
+        let weight = i32::from(shade).abs();
+        ((value * (100 - weight) + target * weight + 50) / 100) as u8
+    };
+    Rgba {
+        r: channel(color.r),
+        g: channel(color.g),
+        b: channel(color.b),
+        a: color.a,
     }
 }
 
@@ -4413,7 +4732,7 @@ fn for_shape_span(
 fn for_path_span(
     slide: &StyledSlide,
     bounds: &text::Clip,
-    path: &FillPath,
+    path: &[Vec<[f32; 2]>],
     even_odd: bool,
     mut draw_span: impl FnMut(i32, i32, i32),
 ) {
@@ -5142,6 +5461,134 @@ mod tests {
         ));
         assert_eq!(frame.pixel(337, 320), parse_color("#FF0000").unwrap());
         assert!(frame.pixel(959, 539).b > 250);
+    }
+
+    #[test]
+    fn powerpoint_dashes_keep_gaps_and_use_the_cap_shape() {
+        let dash = |cap| LineDash::parse(&format!("0 0 100 1 1 0 100 {cap} 1 1")).unwrap();
+        let flat = dash(0);
+        assert!(flat.contains([0.005, 0.0]));
+        assert!(!flat.contains([0.012, 0.0]));
+        assert!(flat.contains([0.985, 0.0]));
+        assert!(!flat.contains([0.995, 0.0]));
+        let round = dash(1);
+        assert!(round.contains([0.014, 0.0]));
+        assert!(!round.contains([0.014, 0.4]));
+        assert!(dash(2).contains([0.014, 0.4]));
+    }
+
+    #[test]
+    fn powerpoint_dashes_count_caps_inside_saved_lengths_when_requested() {
+        let round = LineDash::parse("0 0 10 1 1 0 10 1 inset 1 1").unwrap();
+        assert!(round.contains([0.05, 0.49]));
+        assert!(!round.contains([0.01, 0.49]));
+        assert!(!round.contains([0.125, 0.0]));
+        let short = LineDash::parse("0 0 10 1 1 0 10 1 inset 0.5 1").unwrap();
+        assert!(short.contains([0.025, 0.49]));
+        assert!(!short.contains([0.06, 0.0]));
+
+        let preset_square = LineDash::parse("0 0 10 1 1 0 10 2 inset 1 1").unwrap();
+        assert!(preset_square.contains([0.01, 0.49]));
+        assert!(!preset_square.contains([0.125, 0.0]));
+        let custom_square = LineDash::parse("0 0 10 1 1 0 10 2 1 1").unwrap();
+        assert!(custom_square.contains([0.125, 0.0]));
+    }
+
+    #[test]
+    fn powerpoint_elbow_dashes_keep_phase_through_the_corner() {
+        let dash = LineDash::parse("0 0 10 10 1 0 7 0 turns=0:0:1:0:3,0.3:0:0:1:4 2 2").unwrap();
+        for (point, visible) in [
+            ([0.15, 0.0], true),
+            ([0.29, 0.0], false),
+            ([0.3, 0.025], false),
+            ([0.3, 0.15], true),
+            ([0.3, 0.28], true),
+            ([0.3, 0.34], false),
+        ] {
+            assert_eq!(dash.contains(point), visible, "{point:?}");
+        }
+    }
+
+    #[test]
+    fn powerpoint_compound_dashes_cap_each_band_without_filling_the_gap() {
+        let dash = LineDash::parse("0 0 10 1 1 0 10 1 inset bands=-0.5:-0.2,0.2:0.5 1 1").unwrap();
+        assert!(dash.contains([0.05, -0.35]));
+        assert!(dash.contains([0.05, 0.35]));
+        assert!(!dash.contains([0.05, 0.0]));
+        assert!(!dash.contains([0.002, 0.49]));
+        assert!(dash.contains([0.002, 0.35]));
+        assert!(!dash.contains([0.15, -0.35]));
+    }
+
+    #[test]
+    fn powerpoint_dashes_keep_markers_solid_without_alpha_overlap() {
+        let shaft = "0.1 0.55,0.9 0.55,0.9 0.45,0.1 0.45";
+        let marker = "0.96 0.5,0.65 0.35,0.65 0.65";
+        let mut slide = style_slide(&format!(
+            "left:0px;top:0px;width:100px;height:100px;background:#ff000080;--pptx-fill-paths:{shaft}/{marker};--pptx-line-dash:0.1 0.5 10 10 1 0 8 0 1 1;"
+        ));
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(61, 50), Rgba::BLACK);
+        assert_eq!(frame.pixel(70, 50).r, 128);
+        assert_eq!(frame.pixel(80, 50).r, 128);
+        assert_eq!(frame.pixel(94, 50).r, 128);
+        assert_eq!(frame.pixel(98, 50), Rgba::BLACK);
+    }
+
+    #[test]
+    fn powerpoint_custom_dashes_repeat_fractional_pairs_in_order() {
+        let pattern = LineDash::parse("0 0 12 1 1 0 12 0 0.5 1.25 2 0.25 1 0.75 1.5 0.5").unwrap();
+        for (along, painted) in [
+            (0.25, true),
+            (1.0, false),
+            (3.0, true),
+            (3.875, false),
+            (4.5, true),
+            (5.25, false),
+            (6.0, true),
+            (7.5, false),
+            (8.0, true),
+            (9.0, false),
+            (11.0, true),
+            (11.625, false),
+            (11.875, true),
+            (12.125, false),
+        ] {
+            assert_eq!(pattern.contains([along / 12.0, 0.0]), painted, "{along}");
+        }
+        for bad in ["0 1", "1 -1", "1", "NaN 1", "1 inf"] {
+            assert!(LineDash::parse(&format!("0 0 12 1 1 0 12 0 {bad}")).is_none());
+        }
+    }
+
+    #[test]
+    fn powerpoint_path_shades_preserve_fill_order_and_gradient_stops() {
+        let background = "0 0,1 0,1 1,0 1";
+        let lighten = "0.1 0.1,0.6 0.1,0.6 0.6,0.1 0.6";
+        let darken = "0.4 0.4,0.9 0.4,0.9 0.9,0.4 0.9";
+        let render = |fill| {
+            let mut slide = style_slide(&format!(
+                "left:0px;top:0px;width:100px;height:100px;background:{fill};--pptx-fill-paths:{background}|{lighten}|{darken};--pptx-path-shades:0 40 -20;"
+            ));
+            slide.output_width = 100;
+            slide.output_height = 100;
+            slide.source_width = 100.0;
+            slide.source_height = 100.0;
+            render_styled(&slide)
+        };
+        let solid = render("#646464");
+        assert_eq!(solid.pixel(5, 50).r, 100);
+        assert_eq!(solid.pixel(25, 50).r, 162);
+        assert_eq!(solid.pixel(50, 50).r, 80);
+        let gradient = render("linear-gradient(180deg, #000000 0%, #C8C8C8 100%)");
+        assert!((99..=102).contains(&gradient.pixel(5, 50).r));
+        assert!((161..=164).contains(&gradient.pixel(25, 50).r));
+        assert!((79..=82).contains(&gradient.pixel(50, 50).r));
+        assert_eq!(shade_path(parse_color("#64646480").unwrap(), -40).a, 128);
     }
 
     #[test]

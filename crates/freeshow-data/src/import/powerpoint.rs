@@ -859,7 +859,112 @@ impl SlideObject {
         }
     }
 
-    fn into_item(self) -> Option<serde_json::Value> {
+    fn into_item(mut self) -> Option<serde_json::Value> {
+        let mut dash_style = String::new();
+        if let Some(stroke) = self.style.connector.take() {
+            let size = [self.width / stroke.width[0], self.height / stroke.width[1]];
+            let segments = connector_segments(&stroke.route, size)?;
+            let head = segments.first()?;
+            let tail = segments.last()?;
+            let length = tail.phase + tail.length;
+            let trim = stroke.markers.map(|marker| marker.map_or(0.0, marker_trim));
+            let from = trim[0].min(head.length / 2.0);
+            let to = tail.length - trim[1].min(tail.length / 2.0);
+            let local = |[x, y]: [f64; 2]| [x * stroke.width[0], y * stroke.width[1]];
+            let bands = stroke.compound.bands();
+            let mut contours: Vec<Vec<_>> = bands
+                .iter()
+                .map(|&band| {
+                    connector_shaft(&segments, from, to, stroke.cap, band)
+                        .into_iter()
+                        .map(local)
+                        .collect()
+                })
+                .collect();
+            for (index, marker) in stroke.markers.into_iter().enumerate() {
+                if let Some(marker) = marker {
+                    let at_end = index == 1;
+                    let points = marker_outline(marker).into_iter().map(|[along, across]| {
+                        if at_end {
+                            local(tail.point(tail.length - along, -across))
+                        } else {
+                            local(head.point(along, across))
+                        }
+                    });
+                    contours.push(points.collect());
+                }
+            }
+
+            let padding = if matches!(stroke.cap, theme::StrokeCap::Square) {
+                std::f64::consts::SQRT_2 / 2.0
+            } else {
+                0.5
+            };
+            let [mut pad_x, mut pad_y] = stroke.width.map(|width| width * padding);
+            for &[x, y] in contours.iter().flatten() {
+                pad_x = pad_x.max(-x).max(x - self.width);
+                pad_y = pad_y.max(-y).max(y - self.height);
+            }
+            let (pad_x, pad_y) = (pad_x.ceil(), pad_y.ceil());
+            let width = self.width + 2.0 * pad_x;
+            let height = self.height + 2.0 * pad_y;
+            let point = |[x, y]: [f64; 2]| [(pad_x + x) / width, (pad_y + y) / height];
+            for contour in &mut contours {
+                for vertex in contour {
+                    *vertex = point(*vertex);
+                }
+            }
+            self.style.paths = vec![contours];
+            if !stroke.dash.lengths.is_empty() {
+                let [x, y] = point(local(head.origin));
+                let [ux, uy] = head.unit;
+                let (sx, sy) = (width / stroke.width[0], height / stroke.width[1]);
+                let dash = stroke
+                    .dash
+                    .lengths
+                    .iter()
+                    .map(f64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let inset = if stroke.dash.includes_cap(stroke.cap) {
+                    "inset "
+                } else {
+                    ""
+                };
+                let bands = if bands.len() > 1 {
+                    let ranges = bands
+                        .iter()
+                        .map(|[low, high]| format!("{low}:{high}"))
+                        .collect::<Vec<_>>();
+                    format!("bands={} ", ranges.join(","))
+                } else {
+                    String::new()
+                };
+                let turns = if segments.len() > 1 {
+                    let turns = segments
+                        .iter()
+                        .map(|segment| {
+                            let [x, y] = point(local(segment.origin));
+                            let [ux, uy] = segment.unit;
+                            format!("{x}:{y}:{ux}:{uy}:{}", segment.length)
+                        })
+                        .collect::<Vec<_>>();
+                    format!("turns={} ", turns.join(","))
+                } else {
+                    String::new()
+                };
+                dash_style = format!(
+                    "--pptx-line-dash:{x} {y} {sx} {sy} {ux} {uy} {length} {} {inset}{bands}{turns}{dash};",
+                    stroke.cap.code()
+                );
+            }
+            self.style.fill = Some(format!("background:{};", stroke.color));
+            self.x -= pad_x;
+            self.y -= pad_y;
+            self.width = width;
+            self.height = height;
+            self.flip_y ^= stroke.inverse;
+        }
         let mut style = format!(
             "left:{}px;top:{}px;width:{}px;height:{}px;",
             self.x.round(),
@@ -867,6 +972,7 @@ impl SlideObject {
             self.width.max(1.0).round(),
             self.height.max(1.0).round()
         );
+        style.push_str(&dash_style);
         if self.ellipse {
             style.push_str("border-radius:50%;");
         } else if self.radius > 0.0 {
@@ -903,6 +1009,15 @@ impl SlideObject {
                     .collect::<Vec<_>>()
                     .join("|");
                 style.push_str(&format!("--pptx-fill-paths:{paths};"));
+                if self.style.path_shades.iter().any(|&shade| shade != 0) {
+                    let shades = self
+                        .style
+                        .path_shades
+                        .iter()
+                        .map(i8::to_string)
+                        .collect::<Vec<_>>();
+                    style.push_str(&format!("--pptx-path-shades:{};", shades.join(" ")));
+                }
             }
             if let Some(fill) = &self.style.fill {
                 style.push_str(fill);
@@ -1067,6 +1182,159 @@ fn collect_placeholders(
         );
     }
     Ok(())
+}
+
+fn marker_trim(marker: theme::StrokeMarker) -> f64 {
+    match marker.kind {
+        theme::MarkerKind::Triangle => marker.length * 0.75,
+        theme::MarkerKind::Stealth => marker.length * 0.7,
+        _ => 0.0,
+    }
+}
+
+struct ConnectorSegment {
+    origin: [f64; 2],
+    unit: [f64; 2],
+    length: f64,
+    phase: f64,
+}
+
+impl ConnectorSegment {
+    fn point(&self, along: f64, across: f64) -> [f64; 2] {
+        let [ux, uy] = self.unit;
+        [
+            self.origin[0] + ux * along - uy * across,
+            self.origin[1] + uy * along + ux * across,
+        ]
+    }
+}
+
+fn connector_segments(
+    route: &[[f64; 2]],
+    [width, height]: [f64; 2],
+) -> Option<Vec<ConnectorSegment>> {
+    let mut phase = 0.0;
+    let mut segments = Vec::new();
+    for pair in route.windows(2) {
+        let [[x, y], [next_x, next_y]] = <[[f64; 2]; 2]>::try_from(pair).ok()?;
+        let origin = [x * width, y * height];
+        let delta = [next_x * width - origin[0], next_y * height - origin[1]];
+        let length = delta[0].hypot(delta[1]);
+        if !length.is_finite() {
+            return None;
+        }
+        if length == 0.0 {
+            continue;
+        }
+        segments.push(ConnectorSegment {
+            origin,
+            unit: delta.map(|axis| axis / length),
+            length,
+            phase,
+        });
+        phase += length;
+    }
+    phase.is_finite().then_some(segments)
+}
+
+fn connector_shaft(
+    segments: &[ConnectorSegment],
+    from: f64,
+    to: f64,
+    cap: theme::StrokeCap,
+    [low, high]: [f64; 2],
+) -> Vec<[f64; 2]> {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    use theme::StrokeCap;
+
+    let radius = (high - low) / 2.0;
+    let center = (high + low) / 2.0;
+    let head = &segments[0];
+    let tail = &segments[segments.len() - 1];
+    let joint = |pair: &[ConnectorSegment], across| {
+        let (before, next) = (&pair[0], &pair[1]);
+        let [ux, uy] = before.unit;
+        // Parallel sections already share an edge. Perpendicular sections meet at a miter.
+        let perpendicular = (ux * next.unit[0] + uy * next.unit[1]).abs() < 1e-12;
+        let mut point = next.point(0.0, across);
+        if perpendicular {
+            point[0] -= uy * across;
+            point[1] += ux * across;
+        }
+        point
+    };
+    let joints = segments.windows(2);
+    let mut outline = Vec::new();
+    let end = |outline: &mut Vec<_>, segment: &ConnectorSegment, along, start: f64, flipped| {
+        if matches!(cap, StrokeCap::Round) {
+            for step in 0..=16 {
+                let (sin, cos) = (start - f64::from(step) * PI / 16.0).sin_cos();
+                outline.push(segment.point(along + cos * radius, center + sin * radius));
+            }
+        } else {
+            let extra = if matches!(cap, StrokeCap::Square) {
+                radius
+            } else {
+                0.0
+            };
+            let (along, edges) = if flipped {
+                (along - extra, [low, high])
+            } else {
+                (along + extra, [high, low])
+            };
+            outline.extend(edges.map(|edge| segment.point(along, edge)));
+        }
+    };
+    outline.extend(joints.clone().map(|pair| joint(pair, high)));
+    end(&mut outline, tail, to, FRAC_PI_2, false);
+    outline.extend(joints.rev().map(|pair| joint(pair, low)));
+    end(&mut outline, head, from, -FRAC_PI_2, true);
+    outline
+}
+
+fn marker_outline(marker: theme::StrokeMarker) -> Vec<[f64; 2]> {
+    use theme::MarkerKind;
+
+    let (length, half_width) = (marker.length, marker.width / 2.0);
+    match marker.kind {
+        MarkerKind::None => Vec::new(),
+        MarkerKind::Triangle => vec![[0.0, 0.0], [length, half_width], [length, -half_width]],
+        MarkerKind::Stealth => vec![
+            [0.0, 0.0],
+            [length, half_width],
+            [length * 0.6, 0.0],
+            [length, -half_width],
+        ],
+        MarkerKind::Diamond => vec![
+            [-length / 2.0, 0.0],
+            [0.0, half_width],
+            [length / 2.0, 0.0],
+            [0.0, -half_width],
+        ],
+        MarkerKind::Oval => (0..32)
+            .map(|step| {
+                let angle = std::f64::consts::PI - f64::from(step) * std::f64::consts::TAU / 32.0;
+                let (sin, cos) = angle.sin_cos();
+                [length / 2.0 * cos, half_width * sin]
+            })
+            .collect(),
+        MarkerKind::Arrow => {
+            let inset = 0.75 / marker.width;
+            let base = length * (1.0 - inset);
+            let join = length * (2.75 / marker.width).min(1.0);
+            vec![
+                [0.0, 0.0],
+                [base, half_width],
+                [length, half_width - 0.75],
+                [join, 0.5],
+                [length, 0.5],
+                [length, -0.5],
+                [join, -0.5],
+                [length, 0.75 - half_width],
+                [base, -half_width],
+            ]
+        }
+    }
 }
 
 fn slide_content(
@@ -2668,6 +2936,208 @@ mod tests {
     }
 
     #[test]
+    fn imports_adjusted_elbow_connectors_with_one_continuous_dash() {
+        let files = archive(&[
+            ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p"><p:sldSz cx="19200000" cy="10800000"/></p:presentation>"#),
+            ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+              <p:cxnSp><p:spPr>
+                <a:xfrm flipH="1"><a:off x="2000000" y="3000000"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                <a:prstGeom prst="bentConnector4"><a:avLst>
+                  <a:gd name="adj1" fmla="val 25000"/><a:gd name="adj2" fmla="val 75000"/>
+                </a:avLst></a:prstGeom>
+                <a:ln w="200000"><a:solidFill><a:srgbClr val="44AAFF"/></a:solidFill>
+                  <a:prstDash val="dash"/><a:tailEnd type="triangle"/>
+                </a:ln>
+              </p:spPr></p:cxnSp>
+            </p:spTree></p:cSld></p:sld>"#),
+        ]);
+        let show = import("Elbows.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(style.contains("background:#44AAFF;"));
+        assert!(style.contains("--pptx-fill-flip-x:1;"));
+        let dash = style.split_once("--pptx-line-dash:").unwrap().1;
+        let turns = dash
+            .split_once("turns=")
+            .unwrap()
+            .1
+            .split(' ')
+            .next()
+            .unwrap();
+        let lengths = turns
+            .split(',')
+            .map(|turn| turn.rsplit_once(':').unwrap().1)
+            .collect::<Vec<_>>();
+        assert_eq!(lengths, ["5", "7.5", "15", "2.5"]);
+        let path = style
+            .split_once("--pptx-fill-paths:")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        assert_eq!(path.split('/').count(), 2);
+    }
+
+    #[test]
+    fn imports_straight_connector_width_colors_and_direction() {
+        let files = archive(&[
+            ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p"><p:sldSz cx="19200000" cy="10800000"/></p:presentation>"#),
+            ("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:cxnSp><p:spPr>
+                    <a:xfrm><a:off x="2000000" y="3000000"/><a:ext cx="4000000" cy="0"/></a:xfrm>
+                    <a:prstGeom prst="straightConnector1"/>
+                    <a:ln w="200000"><a:solidFill><a:srgbClr val="E04422"/></a:solidFill><a:prstDash val="dash"/></a:ln>
+                </p:spPr></p:cxnSp>
+                <p:cxnSp><p:spPr>
+                    <a:xfrm><a:off x="8000000" y="3000000"/><a:ext cx="0" cy="4000000"/></a:xfrm>
+                    <a:prstGeom prst="straightConnector1"/>
+                </p:spPr><p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef></p:style></p:cxnSp>
+                <p:sp><p:spPr>
+                    <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
+                    <a:prstGeom prst="lineInv"/><a:ln w="200000" cmpd="tri"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>
+                        <a:custDash><a:ds d="50000" sp="125%"/><a:ds d="200000" sp="25000"/>
+                        <a:ds d="100%" sp="75000"/><a:ds d="150000" sp="50000"/></a:custDash>
+                        <a:headEnd type="oval" w="sm"/><a:tailEnd type="triangle" len="lg"/>
+                    </a:ln>
+                </p:spPr></p:sp>
+                <p:cxnSp><p:spPr>
+                    <a:xfrm><a:off x="2000000" y="4000000"/><a:ext cx="4000000" cy="4000000"/></a:xfrm>
+                    <a:prstGeom prst="straightConnector1"/>
+                    <a:solidFill><a:srgbClr val="FF00FF"/></a:solidFill><a:ln><a:noFill/></a:ln>
+                </p:spPr></p:cxnSp>
+            </p:spTree></p:cSld></p:sld>"#),
+            ("ppt/slides/_rels/slide1.xml.rels", br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#),
+            ("ppt/slideLayouts/slideLayout1.xml", br#"<p:sldLayout xmlns:p="p"><p:cSld/></p:sldLayout>"#),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#),
+            ("ppt/slideMasters/slideMaster1.xml", br#"<p:sldMaster xmlns:p="p"><p:cSld/></p:sldMaster>"#),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels", br#"<Relationships><Relationship Id="t" Type="o/theme" Target="../theme/theme1.xml"/></Relationships>"#),
+            ("ppt/theme/theme1.xml", br#"<a:theme xmlns:a="a"><a:themeElements>
+                <a:clrScheme><a:accent1><a:srgbClr val="2244D0"/></a:accent1></a:clrScheme>
+                <a:fmtScheme><a:lnStyleLst>
+                    <a:ln w="100000" cap="rnd" cmpd="dbl"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="sysDot"/></a:ln>
+                </a:lnStyleLst></a:fmtScheme>
+            </a:themeElements></a:theme>"#),
+        ]);
+        let show = import("Connectors.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        let style = |i: usize| items[i]["style"].as_str().unwrap();
+        assert!(style(0).starts_with("left:190px;top:290px;width:420px;height:20px;"));
+        assert!(style(0).contains("background:#E04422;"));
+        let dash = |item| {
+            style(item)
+                .split_once("--pptx-line-dash:")
+                .unwrap()
+                .1
+                .split(';')
+                .next()
+                .unwrap()
+        };
+        assert!(dash(0).ends_with("20 0 4 3"));
+        assert!(style(1).starts_with("left:795px;top:295px;width:10px;height:410px;"));
+        assert!(style(1).contains("background:#2244D0;"));
+        assert!(dash(1).contains("40 1 inset bands="));
+        assert!(dash(1).ends_with("1 1"));
+        assert!(style(2).contains("--pptx-fill-flip-y:1;"));
+        assert!(style(2).contains("background:#00FF00;"));
+        assert!(dash(2).contains("0 bands="));
+        assert!(dash(2).ends_with("0.5 1.25 2 0.25 1 0.75 1.5 0.5"));
+        let contours = style(2)
+            .split_once("--pptx-fill-paths:")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        assert_eq!(contours.split('/').count(), 5);
+        assert!(!style(3).contains("background:"));
+        assert!(!style(3).contains("--pptx-fill-paths:"));
+    }
+
+    #[test]
+    fn imports_shaded_preset_faces_in_drawing_order() {
+        let mut shapes = String::new();
+        for name in ["cube", "bevel", "foldedCorner", "can"] {
+            shapes.push_str(&format!(
+                r#"<p:sp><p:spPr>
+                    <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                    <a:prstGeom prst="{name}"><a:avLst><a:gd name="adj" fmla="val 40000"/></a:avLst></a:prstGeom>
+                    <a:solidFill><a:srgbClr val="646464"/></a:solidFill>
+                </p:spPr></p:sp>"#
+            ));
+        }
+        let xml = format!(
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>"#
+        );
+        let files = archive(&[("ppt/slides/slide1.xml", xml.as_bytes())]);
+        let show = import("Faces.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        for (item, shades) in items
+            .iter()
+            .zip(["0 -20 20", "0 20 -20 40 -40", "0 -20", "0 40"])
+        {
+            let style = item["style"].as_str().unwrap();
+            assert!(style.contains(&format!("--pptx-path-shades:{shades};")));
+            let paths = style.split_once("--pptx-fill-paths:").unwrap().1;
+            assert_eq!(
+                paths.split(';').next().unwrap().split('|').count(),
+                shades.split(' ').count()
+            );
+        }
+        let cube = items[0]["style"].as_str().unwrap();
+        assert!(cube.contains("--pptx-fill-paths:0 0.4,0.8 0.4,0.8 1,0 1|"));
+    }
+
+    #[test]
+    fn imports_rounded_and_snipped_corners_with_shape_gradients() {
+        let files = archive(&[(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                <p:sp><p:spPr>
+                    <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                    <a:prstGeom prst="snipRoundRect"><a:avLst>
+                        <a:gd name="adj1" fmla="val 40000"/><a:gd name="adj2" fmla="val 20000"/>
+                    </a:avLst></a:prstGeom>
+                    <a:gradFill><a:gsLst>
+                        <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                        <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                    </a:gsLst><a:path path="shape"/></a:gradFill>
+                </p:spPr></p:sp>
+            </p:spTree></p:cSld></p:sld>"#,
+        )]);
+        let show = import("Corners.pptx", &files, None).unwrap();
+        let style = show.show["slides"]["s1"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(style.contains("--pptx-polygon-focus:0.5 0.5;"), "{style}");
+        let path = style.split_once("--pptx-fill-paths:").unwrap().1;
+        let path = path.split_once(';').unwrap().0;
+        let points: Vec<[f64; 2]> = path
+            .split(',')
+            .map(|point| {
+                let (x, y) = point.split_once(' ').unwrap();
+                [x.parse().unwrap(), y.parse().unwrap()]
+            })
+            .collect();
+        let arc_end = points.len() - 4;
+        assert!(arc_end > 2);
+        for &[x, y] in &points[..arc_end] {
+            let radius_squared = ((x - 0.2) / 0.2).powi(2) + ((y - 0.4) / 0.4).powi(2);
+            assert!((radius_squared - 1.0).abs() < 1e-12, "{points:?}");
+        }
+        assert_eq!(points[0], [0.0, 0.4]);
+        let [x, y] = points[arc_end - 1];
+        assert!((x - 0.2).abs() < 1e-12 && y.abs() < 1e-12);
+        assert_eq!(
+            points[arc_end..],
+            [[0.9, 0.0], [1.0, 0.2], [1.0, 1.0], [0.0, 1.0]]
+        );
+    }
+
+    #[test]
     fn imports_preset_shape_adjustments_and_star_gradients() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",
@@ -2835,6 +3305,63 @@ mod tests {
     }
 
     #[test]
+    fn imports_custom_shape_guides_in_the_effective_path_coordinates() {
+        let xml = |size, radius| {
+            format!(
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr>
+            <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+            <a:custGeom>
+              <a:avLst><a:gd name="adj" fmla="val 30000"/></a:avLst>
+              <a:gdLst>
+                <a:gd name="rx" fmla="{radius}"/>
+                <a:gd name="startX" fmla="+- hc rx 0"/>
+                <a:gd name="ry" fmla="val hd5"/>
+                <a:gd name="sweep" fmla="at2 0 1"/>
+              </a:gdLst>
+              <a:pathLst><a:path {size}>
+                <a:moveTo><a:pt x="startX" y="vc"/></a:moveTo>
+                <a:arcTo wR="rx" hR="ry" stAng="0" swAng="sweep"/>
+                <a:lnTo><a:pt x="hc" y="vc"/></a:lnTo><a:close/>
+              </a:path></a:pathLst>
+            </a:custGeom>
+            <a:gradFill><a:gsLst>
+              <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+              <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+            </a:gsLst><a:path path="shape"/></a:gradFill>
+            </p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#
+            )
+        };
+        let default_size = xml(r#"h="0""#, "*/ ss adj 100000");
+        let explicit_size = xml(r#"w="100" h="100""#, "*/ ss adj 100000");
+        let invalid = xml("", "*/ ss adj 0");
+        let files = archive(&[
+            ("ppt/slides/slide1.xml", default_size.as_bytes()),
+            ("ppt/slides/slide2.xml", explicit_size.as_bytes()),
+            ("ppt/slides/slide3.xml", invalid.as_bytes()),
+        ]);
+        let show = import("Guides.pptx", &files, None).unwrap();
+        for (slide, start) in [("s1", "0.65 0.5"), ("s2", "0.8 0.5")] {
+            let style = show.show["slides"][slide]["items"][0]["style"]
+                .as_str()
+                .unwrap();
+            assert!(style.contains("--pptx-polygon-focus:0.5 0.5;"));
+            let path = style.split_once("--pptx-fill-paths:").unwrap().1;
+            let points: Vec<_> = path.split_once(';').unwrap().0.split(',').collect();
+            assert!(points.len() > 4);
+            assert_eq!(points[0], start);
+            let (x, y) = points[points.len() - 2].split_once(' ').unwrap();
+            assert!((x.parse::<f64>().unwrap() - 0.5).abs() < 1e-12);
+            assert!((y.parse::<f64>().unwrap() - 0.7).abs() < 1e-12);
+            assert_eq!(points.last(), Some(&"0.5 0.5"));
+        }
+        let fallback = show.show["slides"]["s3"]["items"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert!(!fallback.contains("--pptx-fill-paths"));
+        assert!(fallback.contains("gradient("));
+    }
+
+    #[test]
     fn imports_compound_contours_and_independent_fill_paths() {
         let files = archive(&[(
             "ppt/slides/slide1.xml",
@@ -2842,20 +3369,20 @@ mod tests {
                 <a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
                 <a:custGeom><a:pathLst>
                     <a:path w="100" h="100">
-                        <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+                        <a:moveTo><a:pt x="-10" y="0"/></a:moveTo>
                         <a:lnTo><a:pt x="100" y="0"/></a:lnTo>
                         <a:lnTo><a:pt x="100" y="100"/></a:lnTo>
-                        <a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/>
+                        <a:lnTo><a:pt x="-10" y="100"/></a:lnTo>
                         <a:moveTo><a:pt x="25" y="25"/></a:moveTo>
                         <a:lnTo><a:pt x="25" y="75"/></a:lnTo>
                         <a:lnTo><a:pt x="75" y="75"/></a:lnTo>
                         <a:lnTo><a:pt x="75" y="25"/></a:lnTo><a:close/>
                     </a:path>
                     <a:path fill="none"/>
-                    <a:path w="20" h="40">
+                    <a:path w="20" h="40" fill="darkenLess">
                         <a:moveTo><a:pt x="10" y="10"/></a:moveTo>
                         <a:lnTo><a:pt x="15" y="20"/></a:lnTo>
-                        <a:lnTo><a:pt x="10" y="30"/></a:lnTo><a:close/>
+                        <a:lnTo><a:pt x="10" y="30"/></a:lnTo>
                     </a:path>
                 </a:pathLst></a:custGeom>
                 <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
@@ -2865,8 +3392,9 @@ mod tests {
         let style = show.show["slides"]["s1"]["items"][0]["style"]
             .as_str()
             .unwrap();
-        assert!(style.contains("--pptx-fill-paths:0 0,1 0,1 1,0 1/0.25 0.25,0.25 0.75,0.75 0.75,0.75 0.25|0.5 0.25,0.75 0.5,0.5 0.75;"));
+        assert!(style.contains("--pptx-fill-paths:-0.1 0,1 0,1 1,-0.1 1/0.25 0.25,0.25 0.75,0.75 0.75,0.75 0.25|0.5 0.25,0.75 0.5,0.5 0.75;"));
         assert!(style.contains("background:#FF0000;"));
+        assert!(style.contains("--pptx-path-shades:0 -20;"));
     }
 
     #[test]
