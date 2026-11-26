@@ -1415,6 +1415,11 @@ impl ShowFile {
         self.slides_in_layout(&self.active_layout())
     }
 
+    /// Slide IDs in the same order as `ordered_slides`, including repeated occurrences.
+    pub fn ordered_slide_ids(&self) -> Vec<&str> {
+        self.slide_ids_in_layout(&self.active_layout())
+    }
+
     /// The transition stored on this layout position. A child uses its own
     /// entry under the parent layout slide. An empty value means the library
     /// transition still applies.
@@ -3137,43 +3142,47 @@ impl ShowFile {
     }
 
     fn slides_in_layout(&self, layout_id: &str) -> Vec<SlideView> {
-        let stored = self.slides();
-        let Some(order) = self
-            .show
-            .pointer(&format!("/layouts/{layout_id}/slides"))
-            .and_then(Value::as_array)
-        else {
-            return stored;
-        };
-        if order.is_empty() {
-            return stored;
-        }
-        let by_id: std::collections::HashMap<String, SlideView> = stored
+        let by_id: std::collections::HashMap<String, SlideView> = self
+            .slides()
             .into_iter()
             .map(|slide| (slide.id.clone(), slide))
             .collect();
+        self.slide_ids_in_layout(layout_id)
+            .into_iter()
+            .filter_map(|id| by_id.get(id).cloned())
+            .collect()
+    }
+
+    fn slide_ids_in_layout(&self, layout_id: &str) -> Vec<&str> {
+        let Some(stored) = self.show.get("slides").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let Some(order) = self
+            .show
+            .get("layouts")
+            .and_then(|layouts| layouts.get(layout_id))
+            .and_then(|layout| layout.get("slides"))
+            .and_then(Value::as_array)
+            .filter(|order| !order.is_empty())
+        else {
+            return stored.keys().map(String::as_str).collect();
+        };
         let mut slides = Vec::new();
         for entry in order {
             let Some(id) = entry.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if let Some(slide) = by_id.get(id) {
-                slides.push(slide.clone());
-            }
-            let Some(children) = self
-                .show
-                .pointer(&format!("/slides/{id}/children"))
-                .and_then(Value::as_array)
-            else {
+            let Some(slide) = stored.get(id) else {
                 continue;
             };
-            for child in children {
-                let Some(child_id) = child.as_str() else {
-                    continue;
-                };
-                if let Some(slide) = by_id.get(child_id) {
-                    slides.push(slide.clone());
-                }
+            slides.push(id);
+            if let Some(children) = slide.get("children").and_then(Value::as_array) {
+                slides.extend(
+                    children
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|&child| stored.contains_key(child)),
+                );
             }
         }
         slides
