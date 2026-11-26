@@ -3974,8 +3974,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(err) => tracing::warn!("show text was not exported: {err}"),
                     },
                     15 => match current.export_current_show_pdf() {
-                        Ok(path) => tracing::info!("exported show PDF to {}", path.display()),
-                        Err(err) => tracing::warn!("show PDF was not exported: {err}"),
+                        Ok(path) => {
+                            current.notice = format!("Exported PDF to {}", path.display());
+                            tracing::info!("exported show PDF to {}", path.display());
+                        }
+                        Err(err) => {
+                            current.notice = format!("PDF export failed: {err}");
+                            tracing::warn!("show PDF was not exported: {err}");
+                        }
                     },
                     16 => match current.export_current_project_package() {
                         Ok((path, warnings)) => {
@@ -3995,8 +4001,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     17 => {
                         let frame = audience_frame(&current);
                         match current.export_screenshot(&frame) {
-                            Ok(path) => tracing::info!("saved screenshot to {}", path.display()),
-                            Err(err) => tracing::warn!("screenshot was not saved: {err}"),
+                            Ok(path) => {
+                                current.notice = format!("Saved screenshot to {}", path.display());
+                                tracing::info!("saved screenshot to {}", path.display());
+                            }
+                            Err(err) => {
+                                current.notice = format!("Screenshot failed: {err}");
+                                tracing::warn!("screenshot was not saved: {err}");
+                            }
                         }
                     }
                     18 => current.toggle_metronome(),

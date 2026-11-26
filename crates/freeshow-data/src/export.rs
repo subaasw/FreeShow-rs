@@ -208,14 +208,21 @@ fn page_stream(heading: &str, lines: &[String]) -> String {
 }
 
 fn pdf_text(text: &str) -> String {
-    let escaped = text
-        .chars()
-        .filter(|ch| *ch >= ' ' && *ch != '\u{7f}' && *ch <= '~')
-        .map(|ch| match ch {
-            '(' | ')' | '\\' => format!("\\{ch}"),
-            other => other.to_string(),
-        })
-        .collect::<String>();
+    // Helvetica uses WinAnsi; keep Latin-1 as octal escapes and replace other scripts.
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        match ch {
+            '(' | ')' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            ' '..='~' => escaped.push(ch),
+            c if (c as u32) <= 0xff && c != '\u{7f}' => {
+                escaped.push_str(&format!("\\{:03o}", c as u8));
+            }
+            _ => escaped.push('?'),
+        }
+    }
     format!("({escaped})")
 }
 
@@ -243,6 +250,8 @@ mod tests {
         assert!(text.contains("Amazing Grace"));
         assert!(text.contains("Praise God"));
         assert!(text.contains("%%EOF"));
+        assert_eq!(pdf_text("café"), "(caf\\351)");
+        assert_eq!(pdf_text("你好"), "(??)");
 
         let mut projects = ProjectsFile::empty();
         let body = json!({
