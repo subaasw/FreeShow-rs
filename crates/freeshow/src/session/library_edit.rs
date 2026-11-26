@@ -409,7 +409,18 @@ impl Session {
             });
         }
         let mut message = format!("Imported {}", parts.join(", "));
+        if songs > 0 && shows == 0 {
+            message = if notes
+                .iter()
+                .any(|note| note.contains("save as .pptx") || note.contains("pdftoppm"))
+            {
+                "Import did not add a show".into()
+            } else {
+                format!("{message} (no new shows; a show with that name may exist already)")
+            };
+        }
         if let Some(first) = notes.first() {
+            let first = first.rsplit(['/', '\\']).next().unwrap_or(first);
             message.push_str(&format!(" · {first}"));
             if notes.len() > 1 {
                 message.push_str(&format!(" · {} more in the log", notes.len() - 1));
