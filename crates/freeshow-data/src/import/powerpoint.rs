@@ -863,19 +863,35 @@ impl SlideObject {
         let mut dash_style = String::new();
         if let Some(stroke) = self.style.connector.take() {
             let size = [self.width / stroke.width[0], self.height / stroke.width[1]];
-            let segments = connector_segments(&stroke.route, size)?;
+            let segments = connector_segments(&stroke.route.points, size)?;
             let head = segments.first()?;
             let tail = segments.last()?;
             let length = tail.phase + tail.length;
             let trim = stroke.markers.map(|marker| marker.map_or(0.0, marker_trim));
-            let from = trim[0].min(head.length / 2.0);
-            let to = tail.length - trim[1].min(tail.length / 2.0);
+            let (shaft, from, to) = if stroke.route.curved {
+                // A marker can cover several of the short segments used to flatten a curve.
+                let start = trim[0].min(length / 3.0);
+                let end = length - trim[1].min(length / 3.0);
+                let first = segments.partition_point(|part| part.phase + part.length <= start);
+                let last = segments.partition_point(|part| part.phase < end) - 1;
+                (
+                    &segments[first..=last],
+                    start - segments[first].phase,
+                    end - segments[last].phase,
+                )
+            } else {
+                (
+                    segments.as_slice(),
+                    trim[0].min(head.length / 2.0),
+                    tail.length - trim[1].min(tail.length / 2.0),
+                )
+            };
             let local = |[x, y]: [f64; 2]| [x * stroke.width[0], y * stroke.width[1]];
             let bands = stroke.compound.bands();
             let mut contours: Vec<Vec<_>> = bands
                 .iter()
                 .map(|&band| {
-                    connector_shaft(&segments, from, to, stroke.cap, band)
+                    connector_shaft(shaft, from, to, stroke.cap, band)
                         .into_iter()
                         .map(local)
                         .collect()
@@ -963,7 +979,7 @@ impl SlideObject {
             self.y -= pad_y;
             self.width = width;
             self.height = height;
-            self.flip_y ^= stroke.inverse;
+            self.flip_y ^= stroke.route.inverse;
         }
         let mut style = format!(
             "left:{}px;top:{}px;width:{}px;height:{}px;",
@@ -1253,15 +1269,16 @@ fn connector_shaft(
     let tail = &segments[segments.len() - 1];
     let joint = |pair: &[ConnectorSegment], across| {
         let (before, next) = (&pair[0], &pair[1]);
-        let [ux, uy] = before.unit;
-        // Parallel sections already share an edge. Perpendicular sections meet at a miter.
-        let perpendicular = (ux * next.unit[0] + uy * next.unit[1]).abs() < 1e-12;
-        let mut point = next.point(0.0, across);
-        if perpendicular {
-            point[0] -= uy * across;
-            point[1] += ux * across;
+        let ([ux, uy], [vx, vy]) = (before.unit, next.unit);
+        let denominator = 1.0 + ux * vx + uy * vy;
+        if denominator < 0.25 {
+            // Avoid extending a miter far past a tight reversal.
+            return next.point(0.0, across);
         }
-        point
+        [
+            next.origin[0] - (uy + vy) * across / denominator,
+            next.origin[1] + (ux + vx) * across / denominator,
+        ]
     };
     let joints = segments.windows(2);
     let mut outline = Vec::new();
@@ -2933,6 +2950,84 @@ mod tests {
         let outside = items[2]["style"].as_str().unwrap();
         assert!(outside.starts_with("left:10px;top:20px;"));
         assert!(!outside.contains("--pptx-group-matrix"));
+    }
+
+    #[test]
+    fn imports_all_curved_connector_presets_using_saved_bends() {
+        let shapes = (2..=5)
+            .map(|preset| format!(r#"
+                <p:cxnSp><p:spPr>
+                  <a:xfrm flipH="1"><a:off x="2000000" y="3000000"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>
+                  <a:prstGeom prst="curvedConnector{preset}"><a:avLst>
+                    <a:gd name="adj1" fmla="val 25000"/><a:gd name="adj2" fmla="val 75000"/>
+                    <a:gd name="adj3" fmla="val 85000"/>
+                  </a:avLst></a:prstGeom>
+                  <a:ln w="200000" cap="rnd"><a:solidFill><a:srgbClr val="44AAFF"/></a:solidFill>
+                    <a:prstDash val="dash"/><a:headEnd type="triangle"/><a:tailEnd type="triangle"/>
+                  </a:ln>
+                </p:spPr></p:cxnSp>"#))
+            .collect::<String>();
+        let slide = format!(
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>"#
+        );
+        let files = archive(&[
+            ("ppt/presentation.xml", br#"<p:presentation xmlns:p="p"><p:sldSz cx="19200000" cy="10800000"/></p:presentation>"#),
+            ("ppt/slides/slide1.xml", slide.as_bytes()),
+        ]);
+        let show = import("Curves.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        for (item, bends) in items.iter().zip([
+            &[[0.6875, 0.3125]][..],
+            &[[0.25, 0.5]],
+            &[[0.25, 0.375], [0.625, 0.75]],
+            &[[0.25, 0.375], [0.55, 0.75], [0.85, 0.875]],
+        ]) {
+            let style = item["style"].as_str().unwrap();
+            assert!(style.contains("background:#44AAFF;"));
+            assert!(style.contains("--pptx-fill-flip-x:1;"));
+            let path = style
+                .split_once("--pptx-fill-paths:")
+                .unwrap()
+                .1
+                .split(';')
+                .next()
+                .unwrap();
+            assert_eq!(path.split('/').count(), 3);
+            assert!(
+                path.split('/')
+                    .all(|contour| contour.split(',').count() <= 128)
+            );
+            let dash = style.split_once("--pptx-line-dash:").unwrap().1;
+            let mut fields = dash.split_whitespace();
+            let mut number = || fields.next().unwrap().parse::<f64>().unwrap();
+            let (x, y, sx, sy) = (number(), number(), number(), number());
+            let turns = dash
+                .split_once("turns=")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .next()
+                .unwrap();
+            assert!((7..=48).contains(&turns.split(',').count()));
+            let route: Vec<_> = turns
+                .split(',')
+                .map(|turn| {
+                    let mut fields = turn.split(':');
+                    let mut number = || fields.next().unwrap().parse::<f64>().unwrap();
+                    [(number() - x) * sx / 20.0, (number() - y) * sy / 10.0]
+                })
+                .collect();
+            for &[bx, by] in bends {
+                assert!(
+                    route
+                        .iter()
+                        .any(|&[px, py]| (px - bx).abs() < 1e-8 && (py - by).abs() < 1e-8),
+                    "missing bend {:?} in {route:?}",
+                    [bx, by]
+                );
+            }
+        }
     }
 
     #[test]

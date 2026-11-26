@@ -4165,7 +4165,7 @@ impl LineDash {
                 let length = nums.next()??;
                 if nums.next().is_some()
                     || length <= 0.0
-                    || segments.len() == 5
+                    || segments.len() == 48
                     || !origin.into_iter().all(|n| (0.0..=1.0).contains(&n))
                     || !unit.into_iter().all(|n| (-1.0..=1.0).contains(&n))
                 {
@@ -5507,6 +5507,27 @@ mod tests {
         ] {
             assert_eq!(dash.contains(point), visible, "{point:?}");
         }
+    }
+
+    #[test]
+    fn powerpoint_dashes_render_after_the_fifth_route_segment() {
+        let mut slide = style_slide(concat!(
+            "left:0px;top:0px;width:100px;height:100px;background:#FF0000;",
+            "--pptx-fill-paths:0 0,1 0,1 1,0 1;",
+            "--pptx-line-dash:0.1 0.1 10 10 1 0 9 0 ",
+            "turns=0.1:0.1:1:0:1,0.2:0.1:1:0:1,0.3:0.1:1:0:1,",
+            "0.4:0.1:1:0:1,0.5:0.1:1:0:1,0.6:0.1:0:1:4 1 1;",
+        ));
+        slide.output_width = 100;
+        slide.output_height = 100;
+        slide.source_width = 100.0;
+        slide.source_height = 100.0;
+        let frame = render_styled(&slide);
+        assert_eq!(frame.pixel(60, 15), Rgba::BLACK);
+        assert_eq!(frame.pixel(60, 25).r, 255);
+        assert_eq!(frame.pixel(60, 35), Rgba::BLACK);
+        assert_eq!(frame.pixel(60, 45).r, 255);
+        assert_eq!(frame.pixel(70, 25), Rgba::BLACK);
     }
 
     #[test]
