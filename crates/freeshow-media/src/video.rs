@@ -521,6 +521,10 @@ mod gst_player {
         }
     }
 
+    pub fn video_default_audio_sink_available() -> bool {
+        gst::init().is_ok() && gst::ElementFactory::find("autoaudiosink").is_some()
+    }
+
     struct AudioBranch {
         bin: gst::Bin,
         volume: gst::Element,
@@ -1330,7 +1334,9 @@ mod gst_player {
 }
 
 #[cfg(feature = "gst")]
-pub use gst_player::{VideoPlayer, cameras, video_output_devices, video_thumbnail};
+pub use gst_player::{
+    VideoPlayer, cameras, video_default_audio_sink_available, video_output_devices, video_thumbnail,
+};
 
 /// Without GStreamer there is no decoder, so videos keep their placeholder icon.
 #[cfg(not(feature = "gst"))]
@@ -1429,6 +1435,11 @@ pub fn cameras() -> Vec<String> {
 #[cfg(not(feature = "gst"))]
 pub fn video_output_devices() -> Vec<String> {
     Vec::new()
+}
+
+#[cfg(not(feature = "gst"))]
+pub fn video_default_audio_sink_available() -> bool {
+    false
 }
 
 #[cfg(all(test, feature = "gst"))]

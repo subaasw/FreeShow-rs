@@ -732,6 +732,38 @@ pub fn output_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone)]
+pub struct AudioOutputDevice {
+    pub name: String,
+    pub max_channels: Option<u16>,
+}
+
+/// Inspect device names and channel capabilities without opening a playback stream.
+pub fn audio_output_inventory() -> (Option<AudioOutputDevice>, Vec<AudioOutputDevice>) {
+    let host = cpal::default_host();
+    let describe = |device: cpal::Device| {
+        let name = device.name().ok()?;
+        let default = device
+            .default_output_config()
+            .ok()
+            .map(|config| config.channels());
+        let max_channels = default.map(|default| {
+            device
+                .supported_output_configs()
+                .ok()
+                .and_then(|configs| configs.map(|config| config.channels()).max())
+                .map_or(default, |supported| supported.max(default))
+        });
+        Some(AudioOutputDevice { name, max_channels })
+    };
+    let default = host.default_output_device().and_then(describe);
+    let devices = host.output_devices().map_or_else(
+        |_| Vec::new(),
+        |devices| devices.filter_map(describe).collect(),
+    );
+    (default, devices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
