@@ -90,19 +90,26 @@ The first implementation adds a taken-slide snapshot for audience, stage, and re
 
 ### D1. Target the right document when undoing
 
-- [ ] Resolve the pending history entry by show ID before capturing the inverse edit. Resolve slide selection by identity where possible. Remove restoration by an old list index. Reordering or deleting entries must never write into another show.
-- [ ] Stage the replacement and use the existing file write path before moving the undo/redo entries. A failed undo or redo leaves the cursor, in-memory document, and file unchanged and surfaces the error. For a failed new edit, retain the user's input as a recoverable draft through D2.
+- [x] Resolve undo and redo by show ID. Store the selected slide occurrence and layers for each saved version so replay restores the right editor focus after a move, duplicate, or show switch.
+- [x] Save the replacement before committing the undo or redo. A write failure leaves the selection, in-memory document, file, and history unchanged and surfaces the error. A failed new edit keeps the user's input as a recoverable draft through D2.
 - [ ] Extend the existing undo tests to check A → B → undo → redo, delete/reorder between edits, unsupported JSON fields, and a deterministic writer error. Compare actual JSON payloads, selected IDs, and history lengths.
-- [ ] Add gesture coalescing with E1. Pointer updates alter a transient preview, release commits once, and Escape discards the gesture. Confirm a redo survives a failed commit and clears after a successful divergent edit.
+- [x] Keep pointer previews separate from saved edits. Release commits once and Escape discards the gesture. Redo survives a failed save and discarding its draft when the saved show is unchanged. A new successful edit clears redo.
+- [x] Preserve a show’s current name in undo and redo after a rename. Refreshing the library drops history for externally changed or missing shows. Undo stays available for unaffected shows, and an unrelated import keeps pending timer edits.
 
 **Merge gate.** Reopen both files after cross-show undo/redo and compare their content. While the destination writer fails, retry the same entry successfully after recovery. Verify that the live program stays on its taken revision throughout.
 
 ### D2. Make recovery visible and testable
 
 - [ ] Track a saved revision and a dirty revision per document. If a write becomes asynchronous, use a single writer per destination and associate completion with its committed revision. Save failures keep the dirty indicator and actionable retry.
-- [x] Compare the saved file with the draft’s base before writing. Save as Copy opens an independent show for review, and Discard reloads the saved version when available. Recovery files live in `Backups/Drafts`. Recovery starts when a committed edit begins saving. Uncommitted typing and dragging can still be lost.
+- [x] Compare the saved file with the draft’s base before writing. Save as Copy opens an independent show for review, and Discard reloads the saved version when available. Recovery files live in `Backups/Drafts`. A drag starts recovery when released for saving.
 - [x] Automated checks inject a write failure, reopen with the journal present, and verify retry, copy, discard, and protection for a newer external edit.
+- [x] On operator-window close, retry writing drafts held in memory. Keep the window open if the draft still cannot be written so the operator can recover it.
+- [x] Tie pending slide and whole-show text to the show and layer where typing started. A change of selection keeps the text with its original target. If the saved show changed during typing, keep the text in recovery for **Save as copy**.
+- [x] Checkpoint buffered typing on a 300 ms timer while keeping routine autosave and undo coalesced. A child-process test exits before autosave, then recovers the latest checkpoint and verifies undo. The latest keystrokes can still be lost before the next checkpoint or if its write fails.
+- [x] Give **Show text** its own focused editor in the center pane. The macOS development build saved a typed edit to the original show after switching to another show, whose file stayed byte-for-byte identical.
 - [ ] Force-quit during an actual installed-app save and repeat the recovery walkthrough on the platform matrix.
+
+The macOS development build passed a close-and-reopen rehearsal with a disposable library. A file at `Backups/Drafts` blocked the journal write. The operator window stayed open until the obstruction was removed. The next close wrote the journal. Reopening and choosing **Retry save** saved the edited text and removed the journal.
 
 ## 4. Decisions with acceptance cases
 
@@ -117,6 +124,8 @@ The installed-app display matrix remains open. Rehearse with an overlapping slid
 Use the current Slint theme, spacing, and existing panels. Keep the center canvas dominant in Edit, with a single contextual toolbar and clear access to the layer list and inspector. For E1, prove a slide with overlapping text, picture, and shape can be edited by keyboard, by direct pointer manipulation, and by numeric fields. Hit testing and handles must agree at zoom-to-fit, crop/rotation, letterboxed viewports, and scaled displays. Focus returns to the edited item after a dialog closes. Test text shortcuts separately from live shortcuts.
 
 E2 now saves groups that can be moved, aligned as a unit, resized proportionally from the canvas, duplicated, and reopened from templates. Resizing scales layer boxes and text sizes around the visible selection outline's opposite corner. The Rust editor stores membership on ordinary FreeShow layers, and the compositor keeps their existing order. The slide text editor preserves run styles around an edit and keeps paragraph metadata on retained lines. Regression fixtures cover mixed typography, a rotated layer, retained picture crop, save and reopen, one-step Undo, template reuse, and isolation from the live slide. Fixed pixel decoration such as shadows and borders keeps its authored values.
+
+The Media library picker in Edit can add a still to an empty slide or replace the source of one unlocked picture layer. Replacement preserves the layer’s crop, effects, and animation. The regression verifies that the saved show changes only the picture source, Undo restores it, and the taken slide stays on air unchanged.
 
 The slide text field now applies weight, size, and color to a selected range. This uses the same transactional save and Undo as other slide edits. The regression covers a backward Unicode selection across mixed runs, pending words, a paragraph break, and a collapsed selection. The Edit canvas shows the result while the field remains a plain text input.
 
@@ -143,7 +152,14 @@ P1 separates template preview, Use as New, Apply Style, and named Save as Templa
 
 P2 writes local project media using the published `data.json` and `files` layout. The Rust gallery can also export and import an editable template on its own. A template-only share removes private notes from its designs. Project shares retain stage notes. Export and import carry warnings for non-bundled named fonts and missing, external, or protected media. Import handles the hashed asset names used by the installed FreeShow 1.6.7 code. The import tests cover duplicate contents, basename collisions, shared show IDs, conflicting catalogs, Windows paths, and rollback after an injected project save failure. A clean Rust library can take a bundled picture and decode the bundled project video after the sender’s library is removed. The installed reference FreeShow check and cross-platform import rehearsal remain open. [FreeShow project format](https://freeshow.app/docs/format-project)
 
-A1 previews local pictures and video off air and with no audio routes. The Media drawer finds and relinks missing files in the open show or current project. The replacement is stored locally and show edits use undo and recovery. **Download video** fetches an authorized direct file in the background, reports progress, and lets operators cancel or retry. A completed file enters the library after a local frame decode, with collision-safe naming and origin-only credit. Startup and retry clean abandoned staging files while a per-library lock protects active transfers. Disk-full errors tell the operator to free space and retry. A cross-platform rehearsal and a disk-full drill on a constrained volume remain open. YouTube downloading remains a separate research item. See the [media plan](IMPLEMENTATION_PLAN.md#4-media-output-and-integrations).
+A1 previews local pictures and video off air and with no audio routes. The Media drawer finds and relinks missing files in the open show or current project. The replacement is stored locally and show edits use undo and recovery. **Download video** fetches an authorized direct file in the background, reports progress, and lets operators cancel or retry. A completed file enters the library after a local frame decode, with collision-safe naming and origin-only credit. Startup and retry clean abandoned staging files while a per-library lock protects active transfers. The disk-full drill uses a disposable 32 MiB volume. It checks the operator message, partial file cleanup, preservation of existing media, and playback after retry. The cross-platform rehearsal remains open. YouTube downloading remains a separate research item. See the [media plan](IMPLEMENTATION_PLAN.md#4-media-output-and-integrations).
+
+Run the disk-full drill with a mounted disposable volume. The test creates its own temporary files and caps its fill at 48 MiB.
+
+```sh
+FREESHOW_TEST_DOWNLOAD_VOLUME=/path/to/disposable-volume \
+  cargo test --locked -p freeshow media_download::tests::disk_full_download_cleans_staging_and_can_retry -- --ignored --exact
+```
 
 ### Output setup and rejoin
 
