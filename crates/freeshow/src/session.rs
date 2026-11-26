@@ -1510,18 +1510,7 @@ impl Session {
         match self.tab.as_str() {
             "shows" => {
                 if index < self.shows.len() {
-                    self.hold_program();
-                    let changed = self.show_index != Some(index);
-                    self.show_index = Some(index);
-                    // Opening a show picks no slide; the first Next or a click presents one.
-                    if changed {
-                        self.slide_index = None;
-                        self.layer_selection = None;
-                    }
-                    self.project_picked = false;
-                    if changed {
-                        self.load_timeline();
-                    }
+                    self.select_show_slot(index);
                 }
                 DrawerAction::None
             }
@@ -1546,6 +1535,18 @@ impl Session {
             "audio" => self.choose_audio(index),
             "overlays" => self.toggle_overlay(index),
             _ => DrawerAction::None,
+        }
+    }
+
+    fn select_show_slot(&mut self, index: usize) {
+        self.hold_program();
+        self.project_picked = false;
+        if self.show_index != Some(index) {
+            self.show_index = Some(index);
+            // Opening a show leaves the slide unselected until Next or a click.
+            self.slide_index = None;
+            self.layer_selection = None;
+            self.load_timeline();
         }
     }
 
@@ -4551,22 +4552,32 @@ impl Session {
         self.program_held = false;
     }
 
-    pub fn select_slide(&mut self, index: usize) {
-        if self.preferences.out_locked() {
-            return;
+    fn show_has_slide(&self, index: usize) -> bool {
+        self.current_show()
+            .is_some_and(|show| index < show.ordered_slides().len())
+    }
+
+    pub fn select_slide(&mut self, index: usize) -> bool {
+        let scripture = self.tab == "scripture";
+        if self.preferences.out_locked()
+            || if scripture {
+                index >= self.verse_hits.len()
+            } else {
+                !self.show_has_slide(index)
+            }
+        {
+            return false;
         }
+        self.take_slide(index, scripture);
+        true
+    }
+
+    fn take_slide(&mut self, index: usize, scripture: bool) {
         self.go_live();
         self.slide_hidden = false;
-        if self.tab == "scripture" {
-            if index < self.verse_hits.len() {
-                self.verse_index = Some(index);
-            }
-            return;
-        }
-        if self
-            .current_show()
-            .is_some_and(|show| index < show.ordered_slides().len())
-        {
+        if scripture {
+            self.verse_index = Some(index);
+        } else {
             self.slide_index = Some(index);
             self.reveal_count = 0;
             self.click_revealed = false;
@@ -5055,21 +5066,49 @@ impl Session {
         }
     }
 
-    pub fn apply_remote(&mut self, command: freeshow_remote::Command) {
+    pub fn apply_remote(&mut self, command: freeshow_remote::Command) -> bool {
         match command {
             freeshow_remote::Command::SetShow(index) => {
-                self.tab = "shows".to_string();
-                self.select_drawer(index);
-                if self.slide_index.is_none() {
-                    self.slide_index = self.first_slide();
-                    self.apply_slide_background();
+                if self.preferences.out_locked() || index >= self.shows.len() {
+                    return false;
                 }
-                self.go_live();
+                self.tab = "shows".to_string();
+                self.select_show_slot(index);
+                if self.slide_index.is_none()
+                    && let Some(index) = self.first_slide()
+                {
+                    self.take_slide(index, false);
+                } else {
+                    self.go_live();
+                }
             }
             freeshow_remote::Command::SetSlide(index) => {
+                if self.preferences.out_locked() {
+                    return false;
+                }
+                // The phone's slide index belongs to the show it reads back from program.
+                let slot = if self.program_held && !self.blanked && !self.slide_hidden {
+                    match self.program_content.borrow().as_ref() {
+                        Some(crate::live::ProgramContent::Slide { show_id, .. }) => {
+                            self.shows.iter().position(|show| &show.id == show_id)
+                        }
+                        _ => self.show_index,
+                    }
+                } else {
+                    self.show_index
+                };
+                let Some(slot) = slot.filter(|&slot| {
+                    self.shows
+                        .get(slot)
+                        .is_some_and(|show| index < show.ordered_slides().len())
+                }) else {
+                    return false;
+                };
                 self.tab = "shows".to_string();
-                self.blanked = false;
-                self.select_slide(index);
+                if self.show_index != Some(slot) {
+                    self.select_show_slot(slot);
+                }
+                self.take_slide(index, false);
             }
             freeshow_remote::Command::OpenProjectItem { index, slide } => {
                 let _ = self.open_project_item(index, slide);
@@ -5082,7 +5121,7 @@ impl Session {
             }
             freeshow_remote::Command::ClearBackground => {
                 if self.preferences.out_locked() {
-                    return;
+                    return false;
                 }
                 self.replace_underlay(None);
                 self.reset_background_look();
@@ -5099,13 +5138,13 @@ impl Session {
             }
             freeshow_remote::Command::ClearOverlay { id } => {
                 if self.preferences.out_locked() || self.overlay_is_locked(&id) {
-                    return;
+                    return false;
                 }
                 self.active_overlays.retain(|active| active != &id);
             }
             freeshow_remote::Command::ClearOverlays => {
                 if self.preferences.out_locked() {
-                    return;
+                    return false;
                 }
                 self.active_overlays.clear();
                 self.restore_locked_overlays();
@@ -5247,6 +5286,7 @@ impl Session {
                 }
             }
         }
+        true
     }
 
     pub fn step_slide(&mut self, delta: isize) {

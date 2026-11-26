@@ -2354,6 +2354,82 @@ mod tests {
     }
 
     #[test]
+    fn rejected_takes_leave_the_held_or_cleared_picture_intact() {
+        use freeshow_remote::Command;
+        let mut session = Session::empty();
+        session.tab = "shows".into();
+        session.output_width = 320;
+        session.output_height = 180;
+        let mut show = ShowFile::blank("a", "A");
+        assert!(show.replace_lyrics_with_split("On air\n\nOff air", false, 0));
+        session.shows.push(show);
+        session.show_index = Some(0);
+        assert!(session.select_slide(0));
+        let before = audience_frame(&session);
+
+        session.select_slide_for_edit(1);
+        assert!(!session.select_slide(99));
+        assert!(!session.apply_remote(Command::SetSlide(99)));
+        assert!(!session.apply_remote(Command::SetShow(99)));
+        assert!(session.program_held);
+        assert_eq!(session.slide_index, Some(1));
+        assert_eq!(audience_frame(&session).pixels, before.pixels);
+        assert_eq!(session.to_snapshot().taken_slide.unwrap().lines, ["On air"]);
+
+        assert!(session.clear_all_layers());
+        session.preferences.out_locked = Some(true);
+        assert!(!session.apply_remote(Command::SetSlide(1)));
+        assert!(!session.apply_remote(Command::SetShow(0)));
+        assert!(session.blanked);
+        assert!(session.to_snapshot().taken_slide.is_none());
+
+        session.preferences.out_locked = Some(false);
+        session.switch_tab("scripture");
+        assert!(!session.apply_remote(Command::SetSlide(99)));
+        assert_eq!(session.tab, "scripture");
+        assert!(session.blanked);
+        assert!(session.apply_remote(Command::SetSlide(1)));
+        audience_frame(&session);
+        assert_eq!(
+            session.to_snapshot().taken_slide.unwrap().lines,
+            ["Off air"]
+        );
+    }
+
+    #[test]
+    fn remote_show_indexes_ignore_operator_search() {
+        use freeshow_remote::Command;
+        let mut session = Session::empty();
+        session.tab = "shows".into();
+        let mut expected = ShowFile::blank("a", "Expected");
+        assert!(expected.replace_lyrics_with_split("First cue\n\nSecond cue", false, 0));
+        session.shows = vec![expected, ShowFile::blank("b", "Filtered")];
+        session.search_query = "Filtered".into();
+        assert_eq!(session.drawer_real_index(0), 1);
+        assert!(session.clear_all_layers());
+        assert!(session.apply_remote(Command::SetShow(0)));
+        capture_program_content(&session);
+        assert_eq!(session.show_index, Some(0));
+        assert_eq!(
+            session.to_snapshot().taken_slide.unwrap().lines,
+            ["First cue"]
+        );
+
+        session.select_drawer(0);
+        assert_eq!(session.show_index, Some(1));
+        assert!(session.program_held);
+        assert!(!session.apply_remote(Command::SetSlide(99)));
+        assert_eq!(session.show_index, Some(1));
+        assert!(session.apply_remote(Command::SetSlide(1)));
+        capture_program_content(&session);
+        assert_eq!(session.show_index, Some(0));
+        assert_eq!(
+            session.to_snapshot().taken_slide.unwrap().lines,
+            ["Second cue"]
+        );
+    }
+
+    #[test]
     fn clear_flushes_delayed_audience_frames() {
         let mut session = Session::empty();
         session.output_width = 1;
