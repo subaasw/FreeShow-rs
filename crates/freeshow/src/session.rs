@@ -15,6 +15,7 @@ use freeshow_data::{
 };
 use freeshow_media::{MediaKind, cameras, media_kind};
 
+use crate::live::SlideOccurrence;
 use crate::slide_countdown::SlideCountdown;
 
 mod drawer_edit;
@@ -88,9 +89,8 @@ struct PendingActions {
 
 struct PendingCueCompletion {
     due: Instant,
-    show_id: String,
-    layout_id: String,
-    index: usize,
+    cue: SlideOccurrence,
+    target: TimedCueTarget,
 }
 
 struct PendingCueActions {
@@ -1434,7 +1434,7 @@ impl Session {
             return None;
         }
         let live_show = match self.program_content.borrow().as_ref() {
-            Some(crate::live::ProgramContent::Slide { show_id, .. }) => show_id.clone(),
+            Some(crate::live::ProgramContent::Slide { cue, .. }) => cue.show_id.clone(),
             _ => return None,
         };
         let project = self.current_project()?;
@@ -3245,13 +3245,12 @@ impl Session {
                 .and_then(|show| self.slide_index.and_then(|index| show.next_timer_at(index)));
             self.pending_cue_completion = self.current_show().and_then(|show| {
                 let index = self.slide_index?;
-                show.timed_cue_target_at(index)?;
+                let target = show.timed_cue_target_at(index)?;
                 let duration = Duration::try_from_secs_f64(self.timed_seconds?).ok()?;
                 Some(PendingCueCompletion {
                     due: Instant::now().checked_add(duration)?,
-                    show_id: show.id.clone(),
-                    layout_id: show.active_layout(),
-                    index,
+                    cue: SlideOccurrence::at(show, index)?,
+                    target,
                 })
             });
             let backdrop = self
@@ -4506,6 +4505,17 @@ impl Session {
         {
             self.pending_cue_actions = None;
         }
+        if self.pending_cue_completion.as_ref().is_some_and(|pending| {
+            self.tab == "scripture"
+                || (self.program_held
+                    && self
+                        .current_show()
+                        .and_then(|show| pending.cue.index_in(show))
+                        .is_none_or(|index| self.slide_index != Some(index)))
+        }) {
+            self.pending_cue_completion = None;
+            self.timed_seconds = None;
+        }
         self.blanked = false;
         self.program_held = false;
     }
@@ -4525,19 +4535,17 @@ impl Session {
             return true;
         }
         let live = match self.program_content.borrow().as_ref() {
-            Some(
-                program @ crate::live::ProgramContent::Slide {
-                    show_id,
-                    reveal,
-                    clicks,
-                    page,
-                    ..
-                },
-            ) => {
-                let Some(slot) = self.shows.iter().position(|show| &show.id == show_id) else {
+            Some(crate::live::ProgramContent::Slide {
+                cue,
+                reveal,
+                clicks,
+                page,
+                ..
+            }) => {
+                let Some(slot) = self.shows.iter().position(|show| show.id == cue.show_id) else {
                     return false;
                 };
-                let Some(index) = program.slide_index_in(&self.shows[slot]) else {
+                let Some(index) = cue.index_in(&self.shows[slot]) else {
                     return false;
                 };
                 Some((slot, index, *reveal, *clicks, *page))
@@ -4912,19 +4920,12 @@ impl Session {
         let mut taken_slide = None;
         if !self.blanked
             && !self.slide_hidden
-            && let Some(
-                taken @ crate::live::ProgramContent::Slide {
-                    show_id,
-                    slide_id,
-                    slide,
-                    ..
-                },
-            ) = program.as_ref()
+            && let Some(crate::live::ProgramContent::Slide { cue, slide, .. }) = program.as_ref()
         {
-            show_index = self.shows.iter().position(|show| &show.id == show_id);
-            slide_index = show_index.and_then(|slot| taken.slide_index_in(&self.shows[slot]));
+            show_index = self.shows.iter().position(|show| show.id == cue.show_id);
+            slide_index = show_index.and_then(|slot| cue.index_in(&self.shows[slot]));
             taken_slide = Some(freeshow_remote::RemoteSlide {
-                id: slide_id.clone(),
+                id: cue.slide_id.clone(),
                 label: String::new(),
                 lines: freeshow_data::visible_slide_lines(&crate::live::program_slide_readback(
                     self, slide,
@@ -5115,8 +5116,8 @@ impl Session {
                 // The phone's slide index belongs to the show it reads back from program.
                 let slot = if self.program_held && !self.blanked && !self.slide_hidden {
                     match self.program_content.borrow().as_ref() {
-                        Some(crate::live::ProgramContent::Slide { show_id, .. }) => {
-                            self.shows.iter().position(|show| &show.id == show_id)
+                        Some(crate::live::ProgramContent::Slide { cue, .. }) => {
+                            self.shows.iter().position(|show| show.id == cue.show_id)
                         }
                         _ => self.show_index,
                     }
@@ -6028,40 +6029,47 @@ impl Session {
         let Some(pending) = &self.pending_cue_completion else {
             return false;
         };
-        let matching_show = self.current_show().filter(|show| {
-            self.tab == "shows"
-                && !self.blanked
-                && self.slide_index == Some(pending.index)
-                && show.id == pending.show_id
-                && show.active_layout() == pending.layout_id
-        });
-        let Some(show) = matching_show else {
+        if now < pending.due {
+            return false;
+        }
+        let matching_cue = self
+            .shows
+            .iter()
+            .enumerate()
+            .find(|(_, show)| show.id == pending.cue.show_id)
+            .and_then(|(slot, show)| {
+                let index = pending.cue.index_in(show)?;
+                let selected = self.tab == "shows"
+                    && self.show_index == Some(slot)
+                    && self.slide_index == Some(index);
+                (self.program_held || selected).then_some((slot, index))
+            })
+            .filter(|_| !self.blanked);
+        let Some((slot, index)) = matching_cue else {
             self.pending_cue_completion = None;
+            self.timed_seconds = None;
             return false;
         };
-        if now < pending.due
-            || self.waiting_for_layer_build()
-            || !self.automatic_build_remaining(now).is_zero()
-        {
+        if self.waiting_for_layer_build() || !self.automatic_build_remaining(now).is_zero() {
             return false;
         }
         let (output_id, output_name) = self.audience();
-        let next = match show.timed_cue_target_at(pending.index) {
-            Some(TimedCueTarget::First) => show.first_output(&output_id, &output_name),
-            Some(TimedCueTarget::Next) => {
-                show.step_output(pending.index, 1, &output_id, &output_name)
-            }
-            Some(TimedCueTarget::Slide(id)) => {
-                show.output_index_for_slide(&id, &output_id, &output_name)
-            }
-            None => None,
+        let show = &self.shows[slot];
+        let next = match &pending.target {
+            TimedCueTarget::First => show.first_output(&output_id, &output_name),
+            TimedCueTarget::Next => show.step_output(index, 1, &output_id, &output_name),
+            TimedCueTarget::Slide(id) => show.output_index_for_slide(id, &output_id, &output_name),
         };
         self.pending_cue_completion = None;
+        self.timed_seconds = None;
         let Some(next) = next.filter(|_| !self.preferences.out_locked()) else {
             return false;
         };
-        self.select_slide(next);
-        true
+        self.tab = "shows".to_string();
+        if self.show_index != Some(slot) {
+            self.select_show_slot(slot);
+        }
+        self.select_slide(next)
     }
 
     /// The next slide in this song, the next picture in a folder, or the next project item.
@@ -6850,7 +6858,7 @@ impl Session {
     fn hold_edited_program(&mut self, show_id: &str) {
         let on_air = matches!(
             self.program_content.borrow().as_ref(),
-            Some(crate::live::ProgramContent::Slide { show_id: live, .. }) if live == show_id
+            Some(crate::live::ProgramContent::Slide { cue, .. }) if cue.show_id == show_id
         );
         if on_air {
             self.hold_program();
@@ -6864,14 +6872,14 @@ impl Session {
         }
         let show = self.current_show()?;
         let program = self.program_content.borrow();
-        let taken @ crate::live::ProgramContent::Slide { slide_id, .. } = program.as_ref()? else {
+        let crate::live::ProgramContent::Slide { cue, .. } = program.as_ref()? else {
             return None;
         };
         let index = self.slide_index?;
-        if taken.slide_index_in(show) != Some(index) {
+        if cue.index_in(show) != Some(index) {
             return None;
         }
-        show.show.get("slides")?.get(slide_id)
+        show.show.get("slides")?.get(&cue.slide_id)
     }
 
     pub fn can_update_live_slide(&self) -> bool {
@@ -10354,6 +10362,73 @@ Second line"
         assert!(!session.run_due_cue_completion(due));
         assert_eq!(session.slide_index, Some(2));
         assert!(!session.has_pending_cue_completion());
+    }
+
+    #[test]
+    fn timed_next_follows_its_moved_cue_while_previewing_another_show() {
+        let mut session = Session::empty();
+        let mut show = ShowFile::blank("timed", "Timed");
+        for _ in 0..3 {
+            show.add_slide().unwrap();
+        }
+        let order = &mut show.show["layouts"]["main"]["slides"];
+        order[1]["nextTimer"] = serde_json::json!(2);
+        order[1]["nextTimerTarget"] = serde_json::json!("next");
+        let next_id = show.ordered_slides()[3].id.clone();
+        session.shows = vec![show, ShowFile::blank("preview", "Preview")];
+        session.show_index = Some(0);
+        assert!(session.select_slide(1));
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        crate::live::capture_program_content(&session);
+
+        session.select_show_slot(1);
+        assert_eq!(session.shows[0].move_slide_at(1, 1), Some(2));
+        assert!(!session.run_due_cue_completion(due - Duration::from_millis(1)));
+        assert_eq!(session.show_index, Some(1));
+        assert!(session.run_due_cue_completion(due));
+        assert_eq!(session.show_index, Some(0));
+        assert_eq!(session.slide_index, Some(3));
+        assert_eq!(session.shows[0].ordered_slides()[3].id, next_id);
+
+        assert!(session.select_slide(2));
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        assert!(
+            session.apply_remote(freeshow_remote::Command::PresentVerse {
+                reference: "John 1:1".into(),
+                text: "In the beginning".into(),
+            })
+        );
+        session.switch_tab("shows");
+        session.select_show_slot(1);
+        assert!(!session.run_due_cue_completion(due));
+        assert_eq!(session.show_index, Some(1));
+    }
+
+    #[test]
+    fn timed_next_cancels_when_its_cue_is_removed() {
+        let mut session = Session::empty();
+        let mut show = ShowFile::blank("timed", "Timed");
+        show.add_slide().unwrap();
+        show.add_slide().unwrap();
+        let order = &mut show.show["layouts"]["main"]["slides"];
+        order[0]["nextTimer"] = serde_json::json!(2);
+        order[0]["nextTimerTarget"] = serde_json::json!("next");
+        session.shows.push(show);
+        session.show_index = Some(0);
+        assert!(session.select_slide(0));
+        crate::live::capture_program_content(&session);
+        let due = session.pending_cue_completion.as_ref().unwrap().due;
+        let taken_id = session.to_snapshot().taken_slide.unwrap().id;
+
+        session.select_slide_for_edit(1);
+        session.shows[0].show["layouts"]["main"]["slides"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        assert!(!session.run_due_cue_completion(due));
+        assert!(!session.has_pending_cue_completion());
+        assert_eq!(session.next_timer_seconds(), None);
+        assert_eq!(session.to_snapshot().taken_slide.unwrap().id, taken_id);
     }
 
     #[test]
