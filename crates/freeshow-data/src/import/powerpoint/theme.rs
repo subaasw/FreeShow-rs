@@ -948,24 +948,43 @@ pub(super) struct ObjectStyle {
 pub(super) struct ConnectorStroke {
     pub width: [f64; 2],
     pub color: String,
-    pub inverse: bool,
-    pub route: Vec<[f64; 2]>,
+    pub route: ConnectorRoute,
     pub cap: StrokeCap,
     pub dash: DashPattern,
     pub markers: [Option<StrokeMarker>; 2],
     pub compound: CompoundStroke,
 }
 
-fn connector_route(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<(bool, Vec<[f64; 2]>)> {
+pub(super) struct ConnectorRoute {
+    pub points: Vec<[f64; 2]>,
+    pub inverse: bool,
+    pub curved: bool,
+}
+
+fn connector_route(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<ConnectorRoute> {
     let geometry = child(properties, "prstGeom");
     let bend = |guide| {
         geometry.map_or(50_000.0, |geometry| {
             preset_adjustment(geometry, guide, 50_000.0)
         }) / 100_000.0
     };
-    let middle = match geometry.and_then(|geom| geom.attribute("prst")) {
-        Some("lineInv") => return Some((true, vec![[0.0, 0.0], [1.0, 1.0]])),
-        Some("line" | "straightConnector1") => Vec::new(),
+    let preset = geometry.and_then(|geom| geom.attribute("prst"));
+    if let Some(
+        preset
+        @ ("curvedConnector2" | "curvedConnector3" | "curvedConnector4" | "curvedConnector5"),
+    ) = preset
+    {
+        return Some(ConnectorRoute {
+            points: flatten_connector_curves(&curved_connector(
+                preset,
+                [bend("adj1"), bend("adj2"), bend("adj3")],
+            ))?,
+            inverse: false,
+            curved: true,
+        });
+    }
+    let middle = match preset {
+        Some("line" | "lineInv" | "straightConnector1") => Vec::new(),
         Some("bentConnector2") => vec![[1.0, 0.0]],
         Some("bentConnector3") => {
             let x = bend("adj1");
@@ -987,15 +1006,80 @@ fn connector_route(shape: Node<'_, '_>, properties: Node<'_, '_>) -> Option<(boo
     let mut route = vec![[0.0, 0.0]];
     route.extend(middle);
     route.push([1.0, 1.0]);
-    Some((false, route))
+    Some(ConnectorRoute {
+        points: route,
+        inverse: preset == Some("lineInv"),
+        curved: false,
+    })
 }
+
+// DrawingML preset geometry (ECMA-376 Part 1), in the connector box's coordinate space.
+fn curved_connector(preset: &str, [x, y, x2]: [f64; 3]) -> Vec<[[f64; 2]; 3]> {
+    let end = [1.0, 1.0];
+    let next_x = (x + 1.0) / 2.0;
+    match preset {
+        "curvedConnector2" => vec![[[0.5, 0.0], [1.0, 0.5], end]],
+        "curvedConnector3" => vec![
+            [[x / 2.0, 0.0], [x, 0.25], [x, 0.5]],
+            [[x, 0.75], [next_x, 1.0], end],
+        ],
+        "curvedConnector4" => vec![
+            [[x / 2.0, 0.0], [x, y / 4.0], [x, y / 2.0]],
+            [[x, 0.75 * y], [(x + next_x) / 2.0, y], [next_x, y]],
+            [[(next_x + 1.0) / 2.0, y], [1.0, (y + 1.0) / 2.0], end],
+        ],
+        _ => {
+            let mid_x = (x + x2) / 2.0;
+            let mid_y = (y + 1.0) / 2.0;
+            vec![
+                [[x / 2.0, 0.0], [x, y / 4.0], [x, y / 2.0]],
+                [[x, 0.75 * y], [(x + mid_x) / 2.0, y], [mid_x, y]],
+                [
+                    [(x2 + mid_x) / 2.0, y],
+                    [x2, (y + mid_y) / 2.0],
+                    [x2, mid_y],
+                ],
+                [[x2, (mid_y + 1.0) / 2.0], [(x2 + 1.0) / 2.0, 1.0], end],
+            ]
+        }
+    }
+}
+
+fn flatten_connector_curves(curves: &[[[f64; 2]; 3]]) -> Option<Vec<[f64; 2]>> {
+    // Normalize signed adjustments before flattening. The shaft polygon has two edges
+    // per segment and may use up to 34 extra points for round caps.
+    let scale = curves
+        .iter()
+        .flatten()
+        .flatten()
+        .fold(1.0_f64, |max, axis| max.max(axis.abs()));
+    for flatness in [PATH_FLATNESS, 1.0 / 512.0, 1.0 / 128.0, 1.0 / 32.0] {
+        let mut route = vec![[0.0, 0.0]];
+        let mut start = [0.0, 0.0];
+        let flattened = curves.iter().try_for_each(|&[a, b, end]| {
+            let curve = [start, a, b, end].map(|point| point.map(|axis| axis / scale));
+            start = end;
+            flatten_cubic_path(&mut route, curve, flatness, 0)
+        });
+        if flattened.is_some() && route.len() <= CONNECTOR_MAX_SEGMENTS + 1 {
+            for point in &mut route {
+                *point = point.map(|axis| axis * scale);
+            }
+            return Some(route);
+        }
+    }
+    None
+}
+
+// Keep this within the compositor's shaft polygon and dash turn limits.
+const CONNECTOR_MAX_SEGMENTS: usize = 48;
 
 fn connector_stroke(
     shape: Node<'_, '_>,
     properties: Node<'_, '_>,
     context: &Context,
     size: &SlideSize,
-    (inverse, route): (bool, Vec<[f64; 2]>),
+    route: ConnectorRoute,
 ) -> Option<ConnectorStroke> {
     let reference = child(shape, "style").and_then(|style| child(style, "lnRef"));
     let index = reference
@@ -1029,7 +1113,6 @@ fn connector_stroke(
     Some(ConnectorStroke {
         width,
         color,
-        inverse,
         route,
         cap: direct
             .cap
@@ -1905,7 +1988,7 @@ fn custom_path(
                 } else {
                     [current, first, second, point(points.next()?)?]
                 };
-                flatten_cubic_path(&mut polygon, curve, 0)?;
+                flatten_cubic_path(&mut polygon, curve, PATH_FLATNESS, 0)?;
             }
             _ => return None,
         }
@@ -2034,6 +2117,7 @@ fn lerp_path([ax, ay]: [f64; 2], [bx, by]: [f64; 2], t: f64) -> [f64; 2] {
 fn flatten_cubic_path(
     vertices: &mut Vec<[f64; 2]>,
     [a, b, c, d]: [[f64; 2]; 4],
+    flatness: f64,
     depth: u8,
 ) -> Option<()> {
     // Compare against the control points of a straight segment in the same parameter space.
@@ -2042,7 +2126,7 @@ fn flatten_cubic_path(
         control
             .into_iter()
             .zip(chord)
-            .all(|(p, q)| (p - q).abs() <= PATH_FLATNESS)
+            .all(|(p, q)| (p - q).abs() <= flatness)
     };
     if near(b, lerp_path(a, d, 1.0 / 3.0)) && near(c, lerp_path(a, d, 2.0 / 3.0)) {
         return push_path_vertex(vertices, d);
@@ -2056,8 +2140,8 @@ fn flatten_cubic_path(
     let abc = lerp_path(ab, bc, 0.5);
     let bcd = lerp_path(bc, cd, 0.5);
     let midpoint = lerp_path(abc, bcd, 0.5);
-    flatten_cubic_path(vertices, [a, ab, abc, midpoint], depth + 1)?;
-    flatten_cubic_path(vertices, [midpoint, bcd, cd, d], depth + 1)
+    flatten_cubic_path(vertices, [a, ab, abc, midpoint], flatness, depth + 1)?;
+    flatten_cubic_path(vertices, [midpoint, bcd, cd, d], flatness, depth + 1)
 }
 
 #[cfg(test)]
