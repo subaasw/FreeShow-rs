@@ -1577,6 +1577,60 @@ mod tests {
     }
 
     #[test]
+    fn imports_rtf_paragraph_indents_and_spacing_into_the_slide_text_box() {
+        let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
+        let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
+        let slide = presentation.cues[0].actions[0]
+            .slide
+            .as_mut()
+            .unwrap()
+            .presentation
+            .as_mut()
+            .unwrap();
+        slide.slide.as_mut().unwrap().elements[0]
+            .element
+            .as_mut()
+            .unwrap()
+            .text
+            .as_mut()
+            .unwrap()
+            .rtf =
+            concat!(
+                r"{\rtf1\pard\li400\ri200\fi-200\sb80\sa120\sl360\slmult1 First\line Continuation\uc0\u8232 Last line",
+                "\\\n",
+                r"{\pard\sl-480 Exact\par}{\pard\sl280 At least\par}\pard Unformatted}",
+            ).as_bytes().to_vec();
+        let show =
+            crate::import::import_show("Paragraphs.pro", &presentation.encode_to_vec()).unwrap();
+        let verse = &show.ordered_slides()[1];
+        assert_eq!(
+            verse.lines,
+            [
+                "First",
+                "Continuation",
+                "Last line",
+                "Exact",
+                "At least",
+                "Unformatted",
+                "Another text box"
+            ]
+        );
+        let rows = &show.show["slides"][&verse.id]["items"][0]["lines"];
+        assert_eq!(rows[0]["paragraphMargins"], json!([20, 10, -10]));
+        assert_eq!(rows[1]["paragraphMargins"], json!([20, 10, 0]));
+        assert_eq!(rows[0]["paragraphSpacing"], json!(["1.5lh", "4px", null]));
+        assert_eq!(rows[1]["paragraphSpacing"], json!(["1.5lh", null, null]));
+        assert_eq!(rows[2]["paragraphSpacing"], json!(["1.5lh", null, "6px"]));
+        assert_eq!(rows[3]["paragraphSpacing"], json!(["24px", null, null]));
+        assert_eq!(
+            rows[4]["paragraphSpacing"],
+            json!(["max(1lh,14px)", null, null])
+        );
+        assert!(rows[3].get("paragraphMargins").is_none());
+        assert!(rows[5].get("paragraphSpacing").is_none());
+    }
+
+    #[test]
     fn hidden_rtf_stays_out_of_imported_slides_and_notes() {
         let bytes = include_bytes!("../../tests/fixtures/propresenter7.pro");
         let mut presentation = wire::Presentation::decode(bytes.as_slice()).unwrap();
