@@ -20,6 +20,8 @@ cargo test --workspace --locked
 | `package-windows.yml` | called by `release.yml` | Tests, builds the MSVC release, packages and verifies the Inno Setup `.exe` without the GStreamer SDK. |
 | `package-macos.yml` | called by `release.yml` | Tests, builds and verifies the ad-hoc signed ARM64 `.app`/`.dmg`. |
 
+All three packagers run `--check-handoff` from the packaged launcher and include `portable_handoff` in the verification report. The check uses embedded fixtures and disposable libraries. It verifies the imported cue order, editable template, bundled pictures, and video with audio before and after relinking. Linux repeats it from the extracted release archive after removing the system GStreamer runtime.
+
 Each package job writes a `<asset>.sha256` sidecar (`<hex>  <file name>`). The
 publish job re-checks every sidecar with `sha256sum --check` and uploads the
 installers and sidecars to the GitHub release. The in-app updater
