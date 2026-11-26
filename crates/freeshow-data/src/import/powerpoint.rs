@@ -112,7 +112,8 @@ pub(super) fn import(
             return Err(invalid("expanded slide XML exceeds 64 MiB"));
         }
         let object_styles = themes.object_styles(&mut archive, part, &xml, &size)?;
-        let mut content = slide_content(&xml, &size, object_styles)?;
+        let placeholders = layout_placeholders(&mut archive, part, &size)?;
+        let mut content = slide_content(&xml, &size, object_styles, &placeholders)?;
         let lines = std::mem::take(&mut content.lines);
         let disabled = content.hidden;
         let found = find_background(&mut archive, &mut cached, part, Some(&xml), 0)?;
@@ -700,6 +701,20 @@ struct SlideObject {
     picture_id: Option<String>,
     src: Option<String>,
     linked: bool,
+    /// PowerPoint placeholder type (`title`, `body`, …); empty when the type attr is omitted.
+    ph_type: Option<String>,
+    ph_idx: u32,
+}
+
+#[derive(Clone, Copy)]
+struct PlaceholderBox {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    rotation: f64,
+    flip_x: bool,
+    flip_y: bool,
 }
 
 enum ObjectKind {
@@ -794,6 +809,43 @@ impl SlideContent {
 }
 
 impl SlideObject {
+    fn apply_placeholder(&mut self, placeholders: &HashMap<(String, u32), PlaceholderBox>) {
+        let Some(ph_type) = self.ph_type.as_ref() else {
+            return;
+        };
+        let kind = ph_type.to_ascii_lowercase();
+        let geom = placeholders
+            .get(&(kind.clone(), self.ph_idx))
+            .or_else(|| {
+                // Slide placeholders often omit type and only set idx.
+                if kind.is_empty() {
+                    placeholders
+                        .iter()
+                        .find(|((_, idx), _)| *idx == self.ph_idx)
+                        .map(|(_, value)| value)
+                } else {
+                    placeholders
+                        .iter()
+                        .find(|((entry, _), _)| entry == &kind)
+                        .map(|(_, value)| value)
+                }
+            });
+        let Some(geom) = geom else {
+            return;
+        };
+        if self.width <= 0.0 || self.height <= 0.0 {
+            self.x = geom.x;
+            self.y = geom.y;
+            self.width = geom.width;
+            self.height = geom.height;
+        }
+        if self.rotation == 0.0 {
+            self.rotation = geom.rotation;
+        }
+        self.flip_x |= geom.flip_x;
+        self.flip_y |= geom.flip_y;
+    }
+
     fn apply_group(&mut self, group: GroupTransform) {
         let [half_w, half_h] = [self.width / 2.0, self.height / 2.0];
         let [x, y] = group.point([self.x + half_w, self.y + half_h]);
@@ -915,10 +967,115 @@ impl SlideObject {
     }
 }
 
+fn layout_placeholders(
+    archive: &mut Archive<'_>,
+    slide_part: &str,
+    size: &SlideSize,
+) -> Result<HashMap<(String, u32), PlaceholderBox>, DataError> {
+    let layout = relationships(archive, slide_part)?
+        .into_iter()
+        .find(|rel| rel.kind == "slideLayout");
+    let Some(layout) = layout else {
+        return Ok(HashMap::new());
+    };
+    let mut map = HashMap::new();
+    if let Some(xml) = read_xml(archive, &layout.target)? {
+        collect_placeholders(&xml, size, &mut map)?;
+    }
+    if let Some(master) = relationships(archive, &layout.target)?
+        .into_iter()
+        .find(|rel| rel.kind == "slideMaster")
+        && let Some(xml) = read_xml(archive, &master.target)?
+    {
+        let mut master_map = HashMap::new();
+        collect_placeholders(&xml, size, &mut master_map)?;
+        for (key, value) in master_map {
+            map.entry(key).or_insert(value);
+        }
+    }
+    Ok(map)
+}
+
+fn collect_placeholders(
+    xml: &str,
+    size: &SlideSize,
+    map: &mut HashMap<(String, u32), PlaceholderBox>,
+) -> Result<(), DataError> {
+    use theme::child;
+
+    // Layout fixtures and some third-party decks omit xmlns; skip rather than fail the import.
+    let Ok(document) = roxmltree::Document::parse(xml) else {
+        return Ok(());
+    };
+    let Some(tree) = document
+        .root_element()
+        .descendants()
+        .find(|node| node.has_tag_name("spTree"))
+    else {
+        return Ok(());
+    };
+    for shape in tree.children().filter(|node| node.has_tag_name("sp")) {
+        let Some(ph) = child(shape, "nvSpPr")
+            .and_then(|node| child(node, "nvPr"))
+            .and_then(|node| child(node, "ph"))
+        else {
+            continue;
+        };
+        let ph_type = ph.attribute("type").unwrap_or("").to_ascii_lowercase();
+        let ph_idx = ph
+            .attribute("idx")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let Some(xfrm) = child(shape, "spPr").and_then(|node| child(node, "xfrm")) else {
+            continue;
+        };
+        let off = child(xfrm, "off");
+        let ext = child(xfrm, "ext");
+        let width = size.px_x(
+            ext.and_then(|node| node.attribute("cx")?.parse().ok())
+                .unwrap_or(0.0),
+        );
+        let height = size.px_y(
+            ext.and_then(|node| node.attribute("cy")?.parse().ok())
+                .unwrap_or(0.0),
+        );
+        if width <= 0.0 || height <= 0.0 {
+            continue;
+        }
+        let rot = xfrm
+            .attribute("rot")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 60_000.0
+            % 360.0;
+        let flipped = |key| matches!(xfrm.attribute(key), Some("1" | "true"));
+        map.insert(
+            (ph_type, ph_idx),
+            PlaceholderBox {
+                x: size.px_x(
+                    off.and_then(|node| node.attribute("x")?.parse().ok())
+                        .unwrap_or(0.0),
+                ),
+                y: size.px_y(
+                    off.and_then(|node| node.attribute("y")?.parse().ok())
+                        .unwrap_or(0.0),
+                ),
+                width,
+                height,
+                rotation: rot,
+                flip_x: flipped("flipH"),
+                flip_y: flipped("flipV"),
+            },
+        );
+    }
+    Ok(())
+}
+
 fn slide_content(
     xml: &str,
     size: &SlideSize,
     mut styles: HashMap<u64, ObjectStyle>,
+    placeholders: &HashMap<(String, u32), PlaceholderBox>,
 ) -> Result<SlideContent, DataError> {
     let (lines, hidden) = slide_text(xml)?;
     let mut reader = Reader::from_str(xml);
@@ -999,6 +1156,8 @@ fn slide_content(
                             picture_id: None,
                             src: None,
                             linked: false,
+                            ph_type: None,
+                            ph_idx: 0,
                         });
                     }
                     (Some("spTree" | "grpSp"), "graphicFrame") if in_tree => {
@@ -1075,6 +1234,13 @@ fn slide_content(
                         }
                         (Some("blipFill"), "tile") => object.tile = true,
                         (Some("blipFill"), "srcRect") => object.crop = percentages(&element),
+                        (_, "ph") => {
+                            object.ph_type =
+                                Some(attribute(&element, "type").unwrap_or_default());
+                            object.ph_idx = attribute(&element, "idx")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0);
+                        }
                         (_, "p") => paragraph = true,
                         (_, "t") => capture = true,
                         (_, "br") if paragraph => text.push('\n'),
@@ -1117,6 +1283,9 @@ fn slide_content(
                     && stack.last().map(String::as_str) == Some(name.as_str())
                     && let Some(mut object) = current.take()
                 {
+                    if object.width <= 0.0 || object.height <= 0.0 {
+                        object.apply_placeholder(placeholders);
+                    }
                     let has_text = object.style.text.is_some() || !object.lines.is_empty();
                     if matches!(object.kind, ObjectKind::Shape) && has_text {
                         object.kind = ObjectKind::Text;
@@ -1654,6 +1823,79 @@ mod tests {
     }
 
     #[test]
+    fn zero_size_shapes_inherit_layout_placeholder_geometry() {
+        let files = archive(&[
+            (
+                "ppt/presentation.xml",
+                br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst>
+                    <p:sldId id="256" r:id="rId1"/>
+                </p:sldIdLst><p:sldSz cx="1000" cy="750"/></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                br#"<Relationships>
+                    <Relationship Id="rId1" Type="o/slide" Target="slides/slide1.xml"/>
+                </Relationships>"#,
+            ),
+            (
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                    <p:sp>
+                        <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+                        <p:spPr/>
+                        <p:txBody><a:p><a:r><a:t>Hello</a:t></a:r></a:p></p:txBody>
+                    </p:sp>
+                    <p:sp>
+                        <p:nvSpPr><p:cNvPr id="3" name="Body"/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+                        <p:spPr/>
+                        <p:txBody><a:p><a:r><a:t>World</a:t></a:r></a:p></p:txBody>
+                    </p:sp>
+                </p:spTree></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                br#"<Relationships><Relationship Id="l" Type="o/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/slideLayouts/slideLayout1.xml",
+                br#"<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+                    <p:sp>
+                        <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+                        <p:spPr><a:xfrm><a:off x="100" y="50"/><a:ext cx="800" cy="120"/></a:xfrm></p:spPr>
+                    </p:sp>
+                    <p:sp>
+                        <p:nvSpPr><p:cNvPr id="3" name="Body"/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+                        <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="800" cy="400"/></a:xfrm></p:spPr>
+                    </p:sp>
+                </p:spTree></p:cSld></p:sldLayout>"#,
+            ),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                br#"<Relationships><Relationship Id="m" Type="o/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/slideMasters/slideMaster1.xml",
+                br#"<p:sldMaster xmlns:p="p"><p:cSld/></p:sldMaster>"#,
+            ),
+        ]);
+        let show = import("Placeholders.pptx", &files, None).unwrap();
+        let items = show.show["slides"]["s1"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let title = items[0]["style"].as_str().unwrap();
+        let body = items[1]["style"].as_str().unwrap();
+        assert!(title.contains("left:192px"), "{title}");
+        assert!(title.contains("top:96px"), "{title}");
+        assert!(title.contains("width:1536px"), "{title}");
+        assert!(title.contains("height:230px"), "{title}");
+        assert!(body.contains("left:192px"), "{body}");
+        assert!(body.contains("top:384px"), "{body}");
+        assert!(body.contains("width:1536px"), "{body}");
+        assert!(body.contains("height:768px"), "{body}");
+        assert_eq!(items[0]["lines"][0]["text"][0]["value"], "Hello");
+        assert_eq!(items[1]["lines"][0]["text"][0]["value"], "World");
+    }
+
+    #[test]
     fn solid_theme_fills_follow_the_slide_color_map_and_style_index() {
         let slides = [
             r#"<p:sld xmlns:p="p" xmlns:a="a"><p:clrMapOvr><a:overrideClrMapping bg1="accent2"/></p:clrMapOvr></p:sld>"#,
@@ -1718,7 +1960,8 @@ mod tests {
         let library = crate::Library::open(&path);
         fs::create_dir_all(library.imports_dir()).unwrap();
         fs::write(library.imports_dir().join("Sunday.pptx"), deck()).unwrap();
-        assert!(library.import_show_sources().unwrap().is_empty());
+        let warnings = library.import_show_sources().unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         let show = library.list_shows().unwrap().remove(0);
         let slides = show.ordered_slides();
         assert_eq!(slides[0].lines, ["Master", "image"]);
