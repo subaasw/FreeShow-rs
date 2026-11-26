@@ -173,8 +173,32 @@ fn anchors(start: i64, end: i64) -> [i64; 3] {
     [start, start + (end - start) / 2, end]
 }
 
+pub(super) fn layer_name(show: &ShowFile, slide: &str, index: usize, item: &Value) -> String {
+    if let Some(name) = item["name"].as_str().filter(|name| !name.trim().is_empty()) {
+        return name.to_owned();
+    }
+    let text = show.item_text(slide, index);
+    let first_line = text
+        .as_deref()
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()));
+    let source = item["src"]
+        .as_str()
+        .and_then(|path| path.rsplit(['/', '\\']).next())
+        .filter(|name| !name.is_empty());
+    let kind = match item["type"].as_str() {
+        Some("media" | "image") => "Picture",
+        Some("shape") => "Shape",
+        Some("video") => "Video",
+        Some("camera") => "Camera",
+        Some("chart") => "Chart",
+        Some("qr") => "QR code",
+        _ => "Text",
+    };
+    first_line.or(source).unwrap_or(kind).to_owned()
+}
+
 impl Session {
-    fn selected_layer_slide(&self) -> Option<(&ShowFile, String)> {
+    pub(super) fn selected_layer_slide(&self) -> Option<(&ShowFile, String)> {
         let show = self.current_show()?;
         let slide = show.ordered_slides().get(self.slide_index?)?.id.clone();
         Some((show, slide))
@@ -195,41 +219,33 @@ impl Session {
             })
     }
 
+    pub fn selected_layer_is_countdown(&self) -> bool {
+        self.selected_layer_slide().is_some_and(|(show, slide)| {
+            let item = self.current_item(show);
+            crate::slide_countdown::is_countdown_item(&show.show["slides"][slide]["items"][item])
+        })
+    }
+
     /// Front to back, matching the order an operator sees on the canvas.
     pub fn layer_labels(&self) -> Vec<String> {
         let Some((show, slide)) = self.selected_layer_slide() else {
             return Vec::new();
         };
-        show.slide_items(&slide)
-            .into_iter()
+        let Some(items) = show.show["slides"][&slide]["items"].as_array() else {
+            return Vec::new();
+        };
+        items
+            .iter()
             .enumerate()
             .rev()
             .map(|(index, item)| {
-                let explicit = item["name"].as_str().filter(|name| !name.trim().is_empty());
-                let text = show.item_text(&slide, index);
-                let first_line = text
-                    .as_deref()
-                    .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()));
-                let source = item["src"]
-                    .as_str()
-                    .and_then(|path| path.rsplit(['/', '\\']).next())
-                    .filter(|name| !name.is_empty());
-                let kind = match item["type"].as_str() {
-                    Some("media" | "image") => "Picture",
-                    Some("shape") => "Shape",
-                    Some("video") => "Video",
-                    Some("camera") => "Camera",
-                    Some("chart") => "Chart",
-                    Some("qr") => "QR code",
-                    _ => "Text",
-                };
-                let name = explicit.or(first_line).or(source).unwrap_or(kind);
-                let locked = if freeshow_data::item_locked(&item) {
+                let name = layer_name(show, &slide, index, item);
+                let locked = if freeshow_data::item_locked(item) {
                     " · locked"
                 } else {
                     ""
                 };
-                let hidden = if freeshow_data::item_hidden(&item) {
+                let hidden = if freeshow_data::item_hidden(item) {
                     " · hidden"
                 } else {
                     ""

@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod audio_check;
 mod church_import;
 mod desktop;
+mod display;
 mod feeds;
 mod lang;
 mod live;
+mod media_download;
 mod operator;
 mod present;
 mod runtime;
 mod service_check;
 mod session;
+mod slide_countdown;
 mod spell;
 mod stage;
 mod streamdeck;
@@ -22,6 +26,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 
 use church_import::ChurchImport;
+use display::{DisplaySetup, Displays};
 use freeshow_ai::SlideAssist;
 use freeshow_cloud::CloudBackup;
 use freeshow_core::{AppSettings, Rgb, WindowPlacement, WindowProfile};
@@ -34,8 +39,8 @@ use freeshow_record::OutputCapture;
 use freeshow_remote::Integration;
 use freeshow_timecode::TimecodeSource;
 use live::{
-    OpeningFade, TransitionAudition, audience_frame, cleared_audience_frame, edit_frame,
-    motion_frame, stage_frame,
+    BuildAudition, OpeningFade, TransitionAudition, audience_frame, cleared_audience_frame,
+    edit_frame, motion_frame, stage_frame,
 };
 use present::{FrameSlot, FrameTarget, attach_frame, attach_frames};
 use session::{DrawerAction, PendingPlay, Session};
@@ -314,6 +319,8 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
                 thumb: catalog_thumb(session, entry, 128, 72),
                 show_thumb: true,
                 on: false,
+                favorite: session.is_template_favorite(id),
+                starter: session.is_starter_template(id),
             })
             .collect::<Vec<_>>()
     } else if session.tab == "media" {
@@ -325,6 +332,8 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
                 thumb: media_thumb(entry),
                 show_thumb: true,
                 on: false,
+                favorite: false,
+                starter: false,
             })
             .collect::<Vec<_>>()
     } else {
@@ -351,11 +360,39 @@ fn drawer_rows(session: &Session) -> slint::ModelRc<DrawerRowData> {
                     show_thumb: catalog.is_some(),
                     name: name.into(),
                     on,
+                    favorite: false,
+                    starter: false,
                 }
             })
             .collect()
     };
     slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+fn refresh_build_rows(ui: &ControlWindow, session: &Session) {
+    use slint::Model;
+
+    let rows = if ui.get_editing() && !ui.get_text_mode() {
+        session
+            .build_order()
+            .into_iter()
+            .map(|row| BuildRowData {
+                layer: row.layer as i32,
+                title: format!("Step {} · {}", row.step, row.name).into(),
+                trigger: row.trigger.into(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let previous = ui.get_build_rows();
+    if previous.row_count() != rows.len()
+        || !previous.iter().zip(&rows).all(|(left, right)| {
+            left.layer == right.layer && left.title == right.title && left.trigger == right.trigger
+        })
+    {
+        ui.set_build_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+    }
 }
 
 /// Overlay and template thumbnails, kept until their saved look changes.
@@ -429,15 +466,20 @@ fn refresh_missing_media(ui: &ControlWindow, session: &Session) {
 }
 
 fn refresh_template_pick(ui: &ControlWindow, session: &Session) {
+    ui.set_template_favorites_only(session.template_favorites_only);
     if let Some((id, name, entry)) = session.selected_template() {
         ui.set_selected_template(id.into());
         ui.set_template_title(name.into());
         ui.set_template_preview(catalog_thumb(session, entry, 320, 180));
         ui.set_template_target(session.template_target_show().unwrap_or_default().into());
         ui.set_template_has_style(freeshow_data::template_text_item(entry).is_some());
+        ui.set_template_is_favorite(session.is_template_favorite(id));
+        ui.set_template_is_starter(session.is_starter_template(id));
     } else {
         ui.set_selected_template("".into());
         ui.set_template_preview(slint::Image::default());
+        ui.set_template_is_favorite(false);
+        ui.set_template_is_starter(false);
     }
 }
 
@@ -623,25 +665,34 @@ fn spelling_note(session: &Session, text: &str) -> String {
     }
 }
 
-/// Tells the operator when another program holds the phone remote or stage port.
-fn busy_ports_notice(remote: u16, stage: u16) -> Option<String> {
-    let busy = |port: u16| std::net::TcpListener::bind(("0.0.0.0", port)).is_err();
-    let names: Vec<String> = [("remote", remote), ("stage", stage)]
-        .into_iter()
-        .filter(|(_, port)| busy(*port))
-        .map(|(name, port)| format!("{name} port {port}"))
-        .collect();
-    (!names.is_empty()).then(|| {
-        let (verb, pages) = if names.len() > 1 {
-            ("are", "those pages are")
-        } else {
-            ("is", "that page is")
-        };
-        format!(
-            "The {} {verb} in use by another program, so {pages} off. Close the other program or pick another port in Settings, Connection, then restart.",
-            names.join(" and ")
-        )
-    })
+fn web_listener_status(
+    page: freeshow_remote::WebPage,
+    state: freeshow_remote::ListenerState,
+    host: &str,
+    protected: bool,
+) -> String {
+    use freeshow_remote::{ListenerState, WebPage};
+    let label = match page {
+        WebPage::Remote => "Phone remote",
+        WebPage::Stage => "Stage web view",
+    };
+    match state {
+        ListenerState::Listening(port) => {
+            let access = if protected {
+                "Password required"
+            } else {
+                "Open access"
+            };
+            format!("{label} · http://{host}:{port}/ · {access}")
+        }
+        ListenerState::BindFailed(port, std::io::ErrorKind::AddrInUse) => format!(
+            "{label} unavailable. Port {port} is in use. Free the port or change it and restart."
+        ),
+        ListenerState::BindFailed(port, _) => {
+            format!("{label} could not listen on port {port}. Check the startup log.")
+        }
+        ListenerState::Stopped => format!("{label} is offline. Check the startup log."),
+    }
 }
 
 fn show_now_playing(ui: &ControlWindow, session: &Session) {
@@ -699,6 +750,7 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     ui.set_slide_cards(slide_cards(session));
     ui.set_slides_columns(session.slides_list_columns() as i32);
     ui.set_live_slide(session.live_slide_index().map_or(-1, |index| index as i32));
+    ui.set_next_build_step(session.live_build_step());
     ui.set_full_colors(session.preferences.full_colors());
     ui.set_project_names(strings(&session.project_labels()));
     ui.set_project_kinds(strings(&session.project_kinds()));
@@ -723,9 +775,11 @@ fn refresh(ui: &ControlWindow, session: &Session) {
     let (item_index, item_count) = session.item_position();
     ui.set_item_index(item_index as i32);
     ui.set_item_count(item_count as i32);
+    ui.set_countdown_layer(session.selected_layer_is_countdown());
     if ui.get_editing() {
         refresh_layer_rows(ui, session);
     }
+    refresh_build_rows(ui, session);
     ui.set_picture_choices(strings(
         &session
             .slide_pictures()
@@ -853,7 +907,6 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         media_transition: settings.media_transition.into(),
         media_duration: settings.media_duration,
         media_direction: settings.media_direction.into(),
-        addresses: settings.addresses.into(),
         style_names: strings(&settings.style_names),
         style_name: settings.style_name.into(),
         style_is_default: settings.style_is_default,
@@ -892,6 +945,7 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
     ui.set_transition_kinds(strings(&session::TRANSITION_KINDS.map(str::to_string)));
     ui.set_autosave_choices(strings(&session::AUTOSAVE_CHOICES.map(str::to_string)));
     let inspector = session.inspector_form();
+    let build = session.selected_layer_build();
     let (motion, motion_source) = if ui.get_editing() && inspector.has_item {
         session.selected_slide_motion()
     } else {
@@ -949,6 +1003,16 @@ fn refresh_panels(ui: &ControlWindow, session: &Session) {
         slide_transition_direction: motion.direction.into(),
         slide_transition_easing: motion.easing.into(),
         slide_transition_source: motion_source.into(),
+        build_allowed: build.allowed,
+        build_preview_available: build.preview_available,
+        build_step: build.step,
+        build_after_previous: build.after_previous,
+        build_enter: build.enter.effect.into(),
+        build_enter_duration: build.enter.duration_ms,
+        build_enter_delay: build.enter.delay_ms,
+        build_exit: build.exit.effect.into(),
+        build_exit_duration: build.exit.duration_ms,
+        build_exit_delay: build.exit.delay_ms,
         valign: inspector.item_box.valign.into(),
         rotation: inspector.item_box.rotation,
         text_case: inspector.typography.text_case.into(),
@@ -1101,131 +1165,212 @@ enum NetworkPicture {
     Stage,
 }
 
+struct PictureSender<T> {
+    name: String,
+    stage: bool,
+    sender: T,
+}
+
+fn network_row(transport: &str, output: &str, stage: bool, status: &str) -> NetworkCheckRow {
+    NetworkCheckRow {
+        transport: transport.into(),
+        output: output.into(),
+        picture: if stage {
+            "Stage".into()
+        } else {
+            "Audience".into()
+        },
+        status: status.into(),
+    }
+}
+
+fn lan_sender_status(status: freeshow_ndi::SenderStatus) -> &'static str {
+    use freeshow_ndi::SenderStatus;
+    match status {
+        SenderStatus::Starting => "Starting sender…",
+        SenderStatus::Running => "Sender running. Verify the picture on a receiver.",
+        SenderStatus::Unavailable => "Sender unavailable. Check the startup log.",
+    }
+}
+
 #[derive(Default)]
 struct LanBroadcast {
-    audience: Vec<freeshow_ndi::NdiSender>,
-    stage: Vec<freeshow_ndi::NdiSender>,
-    omt_audience: Vec<freeshow_ndi::OmtSender>,
-    omt_stage: Vec<freeshow_ndi::OmtSender>,
+    ndi: Vec<PictureSender<freeshow_ndi::NdiSender>>,
+    omt: Vec<PictureSender<freeshow_ndi::OmtSender>>,
+    skipped: Vec<NetworkCheckRow>,
 }
 
 impl LanBroadcast {
-    fn open(session: &session::Session) -> Self {
+    fn open(session: &Session) -> Self {
         let mut broadcast = Self::default();
-        let mut opened = std::collections::BTreeSet::new();
         for target in session.ndi_outputs() {
-            let source_name = target.grouped_name();
-            let key = target
-                .group
-                .clone()
-                .map(|group| format!("{}:{group}", target.stage))
-                .unwrap_or_else(|| target.id.clone());
-            if !opened.insert(key) {
+            if target.group.is_some() {
+                broadcast.skipped.push(network_row(
+                    "NDI",
+                    &target.grouped_name(),
+                    target.stage,
+                    "Discovery groups are unavailable. This output is closed.",
+                ));
                 continue;
             }
-            let (width, height) = if target.stage {
-                session.stage_output_size()
-            } else {
-                (session.output_width, session.output_height)
-            };
-            let sender =
-                freeshow_ndi::NdiSender::open_routed(&source_name, width, height, &target.id);
-            if target.stage {
-                broadcast.stage.push(sender);
-            } else {
-                broadcast.audience.push(sender);
-            }
+            let (width, height) = picture_size(session, target.stage);
+            broadcast.ndi.push(PictureSender {
+                sender: freeshow_ndi::NdiSender::open_routed(
+                    &target.name,
+                    width,
+                    height,
+                    &target.id,
+                ),
+                name: target.name,
+                stage: target.stage,
+            });
         }
         for target in session.omt_outputs() {
-            let (width, height) = if target.stage {
-                session.stage_output_size()
-            } else {
-                (session.output_width, session.output_height)
-            };
+            let (width, height) = picture_size(session, target.stage);
             match freeshow_ndi::OmtSender::open_routed(&target.name, width, height, &target.id) {
-                Ok(sender) if target.stage => broadcast.omt_stage.push(sender),
-                Ok(sender) => broadcast.omt_audience.push(sender),
-                Err(error) => tracing::warn!(%error, "OMT output {} did not start", target.id),
+                Ok(sender) => broadcast.omt.push(PictureSender {
+                    name: target.name,
+                    stage: target.stage,
+                    sender,
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, "OMT output {} did not start", target.id);
+                    broadcast.skipped.push(network_row(
+                        "OMT",
+                        &target.name,
+                        target.stage,
+                        "Could not start the sender.",
+                    ));
+                }
             }
         }
         broadcast
     }
 
     fn submit(&self, picture: NetworkPicture, pixels: &[u8], width: u32, height: u32) {
-        let (ndi, omt) = match picture {
-            NetworkPicture::Audience => (&self.audience, &self.omt_audience),
-            NetworkPicture::Stage => (&self.stage, &self.omt_stage),
-        };
-        for sender in ndi {
-            sender.submit(pixels, width, height);
+        let stage = matches!(picture, NetworkPicture::Stage);
+        for route in self.ndi.iter().filter(|route| route.stage == stage) {
+            route.sender.submit(pixels, width, height);
         }
-        for sender in omt {
-            sender.submit(pixels, width, height);
+        for route in self.omt.iter().filter(|route| route.stage == stage) {
+            route.sender.submit(pixels, width, height);
         }
+    }
+
+    fn rows(&self, rows: &mut Vec<NetworkCheckRow>) {
+        rows.extend(self.skipped.iter().cloned());
+        rows.extend(self.ndi.iter().map(|route| {
+            network_row(
+                "NDI",
+                &route.name,
+                route.stage,
+                lan_sender_status(route.sender.status()),
+            )
+        }));
+        rows.extend(self.omt.iter().map(|route| {
+            network_row(
+                "OMT",
+                &route.name,
+                route.stage,
+                lan_sender_status(route.sender.status()),
+            )
+        }));
+    }
+}
+
+fn picture_size(session: &Session, stage: bool) -> (u32, u32) {
+    if stage {
+        session.stage_output_size()
+    } else {
+        (session.output_width, session.output_height)
     }
 }
 
 static LAN: std::sync::OnceLock<LanBroadcast> = std::sync::OnceLock::new();
 
+#[derive(Default)]
 struct WebrtcBroadcast {
-    audience: Vec<freeshow_record::WebrtcSender>,
-    stage: Vec<freeshow_record::WebrtcSender>,
+    routes: Vec<PictureSender<freeshow_record::WebrtcSender>>,
+    skipped: Vec<NetworkCheckRow>,
 }
 
 impl WebrtcBroadcast {
-    fn open(session: &session::Session) -> Self {
-        let mut audience = Vec::new();
-        let mut stage = Vec::new();
-        for target in session.webrtc_outputs() {
-            let (width, height) = if target.stage {
-                session.stage_output_size()
-            } else {
-                (session.output_width, session.output_height)
-            };
-            let Some(sender) = freeshow_record::WebrtcSender::open_routed(
+    fn open(session: &Session) -> Self {
+        let mut broadcast = Self::default();
+        let targets = session.webrtc_outputs();
+        if let Some(root) = &session.root {
+            for (id, configured) in freeshow_data::Library::open(root).network_outputs("webrtc") {
+                if !targets.iter().any(|target| target.id == id) {
+                    let stage = configured["stageOutput"]
+                        .as_str()
+                        .is_some_and(|layout| !layout.is_empty());
+                    broadcast.skipped.push(network_row(
+                        "WHIP",
+                        &id,
+                        stage,
+                        "An HTTP or HTTPS endpoint is required.",
+                    ));
+                }
+            }
+        }
+        for target in targets {
+            let (width, height) = picture_size(session, target.stage);
+            if let Some(sender) = freeshow_record::WebrtcSender::start_routed(
                 &target.url,
                 target.token.as_deref(),
                 width,
                 height,
                 &target.id,
-            ) else {
-                tracing::warn!("WebRTC output {} did not start", target.id);
-                continue;
-            };
-            if target.stage {
-                stage.push(sender);
+            ) {
+                broadcast.routes.push(PictureSender {
+                    name: target.id,
+                    stage: target.stage,
+                    sender,
+                });
             } else {
-                audience.push(sender);
+                broadcast.skipped.push(network_row(
+                    "WHIP",
+                    &target.id,
+                    target.stage,
+                    "Could not start the sender.",
+                ));
             }
         }
-        Self { audience, stage }
+        broadcast
     }
 
     fn submit(&self, picture: NetworkPicture, pixels: &[u8], width: u32, height: u32) {
-        let senders = match picture {
-            NetworkPicture::Audience => &self.audience,
-            NetworkPicture::Stage => &self.stage,
-        };
-        for sender in senders {
-            sender.submit(pixels, width, height);
+        let stage = matches!(picture, NetworkPicture::Stage);
+        for route in self.routes.iter().filter(|route| route.stage == stage) {
+            route.sender.submit(pixels, width, height);
         }
+    }
+
+    fn rows(&self, rows: &mut Vec<NetworkCheckRow>) {
+        use freeshow_record::WebrtcStatus;
+        rows.extend(self.skipped.iter().cloned());
+        rows.extend(self.routes.iter().map(|route| {
+            let status = match route.sender.status() {
+                WebrtcStatus::Negotiating => "Negotiating with the WHIP endpoint…",
+                WebrtcStatus::Running => {
+                    "Endpoint accepted the session. Verify the picture on a receiver."
+                }
+                WebrtcStatus::Unavailable => "WHIP session unavailable. Check the startup log.",
+            };
+            network_row("WHIP", &route.name, route.stage, status)
+        }));
     }
 }
 
 static WEBRTC: std::sync::OnceLock<WebrtcBroadcast> = std::sync::OnceLock::new();
 
-fn webrtc_out() -> &'static WebrtcBroadcast {
-    WEBRTC.get_or_init(|| WebrtcBroadcast {
-        audience: Vec::new(),
-        stage: Vec::new(),
-    })
-}
-
 fn submit_network(picture: NetworkPicture, frame: &Frame) {
     if let Some(lan) = LAN.get() {
         lan.submit(picture, &frame.pixels, frame.width, frame.height);
     }
-    webrtc_out().submit(picture, &frame.pixels, frame.width, frame.height);
+    if let Some(webrtc) = WEBRTC.get() {
+        webrtc.submit(picture, &frame.pixels, frame.width, frame.height);
+    }
     if matches!(picture, NetworkPicture::Audience) {
         freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
         hardware().submit(&frame.pixels, frame.width, frame.height);
@@ -1719,6 +1864,159 @@ fn wire_transition_audition(control: &ControlWindow, session: Rc<RefCell<Session
     });
 }
 
+fn refresh_build_preview(
+    window: &TransitionPreviewWindow,
+    audition: &BuildAudition,
+    now: std::time::Instant,
+    paint: bool,
+) -> bool {
+    if paint {
+        window.set_frame(present::frame_image(&audition.frame(now)));
+    }
+    let next = audition.builds.next_step();
+    let moving = audition.builds.motion_remaining(now);
+    window.set_next_build_step(next.map_or(0, i32::from));
+    window.set_can_rewind(audition.builds.can_rewind());
+    window.set_build_status(
+        match next {
+            Some(step) => format!("Next plays step {step}."),
+            None if moving => "Playing the final animation.".into(),
+            None => "Animation complete.".into(),
+        }
+        .into(),
+    );
+    moving
+}
+
+fn play_build_preview(
+    window: &TransitionPreviewWindow,
+    timer: &Rc<slint::Timer>,
+    prepared: &Rc<RefCell<Option<BuildAudition>>>,
+    now: std::time::Instant,
+) {
+    timer.stop();
+    if !prepared
+        .borrow()
+        .as_ref()
+        .is_some_and(|audition| refresh_build_preview(window, audition, now, true))
+    {
+        return;
+    }
+    let weak_window = window.as_weak();
+    let weak_timer = Rc::downgrade(timer);
+    let prepared = Rc::clone(prepared);
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(33),
+        move || {
+            let moving = weak_window.upgrade().is_some_and(|window| {
+                prepared.borrow_mut().as_mut().is_some_and(|audition| {
+                    let now = std::time::Instant::now();
+                    let paint = audition.builds.tick(now, 0);
+                    refresh_build_preview(&window, audition, now, paint)
+                })
+            });
+            if !moving && let Some(timer) = weak_timer.upgrade() {
+                timer.stop();
+            }
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+enum BuildPreviewAction {
+    Restart,
+    Previous,
+    Next,
+}
+
+fn wire_build_audition(control: &ControlWindow, session: Rc<RefCell<Session>>) {
+    let control_weak = control.as_weak();
+    let timer = Rc::new(slint::Timer::default());
+    let prepared: Rc<RefCell<Option<BuildAudition>>> = Rc::default();
+    let window: RefCell<Option<TransitionPreviewWindow>> = RefCell::default();
+    control.on_preview_builds(move || {
+        let now = std::time::Instant::now();
+        let Some(mut audition) = BuildAudition::prepare(&session.borrow(), now) else {
+            return;
+        };
+        let mut slot = window.borrow_mut();
+        if slot.is_none() {
+            let preview = match TransitionPreviewWindow::new() {
+                Ok(preview) => preview,
+                Err(error) => {
+                    if let Some(control) = control_weak.upgrade() {
+                        control.set_notice(
+                            format!("Could not open animation preview: {error}").into(),
+                        );
+                    }
+                    return;
+                }
+            };
+            preview.set_build_mode(true);
+            let close_timer = Rc::clone(&timer);
+            let close_prepared = Rc::clone(&prepared);
+            let close = Rc::new(move || {
+                close_timer.stop();
+                close_prepared.borrow_mut().take();
+            });
+            let native_close = Rc::clone(&close);
+            preview.window().on_close_requested(move || {
+                native_close();
+                slint::CloseRequestResponse::HideWindow
+            });
+            let close_window = preview.as_weak();
+            preview.on_dismiss(move || {
+                close();
+                if let Some(window) = close_window.upgrade() {
+                    let _ = window.hide();
+                }
+            });
+            let step_window = preview.as_weak();
+            let step_timer = Rc::clone(&timer);
+            let step_prepared = Rc::clone(&prepared);
+            let input = Rc::new(move |action| {
+                let now = std::time::Instant::now();
+                if let Some(audition) = step_prepared.borrow_mut().as_mut() {
+                    match action {
+                        BuildPreviewAction::Restart => audition.builds.restart(now),
+                        BuildPreviewAction::Previous => {
+                            audition.builds.previous(now);
+                        }
+                        BuildPreviewAction::Next => {
+                            audition.builds.next(now);
+                        }
+                    }
+                }
+                if let Some(window) = step_window.upgrade() {
+                    play_build_preview(&window, &step_timer, &step_prepared, now);
+                }
+            });
+            let restart = Rc::clone(&input);
+            preview.on_replay(move || restart(BuildPreviewAction::Restart));
+            let previous = Rc::clone(&input);
+            preview.on_previous_build(move || previous(BuildPreviewAction::Previous));
+            preview.on_next_build(move || input(BuildPreviewAction::Next));
+            *slot = Some(preview);
+        }
+        let preview = slot.as_ref().unwrap();
+        preview.set_description(format!("Slide {} · Off air", audition.slide_number).into());
+        match preview.show() {
+            Ok(()) => {
+                let started = std::time::Instant::now();
+                audition.builds.restart(started);
+                *prepared.borrow_mut() = Some(audition);
+                play_build_preview(preview, &timer, &prepared, started);
+            }
+            Err(error) => {
+                if let Some(control) = control_weak.upgrade() {
+                    control.set_notice(format!("Could not show animation preview: {error}").into());
+                }
+            }
+        }
+    });
+}
+
 fn sample_audio(session: &RefCell<Session>, audio: &RefCell<Option<AudioOutput>>) {
     let mut session = session.borrow_mut();
     if session.audio_change_pending() {
@@ -1995,6 +2293,7 @@ fn follow_video(
             }
             let (audience, stage) = {
                 let mut session = session.borrow_mut();
+                let changing_graphics = session.tick_live_graphics(std::time::Instant::now());
                 if let Some((time, duration)) = timing {
                     session.video_time = time;
                     session.video_duration = duration;
@@ -2013,7 +2312,10 @@ fn follow_video(
                         opening = None;
                         return;
                     }
-                    if opening.is_none() || first_frame_at.is_none() {
+                    let opening_needs_frame = opening.is_some() && first_frame_at.is_some();
+                    let graphics_can_paint =
+                        changing_graphics && (opening.is_none() || first_frame_at.is_some());
+                    if !opening_needs_frame && !graphics_can_paint {
                         return;
                     }
                     // Keep sampling the opening fade against the held decoded frame.
@@ -2130,7 +2432,27 @@ fn schedule_next_slide(
         std::time::Duration::from_millis(delay),
         move || {
             let mut current = session.borrow_mut();
-            if current.has_pending_cue_completion() || !current.advance_show() {
+            if current.has_pending_cue_completion() || current.waiting_for_layer_build() {
+                return;
+            }
+            let remaining = current.automatic_build_remaining(std::time::Instant::now());
+            if !remaining.is_zero() {
+                drop(current);
+                schedule_next_slide(
+                    &timer_cb,
+                    &session,
+                    &output_fade,
+                    &stage_fade,
+                    &output_slot,
+                    &preview_slot,
+                    &stage_slot,
+                    ui.clone(),
+                    Some(remaining.as_secs_f64()),
+                    &playback,
+                );
+                return;
+            }
+            if !current.advance_show() {
                 return;
             }
             let plays = current.take_plays();
@@ -2187,53 +2509,6 @@ fn schedule_next_slide(
     );
 }
 
-fn place_output(window: &slint::Window, saved: Option<usize>) {
-    let placed = window.with_winit_window(|winit_window| {
-        let monitors: Vec<_> = winit_window.available_monitors().collect();
-        let Some(index) = freeshow_core::output_monitor_index(saved, monitors.len()) else {
-            return false;
-        };
-        let Some(monitor) = monitors.get(index) else {
-            return false;
-        };
-        let pos = monitor.position();
-        winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(
-            pos.x, pos.y,
-        ));
-        true
-    });
-    if placed != Some(true) {
-        place(window, 80, 80);
-    }
-}
-
-fn monitor_count(window: &slint::Window) -> usize {
-    window
-        .with_winit_window(|winit_window| winit_window.available_monitors().count())
-        .unwrap_or(0)
-}
-
-/// Header picker rows: Auto, then each connected display by OS name.
-fn monitor_choices(window: &slint::Window) -> Vec<String> {
-    let mut choices = vec!["Auto".to_string()];
-    let named = window
-        .with_winit_window(|winit_window| {
-            winit_window
-                .available_monitors()
-                .enumerate()
-                .map(|(index, monitor)| match monitor.name() {
-                    Some(name) if !name.trim().is_empty() => {
-                        format!("{} · {name}", index + 1)
-                    }
-                    _ => format!("Screen {}", index + 1),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    choices.extend(named);
-    choices
-}
-
 fn screen_label(index: Option<usize>, outputs: &[freeshow_data::OutputPreference]) -> String {
     let screen = match index {
         Some(index) => format!("Screen {}", index + 1),
@@ -2250,16 +2525,8 @@ fn screen_label(index: Option<usize>, outputs: &[freeshow_data::OutputPreference
     }
 }
 
-fn apply_chrome(
-    ui: &ControlWindow,
-    session: &Session,
-    output_screen: Option<usize>,
-    monitors: &[String],
-) {
+fn apply_chrome(ui: &ControlWindow, session: &Session) {
     ui.set_show_labels(!session.preferences.labels_disabled());
-    ui.set_screen_label(screen_label(output_screen, &session.preferences.outputs).into());
-    ui.set_screen_choices(strings(monitors));
-    ui.set_screen_index(freeshow_core::screen_combo_index(output_screen));
     ui.set_drawer_width(session.preferences.left_panel_width() as i32);
     ui.set_project_width(session.preferences.right_panel_width() as i32);
     ui.set_drawer_height(session.preferences.drawer_height() as i32);
@@ -2278,6 +2545,15 @@ fn apply_chrome(
 }
 
 fn apply_window_behavior(window: &slint::Window, always_on_top: bool, kiosk: bool) {
+    apply_window_behavior_on(window, always_on_top, kiosk, None);
+}
+
+fn apply_window_behavior_on(
+    window: &slint::Window,
+    always_on_top: bool,
+    kiosk: bool,
+    monitor: Option<slint::winit_030::winit::monitor::MonitorHandle>,
+) {
     let _ = window.with_winit_window(|winit_window| {
         winit_window.set_window_level(if always_on_top {
             slint::winit_030::winit::window::WindowLevel::AlwaysOnTop
@@ -2287,7 +2563,7 @@ fn apply_window_behavior(window: &slint::Window, always_on_top: bool, kiosk: boo
         winit_window.set_decorations(!kiosk);
         winit_window.set_fullscreen(if kiosk {
             Some(slint::winit_030::winit::window::Fullscreen::Borderless(
-                None,
+                monitor,
             ))
         } else {
             None
@@ -2305,35 +2581,22 @@ fn capture_placement(window: &slint::Window) -> Option<WindowPlacement> {
         .flatten()
 }
 
-fn apply_placement(window: &slint::Window, place: &WindowPlacement) {
-    let _ = window.with_winit_window(|winit_window| {
-        winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(
-            place.x, place.y,
-        ));
-        let _ = winit_window.request_inner_size(slint::winit_030::winit::dpi::PhysicalSize::new(
-            place.width,
-            place.height,
-        ));
-    });
-}
-
 fn apply_window_profile(
     control: &slint::Window,
-    output: &slint::Window,
     stage: &slint::Window,
     settings: &AppSettings,
+    displays: &Displays,
 ) {
     let Some(profile) = settings.active_profile() else {
         return;
     };
-    if let Some(place) = &profile.control {
-        apply_placement(control, place);
+    if let Some(place) = &profile.control
+        && display::profile_on_displays(place, &displays.identities)
+    {
+        display::place(control, place);
     }
-    if let Some(place) = &profile.output {
-        apply_placement(output, place);
-    }
-    if let Some(place) = &profile.stage {
-        apply_placement(stage, place);
+    if stage.is_visible() {
+        place_stage(stage, settings, displays);
     }
 }
 
@@ -2349,24 +2612,15 @@ fn capture_window_profile(
     }
 }
 
-fn place_from_profile_or(
-    window: &slint::Window,
-    place: Option<&WindowPlacement>,
-    fallback: impl FnOnce(),
-) {
-    if let Some(place) = place {
-        apply_placement(window, place);
+fn place_stage(window: &slint::Window, settings: &AppSettings, displays: &Displays) {
+    if let Some(place) = settings
+        .active_profile()
+        .and_then(|profile| profile.stage.as_ref())
+        && display::profile_on_displays(place, &displays.identities)
+    {
+        display::place(window, place);
     } else {
-        fallback();
-    }
-}
-
-fn place(window: &slint::Window, x: i32, y: i32) {
-    let moved = window.with_winit_window(|winit_window| {
-        winit_window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
-    });
-    if moved.is_none() {
-        tracing::debug!("window was not ready to move");
+        display::fallback(window, displays, 120, 140);
     }
 }
 
@@ -2380,6 +2634,7 @@ struct Launch {
     check_perf: Option<Option<PathBuf>>,
     check_library: Option<Option<PathBuf>>,
     check_service: Option<Option<PathBuf>>,
+    check_handoff: bool,
     list_audio_devices: bool,
     list_video_audio_devices: bool,
 }
@@ -2395,6 +2650,7 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
         check_perf: None,
         check_library: None,
         check_service: None,
+        check_handoff: false,
         list_audio_devices: false,
         list_video_audio_devices: false,
     };
@@ -2413,6 +2669,7 @@ fn launch_args() -> Result<Launch, Box<dyn std::error::Error>> {
             "--check-service" => {
                 launch.check_service = Some(args.next().map(PathBuf::from));
             }
+            "--check-handoff" => launch.check_handoff = true,
             "--check-media" => {
                 launch.check_media = Some(PathBuf::from(
                     args.next().ok_or("--check-media needs a video file")?,
@@ -2442,6 +2699,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(path) = launch.check_service {
         return service_check::check_service(path.as_deref());
+    }
+    if launch.check_handoff {
+        return service_check::check_handoff();
     }
     if launch.check_runtime || launch.check_media.is_some() {
         return runtime::check(launch.check_media.as_deref());
@@ -2600,14 +2860,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     control.set_active_tab(session.tab.clone().into());
     control.set_panel_title("Shows".into());
     refresh(&control, &session);
-    apply_chrome(&control, &session, settings.output_screen, &[]);
+    apply_chrome(&control, &session);
     let output_width = session.output_width;
     let output_height = session.output_height;
 
     let output = OutputWindow::new()?;
     let stage = StageWindow::new()?;
-    let monitors = monitor_choices(output.window());
-    apply_chrome(&control, &session, settings.output_screen, &monitors);
     let output_weak = output.as_weak();
     let output_redraw = output.as_weak();
     let output_slot = attach_frame(
@@ -2686,21 +2944,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         publish_audience(&output_slot, &preview_slot, audience);
         publish_stage(&stage_slot, stage);
     }
-    if settings.show_output || session.preferences.auto_output() {
-        output.show()?;
-        place_output(output.window(), settings.output_screen);
-        let (on_top, kiosk) = session.output_window_flags();
-        apply_window_behavior(output.window(), on_top, kiosk);
-    }
-    if settings.show_stage {
-        stage.show()?;
-        place(stage.window(), 120, 140);
-    }
-
     let session = Rc::new(RefCell::new(session));
     // Runs one live-update pass now instead of waiting for the next 100 ms tick.
     let live_pump: LivePump = Rc::default();
     let settings = Rc::new(RefCell::new(settings));
+    let _audio_check_timer = audio_check::wire(
+        &control,
+        Rc::clone(&session),
+        Rc::clone(&settings),
+        settings_path.clone(),
+    );
     let audio_out: Rc<RefCell<Option<AudioOutput>>> = Rc::new(RefCell::new(None));
     let video_player: Rc<RefCell<Option<VideoPlayer>>> = Rc::new(RefCell::new(None));
     let video_timer = Rc::new(slint::Timer::default());
@@ -2908,101 +3161,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings_path.clone(),
         true,
     );
-    let output_toggle = output.as_weak();
-    let settings_for_output = Rc::clone(&settings);
-    let session_for_output_flags = Rc::clone(&session);
-    let settings_path_for_output = settings_path.clone();
-    let ui_for_output = control.as_weak();
-    control.on_open_output(move || {
-        let Some(output) = output_toggle.upgrade() else {
-            return;
-        };
-        let visible = output.window().is_visible();
-        if visible {
-            let _ = output.hide();
-        } else if output.show().is_ok() {
-            let settings = settings_for_output.borrow();
-            place_from_profile_or(
-                output.window(),
-                settings.active_profile().and_then(|p| p.output.as_ref()),
-                || place_output(output.window(), settings.output_screen),
-            );
-            let (on_top, kiosk) = session_for_output_flags.borrow().output_window_flags();
-            apply_window_behavior(output.window(), on_top, kiosk);
-        }
-        settings_for_output.borrow_mut().show_output = !visible;
-        if let Some(ui) = ui_for_output.upgrade() {
-            ui.set_output_open(output.window().is_visible());
-        }
-        if let Err(err) = settings_for_output.borrow().save(&settings_path_for_output) {
-            tracing::error!("could not save settings: {err}");
-        }
-    });
-
-    {
-        let output_for_screen = output.as_weak();
-        let settings_for_screen = Rc::clone(&settings);
-        let settings_path_for_screen = settings_path.clone();
-        let session_for_screen = Rc::clone(&session);
-        let ui = control.as_weak();
-        control.on_pick_screen(move |index| {
-            let Some(output) = output_for_screen.upgrade() else {
-                return;
-            };
-            let next = freeshow_core::screen_from_combo(index);
-            let count = monitor_count(output.window());
-            if let Some(chosen) = next
-                && chosen >= count
-            {
-                return;
-            }
-            settings_for_screen.borrow_mut().output_screen = next;
-            if output.window().is_visible() {
-                place_output(output.window(), next);
-            }
-            if let Some(ui) = ui.upgrade() {
-                apply_chrome(
-                    &ui,
-                    &session_for_screen.borrow(),
-                    next,
-                    &monitor_choices(output.window()),
-                );
-            }
-            if let Err(err) = settings_for_screen.borrow().save(&settings_path_for_screen) {
-                tracing::error!("could not save settings: {err}");
-            }
-        });
-    }
-
-    let stage_toggle = stage.as_weak();
-    let settings_for_stage = Rc::clone(&settings);
-    let settings_path_for_stage = settings_path.clone();
-    let ui_for_stage = control.as_weak();
-    control.on_open_stage(move || {
-        let Some(stage) = stage_toggle.upgrade() else {
-            return;
-        };
-        let visible = stage.window().is_visible();
-        if visible {
-            let _ = stage.hide();
-        } else if stage.show().is_ok() {
-            place_from_profile_or(
-                stage.window(),
-                settings_for_stage
-                    .borrow()
-                    .active_profile()
-                    .and_then(|p| p.stage.as_ref()),
-                || place(stage.window(), 120, 140),
-            );
-        }
-        settings_for_stage.borrow_mut().show_stage = !visible;
-        if let Some(ui) = ui_for_stage.upgrade() {
-            ui.set_stage_open(stage.window().is_visible());
-        }
-        if let Err(err) = settings_for_stage.borrow().save(&settings_path_for_stage) {
-            tracing::error!("could not save settings: {err}");
-        }
-    });
+    let display_setup = DisplaySetup::wire(
+        &control,
+        &output,
+        &stage,
+        Rc::clone(&session),
+        Rc::clone(&settings),
+        settings_path.clone(),
+    );
 
     let ui = control.as_weak();
     let session_for_tab = Rc::clone(&session);
@@ -3041,7 +3207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let settings = Rc::clone(&settings);
         let edit_slot = Rc::clone(&edit_slot);
-        let output_window = output.as_weak();
+        let displays = Rc::clone(&display_setup);
         control.on_apply_setting(move |key, value| {
             let result = session.borrow_mut().apply_setting(&key, &value);
             let Some(ui) = ui.upgrade() else {
@@ -3052,14 +3218,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_status(
                         format!("Saved {}", session::setting_label(&key)).into(),
                     );
-                    let current = session.borrow();
-                    if key.starts_with("output")
-                        && let Some(output) = output_window.upgrade()
-                        && output.window().is_visible()
-                    {
-                        let (on_top, kiosk) = current.output_window_flags();
-                        apply_window_behavior(output.window(), on_top, kiosk);
+                    if key.starts_with("output") {
+                        displays.apply_audience_flags();
                     }
+                    let current = session.borrow();
                     if key.starts_with("theme") {
                         let theme = theme::operator_theme(
                             settings.borrow().theme.as_deref(),
@@ -3068,11 +3230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         apply_theme(&ui, &theme);
                     }
                     // Labels, language and output names in the header follow at once.
-                    let monitors = output_window
-                        .upgrade()
-                        .map(|output| monitor_choices(output.window()))
-                        .unwrap_or_default();
-                    apply_chrome(&ui, &current, settings.borrow().output_screen, &monitors);
+                    apply_chrome(&ui, &current);
                     refresh(&ui, &current);
                     publish(&edit_slot, edit_frame(&current));
                 }
@@ -3115,6 +3273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     wire_media_preview(&control, Rc::clone(&session));
+    let _video_download_timer = media_download::wire(&control, Rc::clone(&session));
     {
         let ui = control.as_weak();
         let scan_session = Rc::clone(&session);
@@ -3141,6 +3300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     wire_transition_audition(&control, Rc::clone(&session));
+    wire_build_audition(&control, Rc::clone(&session));
     {
         let ui = control.as_weak();
         let session = Rc::clone(&session);
@@ -3186,6 +3346,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let session = Rc::clone(&session);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_inspector_set(move |key, value| {
+            if key.starts_with("build-") {
+                let Some(ui) = ui.upgrade() else { return };
+                if !commit_pending_layer_text(&ui, &mut session.borrow_mut()) {
+                    let current = session.borrow();
+                    ui.set_notice(current.notice.clone().into());
+                    ui.set_draft_status(current.show_draft_status().into());
+                    return;
+                }
+            }
             let result = session.borrow_mut().inspector_set(&key, &value);
             if let Err(err) = &result {
                 tracing::warn!("inspector {key} not applied: {err}");
@@ -3193,6 +3362,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = ui.upgrade() {
                 let current = session.borrow();
                 refresh(&ui, &current);
+                if key.starts_with("build-")
+                    && let Err(error) = &result
+                {
+                    ui.set_notice(error.as_str().into());
+                }
                 if result.is_ok() {
                     publish(&edit_slot, edit_frame(&current));
                 }
@@ -3384,22 +3558,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = control.as_weak();
         let settings = Rc::clone(&settings);
         let settings_path = settings_path.clone();
-        let output = output.as_weak();
-        let stage = stage.as_weak();
+        let displays = Rc::clone(&display_setup);
         control.on_save_layouts(move |text| {
             settings.borrow_mut().apply_profile_text(&text);
             if let Err(err) = settings.borrow().save(&settings_path) {
                 tracing::error!("could not save window layouts: {err}");
             }
-            if let (Some(ui), Some(output), Some(stage)) =
-                (ui.upgrade(), output.upgrade(), stage.upgrade())
-            {
-                apply_window_profile(
-                    ui.window(),
-                    output.window(),
-                    stage.window(),
-                    &settings.borrow(),
-                );
+            displays.apply_profile();
+            if let Some(ui) = ui.upgrade() {
                 ui.set_show_layouts(false);
             }
         });
@@ -3817,7 +3983,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 format!("Exported project to {}", path.display())
                             } else {
                                 format!(
-                                    "Exported project with {} media dependencies: {}",
+                                    "Exported project with {} dependency warnings · {}",
                                     warnings.len(),
                                     warnings.join(" · ")
                                 )
@@ -4666,14 +4832,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     };
-    if let Some(notice) = busy_ports_notice(remote_ports.remote, remote_ports.stage) {
-        tracing::warn!("{notice}");
-        session.borrow_mut().notice = notice;
-        refresh(&control, &session.borrow());
-    }
+    let protected = remote_password
+        .as_deref()
+        .is_some_and(|password| !password.trim().is_empty());
     let (stage_frame_tx, stage_frame_rx) = mpsc::sync_channel(1);
     let max_connections = session.borrow().preferences.max_connections();
-    freeshow_remote::spawn_limited(
+    let listener_events = freeshow_remote::spawn_limited(
         Arc::clone(&snapshot),
         command_tx.clone(),
         remote_password,
@@ -4681,6 +4845,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage_frame_tx,
         max_connections,
     );
+    let listener_timer = slint::Timer::default();
+    {
+        use freeshow_remote::WebPage;
+        let ui = control.as_weak();
+        let states = RefCell::new([None, None]);
+        listener_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                let Some(ui) = ui.upgrade() else { return };
+                let mut states = states.borrow_mut();
+                let mut changed = false;
+                for (page, state) in listener_events.try_iter() {
+                    states[usize::from(page == WebPage::Stage)] = Some(state);
+                    changed = true;
+                }
+                if changed || ui.get_show_settings() {
+                    let host = session::lan_host();
+                    if let Some(state) = states[0] {
+                        ui.set_remote_web_status(
+                            web_listener_status(WebPage::Remote, state, &host, protected).into(),
+                        );
+                    }
+                    if let Some(state) = states[1] {
+                        ui.set_stage_web_status(
+                            web_listener_status(WebPage::Stage, state, &host, protected).into(),
+                        );
+                    }
+                }
+            },
+        );
+    }
     freeshow_osc::OscInput::default().start(freeshow_remote::ShowBus {
         snapshot: Arc::clone(&snapshot),
         commands: command_tx.clone(),
@@ -4706,32 +4902,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     freeshow_timecode::MtcInput::default().start();
     freeshow_timecode::LtcInput.start();
-    let mut rtmp_started = false;
+    let mut rtmp_targets = Vec::new();
     if let Ok(url) = std::env::var("FREESHOW_RTMP")
         && !url.trim().is_empty()
     {
-        let output_id = session
+        let id = session
             .borrow()
             .network_output("rtmp")
             .unwrap_or_else(|| "default".into());
-        rtmp_started |= freeshow_record::ServiceCapture.start_rtmp_routed(
+        rtmp_targets.push((id, url));
+    }
+    rtmp_targets.extend(
+        session
+            .borrow()
+            .rtmp_destinations()
+            .into_iter()
+            .map(|dest| (dest.id, dest.url)),
+    );
+    let mut inactive_rtmp = Vec::new();
+    let active_rtmp = rtmp_targets.pop().map(|(id, url)| {
+        let started = freeshow_record::ServiceCapture.start_rtmp_routed(
             &url,
             output_width,
             output_height,
-            &output_id,
+            &id,
         );
+        if started {
+            let frame = output_slot.last_frame();
+            freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
+        }
+        (id, started)
+    });
+    for (id, _) in rtmp_targets {
+        inactive_rtmp.push(network_row(
+            "RTMP",
+            &id,
+            false,
+            "Another destination is selected. RTMP uses one sender.",
+        ));
     }
-    for dest in session.borrow().rtmp_destinations() {
-        rtmp_started |= freeshow_record::ServiceCapture.start_rtmp_routed(
-            &dest.url,
-            output_width,
-            output_height,
-            &dest.id,
+    if active_rtmp.is_none()
+        && let Some(root) = &session.borrow().root
+    {
+        for (id, _) in freeshow_data::Library::open(root).network_outputs("rtmp") {
+            inactive_rtmp.push(network_row(
+                "RTMP",
+                &id,
+                false,
+                "No valid automatic destination.",
+            ));
+        }
+    }
+    let network_check_timer = slint::Timer::default();
+    {
+        let ui = control.as_weak();
+        let session = Rc::clone(&session);
+        let mut previous = Vec::new();
+        network_check_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                let Some(ui) = ui.upgrade().filter(|ui| ui.get_show_settings()) else {
+                    return;
+                };
+                let mut rows = inactive_rtmp.clone();
+                if let Some(lan) = LAN.get() {
+                    lan.rows(&mut rows);
+                }
+                if let Some(webrtc) = WEBRTC.get() {
+                    webrtc.rows(&mut rows);
+                }
+                if let Some((id, started)) = &active_rtmp {
+                    let status = if !started {
+                        "Could not start the RTMP pipeline."
+                    } else if freeshow_record::ServiceCapture.rtmp_running() {
+                        "Pipeline running. Verify ingest at the destination."
+                    } else {
+                        "RTMP pipeline stopped. Check the startup log."
+                    };
+                    rows.push(network_row("RTMP", id, false, status));
+                }
+                if let Some((_, enabled)) = session.borrow().icecast.as_ref() {
+                    let status = if *enabled {
+                        "Enabled in the mixer. Verify the stream on a listener."
+                    } else {
+                        "Configured. Streaming is disabled."
+                    };
+                    let mut row = network_row("Icecast", "Mixer output", false, status);
+                    row.picture = "Audio".into();
+                    rows.push(row);
+                }
+                if previous != rows {
+                    previous = rows.clone();
+                    ui.set_network_check_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                }
+            },
         );
-    }
-    if rtmp_started {
-        let frame = output_slot.last_frame();
-        freeshow_record::ServiceCapture.submit(&frame.pixels, frame.width, frame.height);
     }
     let remote_session = Rc::clone(&session);
     let remote_ui = control.as_weak();
@@ -4995,6 +5261,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clock_video_timer = Rc::clone(&video_timer);
     let clock_output_fade = Rc::clone(&output_fade);
     let clock_stage_fade = Rc::clone(&stage_fade);
+    let graphics_timer = slint::Timer::default();
+    {
+        let session = Rc::clone(&session);
+        let video_player = Rc::clone(&video_player);
+        let output = Rc::clone(&output_slot);
+        let preview = Rc::clone(&preview_slot);
+        let stage = Rc::clone(&stage_slot);
+        let output_fade = Rc::clone(&output_fade);
+        let stage_fade = Rc::clone(&stage_fade);
+        graphics_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(33),
+            move || {
+                // The video clock composites its own frames, including an opening fade.
+                if video_player.borrow().is_some() {
+                    return;
+                }
+                let mut session = session.borrow_mut();
+                if !session.tick_live_graphics(std::time::Instant::now()) {
+                    return;
+                }
+                if let Some(frame) = output_fade.update_target(audience_frame(&session)) {
+                    publish_audience(&output, &preview, frame);
+                }
+                if let Some(frame) = stage_fade.update_target(stage_frame(&session)) {
+                    publish_stage(&stage, frame);
+                }
+            },
+        );
+    }
     let clock_timer = slint::Timer::default();
     let autosave_session = Rc::clone(&session);
     let autosave_timer = slint::Timer::default();
@@ -5137,6 +5433,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if current.browse_template(&id)
                 && let Some(ui) = browse_ui.upgrade()
             {
+                refresh_template_pick(&ui, &current);
+            }
+        });
+        let filter_session = Rc::clone(&session);
+        let filter_ui = ui.clone();
+        control.on_filter_template_favorites(move |only| {
+            let mut current = filter_session.borrow_mut();
+            current.template_favorites_only = only;
+            if let Some(ui) = filter_ui.upgrade() {
+                ui.set_drawer_rows(drawer_rows(&current));
                 refresh_template_pick(&ui, &current);
             }
         });
@@ -5458,13 +5764,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     );
-    place(control.window(), 40, 40);
-    apply_window_profile(
-        control.window(),
-        output.window(),
-        stage.window(),
-        &settings.borrow(),
-    );
     {
         // Closing the operator window quits FreeShow even while an output is open,
         // after saving text the operator typed but the autosave has not caught yet.
@@ -5486,7 +5785,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     tracing::info!("control window ready");
-    let result = control.run();
+    control.show()?;
+    let display_timer = slint::Timer::default();
+    let display_started = Cell::new(display_setup.startup());
+    display_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(500),
+        move || {
+            if display_started.get() {
+                display_setup.sync();
+            } else {
+                display_started.set(display_setup.startup());
+            }
+        },
+    );
+    let result = slint::run_event_loop();
     freeshow_record::ServiceCapture.stop_all();
     result?;
     Ok(())
@@ -5517,6 +5830,35 @@ fn spawn_feed_worker() -> (
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grouped_ndi_stays_closed_and_invalid_whip_is_reported_without_endpoint_details() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!(
+            "freeshow-network-check-{}",
+            freeshow_data::new_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let library = freeshow_data::Library::open(&root);
+        std::fs::write(library.settings_path(), serde_json::json!({"outputs":{
+            "stage-private": {"enabled":true,"ndi":true,"stageOutput":"speaker","ndiData":{"name":"Private cues","groups":["Crew"]}},
+            "whip-bad": {"enabled":true,"webrtc":true,"webrtcData":{"url":"invalid-secret","token":"secret"}}
+        }}).to_string()).unwrap();
+        let session = Session::open(root.clone());
+        let lan = LanBroadcast::open(&session);
+        let whip = WebrtcBroadcast::open(&session);
+        assert!(lan.ndi.is_empty());
+        assert!(whip.routes.is_empty());
+        let mut rows = Vec::new();
+        lan.rows(&mut rows);
+        whip.rows(&mut rows);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].picture.as_str(), "Stage");
+        assert!(rows[0].status.contains("closed"));
+        assert!(rows[1].status.contains("endpoint is required"));
+        assert!(!format!("{rows:?}").contains("secret"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
 
     #[test]

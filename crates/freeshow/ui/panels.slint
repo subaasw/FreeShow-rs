@@ -2,7 +2,7 @@
 // Settings, Inspector and Stage editor panels. Every edit calls back with one
 // key/value pair; Rust validates it, writes the library file, and refreshes `data`.
 
-import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider, SpinBox, Switch, TabWidget, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, ScrollView, Slider, SpinBox, Switch, TabWidget, TextEdit } from "std-widgets.slint";
 import { OperatorStyle, BoxButton, HeaderButton, ListRow } from "widgets.slint";
 
 export struct ThemeColorRow {
@@ -46,7 +46,6 @@ export struct SettingsData {
     media-transition: string,
     media-duration: int,
     media-direction: string,
-    addresses: string,
     style-names: [string],
     style-name: string,
     style-is-default: bool,
@@ -64,6 +63,12 @@ export struct SettingsData {
     theme-font-size: int,
     theme-radius: int,
     theme-edited: bool,
+}
+
+export struct BuildRowData {
+    layer: int,
+    title: string,
+    trigger: string,
 }
 
 export struct InspectorData {
@@ -115,6 +120,16 @@ export struct InspectorData {
     slide-transition-direction: string,
     slide-transition-easing: string,
     slide-transition-source: string,
+    build-allowed: bool,
+    build-preview-available: bool,
+    build-step: int,
+    build-after-previous: bool,
+    build-enter: string,
+    build-enter-duration: int,
+    build-enter-delay: int,
+    build-exit: string,
+    build-exit-duration: int,
+    build-exit-delay: int,
     valign: string,
     rotation: int,
     text-case: string,
@@ -248,7 +263,13 @@ component SectionHeader inherits Rectangle {
     in property <string> title;
     in property <color> text-color;
     in-out property <bool> open: true;
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-action-default => { root.open = !root.open; }
     height: 22px;
+    border-radius: OperatorStyle.chrome-radius;
+    border-width: section-focus.has-focus ? 1px : 0px;
+    border-color: root.text-color.with-alpha(0.5);
     HorizontalLayout {
         spacing: OperatorStyle.space-xs;
         alignment: center;
@@ -268,7 +289,16 @@ component SectionHeader inherits Rectangle {
     }
     TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.open = !root.open; }
+        clicked => { section-focus.focus(); root.open = !root.open; }
+    }
+    section-focus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.open = !root.open;
+                return accept;
+            }
+            reject
+        }
     }
 }
 
@@ -542,8 +572,37 @@ global Fmt {
     }
 }
 
+export struct AudioCheckRow {
+    source: string,
+    destination: string,
+    detail: string,
+}
+
+export struct AudioMappingRow {
+    key: string,
+    choice: string,
+    choices: [string],
+    pending: bool,
+}
+
+export struct NetworkCheckRow {
+    transport: string,
+    output: string,
+    picture: string,
+    status: string,
+}
+
 export component SettingsPanel inherits Rectangle {
     in property <SettingsData> data;
+    in property <string> remote-web-status;
+    in property <string> stage-web-status;
+    in property <string> audio-check-status;
+    in property <[AudioCheckRow]> audio-check-rows;
+    in property <[AudioMappingRow]> audio-mapping-rows;
+    in property <bool> audio-scan-running;
+    in property <[NetworkCheckRow]> network-check-rows;
+    callback scan-audio-devices();
+    callback save-audio-mapping(string, string);
     in property <[string]> themes;
     in property <[string]> autosave-choices;
     in property <[string]> transition-kinds;
@@ -1035,7 +1094,10 @@ export component SettingsPanel inherits Rectangle {
                     Row {
                         Text {
                             colspan: 2;
-                            text: root.data.addresses;
+                            text: root.remote-web-status;
+                            accessible-role: text;
+                            accessible-label: "Phone remote listener status";
+                            accessible-value: root.remote-web-status;
                             wrap: word-wrap;
                             color: root.text-color;
                             font-size: 13px * OperatorStyle.font-scale;
@@ -1044,12 +1106,137 @@ export component SettingsPanel inherits Rectangle {
                     Row {
                         Text {
                             colspan: 2;
-                            text: "Port changes apply the next time FreeShow starts.";
+                            text: root.stage-web-status;
+                            accessible-role: text;
+                            accessible-label: "Stage web listener status";
+                            accessible-value: root.stage-web-status;
+                            wrap: word-wrap;
+                            color: root.text-color;
+                            font-size: 13px * OperatorStyle.font-scale;
+                        }
+                    }
+                    Row {
+                        Text {
+                            colspan: 2;
+                            text: "Open these addresses from a device on the same network. Connection settings apply after restart.";
                             color: root.text-color;
                             font-size: 12px * OperatorStyle.font-scale;
                         }
                     }
                 }
+                }
+            }
+            Tab {
+                title: "Audio routing";
+                VerticalLayout {
+                    padding: OperatorStyle.panel-pad;
+                    spacing: OperatorStyle.space-sm;
+                    HorizontalLayout {
+                        spacing: OperatorStyle.space;
+                        Button {
+                            text: "Scan output devices";
+                            enabled: !root.audio-scan-running;
+                            clicked => { root.scan-audio-devices(); }
+                        }
+                        Text {
+                            text: root.audio-check-status;
+                            accessible-role: text;
+                            accessible-label: "Audio scan status";
+                            accessible-value: root.audio-check-status;
+                            color: root.text-color;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ScrollView {
+                        content-height: max(self.visible-height, audio-check.min-height);
+                        audio-check := VerticalLayout {
+                            width: parent.width - 18px;
+                            padding-top: OperatorStyle.space-sm;
+                            spacing: OperatorStyle.space-sm;
+                            alignment: start;
+                            for route in root.audio-check-rows: VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: route.source + " → " + route.destination;
+                                    color: root.text-color;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: route.detail;
+                                    color: root.text-color;
+                                    opacity: 0.75;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if root.audio-mapping-rows.length > 0: Text {
+                                text: "Device mappings";
+                                color: root.text-color;
+                                font-weight: 600;
+                            }
+                            if root.audio-mapping-rows.length > 0: Text {
+                                text: "The picker shows devices listed for every playback path using that speaker. Saved mappings apply after restart.";
+                                color: root.text-color;
+                                opacity: 0.75;
+                                wrap: word-wrap;
+                            }
+                            for mapping in root.audio-mapping-rows: HorizontalLayout {
+                                spacing: OperatorStyle.space-sm;
+                                Text {
+                                    text: mapping.key + (mapping.pending ? " · Applies after restart" : "");
+                                    color: root.text-color;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                }
+                                ValueCombo {
+                                    horizontal-stretch: 1;
+                                    enabled: !root.audio-scan-running;
+                                    accessible-label: "Native device for " + mapping.key;
+                                    model: mapping.choices;
+                                    value: mapping.choice;
+                                    selected(value) => {
+                                        root.save-audio-mapping(mapping.key, self.current-index == 0 ? "" : value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: "Network outputs";
+                ScrollView {
+                    content-height: max(self.visible-height, network-check.min-height);
+                    network-check := VerticalLayout {
+                        width: parent.width - 18px;
+                        padding: OperatorStyle.panel-pad;
+                        spacing: OperatorStyle.space-sm;
+                        alignment: start;
+                        if root.network-check-rows.length == 0: Text {
+                            text: "No network outputs are configured for this session.";
+                            color: root.text-color;
+                            wrap: word-wrap;
+                        }
+                        for route in root.network-check-rows: VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: route.transport + " · " + route.output + " · " + route.picture;
+                                color: root.text-color;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: route.status;
+                                accessible-role: text;
+                                accessible-label: route.transport + " status for " + route.output;
+                                accessible-value: route.status;
+                                color: root.text-color;
+                                opacity: 0.8;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                 }
             }
             Tab {
@@ -1172,8 +1359,14 @@ export component InspectorPanel inherits VerticalLayout {
     private property <bool> item-editable: root.data.has-item && !root.item-locked;
     in property <color> text-color;
     in property <color> panel: #2a2a32;
+    in property <color> accent: #4f63df;
+    in property <color> accent-text: white;
+    in property <[BuildRowData]> build-rows;
+    in property <int> selected-layer: -1;
     in property <int> transition-slide-count;
     callback preview-transition();
+    callback preview-builds();
+    callback choose-build-layer(int);
     callback apply-transition-range(int, int);
     private property <bool> show-transition-range;
     private property <[string]> effect-keys: ["default", "none", "fade", "blur", "scale", "slide", "spin", "push", "fade_through_black", "wipe", "cover", "uncover"];
@@ -1199,6 +1392,7 @@ export component InspectorPanel inherits VerticalLayout {
     property <bool> open-outline: false;
     property <bool> open-filters: false;
     property <bool> open-layout: false;
+    property <bool> open-build: false;
     property <bool> open-transition: true;
     spacing: OperatorStyle.space-sm;
 
@@ -1510,6 +1704,119 @@ export component InspectorPanel inherits VerticalLayout {
                 selected(value) => { root.set("text-case", value); }
             }
             Rectangle { horizontal-stretch: 1; }
+        }
+    }
+
+    SectionHeader { title: "LAYER ANIMATION"; text-color: root.text-color; open <=> root.open-build; }
+    if root.open-build: VerticalLayout {
+        spacing: OperatorStyle.space-sm;
+        property <bool> has-entrance: root.data.build-enter != "" && root.data.build-enter != "none";
+        Text {
+            color: root.text-color;
+            opacity: 0.75;
+            wrap: word-wrap;
+            text: root.data.has-item && !root.data.build-allowed
+                ? "This layer uses a legacy reveal."
+                : "Layers on the same step animate together and share a trigger.";
+        }
+        if root.build-rows.length > 0: VerticalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Build order"; text-color: root.text-color; }
+            ListView {
+                min-height: min(root.build-rows.length, 5) * 36px;
+                max-height: self.min-height;
+                for row in root.build-rows: ListRow {
+                    label: row.title;
+                    tag: row.trigger;
+                    accessible-description: "Layer " + (row.layer + 1) + " · " + row.trigger
+                        + (root.selected-layer == row.layer ? " · Selected" : "");
+                    active: root.selected-layer == row.layer;
+                    accent: root.accent;
+                    text-color: root.text-color;
+                    accent-text: root.accent-text;
+                    clicked => { root.choose-build-layer(row.layer); }
+                }
+            }
+        }
+        if self.has-entrance: HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Step"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueSpin {
+                accessible-label: "Layer animation step";
+                enabled: root.item-editable && root.data.build-allowed;
+                horizontal-stretch: 1;
+                minimum: 0;
+                maximum: 65535;
+                shown: root.data.build-step;
+                edited(value) => { root.set("build-step", value); }
+            }
+        }
+        if self.has-entrance: HorizontalLayout {
+            spacing: OperatorStyle.space-sm;
+            FieldLabel { text: "Start"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+            ValueCombo {
+                accessible-label: "Animation step trigger";
+                horizontal-stretch: 1;
+                enabled: root.item-editable && root.data.build-allowed && root.data.build-step > 0;
+                model: root.data.build-step == 0 ? ["On Take"] : ["On Click", "After Previous"];
+                value: root.data.build-step == 0 ? "On Take" : root.data.build-after-previous ? "After Previous" : "On Click";
+                selected(value) => { root.set("build-after-previous", Fmt.flag(value == "After Previous")); }
+            }
+        }
+        for phase[i] in [
+            { label: "Entrance", key: "build-enter", effect: root.data.build-enter, duration: root.data.build-enter-duration, delay: root.data.build-enter-delay },
+            { label: "Exit", key: "build-exit", effect: root.data.build-exit, duration: root.data.build-exit-duration, delay: root.data.build-exit-delay },
+        ]: VerticalLayout {
+            spacing: OperatorStyle.space-sm;
+            property <bool> on: phase.effect != "" && phase.effect != "none";
+            HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                FieldLabel { text: phase.label; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueCombo {
+                    accessible-label: phase.label + " effect";
+                    enabled: root.item-editable && root.data.build-allowed && (i == 0 || root.data.build-enter != "none");
+                    horizontal-stretch: 1;
+                    model: i == 0 ? ["None", "Fade", "From left", "From right", "From above", "From below", "Scale in"]
+                        : ["None", "Fade", "To left", "To right", "Up", "Down", "Scale out"];
+                    value: self.model[max(0, root.choice-index(["none", "fade", "left", "right", "up", "down", "scale"], phase.effect))];
+                    selected(_) => {
+                        root.set(phase.key, ["none", "fade", "left", "right", "up", "down", "scale"][self.current-index]);
+                    }
+                }
+            }
+            if self.on: HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                FieldLabel { text: "Duration (ms)"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueSpin {
+                    accessible-label: phase.label + " duration in milliseconds";
+                    enabled: root.item-editable && root.data.build-allowed;
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: 10000;
+                    step-size: 50;
+                    shown: phase.duration;
+                    edited(value) => { root.set(phase.key + "-duration", value); }
+                }
+            }
+            if self.on: HorizontalLayout {
+                spacing: OperatorStyle.space-sm;
+                FieldLabel { text: "Delay (ms)"; text-color: root.text-color; min-width: OperatorStyle.label-width; }
+                ValueSpin {
+                    accessible-label: phase.label + " delay in milliseconds";
+                    enabled: root.item-editable && root.data.build-allowed;
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: 60000;
+                    step-size: 50;
+                    shown: phase.delay;
+                    edited(value) => { root.set(phase.key + "-delay", value); }
+                }
+            }
+        }
+        Button {
+            text: "Preview animations";
+            enabled: root.data.build-preview-available;
+            clicked => { root.preview-builds(); }
         }
     }
 

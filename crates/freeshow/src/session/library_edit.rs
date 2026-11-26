@@ -284,6 +284,18 @@ impl Session {
         }
     }
 
+    pub(crate) fn refresh_downloaded_media(&mut self, root: &std::path::Path) {
+        if self.root.as_deref() == Some(root) {
+            let selected = self
+                .media_index
+                .and_then(|index| self.media.get(index))
+                .map(|entry| entry.path.clone());
+            self.reload_local_media(&Library::open(root));
+            self.media_index =
+                selected.and_then(|path| self.media.iter().position(|entry| entry.path == path));
+        }
+    }
+
     pub fn import_files(&mut self, paths: &[std::path::PathBuf]) -> Result<String, String> {
         let root = self.root.clone().ok_or("choose a library folder first")?;
         let library = Library::open(&root);
@@ -397,8 +409,11 @@ impl Session {
             });
         }
         let mut message = format!("Imported {}", parts.join(", "));
-        if !notes.is_empty() {
-            message.push_str(&format!(" · {} warning(s) in the log", notes.len()));
+        if let Some(first) = notes.first() {
+            message.push_str(&format!(" · {first}"));
+            if notes.len() > 1 {
+                message.push_str(&format!(" · {} more in the log", notes.len() - 1));
+            }
         }
         if !copy_errors.is_empty() {
             message.push_str(&format!(
@@ -552,6 +567,7 @@ impl Session {
             "slide-to-template" => self.save_slide_as("template", arg),
             "template-new-show" => self.use_template_as_new(arg),
             "template-apply-style" => self.apply_browsed_template(arg),
+            "template-toggle-favorite" => self.toggle_template_favorite(arg),
             "template-export" => self.export_browsed_template(arg),
             "open-project" => self.open_project(arg),
             "rename-project" => self.rename_project(arg),
@@ -574,6 +590,37 @@ impl Session {
         })
     }
 
+    fn toggle_template_favorite(&mut self, id: &str) -> Result<String, String> {
+        let Some((_, name, _)) = self
+            .selected_template()
+            .filter(|(selected, _, _)| *selected == id)
+        else {
+            return Err("Select a template first".into());
+        };
+        let root = self
+            .root
+            .as_deref()
+            .ok_or("Choose a library folder first")?;
+        let library = Library::open(root);
+        let message = if self.is_template_favorite(id) {
+            format!("Removed “{name}” from favorites")
+        } else {
+            format!("Added “{name}” to favorites")
+        };
+        let save_error = |error| format!("Could not save template favorites. {error}");
+        let mut saved = library.load_template_favorites().map_err(save_error)?;
+        if self.is_template_favorite(id) {
+            saved.remove(id);
+        } else {
+            saved.insert(id.to_owned());
+        }
+        library
+            .save_template_favorites(&saved)
+            .map_err(save_error)?;
+        self.template_favorites = saved;
+        Ok(message)
+    }
+
     fn export_browsed_template(&self, id: &str) -> Result<String, String> {
         let Some((_, name, template)) = self.selected_template().filter(|(key, _, _)| *key == id)
         else {
@@ -593,7 +640,7 @@ impl Session {
             Ok(format!("Exported template to {}", path.display()))
         } else {
             Ok(format!(
-                "Exported template with {} media dependencies: {}",
+                "Exported template with {} dependency warnings · {}",
                 warnings.len(),
                 warnings.join(" · ")
             ))
@@ -1298,6 +1345,7 @@ mod tests {
             }),
         );
         session.switch_tab("templates");
+        session.set_search("Welcome poster");
         assert_eq!(session.template_entries().len(), 2);
         assert!(session.browse_template("same-name"));
         assert_eq!(session.selected_template().unwrap().0, "same-name");
@@ -1472,23 +1520,132 @@ mod tests {
         let (_destination, mut receiver) = library("receive-template");
         assert!(session.create_show());
         assert!(session.save_lyrics("Reusable wording"));
+        assert!(
+            session.edit_selected_slide("Set template font", |show, slide, _| {
+                show.set_item_font_family(slide, 0, "Arial")
+            })
+        );
         session
             .library_action("slide-to-template", "Welcome")
             .unwrap();
         session.switch_tab("templates");
         let id = session.template_catalog.id_named("Welcome").unwrap();
         assert!(session.browse_template(&id));
-        session.library_action("template-export", &id).unwrap();
+        let notice = session.library_action("template-export", &id).unwrap();
+        assert!(notice.contains("Verify or install these fonts for this package (Arial)"));
         let manifest = receiver
             .import_files(&[source.0.join("Exports/Welcome - Template.project")])
             .unwrap();
-        assert_eq!(manifest, "Imported 1 template");
+        assert_eq!(
+            manifest,
+            "Imported 1 template · Verify or install these fonts for this package (Arial)"
+        );
         assert!(receiver.projects.projects().is_empty());
         assert_eq!(receiver.templates, ["Welcome"]);
         receiver.switch_tab("templates");
         assert!(receiver.browse_template(&id));
         receiver.library_action("template-new-show", &id).unwrap();
         assert_eq!(receiver.lyrics(), "Reusable wording");
+        assert!(receiver.save_lyrics("Local edits after import"));
+        receiver.switch_tab("templates");
+        assert!(receiver.browse_template(&id));
+        receiver.library_action("template-new-show", &id).unwrap();
+        assert_eq!(receiver.lyrics(), "Reusable wording");
+    }
+
+    #[test]
+    fn template_favorites_keep_stable_ids_and_filter_the_keyboard_gallery() {
+        let (dir, mut session) = library("favorite-templates");
+        let library = Library::open(&dir.0);
+        let entry = serde_json::json!({"name":"Équipe Welcome","items":[{"style":"color:#fff;"}]});
+        for id in ["alpha", "beta"] {
+            session.template_catalog.insert(id, entry.clone());
+        }
+        session
+            .template_catalog
+            .save(&library.templates_path())
+            .unwrap();
+        session.switch_tab("templates");
+        assert!(session.browse_template("beta"));
+        session
+            .library_action("template-toggle-favorite", "beta")
+            .unwrap();
+        assert!(!session.is_template_favorite("alpha"));
+        assert!(session.is_template_favorite("beta"));
+        assert_eq!(library.load_templates().unwrap(), session.template_catalog);
+        session.library_action("template-export", "beta").unwrap();
+        let (_receiver_dir, mut receiver) = self::library("receive-favorite-template");
+        receiver
+            .import_files(&[dir.0.join("Exports/Équipe Welcome - Template.project")])
+            .unwrap();
+        assert!(!receiver.is_template_favorite("beta"));
+
+        let mut reopened = Session::open(dir.0.clone());
+        assert!(reopened.is_template_favorite("beta"));
+        reopened.switch_tab("templates");
+        reopened.set_search("ÉQUIPE");
+        reopened.template_favorites_only = true;
+        assert_eq!(reopened.drawer(), ["Équipe Welcome"]);
+        assert!(!reopened.browse_template("alpha"));
+        reopened.select_drawer(0);
+        assert_eq!(reopened.selected_template().unwrap().0, "beta");
+        reopened
+            .library_action("template-toggle-favorite", "beta")
+            .unwrap();
+        assert!(reopened.drawer().is_empty());
+        assert!(reopened.selected_template().is_none());
+        assert!(library.load_template_favorites().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bundled_starters_can_be_previewed_customized_and_shared_from_a_clean_library() {
+        let (dir, mut session) = library("starter-templates");
+        let library = Library::open(&dir.0);
+        assert!(session.create_project());
+        assert!(session.create_show());
+        assert!(session.save_lyrics("Already on air"));
+        session.select_slide(0);
+        let live = crate::live::audience_frame(&session);
+        session.switch_tab("templates");
+        let rows = session.template_entries();
+        assert_eq!(rows.len(), 5);
+        for (id, _, design) in rows {
+            assert!(session.is_starter_template(id));
+            let thumbnail = crate::live::catalog_thumbnail(&session, design, 128, 72);
+            let (pixels, _) = thumbnail.pixels.as_chunks::<4>();
+            assert!(pixels.iter().any(|pixel| *pixel != pixels[0]));
+        }
+        const TITLE: &str = "freeshow-rust-starter-title";
+        assert!(session.browse_template(TITLE));
+        session
+            .library_action("template-toggle-favorite", TITLE)
+            .unwrap();
+        session.template_favorites_only = true;
+        assert_eq!(session.template_entries().len(), 1);
+        session.library_action("template-export", TITLE).unwrap();
+        session.library_action("template-new-show", TITLE).unwrap();
+        assert_eq!(session.lyrics(), "Welcome");
+        assert!(session.save_lyrics("Welcome to the evening service"));
+        let saved =
+            ShowFile::load(session.current_show().unwrap().path.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            saved.plain_text("s1").lines().next().unwrap(),
+            "Welcome to the evening service"
+        );
+        assert_eq!(saved.show["slides"]["s1"]["settings"]["color"], "#123d39");
+        assert_eq!(crate::live::audience_frame(&session), live);
+        assert!(!library.templates_path().exists());
+
+        let (_dir, mut receiver) = self::library("receive-starter-template");
+        receiver
+            .import_files(&[dir.0.join("Exports/Title — Welcome - Template.project")])
+            .unwrap();
+        receiver.switch_tab("templates");
+        assert_eq!(receiver.template_entries().len(), 5);
+        assert!(!receiver.is_starter_template(TITLE));
+        assert!(receiver.browse_template(TITLE));
+        receiver.library_action("template-new-show", TITLE).unwrap();
+        assert_eq!(receiver.lyrics(), "Welcome");
     }
 
     #[test]
