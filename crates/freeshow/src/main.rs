@@ -4259,6 +4259,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let live_pump = Rc::clone(&live_pump);
         let edit_slot = Rc::clone(&edit_slot);
         control.on_choose_slide(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
             let Some(ui) = ui.upgrade() else {
                 return;
             };
@@ -4268,10 +4271,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // As in FreeShow, a click outside the editor puts the slide on the output.
                 // Edit mode only applies where the editor is shown.
                 if ui.get_editing() {
-                    current.select_slide_for_edit(index.max(0) as usize);
-                } else {
-                    current.select_slide(index.max(0) as usize);
-                    current.blanked = false;
+                    current.select_slide_for_edit(index);
+                } else if current.select_slide(index) {
                     current.refresh_output = true;
                 }
             }
@@ -4739,7 +4740,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && let Some(index) = current.slide_index.or_else(|| current.first_slide())
                 {
                     // Route Go through the same media and timer handoff as a slide click.
-                    current.select_slide(index);
+                    if !current.select_slide(index) {
+                        return;
+                    }
                 } else {
                     current.go_live();
                 }
@@ -5208,8 +5211,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     clear_background |= matches!(command, Command::ClearBackground);
                     cancel_next |= matches!(command, Command::Clear | Command::ClearSlide);
                 }
-                change = change.after(&command, locked);
-                session.apply_remote(command);
+                let next_change = change.after(&command, locked);
+                if session.apply_remote(command) {
+                    change = next_change;
+                }
             }
             let completed = session.run_due_cue_completion(std::time::Instant::now());
             let repaint = std::mem::take(&mut session.refresh_output);
