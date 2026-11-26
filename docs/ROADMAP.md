@@ -122,6 +122,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 7 text boxes preserve saved margins, glyph outlines, and text drop shadows.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
 - [x] ProPresenter RTF raised and lowered runs, including superscript and subscript.
+- [x] ProPresenter RTF paragraph margins, first-line and hanging indents, space before and after, and exact, minimum, and multiple line spacing.
 - [x] ProPresenter 7 solid rectangle and ellipse fills with stored rotation rendered in Rust.
 - [x] ProPresenter 7 triangle and rhombus fills follow the shape while text uses the rectangular text box.
 - [x] ProPresenter 7 regular polygons and stars use the stored side or point count and the star's inner radius.

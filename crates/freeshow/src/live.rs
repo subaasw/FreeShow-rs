@@ -1544,8 +1544,14 @@ fn session_variables(session: &Session) -> Vec<(String, String)> {
 }
 
 fn styled_line(line: &serde_json::Value, variables: &[(String, String)]) -> StyledLine {
-    let spacing = line.get("pptxSpacing").and_then(|value| value.as_array());
-    let margins = line.get("pptxMargins").and_then(|value| value.as_array());
+    let spacing = line
+        .get("paragraphSpacing")
+        .or_else(|| line.get("pptxSpacing"))
+        .and_then(|value| value.as_array());
+    let margins = line
+        .get("paragraphMargins")
+        .or_else(|| line.get("pptxMargins"))
+        .and_then(|value| value.as_array());
     StyledLine {
         align: line
             .get("align")

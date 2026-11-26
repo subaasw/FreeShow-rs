@@ -248,7 +248,7 @@ pub struct StyledLine {
     /// A later visual row of a lyric that wrapped. It keeps the line background
     /// and does not open the gap that sits between lyrics.
     pub wrapped: bool,
-    /// DrawingML line height, space before, and space after, in slide pixels or percent of font size.
+    /// Imported line height, space before, and space after.
     pub pptx_spacing: [Option<String>; 3],
     /// Left margin, right margin, and signed first-line indent, in slide pixels.
     pub pptx_margins: [i32; 3],
@@ -2776,7 +2776,7 @@ fn paragraph_row(margins: [i32; 3], slide: &StyledSlide, width: i32) -> (i32, i3
     let [left, right, indent] = margins;
     let horizontal = |value| scale(value as f32, slide.output_width, slide.source_width);
     let left = horizontal(left.saturating_add(indent)).clamp(-width, width);
-    let right = horizontal(right).clamp(0, width);
+    let right = horizontal(right).clamp(-width, width);
     (
         left,
         width.saturating_sub(left).saturating_sub(right).max(0),
@@ -3074,7 +3074,12 @@ fn vertical_offset(
     }
 }
 
-fn pptx_spacing(line: &StyledLine, style: &BoxStyle, slide: &StyledSlide) -> [Option<i32>; 3] {
+fn paragraph_spacing(
+    line: &StyledLine,
+    style: &BoxStyle,
+    slide: &StyledSlide,
+    natural_height: i32,
+) -> [Option<i32>; 3] {
     let font_size = || {
         line.runs
             .iter()
@@ -3088,13 +3093,28 @@ fn pptx_spacing(line: &StyledLine, style: &BoxStyle, slide: &StyledSlide) -> [Op
     };
     line.pptx_spacing.each_ref().map(|value| {
         let value = value.as_deref()?;
+        let positive = |value: &str| {
+            value
+                .parse::<f32>()
+                .ok()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+        };
+        let pixels = |value: f32| scale(value, slide.output_height, slide.source_height);
+        if let Some(minimum) = value
+            .strip_prefix("max(1lh,")
+            .and_then(|v| v.strip_suffix("px)"))
+        {
+            return Some(natural_height.max(pixels(positive(minimum)?)));
+        }
+        if let Some(multiplier) = value.strip_suffix("lh") {
+            return Some((natural_height as f32 * positive(multiplier)?).round() as i32);
+        }
         let source_px = if let Some(percent) = value.strip_suffix('%') {
             font_size() * percent.parse::<f32>().ok()? / 100.0
         } else {
             value.strip_suffix("px")?.parse().ok()?
         };
-        (source_px.is_finite() && source_px >= 0.0)
-            .then(|| scale(source_px, slide.output_height, slide.source_height))
+        (source_px.is_finite() && source_px >= 0.0).then(|| pixels(source_px))
     })
 }
 
@@ -3132,7 +3152,7 @@ fn line_layout(
         font_px = font_px.max(size);
     }
     let natural_height = (ascent + below).ceil() as i32;
-    let [height, before, after] = pptx_spacing(line, style, slide);
+    let [height, before, after] = paragraph_spacing(line, style, slide, natural_height);
     let height =
         height.unwrap_or_else(|| line_box(&first.style, item_css, font_px, natural_height, slide));
     Some(LineLayout {
@@ -6363,6 +6383,33 @@ mod tests {
             wrapped.last().unwrap().pptx_spacing,
             [Some("150%".into()), None, Some("6px".into())]
         );
+    }
+
+    #[test]
+    fn rtf_line_height_preserves_exact_minimum_and_multiple_spacing() {
+        let slide = shadow_slide("font-size:20px;");
+        let item = &slide.items[0];
+        let style = parse_style(&item.style);
+        let mut line = item.lines[0].clone();
+        let natural = line_layout(&line, &style, &slide, &item.style)
+            .unwrap()
+            .height;
+        assert!(natural > 4);
+        for (spacing, expected) in [
+            ("4px", 4),
+            ("max(1lh,4px)", natural),
+            ("max(1lh,80px)", 80),
+            ("1.5lh", (natural as f32 * 1.5).round() as i32),
+        ] {
+            line.pptx_spacing[0] = Some(spacing.into());
+            assert_eq!(
+                line_layout(&line, &style, &slide, &item.style)
+                    .unwrap()
+                    .height,
+                expected,
+                "{spacing}"
+            );
+        }
     }
 
     #[test]

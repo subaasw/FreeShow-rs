@@ -41,11 +41,36 @@ enum Destination {
     Ignore,
 }
 
+#[derive(Clone, Copy, Default)]
+struct Paragraph {
+    align: Option<&'static str>,
+    margins: [i32; 3],
+    before: i32,
+    after: i32,
+    spacing: i32,
+    multiple: bool,
+}
+
+impl Paragraph {
+    fn line_height(self) -> Option<String> {
+        match self.spacing {
+            0 => None,
+            value if self.multiple => Some(format!("{}lh", f64::from(value.abs()) / 240.0)),
+            value if value < 0 => Some(twips_as_pixels(-value)),
+            value => Some(format!("max(1lh,{})", twips_as_pixels(value))),
+        }
+    }
+}
+
+fn twips_as_pixels(value: i32) -> String {
+    format!("{}px", f64::from(value) / 20.0)
+}
+
 #[derive(Clone, Copy)]
 struct State {
     destination: Destination,
     format: Format,
-    align: Option<&'static str>,
+    paragraph: Paragraph,
     unicode_fallback: usize,
     encoding: &'static Encoding,
 }
@@ -55,7 +80,7 @@ impl Default for State {
         Self {
             destination: Destination::Body,
             format: Format::default(),
-            align: None,
+            paragraph: Paragraph::default(),
             unicode_fallback: 1,
             encoding: encoding_rs::WINDOWS_1252,
         }
@@ -69,7 +94,8 @@ struct Run {
 
 #[derive(Default)]
 struct Line {
-    align: Option<&'static str>,
+    paragraph: Option<Paragraph>,
+    soft_break: bool,
     runs: Vec<Run>,
 }
 
@@ -98,9 +124,16 @@ impl Document {
         if lines.last().is_some_and(|line| line.runs.is_empty()) {
             lines = &lines[..lines.len() - 1];
         }
-        lines
-            .iter()
-            .map(|line| {
+        let mut styled = Vec::with_capacity(lines.len());
+        for paragraph_lines in lines.split_inclusive(|line| !line.soft_break) {
+            let paragraph = paragraph_lines
+                .last()
+                .and_then(|line| line.paragraph)
+                .unwrap_or_default();
+            let height = paragraph.line_height();
+            let before = (paragraph.before > 0).then(|| twips_as_pixels(paragraph.before));
+            let after = (paragraph.after > 0).then(|| twips_as_pixels(paragraph.after));
+            for (index, line) in paragraph_lines.iter().enumerate() {
                 let mut runs: Vec<_> = line
                     .runs
                     .iter()
@@ -114,9 +147,28 @@ impl Document {
                 if runs.is_empty() {
                     runs.push(json!({"value":"","style":""}));
                 }
-                json!({"align":line.align.unwrap_or(align),"text":runs})
-            })
-            .collect()
+                let mut row = json!({"align":paragraph.align.unwrap_or(align),"text":runs});
+                let mut margins = paragraph
+                    .margins
+                    .map(|twips| (f64::from(twips) / 20.0).round() as i32);
+                let mut first_gap = before.as_ref();
+                if index != 0 {
+                    margins[2] = 0;
+                    first_gap = None;
+                }
+                let last_gap = after
+                    .as_ref()
+                    .filter(|_| index + 1 == paragraph_lines.len());
+                if margins != [0; 3] {
+                    row["paragraphMargins"] = json!(margins);
+                }
+                if height.is_some() || first_gap.is_some() || last_gap.is_some() {
+                    row["paragraphSpacing"] = json!([height, first_gap, last_gap]);
+                }
+                styled.push(row);
+            }
+        }
+        styled
     }
 
     fn css(&self, format: Format, underline: bool, strike: bool) -> String {
@@ -211,6 +263,12 @@ struct Reader {
 }
 
 impl Reader {
+    fn finish_line(&mut self, soft_break: bool) {
+        self.line.paragraph.get_or_insert(self.state.paragraph);
+        self.line.soft_break = soft_break;
+        self.lines.push(std::mem::take(&mut self.line));
+    }
+
     fn emit(&mut self, unit: u16) {
         match self.state.destination {
             Destination::Ignore => {}
@@ -233,13 +291,10 @@ impl Reader {
             }
             Destination::ColorTable => {}
             Destination::Body if self.state.format.hidden => {}
-            Destination::Body if unit == b'\n' as u16 => {
-                self.lines.push(std::mem::take(&mut self.line))
-            }
+            Destination::Body if unit == 0x2028 => self.finish_line(true),
+            Destination::Body if matches!(unit, 0x000a | 0x2029) => self.finish_line(false),
             Destination::Body => {
-                if self.line.align.is_none() {
-                    self.line.align = self.state.align;
-                }
+                self.line.paragraph.get_or_insert(self.state.paragraph);
                 let format = self.state.format;
                 if let Some(run) = self.line.runs.last_mut()
                     && (run.format == format
@@ -340,7 +395,11 @@ impl Reader {
                     self.fallback = self.state.unicode_fallback;
                 }
             }
-            "par" | "line" if self.state.destination == Body => self.emit(b'\n' as u16),
+            "par" | "line" if self.state.destination == Body => {
+                if !self.state.format.hidden {
+                    self.finish_line(word == "line");
+                }
+            }
             "tab" if self.state.destination == Body => self.emit(b'\t' as u16),
             "emdash" if self.state.destination == Body => self.emit('—' as u16),
             "endash" if self.state.destination == Body => self.emit('–' as u16),
@@ -429,18 +488,34 @@ impl Reader {
                     hidden: false,
                 }
             }
-            "ql" | "qr" | "qc" | "qj" | "pard" => {
-                let align = match word {
-                    "qr" => "right",
-                    "qc" => "center",
-                    "qj" => "justify",
-                    _ => "left",
-                };
-                self.state.align = Some(align);
-                self.line.align = Some(align);
-            }
-            _ => {}
+            _ => self.format_paragraph(word, number),
         }
+    }
+
+    fn format_paragraph(&mut self, word: &str, number: Option<i32>) {
+        let paragraph = &mut self.state.paragraph;
+        let dimension = number.unwrap_or(0).clamp(-200_000, 200_000);
+        match word {
+            "pard" => {
+                *paragraph = Paragraph {
+                    align: Some("left"),
+                    ..Paragraph::default()
+                }
+            }
+            "ql" => paragraph.align = Some("left"),
+            "qr" => paragraph.align = Some("right"),
+            "qc" => paragraph.align = Some("center"),
+            "qj" => paragraph.align = Some("justify"),
+            "li" | "lin" => paragraph.margins[0] = dimension,
+            "ri" | "rin" => paragraph.margins[1] = dimension,
+            "fi" => paragraph.margins[2] = dimension,
+            "sb" => paragraph.before = dimension,
+            "sa" => paragraph.after = dimension,
+            "sl" => paragraph.spacing = dimension,
+            "slmult" => paragraph.multiple = number == Some(1),
+            _ => return,
+        }
+        self.line.paragraph = Some(*paragraph);
     }
 }
 
@@ -479,6 +554,10 @@ pub(super) fn decode(text: &str) -> Document {
                     let literal = match next {
                         '*' => {
                             reader.state.destination = Destination::Ignore;
+                            None
+                        }
+                        '\r' | '\n' => {
+                            reader.control("par", None);
                             None
                         }
                         '\\' | '{' | '}' => Some(next),
