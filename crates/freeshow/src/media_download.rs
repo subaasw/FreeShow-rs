@@ -575,6 +575,83 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a small disposable volume set in FREESHOW_TEST_DOWNLOAD_VOLUME"]
+    fn disk_full_download_cleans_staging_and_can_retry() {
+        const MIB: usize = 1024 * 1024;
+        let volume = std::env::var_os("FREESHOW_TEST_DOWNLOAD_VOLUME")
+            .expect("set a disposable volume path");
+        let root = tempfile::tempdir_in(volume).unwrap();
+        let library = Library::open(root.path());
+        let media = library.media_dir();
+        let receipts = media.join(SOURCE_DIR);
+        fs::create_dir_all(&receipts).unwrap();
+        let existing = media.join("Keep.mp4");
+        fs::write(&existing, b"existing media").unwrap();
+
+        let mut ballast = NamedTempFile::new_in(root.path()).unwrap();
+        let block = vec![0xa5; MIB];
+        let mut filled = false;
+        for _ in 0..48 {
+            match ballast.write_all(&block) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::StorageFull => {
+                    filled = true;
+                    break;
+                }
+                Err(error) => panic!("could not fill the test volume: {error}"),
+            }
+        }
+        assert!(
+            filled,
+            "test needs a disposable volume with less than 48 MiB free"
+        );
+        let used = ballast.as_file().metadata().unwrap().len();
+        // Leave enough room to open staging and write part of the file.
+        ballast.as_file().set_len(used - MIB as u64).unwrap();
+
+        let fixture = include_bytes!("../../freeshow-data/tests/fixtures/service-handoff.mp4");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = direct_url(&format!(
+            "http://{}/clip.mp4",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        // A valid top-level MP4 padding box keeps the fixture small in the repository.
+        let mut body = fixture.to_vec();
+        body.extend_from_slice(&(4 * MIB as u32).to_be_bytes());
+        body.extend_from_slice(b"free");
+        body.resize(body.len() + 4 * MIB - 8, 0);
+        let size = body.len();
+        let server = thread::spawn(move || {
+            let headers = format!("Content-Type: video/mp4\r\nContent-Length: {size}\r\n");
+            let (mut failed, _) = accept(&listener);
+            respond(&mut failed, "200 OK", &headers, &[]);
+            let _ = failed.write_all(&body);
+            drop(failed);
+            let (mut retry, _) = accept(&listener);
+            respond(&mut retry, "200 OK", &headers, &body);
+        });
+
+        let progress = Control::default();
+        let error = download(root.path(), url.clone(), "Capacity check", &progress).unwrap_err();
+        assert_eq!(
+            error,
+            "The library disk is full. Free up space and retry the download."
+        );
+        assert!(progress.progress.lock().unwrap().bytes > 0);
+        assert_eq!(fs::read_dir(&receipts).unwrap().count(), 1); // Only the lock remains.
+        assert_eq!(library.list_media_entries().unwrap().len(), 1);
+        assert_eq!(fs::read(&existing).unwrap(), b"existing media");
+
+        drop(ballast);
+        let saved = download(root.path(), url, "Capacity check", &Control::default()).unwrap();
+        assert_eq!(fs::metadata(&saved).unwrap().len(), size as u64);
+        assert!(freeshow_media::video_thumbnail(&saved, 96, 54).is_some());
+        assert_eq!(library.list_media_entries().unwrap().len(), 2);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn retries_failed_download_and_saves_a_playable_copy_with_origin_credit() {
         let root = tempfile::tempdir().unwrap();
         let fixture = root.path().join("fixture.mp4");
