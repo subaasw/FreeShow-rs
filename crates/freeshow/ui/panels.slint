@@ -1396,6 +1396,14 @@ export component InspectorPanel inherits VerticalLayout {
     property <bool> open-transition: true;
     spacing: OperatorStyle.space-sm;
 
+    if !root.data.has-item: Text {
+        text: "Select a box in the preview, or press Add box / Add picture, then style it here.";
+        color: root.text-color;
+        opacity: 0.7;
+        font-size: 12px * OperatorStyle.font-scale;
+        wrap: word-wrap;
+    }
+
     SectionHeader { title: "TEXT"; text-color: root.text-color; open <=> root.open-text; }
     if root.open-text: VerticalLayout {
         spacing: OperatorStyle.space-sm;
@@ -2005,7 +2013,7 @@ export component StageEditorPanel inherits Rectangle {
             close => { if (text-save.running) { text-save.save(); } root.close(); }
         }
         HorizontalLayout {
-            spacing: 10px;
+            spacing: OperatorStyle.space;
             VerticalLayout {
                 width: 240px;
                 spacing: OperatorStyle.space-sm;
@@ -2080,6 +2088,13 @@ export component StageEditorPanel inherits Rectangle {
                     vertical-stretch: 1;
                     VerticalLayout {
                         alignment: start;
+                        if root.rows.length == 0: Text {
+                            text: "No boxes yet. Choose a type above and press Add item.";
+                            color: root.text-color;
+                            opacity: 0.7;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
+                        }
                         for row[index] in root.rows: ListRow {
                             label: row.enabled ? row.title : row.title + " (hidden)";
                             active: index == root.selected;
@@ -2089,6 +2104,18 @@ export component StageEditorPanel inherits Rectangle {
                             clicked => { if (text-save.running) { text-save.save(); } root.selected = index; }
                         }
                     }
+                }
+            }
+            if root.rows.length == 0: VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Text {
+                    text: "Add a slide, notes, clock, or other box to edit it here. The stage preview appears once the layout has an item.";
+                    color: root.text-color;
+                    opacity: 0.7;
+                    font-size: 13px * OperatorStyle.font-scale;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
                 }
             }
             if root.rows.length > 0: VerticalLayout {
@@ -2397,7 +2424,7 @@ export component StageEditorPanel inherits Rectangle {
                     if root.current.kind == "chart": Row {
                         VerticalLayout {
                             colspan: 4;
-                            spacing: 4px;
+                            spacing: OperatorStyle.space-xs;
                             FieldLabel { text: "Chart data (one label: value per line)"; text-color: root.text-color; }
                             chart-data := TextEdit {
                                 property <string> item-id: root.current.id;
@@ -2431,6 +2458,16 @@ export component StageEditorPanel inherits Rectangle {
                             height: 90px;
                             text: root.current.text;
                             edited(value) => { text-save.queue(value); }
+                        }
+                    }
+                    if root.current.kind == "custom": Row {
+                        Text {
+                            colspan: 4;
+                            text: "This FreeShow item type is kept in the layout but is not drawn with a dedicated editor yet. Rename it, move it, or hide it here.";
+                            color: root.text-color;
+                            opacity: 0.75;
+                            font-size: 12px * OperatorStyle.font-scale;
+                            wrap: word-wrap;
                         }
                     }
                     Row {
