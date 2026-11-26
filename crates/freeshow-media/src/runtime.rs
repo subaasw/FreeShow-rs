@@ -9,6 +9,89 @@ pub struct RuntimeStatus {
     pub ndi_plugin: bool,
 }
 
+pub struct RoutedVideoProbe {
+    pub frame: freeshow_output::Raster,
+    pub audio_peak: f32,
+}
+
+/// Decode a file through the live video player and measure its private audio mix.
+#[cfg(feature = "gst")]
+pub fn probe_routed_video(path: &Path) -> Result<RoutedVideoProbe, MediaError> {
+    use gst::prelude::*;
+    use gstreamer as gst;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static NEXT_BUS: AtomicU64 = AtomicU64::new(0);
+    let output_id = format!(
+        "service-probe-{}-{}",
+        std::process::id(),
+        NEXT_BUS.fetch_add(1, Ordering::Relaxed)
+    );
+    let error = |message: &str| MediaError::Video(message.into());
+    gst::init().map_err(|err| error(&err.to_string()))?;
+    let receiver = gst::parse::launch(&format!(
+        "{} ! appsink name=capture sync=false max-buffers=4 drop=true",
+        crate::network_audio_mix(&output_id)
+    ))
+    .map_err(|err| error(&err.to_string()))?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| error("could not create the video audio probe pipeline"))?;
+    let sink = receiver
+        .by_name("capture")
+        .and_then(|sink| sink.downcast::<gstreamer_app::AppSink>().ok())
+        .ok_or_else(|| error("could not open the video audio probe sink"))?;
+    let result = (|| {
+        receiver
+            .set_state(gst::State::Playing)
+            .map_err(|err| error(&err.to_string()))?;
+        let route = crate::NetworkRoute {
+            output_id,
+            gain: 1.0,
+        };
+        let mut player = crate::VideoPlayer::open_with_network(path, &[], &[route])?;
+        player.set_volume(1.0);
+        player.set_looping(false);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut frame = None;
+        let mut peak = 0.0_f32;
+        while Instant::now() < deadline {
+            if frame.is_none() {
+                frame = player.try_next_frame();
+            }
+            if let Some(err) = player.take_error() {
+                return Err(err);
+            }
+            if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(40))
+                && let Some(buffer) = sample.buffer()
+                && let Ok(bytes) = buffer.map_readable()
+            {
+                for sample in bytes.as_slice().as_chunks::<4>().0 {
+                    peak = peak.max(f32::from_le_bytes(*sample).abs());
+                }
+            }
+            if frame.is_some() && peak > 0.01 {
+                break;
+            }
+        }
+        let frame = frame.ok_or_else(|| error("timed out waiting for a local video frame"))?;
+        if peak <= 0.01 {
+            return Err(error("no audible signal reached the video audio probe mix"));
+        }
+        Ok(RoutedVideoProbe {
+            frame,
+            audio_peak: peak,
+        })
+    })();
+    let _ = receiver.set_state(gst::State::Null);
+    result
+}
+
+#[cfg(not(feature = "gst"))]
+pub fn probe_routed_video(_path: &Path) -> Result<RoutedVideoProbe, MediaError> {
+    Err(MediaError::Video("built without GStreamer support".into()))
+}
+
 #[cfg(feature = "gst")]
 pub fn check_runtime() -> Result<RuntimeStatus, MediaError> {
     use gstreamer as gst;
