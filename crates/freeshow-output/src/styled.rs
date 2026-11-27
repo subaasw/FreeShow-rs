@@ -2888,21 +2888,53 @@ fn split_line(
     }
     let mut rows = vec![Vec::new()];
     let mut width: i32 = 0;
+    let mut pending_spaces = Vec::new();
+    let mut pending_width: i32 = 0;
     let text: String = line.runs.iter().map(|run| run.text.as_str()).collect();
     let spans = line
         .runs
         .iter()
         .map(|run| (run.text.as_str(), run.style.as_str()));
     let boundaries = unicode_linebreak::linebreaks(&text).map(|(offset, _)| offset);
-    for word in split_pieces(spans, boundaries) {
-        let word_width = width_of(&word);
-        if width.saturating_add(word_width) > row_limit
-            && rows.last().is_some_and(|row| !row.is_empty())
+    for mut word in split_pieces(spans, boundaries) {
+        let full_width = width_of(&word);
+        let last_content = word
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, (text, _))| {
+                let body = text.trim_end_matches([' ', '\t']);
+                (!body.is_empty()).then_some((index, body))
+            });
+        let Some((last, body)) = last_content else {
+            pending_width = pending_width.saturating_add(full_width);
+            pending_spaces.extend(word);
+            continue;
+        };
+        let (piece, css) = word[last];
+        let suffix = &piece[body.len()..];
+        let trailing = word.split_off(last + 1);
+        word[last].0 = body;
+        let word_width = if suffix.is_empty() && trailing.is_empty() {
+            full_width
+        } else {
+            width_of(&word)
+        };
+        if width
+            .saturating_add(pending_width)
+            .saturating_add(word_width)
+            > row_limit
         {
-            rows.push(Vec::new());
-            width = 0;
-            row_limit = continuation_limit;
+            pending_spaces.clear();
+            pending_width = 0;
+            if rows.last().is_some_and(|row| !row.is_empty()) {
+                rows.push(Vec::new());
+                width = 0;
+                row_limit = continuation_limit;
+            }
         }
+        rows.last_mut().unwrap().append(&mut pending_spaces);
+        width = width.saturating_add(pending_width);
         if word_width > row_limit {
             for chunk in break_word(word, &measure, [row_limit, continuation_limit]) {
                 if rows.last().is_some_and(|row| !row.is_empty()) {
@@ -2912,10 +2944,19 @@ fn split_line(
                 width = width_of(&chunk);
                 rows.last_mut().unwrap().extend(chunk);
             }
-            continue;
+        } else {
+            rows.last_mut().unwrap().extend(word);
+            width = width.saturating_add(word_width);
         }
-        rows.last_mut().unwrap().extend(word);
-        width = width.saturating_add(word_width);
+        // The space advances the next word only if both words end up on the same row.
+        if !suffix.is_empty() {
+            pending_spaces.push((suffix, css));
+        }
+        pending_spaces.extend(trailing);
+        pending_width = full_width.saturating_sub(word_width);
+    }
+    if rows[0].is_empty() {
+        return vec![line.clone()];
     }
     let last = rows.len() - 1;
     rows.into_iter()
@@ -6455,7 +6496,7 @@ mod tests {
     #[test]
     fn cocoa_line_height_preserves_limits_and_leading_on_wrapped_rows() {
         let mut slide = shadow_slide("font-size:20px;color:#FFFFFF;");
-        let width = piece_width("HH ", "font-size:20px;", "", &slide) + 1;
+        let width = piece_width("HH", "font-size:20px;", "", &slide);
         let item = &mut slide.items[0];
         item.align = "align-items:flex-end;".into();
         item.style = format!("left:0px;top:0px;width:{width}px;height:80px;");
@@ -6921,7 +6962,7 @@ mod tests {
             + piece_width("Foot", &line.runs[0].style, "", &slide);
         let rows = wrap_lines(&slide.items[0].lines, "", &slide, room);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].runs[0].text, "Previously ");
+        assert_eq!(rows[0].runs[0].text, "Previously");
         assert_eq!(rows[1].runs[0].text, "Foot");
         assert_eq!(rows[1].runs[1], line.runs[1]);
 
@@ -6937,6 +6978,31 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_rows_drop_styled_separators_at_the_edge_and_keep_inline_spaces() {
+        let mut slide = shadow_slide("font-size:20px;");
+        let line = &mut slide.items[0].lines[0];
+        line.runs = [("A", 20), (" ", 22), ("B", 20), ("  ", 100), ("CCC", 20)]
+            .into_iter()
+            .map(|(text, size)| TextRun {
+                text: text.into(),
+                style: format!("font-size:{size}px;"),
+                place_on: None,
+                paint: true,
+            })
+            .collect();
+        let line = &slide.items[0].lines[0];
+        let inline_width: i32 = line.runs[..3]
+            .iter()
+            .map(|run| piece_width(&run.text, &run.style, "", &slide))
+            .sum();
+        let width = inline_width.max(piece_width("CCC", "font-size:20px;", "", &slide));
+        let rows = wrap_lines(&slide.items[0].lines, "", &slide, width);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].runs, line.runs[..3]);
+        assert_eq!(rows[1].runs, line.runs[4..]);
+    }
+
+    #[test]
     fn unicode_wrap_keeps_nonbreaking_spaces_and_combining_marks() {
         let mut slide = shadow_slide("font-size:20px;color:#f00;");
         let runs = &mut slide.items[0].lines[0].runs;
@@ -6949,7 +7015,7 @@ mod tests {
         let room = piece_width(&line.runs[0].text, &line.runs[0].style, "", &slide);
         let rows = wrap_lines(&slide.items[0].lines, "", &slide, room);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].runs[0].text, "Lead ");
+        assert_eq!(rows[0].runs[0].text, "Lead");
         assert_eq!(rows[1].runs[0].text, "12\u{a0}");
         assert_eq!(rows[1].runs[1], line.runs[1]);
 
