@@ -560,6 +560,10 @@ fn output_spacing(spacing: f32, slide: &StyledSlide) -> f32 {
     }
 }
 
+fn output_font_size(font_px: f32, slide: &StyledSlide) -> f32 {
+    output_spacing(font_px, slide).max(1.0).min(i32::MAX as f32)
+}
+
 fn stroke_shorthand(value: &str) -> Option<(f32, Rgba)> {
     let mut rest = value.trim();
     let token = rest.split_whitespace().next()?;
@@ -1901,8 +1905,7 @@ fn draw_item_content(
             .iter()
             .filter(|(run, _)| run.place_on.is_none())
             .map(|(run, run_style)| {
-                let size = scale(run_style.font_px, slide.output_height, slide.source_height).max(1)
-                    as f32;
+                let size = output_font_size(run_style.font_px, slide);
                 let shown = cased(&run.text, run_style.text_case);
                 text::measure(
                     &shown,
@@ -1943,9 +1946,7 @@ fn draw_item_content(
         let origin = cursor_x;
         let spacer = runs.iter().find(|(run, _)| run.place_on.is_none());
         let spacer_size = spacer
-            .map(|(_, run_style)| {
-                scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32
-            })
+            .map(|(_, run_style)| output_font_size(run_style.font_px, slide))
             .unwrap_or(layout.font_px);
         let spacer_family = spacer
             .map(|(_, run_style)| run_style.font_family.clone())
@@ -1973,7 +1974,7 @@ fn draw_item_content(
                 slide.output_height,
                 &marker.text,
                 style.color,
-                scale(style.font_px, slide.output_height, slide.source_height).max(1) as f32,
+                output_font_size(style.font_px, slide),
                 origin - bullet_gap as f32,
                 baseline,
                 &clip,
@@ -1984,8 +1985,7 @@ fn draw_item_content(
         }
         for (run, run_style) in &runs {
             let baseline = baseline - output_spacing(run_style.baseline_shift, slide);
-            let size =
-                scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
+            let size = output_font_size(run_style.font_px, slide);
             let typeface = text::Typeface {
                 family: run_style.font_family.as_str(),
                 bold: run_style.bold,
@@ -2839,7 +2839,7 @@ fn typeface(style: &BoxStyle) -> text::Typeface<'_> {
 }
 
 fn bullet_width(bullet: &TextRun, style: &BoxStyle, slide: &StyledSlide) -> i32 {
-    let size = scale(style.font_px, slide.output_height, slide.source_height).max(1) as f32;
+    let size = output_font_size(style.font_px, slide);
     text::measure(
         &format!("{} ", bullet.text),
         size,
@@ -3080,7 +3080,7 @@ fn merge_words(words: Vec<TextPiece<'_>>) -> Vec<TextRun> {
 fn piece_width(text: &str, css: &str, item_style: &str, slide: &StyledSlide) -> i32 {
     let mut style = parse_style(item_style);
     apply_run_style(&mut style, css);
-    let size = scale(style.font_px, slide.output_height, slide.source_height).max(1) as f32;
+    let size = output_font_size(style.font_px, slide);
     let shown = cased(text, style.text_case);
     text::measure(
         &shown,
@@ -3197,7 +3197,7 @@ fn line_layout(
     for run in std::iter::once(first).chain(painted) {
         let mut run_style = style.clone();
         apply_run_style(&mut run_style, &run.style);
-        let size = scale(run_style.font_px, slide.output_height, slide.source_height).max(1) as f32;
+        let size = output_font_size(run_style.font_px, slide);
         let face = typeface(&run_style);
         let top = text::ascent(size, face);
         let shift = output_spacing(run_style.baseline_shift, slide);
@@ -6934,6 +6934,21 @@ mod tests {
         let reversed = render_styled(&slide);
         assert_eq!(bar_top(&reversed), top);
         assert_eq!(green_rows(&reversed), green);
+    }
+
+    #[test]
+    fn fractional_font_sizes_change_where_text_wraps() {
+        let mut slide = shadow_slide("font-size:20.125px;color:#fff;");
+        let text = "MMMM MMMM";
+        let width = piece_width(text, "font-size:20.125px;", "", &slide);
+        slide.items[0].style = format!("left:0px;top:0px;width:{width}px;height:80px;");
+        slide.items[0].lines[0].runs[0].text = text.into();
+        let fits = render_styled(&slide);
+        assert!(lowest_ink(&fits) > 0);
+
+        slide.items[0].lines[0].runs[0].style = "font-size:20.375px;color:#fff;".into();
+        let wraps = render_styled(&slide);
+        assert!(lowest_ink(&wraps) > lowest_ink(&fits) + 12);
     }
 
     #[test]

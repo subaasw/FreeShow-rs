@@ -116,6 +116,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter 4–6 XML bundles and their slide-background media.
 - [x] ProPresenter 7 protobuf, arrangements, original text-box geometry, and box-level styling.
 - [x] ProPresenter 7 mixed RTF fonts, colors, emphasis, paragraph alignment, all caps, and letter spacing.
+- [x] ProPresenter Cocoa RTF fractional font sizes carry through measurement, wrapping, and output.
 - [x] ProPresenter RTF hex escapes decoded with their document code page and font charset.
 - [x] ProPresenter RTF typographic punctuation and spacing, including Unicode fallback encoded as control words.
 - [x] ProPresenter 7 RTF highlights and character background colors appear behind their text runs in native output.

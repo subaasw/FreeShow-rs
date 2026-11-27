@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Format {
     font: Option<i32>,
-    size: Option<i32>,
+    size_milli: Option<i32>,
     color: Option<usize>,
     background: Option<usize>,
     highlight: Option<usize>,
@@ -193,8 +193,8 @@ impl Document {
         {
             let _ = write!(css, "font-family:{family};");
         }
-        if let Some(size) = format.size.filter(|size| (2..=20000).contains(size)) {
-            let _ = write!(css, "font-size:{}px;", f64::from(size) / 2.0);
+        if let Some(size) = format.size_milli {
+            let _ = write!(css, "font-size:{}px;", f64::from(size) / 1000.0);
         }
         if let Some([r, g, b]) = format
             .color
@@ -465,7 +465,16 @@ impl Reader {
         match word {
             "deff" => self.default_font = number,
             "f" => format.font = number,
-            "fs" => format.size = number,
+            "fs" => {
+                format.size_milli = number
+                    .filter(|size| (2..=20_000).contains(size))
+                    .map(|size| size * 500);
+            }
+            "fsmilli" => {
+                if let Some(size) = number.filter(|size| (1000..=10_000_000).contains(size)) {
+                    format.size_milli = Some(size);
+                }
+            }
             "cf" => format.color = number.and_then(|index| usize::try_from(index).ok()),
             "cb" => format.background = number.and_then(|index| usize::try_from(index).ok()),
             "highlight" => format.highlight = number.and_then(|index| usize::try_from(index).ok()),
@@ -488,7 +497,7 @@ impl Reader {
             "plain" => {
                 *format = Format {
                     font: self.default_font,
-                    size: Some(24),
+                    size_milli: Some(12_000),
                     color: Some(0),
                     background: None,
                     highlight: None,
@@ -685,6 +694,27 @@ fn charset_code_page(charset: i32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::decode;
+
+    #[test]
+    fn cocoa_fractional_font_sizes_follow_rtf_group_scope() {
+        let document = decode(
+            r"{\rtf1\fs40\fsmilli20125 First {\fs40\fsmilli20375 larger}\fsmilli0 restored\fs41 half\plain reset}",
+        );
+        let lines = document.styled_lines("", false, false);
+        let runs = lines[0]["text"].as_array().unwrap();
+        assert_eq!(runs.len(), 5);
+        for (run, size) in runs
+            .iter()
+            .zip(["20.125", "20.375", "20.125", "20.5", "12"])
+        {
+            assert!(
+                run["style"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("font-size:{size}px;"))
+            );
+        }
+    }
 
     #[test]
     fn escaped_bytes_use_the_document_or_font_code_page() {
