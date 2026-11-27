@@ -13,6 +13,7 @@ struct Format {
     color: Option<usize>,
     background: Option<usize>,
     highlight: Option<usize>,
+    shadow: Option<RunShadow>,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
@@ -21,6 +22,27 @@ struct Format {
     spacing_twips: Option<i32>,
     baseline: Baseline,
     hidden: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RunShadow {
+    enabled: bool,
+    offset: [i32; 2],
+    blur: i32,
+    color: Option<usize>,
+    opacity: u8,
+}
+
+impl Default for RunShadow {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            offset: [0, 0],
+            blur: 0,
+            color: None,
+            opacity: 85,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -211,6 +233,20 @@ impl Document {
             .or_else(|| format.background.and_then(color_at))
         {
             let _ = write!(css, "background-color:#{r:02x}{g:02x}{b:02x};");
+        }
+        if let Some(shadow) = format.shadow {
+            if shadow.enabled && shadow.opacity != 0 {
+                let [x, y] = shadow.offset.map(twips_as_pixels);
+                let blur = twips_as_pixels(shadow.blur);
+                let [r, g, b] = shadow.color.and_then(color_at).unwrap_or([0; 3]);
+                let a = shadow.opacity;
+                let _ = write!(
+                    css,
+                    "text-shadow:{x} {y} {blur} #{r:02x}{g:02x}{b:02x}{a:02x};"
+                );
+            } else {
+                css.push_str("text-shadow:none;");
+            }
         }
         if let Some(bold) = format.bold {
             css.push_str(if bold {
@@ -478,6 +514,28 @@ impl Reader {
             "cf" => format.color = number.and_then(|index| usize::try_from(index).ok()),
             "cb" => format.background = number.and_then(|index| usize::try_from(index).ok()),
             "highlight" => format.highlight = number.and_then(|index| usize::try_from(index).ok()),
+            "shad" => {
+                let enabled = number != Some(0);
+                format.shadow = Some(RunShadow {
+                    enabled,
+                    // The Cocoa reader starts a bare \shad at (3, -3) points.
+                    offset: if enabled { [60, -60] } else { [0, 0] },
+                    ..RunShadow::default()
+                });
+            }
+            "shadx" | "shady" | "shadr" | "shadc" | "shado" => {
+                if let Some(value) = number {
+                    let shadow = format.shadow.get_or_insert_with(RunShadow::default);
+                    shadow.enabled = true;
+                    match word {
+                        "shadx" => shadow.offset[0] = value.clamp(-200_000, 200_000),
+                        "shady" => shadow.offset[1] = value.clamp(-200_000, 200_000),
+                        "shadr" => shadow.blur = value.clamp(0, 200_000),
+                        "shadc" => shadow.color = usize::try_from(value).ok(),
+                        _ => shadow.opacity = value.clamp(0, 255) as u8,
+                    }
+                }
+            }
             "b" => format.bold = on,
             "i" => format.italic = on,
             "ul" => format.underline = on,
@@ -501,6 +559,7 @@ impl Reader {
                     color: Some(0),
                     background: None,
                     highlight: None,
+                    shadow: None,
                     bold: Some(false),
                     italic: Some(false),
                     underline: Some(false),
@@ -694,6 +753,29 @@ fn charset_code_page(charset: i32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::decode;
+
+    #[test]
+    fn cocoa_shadows_follow_character_run_scope_and_clear_explicitly() {
+        let document = decode(
+            r"{\rtf1{\colortbl;\red39\green76\blue223;}\shad Default {\shadx65\shady-45\shadr90\shado89\shadc1 Custom} Restored \shad0 Clear \shadc1\shado0 Transparent \shad Reset}",
+        );
+        let lines = document.styled_lines("", false, false);
+        let runs = lines[0]["text"].as_array().unwrap();
+        let default = "text-shadow:3px -3px 0px #00000055;";
+        let expected = [
+            ("Default ", default),
+            ("Custom", "text-shadow:3.25px -2.25px 4.5px #274cdf59;"),
+            (" Restored ", default),
+            ("Clear ", "text-shadow:none;"),
+            ("Transparent ", "text-shadow:none;"),
+            ("Reset", default),
+        ];
+        assert_eq!(runs.len(), expected.len());
+        for (run, (text, css)) in runs.iter().zip(expected) {
+            assert_eq!(run["value"], text);
+            assert_eq!(run["style"], css);
+        }
+    }
 
     #[test]
     fn cocoa_fractional_font_sizes_follow_rtf_group_scope() {
