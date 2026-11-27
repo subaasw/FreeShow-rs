@@ -302,7 +302,16 @@ fn download(root: &Path, url: Url, title: &str, control: &Control) -> Result<Pat
     publish_download(temporary, &media, &staging, &name, ext, &source_origin)
 }
 
-fn lock_staging(staging: &Path) -> io::Result<Option<File>> {
+struct StagingLock(File);
+
+impl Drop for StagingLock {
+    fn drop(&mut self) {
+        // A handle inherited by a child can keep the lock alive after this file closes.
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_staging(staging: &Path) -> io::Result<Option<StagingLock>> {
     if !fs::symlink_metadata(staging)?.is_dir() {
         return Err(io::Error::other(
             "The download staging path must be a folder in the media library.",
@@ -316,7 +325,7 @@ fn lock_staging(staging: &Path) -> io::Result<Option<File>> {
         .truncate(false)
         .open(staging.join(STAGING_LOCK))?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(StagingLock(file))),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(error)) => Err(error),
     }
@@ -786,6 +795,8 @@ mod tests {
 
         fs::create_dir_all(&staging).unwrap();
         let guard = lock_staging(&staging).unwrap().unwrap();
+        #[cfg(unix)]
+        let _inherited_handle = guard.0.try_clone().unwrap();
         let partial = staging.join(".pending-Ab0cd1.part");
         let legacy_credit = staging.join(".tmpa0B1c2");
         let credit = staging.join("Video Service.mp4.json");
@@ -801,7 +812,7 @@ mod tests {
         assert!(partial.is_file());
         assert!(legacy_credit.is_file());
         assert!(lock_staging(&staging).unwrap().is_none());
-        drop(guard); // The OS also releases the lock if the process exits abruptly.
+        drop(guard);
 
         recover_pending(root.path()).unwrap();
         assert!(!partial.exists());
