@@ -121,6 +121,7 @@ Acceptance: a fresh machine can install the app without a Rust toolchain.
 - [x] ProPresenter RTF typographic punctuation and spacing, including Unicode fallback encoded as control words.
 - [x] ProPresenter 7 RTF highlights and character background colors appear behind their text runs in native output.
 - [x] ProPresenter 7 text boxes preserve saved margins, glyph outlines, and text drop shadows.
+- [x] ProPresenter Cocoa RTF preserves individual text-run shadows, including offset, blur, color, and opacity.
 - [x] Hidden RTF text omitted from imported ProPresenter lyrics and notes.
 - [x] ProPresenter RTF raised and lowered runs, including superscript and subscript.
 - [x] ProPresenter RTF paragraph margins, first-line and hanging indents, space before and after, and exact, minimum, and multiple line spacing.
